@@ -40,6 +40,11 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `Vehicle { pos (m, centre line), heading (rad, atan2 in sim xy), segment, forward (a→b), progress (m), seed }`.
 - `RoadSegment { load: [f32; 2], capacity: [f32; 2] }` indexed `[a→b, b→a]`; `congestion_in(forward)`.
 - Segment ids can vanish on road edits (split keeps the id for the `a` half): always re-check.
+- Time: vehicles move in real time (1 tick = 1/20 s), the calendar is compressed: a day = 4 min at 1x (`balance`).
+- Trip kind per car: `world.traffic.trips.get(vehicle_id).map(|t| t.purpose)` (`TripPurpose::Goods` = draw a truck).
+- HUD data: `stats` (unemployment, avg_commute_s, avg_speed m/s, congestion_share, buildings_by_kind), `economy.last_day`
+  (`Budget` by category), `economy.history` (one `DaySummary` per day), `demand` (-1..=1).
+- Sim balance runs: `cargo run -p citysim_sim --release --example headless` (scripted cities in `citysim_sim::scenarios`).
 - `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep). `// PHASE2:` marks sim stubs.
 
 ## Dev / headless flags (need `DISPLAY=:0`; llvmpipe works)
