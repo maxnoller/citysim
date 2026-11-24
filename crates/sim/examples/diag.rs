@@ -12,8 +12,8 @@ fn main() {
     let mut p = None;
     match which.as_str() {
         "overbuilt" => scenarios::overbuilt(&mut w),
-        "two_grid" => scenarios::two_districts(&mut w, true),
-        "artery" => scenarios::two_districts(&mut w, false),
+        "two_grid" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, true)),
+        "artery" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false)),
         _ => p = Some(GridPlayer::new(&Zone::ALL)),
     }
     let target = days * balance::TICKS_PER_DAY as u64 + hour * balance::TICKS_PER_HOUR as u64;

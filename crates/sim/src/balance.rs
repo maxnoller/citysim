@@ -22,18 +22,38 @@
 //! workers.
 
 // ---------------------------------------------------------------- money ----
+//
+// Targets (checked by the `headless` example and `tests/balance.rs`), for a
+// sensible player (the scripted `GridPlayer`: grid of 10x5 blocks built as
+// demand asks) over a 30-minute game at 2.5x:
+//
+// * Starting money pays for the first days, when taxes do not yet cover
+//   upkeep and services, and is mostly spent by the middle of the game:
+//   cash bottoms out around $6k (about 120 road cells) on days 11-14.
+// * At 5,000 residents the daily net (taxes - road upkeep - services) is
+//   20-35 % of tax income, about $3k; 100 road cells ($5k) cost 1.5-2 days
+//   of it, so every expansion and every rebuild is a real expense.
+// * The player never waits more than about a minute for the money for its
+//   next block, and never has less than 100 road cells' worth in hand.
+// * Cash at 30 minutes stays below $25k (it used to be $127k and climbing).
+// * Road upkeep is the biggest cost: a network with much more road per
+//   resident than a grid (the `overbuilt` scenario) loses money every day.
 
-/// Money at the start of a new game.
-pub const STARTING_MONEY: i64 = 50_000;
+/// Money at the start of a new game: the first 600 road cells, or the
+/// roads of a town of about 3,500.
+pub const STARTING_MONEY: i64 = 30_000;
 /// Cost of one cell of newly built road (per cell-to-cell piece of length).
-pub const ROAD_COST_PER_CELL: i64 = 25;
+pub const ROAD_COST_PER_CELL: i64 = 50;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
-pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 2;
-
+/// A road cell of a sensible grid serves ~6.5 residents and their jobs, who
+/// pay ~$10 a day net of services: upkeep takes most of that, so wasted
+/// road shows.
+pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 6;
 /// Daily cost of city services per resident (police, fire, schools...,
-/// abstracted), charged at midnight with road upkeep.
+/// abstracted), charged at midnight with road upkeep. Keeps the margin per
+/// resident thin, so a bigger city is not automatically a money machine.
 pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 0.6;
 
 /// Tax rate of a new game.

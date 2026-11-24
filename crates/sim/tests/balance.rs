@@ -4,7 +4,7 @@
 
 mod common;
 
-use citysim_sim::scenarios::GridPlayer;
+use citysim_sim::scenarios::{self, GridPlayer};
 use citysim_sim::*;
 use common::{DAY, HOUR, c};
 
@@ -246,4 +246,43 @@ fn budget_by_category_and_unemployment_for_the_hud() {
     assert_eq!(loaded.economy, w.economy);
     assert_eq!(loaded.stats, w.stats);
     assert_eq!(loaded, w);
+}
+
+/// The money targets of `balance` (see the comment above its money
+/// section) over a 30-minute game of the scripted sensible player, and the
+/// over-eager road builder going broke.
+#[test]
+fn money_stays_meaningful_for_a_sensible_player_and_overbuilding_goes_broke() {
+    let real_s = |ticks: u64| ticks as f64 / TICKS_PER_SECOND as f64 / 2.5;
+    let hundred_cells = 100 * balance::ROAD_COST_PER_CELL;
+    let mut w = World::new(7);
+    let mut p = GridPlayer::new(&Zone::ALL);
+    let mut lowest = i64::MAX;
+    let mut reached_5k = None;
+    while w.time.tick < 20 * DAY {
+        p.act(&mut w);
+        w.step();
+        lowest = lowest.min(w.economy.money);
+        if reached_5k.is_none() && w.stats.population >= 5000 {
+            reached_5k = Some(w.time.tick);
+        }
+    }
+    let minutes = real_s(reached_5k.expect("reaches 5,000 residents")) / 60.0;
+    assert!((24.0..=34.0).contains(&minutes), "5,000 residents after {minutes:.1} min");
+    let at_5k = w.economy.history.iter().find(|d| d.population >= 5000).unwrap().budget;
+    let margin = at_5k.net() as f64 / at_5k.income() as f64;
+    assert!((0.2..=0.35).contains(&margin), "net margin at 5,000: {margin:.2} ({at_5k:?})");
+    let days_per_100 = hundred_cells as f64 / at_5k.net() as f64;
+    assert!((1.0..=2.5).contains(&days_per_100), "100 cells = {days_per_100:.2} days of net");
+    assert!(lowest >= hundred_cells, "lowest cash ${lowest}");
+    let waited = real_s(p.longest_money_wait_ticks);
+    assert!(waited <= 60.0, "waited {waited:.0} s for money");
+    assert!(w.economy.money < 25_000, "hoarding: ${}", w.economy.money);
+
+    let mut over = World::new(7);
+    scenarios::overbuilt(&mut over);
+    for _ in 0..10 * DAY {
+        over.step();
+    }
+    assert!(over.economy.history.iter().all(|d| d.money < 0 && d.budget.net() < 0));
 }
