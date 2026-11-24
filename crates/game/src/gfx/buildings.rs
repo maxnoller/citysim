@@ -1,73 +1,134 @@
-//! Placeholder buildings: one box entity per `world.buildings` entry,
-//! synced when `versions.buildings` changes.
+//! Buildings: one entity per `world.buildings` entry, synced when
+//! `versions.buildings` changes. Models come from `building_gen`, cached by
+//! `(kind, lot size, level, variant)` and shared, all with one material, so
+//! thousands of buildings batch into few draws. New buildings grow in with
+//! an ease-out; removed ones shrink out before despawning.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use citysim_sim::{BuildingId, CELL_SIZE, Zone};
+use citysim_sim::{Building, BuildingId, CELL_SIZE, Facing};
 
-use super::zones::zone_color;
+use super::building_gen::{self, ModelKey, VARIANTS};
+use super::scene::WorldMaterials;
 use crate::shared::{GameSet, SimWorld};
 
-#[derive(Resource)]
-struct BuildingAssets {
-    cube: Handle<Mesh>,
-    /// `[zone][shade]`.
-    materials: [[Handle<StandardMaterial>; 3]; 3],
+const GROW_SECS: f32 = 0.75;
+const SHRINK_SECS: f32 = 0.35;
+/// Buildings younger than this (sim ticks) animate in; older ones (e.g. from
+/// a loaded save) just appear.
+const ANIMATE_IF_YOUNGER: u64 = 3 * citysim_sim::TICKS_PER_SECOND as u64;
+
+/// Cache of generated building models.
+#[derive(Resource, Default)]
+pub struct BuildingModels {
+    meshes: HashMap<ModelKey, Handle<Mesh>>,
+}
+
+impl BuildingModels {
+    pub fn count(&self) -> usize {
+        self.meshes.len()
+    }
+
+    fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        self.meshes
+            .entry(key)
+            .or_insert_with(|| meshes.add(building_gen::generate(key).build()))
+            .clone()
+    }
+}
+
+#[derive(Component)]
+struct BuildingVisual;
+
+#[derive(Component)]
+struct Growing {
+    start: f32,
+}
+
+#[derive(Component)]
+struct Shrinking {
+    start: f32,
 }
 
 #[derive(Default)]
 struct Spawned {
     key: Option<(u64, u64)>,
-    entities: HashMap<BuildingId, Entity>,
+    entities: HashMap<BuildingId, (Entity, ModelKey, Facing)>,
 }
 
 pub struct BuildingsPlugin;
 
 impl Plugin for BuildingsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup)
-            .add_systems(Update, sync_buildings.in_set(GameSet::Render));
+        app.init_resource::<BuildingModels>().add_systems(
+            Update,
+            (sync_buildings, animate_buildings).chain().in_set(GameSet::Render),
+        );
     }
 }
 
-fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
-    let materials = Zone::ALL.map(|z| {
-        [0.55, 0.7, 0.85].map(|shade| {
-            let base = zone_color(z).to_srgba();
-            materials.add(StandardMaterial {
-                base_color: Color::srgb(
-                    base.red * shade + 0.1,
-                    base.green * shade + 0.1,
-                    base.blue * shade + 0.1,
-                ),
-                perceptual_roughness: 0.8,
-                ..default()
-            })
-        })
-    });
-    commands.insert_resource(BuildingAssets {
-        cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        materials,
-    });
+/// Model key and placement for a building.
+pub fn model_key(b: &Building) -> ModelKey {
+    let (w, d) = b.size();
+    let (w, d) = match b.facing {
+        Facing::PlusY | Facing::MinusY => (w, d),
+        Facing::PlusX | Facing::MinusX => (d, w),
+    };
+    ModelKey {
+        kind: b.kind,
+        cells: (w.clamp(1, 255) as u8, d.clamp(1, 255) as u8),
+        level: b.level.max(1),
+        variant: (b.seed % VARIANTS) as u8,
+    }
 }
 
+/// Rotation turning the model's front (+z) towards the building's facing.
+pub fn facing_rotation(f: Facing) -> Quat {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    Quat::from_rotation_y(match f {
+        Facing::PlusY => 0.0,
+        Facing::PlusX => FRAC_PI_2,
+        Facing::MinusY => PI,
+        Facing::MinusX => -FRAC_PI_2,
+    })
+}
+
+fn footprint_center(b: &Building) -> Vec3 {
+    let (w, d) = b.size();
+    let min = b.footprint.min;
+    Vec3::new(
+        (min.x as f32 + w as f32 * 0.5) * CELL_SIZE,
+        0.0,
+        (min.y as f32 + d as f32 * 0.5) * CELL_SIZE,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn sync_buildings(
     mut commands: Commands,
     sim: Res<SimWorld>,
-    assets: Res<BuildingAssets>,
+    time: Res<Time<Real>>,
+    mats: Res<WorldMaterials>,
+    mut models: ResMut<BuildingModels>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut spawned: Local<Spawned>,
 ) {
     let key = sim.key(sim.world.versions.buildings);
     if spawned.key == Some(key) {
         return;
     }
+    let reloaded = spawned.key.is_some_and(|(g, _)| g != sim.generation);
     spawned.key = Some(key);
-    let buildings = &sim.world.buildings;
-    spawned.entities.retain(|id, e| {
-        let keep = buildings.contains_key(*id);
+    let now = time.elapsed_secs();
+    let world = &sim.world;
+    let buildings = &world.buildings;
+    spawned.entities.retain(|id, (e, k, f)| {
+        let keep = buildings
+            .get(*id)
+            .is_some_and(|b| model_key(b) == *k && b.facing == *f && !reloaded);
         if !keep {
-            commands.entity(*e).despawn();
+            commands.entity(*e).remove::<Growing>().insert(Shrinking { start: now });
         }
         keep
     });
@@ -75,26 +136,76 @@ fn sync_buildings(
         if spawned.entities.contains_key(&id) {
             continue;
         }
-        let (w, d) = b.size();
-        let min = b.footprint.min;
-        let center = Vec3::new(
-            (min.x as f32 + w as f32 * 0.5) * CELL_SIZE,
-            0.0,
-            (min.y as f32 + d as f32 * 0.5) * CELL_SIZE,
-        );
-        let height = 3.0 + b.level as f32 * 4.0 + (b.seed % 5) as f32;
-        let zone = Zone::ALL.iter().position(|&z| z == b.kind).unwrap_or(0);
-        let e = commands
-            .spawn((
-                Mesh3d(assets.cube.clone()),
-                MeshMaterial3d(assets.materials[zone][(b.seed % 3) as usize].clone()),
-                Transform::from_translation(center + Vec3::Y * height * 0.5).with_scale(Vec3::new(
-                    w as f32 * CELL_SIZE - 1.6,
-                    height,
-                    d as f32 * CELL_SIZE - 1.6,
-                )),
-            ))
-            .id();
-        spawned.entities.insert(id, e);
+        let mk = model_key(b);
+        let young = world.time.tick.saturating_sub(b.created_tick) < ANIMATE_IF_YOUNGER && !reloaded;
+        let tf = Transform::from_translation(footprint_center(b)).with_rotation(facing_rotation(b.facing));
+        let mut ec = commands.spawn((
+            BuildingVisual,
+            Mesh3d(models.get(mk, &mut meshes)),
+            MeshMaterial3d(mats.lit.clone()),
+        ));
+        if young {
+            ec.insert((tf.with_scale(Vec3::new(0.9, 0.01, 0.9)), Growing { start: now }));
+        } else {
+            ec.insert(tf);
+        }
+        spawned.entities.insert(id, (ec.id(), mk, b.facing));
+    }
+}
+
+/// Ease-out with a slight overshoot.
+fn ease_out_back(t: f32) -> f32 {
+    let c1 = 1.4;
+    let c3 = c1 + 1.0;
+    let u = t - 1.0;
+    1.0 + c3 * u * u * u + c1 * u * u
+}
+
+fn animate_buildings(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    mut growing: Query<(Entity, &Growing, &mut Transform), Without<Shrinking>>,
+    mut shrinking: Query<(Entity, &Shrinking, &mut Transform), Without<Growing>>,
+) {
+    let now = time.elapsed_secs();
+    for (e, g, mut t) in &mut growing {
+        let k = ((now - g.start) / GROW_SECS).clamp(0.0, 1.0);
+        if k >= 1.0 {
+            t.scale = Vec3::ONE;
+            commands.entity(e).remove::<Growing>();
+        } else {
+            let y = ease_out_back(k).max(0.01);
+            let xz = 0.9 + 0.1 * (k * 2.0).min(1.0);
+            t.scale = Vec3::new(xz, y, xz);
+        }
+    }
+    for (e, s, mut t) in &mut shrinking {
+        let k = ((now - s.start) / SHRINK_SECS).clamp(0.0, 1.0);
+        if k >= 1.0 {
+            commands.entity(e).despawn();
+        } else {
+            let y = (1.0 - k * k).max(0.01);
+            t.scale = Vec3::new(1.0 - 0.1 * k, y, 1.0 - 0.1 * k);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn facing_rotation_turns_front_towards_facing() {
+        for f in Facing::ALL {
+            let front = facing_rotation(f) * Vec3::Z;
+            let (dx, dy) = f.offset();
+            assert!(front.distance(Vec3::new(dx as f32, 0.0, dy as f32)) < 1e-5, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn grow_easing_ends_at_one() {
+        assert!(ease_out_back(0.0).abs() < 1e-6);
+        assert!((ease_out_back(1.0) - 1.0).abs() < 1e-6);
     }
 }

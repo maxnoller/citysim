@@ -327,12 +327,12 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
 /// Camera look that does not depend on quality, added once.
 pub fn camera_look() -> impl Bundle {
     let tm = match std::env::var("CITYSIM_GFX_TM").as_deref() {
-        Ok("tony") => Tonemapping::TonyMcMapface,
+        Ok("agx") => Tonemapping::AgX,
         Ok("filmic") => Tonemapping::BlenderFilmic,
         Ok("aces") => Tonemapping::AcesFitted,
         Ok("sbdt") => Tonemapping::SomewhatBoringDisplayTransform,
         Ok("reinhard") => Tonemapping::ReinhardLuminance,
-        _ => Tonemapping::AgX,
+        _ => Tonemapping::TonyMcMapface,
     };
     (
         tm,

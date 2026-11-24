@@ -1,0 +1,243 @@
+//! Low-poly car models (body, cabin with glass, wheels). Local frame: the
+//! car points along +x, centred on the origin, wheels on `y = 0`.
+
+use bevy::prelude::*;
+
+use super::mesh_util::MeshBuilder;
+use super::palette::{self, lin, shade};
+
+/// Number of body shapes.
+pub const SHAPES: u32 = 4;
+
+/// Extrude a convex side profile in (x, y) between `z0` and `z1`.
+fn extrude(m: &mut MeshBuilder, prof: &[Vec2], z0: f32, z1: f32, side: Color, around: &dyn Fn(usize) -> Color) {
+    let n = prof.len();
+    let p = |i: usize, z: f32| Vec3::new(prof[i].x, prof[i].y, z);
+    // Profile is counter-clockwise seen from +z.
+    for i in 1..n - 1 {
+        m.tri(p(0, z1), p(i, z1), p(i + 1, z1), side);
+        m.tri(p(0, z0), p(i + 1, z0), p(i, z0), side);
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        m.quad(p(i, z0), p(j, z0), p(j, z1), p(i, z1), around(i));
+    }
+}
+
+/// Box-ish wheel (8-sided disc along z).
+fn wheel(m: &mut MeshBuilder, c: Vec3, r: f32, w: f32) {
+    let prof: Vec<Vec2> = (0..8)
+        .map(|i| {
+            let a = (i as f32 + 0.5) / 8.0 * std::f32::consts::TAU;
+            Vec2::new(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+        .collect();
+    let hub = shade(palette::GUARDRAIL, 0.8);
+    extrude(m, &prof, c.z - w * 0.5, c.z + w * 0.5, palette::TYRE, &|_| {
+        palette::TYRE
+    });
+    // Hub caps on the outer side.
+    let s = if c.z > 0.0 { 1.0 } else { -1.0 };
+    let z = c.z + s * (w * 0.5 + 0.005);
+    let k = r * 0.5;
+    let q = [
+        Vec3::new(c.x - k, c.y - k, z),
+        Vec3::new(c.x + k, c.y - k, z),
+        Vec3::new(c.x + k, c.y + k, z),
+        Vec3::new(c.x - k, c.y + k, z),
+    ];
+    if s > 0.0 {
+        m.quad(q[0], q[1], q[2], q[3], hub);
+    } else {
+        m.quad(q[0], q[3], q[2], q[1], hub);
+    }
+}
+
+/// A car centred at `c`, rotated `yaw` about +y, into `out`.
+pub fn car(out: &mut MeshBuilder, c: Vec3, yaw: f32, body: Color, shape: u32) {
+    let m = car_model(body, shape);
+    out.append(&m, c, yaw, Vec3::ONE, [1.0; 4]);
+}
+
+/// Car model in its local frame.
+pub fn car_model(body: Color, shape: u32) -> MeshBuilder {
+    let mut m = MeshBuilder::new();
+    let glass = palette::CAR_GLASS;
+    let dark = shade(body, 0.75);
+    let (len, wid) = match shape {
+        2 => (4.6, 1.9),
+        3 => (4.8, 1.9),
+        1 => (3.7, 1.75),
+        _ => (4.2, 1.8),
+    };
+    let (hl, hw) = (len * 0.5, wid * 0.5);
+    let wr = 0.34;
+    // Lower body with a sloped nose.
+    let lower = [
+        Vec2::new(-hl, 0.3),
+        Vec2::new(hl - 0.05, 0.3),
+        Vec2::new(hl, 0.62),
+        Vec2::new(hl - 0.35, 0.88),
+        Vec2::new(-hl + 0.1, 0.9),
+        Vec2::new(-hl, 0.75),
+    ];
+    let body_c = body;
+    extrude(&mut m, &lower, -hw, hw, body_c, &|i| match i {
+        0 => shade(body_c, 0.4),
+        1 | 5 => dark,
+        _ => body_c,
+    });
+    let cw = hw - 0.08;
+    match shape {
+        // Van: tall box cabin.
+        2 => {
+            let cab = [
+                Vec2::new(-hl + 0.05, 0.88),
+                Vec2::new(hl - 0.45, 0.88),
+                Vec2::new(hl - 1.0, 1.85),
+                Vec2::new(-hl + 0.05, 1.85),
+            ];
+            extrude(&mut m, &cab, -cw, cw, body_c, &|i| match i {
+                1 => glass,
+                2 => shade(body_c, 1.08),
+                _ => body_c,
+            });
+            side_windows(&mut m, hl - 1.1, hl - 2.2, 1.15, 1.6, cw);
+        }
+        // Pickup: cab plus an open bed.
+        3 => {
+            let cab = [
+                Vec2::new(-0.2, 0.88),
+                Vec2::new(hl - 0.55, 0.88),
+                Vec2::new(hl - 1.0, 1.55),
+                Vec2::new(-0.2, 1.55),
+            ];
+            extrude(&mut m, &cab, -cw, cw, body_c, &|i| match i {
+                1 | 3 => glass,
+                2 => shade(body_c, 1.08),
+                _ => body_c,
+            });
+            side_windows(&mut m, hl - 1.05, 0.0, 1.0, 1.42, cw);
+            m.cuboid2(
+                Vec3::new(-hl + 0.1, 0.9, -cw + 0.05),
+                Vec3::new(-0.3, 0.95, cw - 0.05),
+                shade(body_c, 0.5),
+                shade(body_c, 0.5),
+            );
+        }
+        _ => {
+            let (back, front) = if shape == 1 {
+                (-hl + 0.15, hl - 1.1)
+            } else {
+                (-hl + 0.7, hl - 1.25)
+            };
+            let cab = [
+                Vec2::new(back - 0.25, 0.88),
+                Vec2::new(front + 0.45, 0.88),
+                Vec2::new(front, 1.42),
+                Vec2::new(back + 0.3, 1.42),
+            ];
+            extrude(&mut m, &cab, -cw + 0.05, cw - 0.05, body_c, &|i| match i {
+                1 | 3 => glass,
+                2 => shade(body_c, 1.1),
+                _ => body_c,
+            });
+            side_windows(&mut m, front + 0.05, back + 0.1, 0.98, 1.36, cw - 0.05);
+        }
+    }
+    // Lights.
+    let head = Color::srgb(0.98, 0.96, 0.85);
+    let tail = Color::srgb(0.75, 0.12, 0.1);
+    for s in [-1.0, 1.0] {
+        let z = s * (hw - 0.3);
+        m.quad(
+            Vec3::new(hl + 0.005, 0.5, z + 0.2),
+            Vec3::new(hl + 0.005, 0.5, z - 0.2),
+            Vec3::new(hl + 0.005, 0.62, z - 0.2),
+            Vec3::new(hl + 0.005, 0.62, z + 0.2),
+            head,
+        );
+        m.quad(
+            Vec3::new(-hl - 0.005, 0.55, z - 0.2),
+            Vec3::new(-hl - 0.005, 0.55, z + 0.2),
+            Vec3::new(-hl - 0.005, 0.68, z + 0.2),
+            Vec3::new(-hl - 0.005, 0.68, z - 0.2),
+            tail,
+        );
+    }
+    let wb = hl - 0.75;
+    for x in [-wb, wb] {
+        for z in [-(hw - 0.12), hw - 0.12] {
+            wheel(&mut m, Vec3::new(x, wr, z), wr, 0.24);
+        }
+    }
+    // Soft contact shadow under the car (a dark quad just above the road).
+    let sh = lin(Color::srgba(0.0, 0.0, 0.0, 1.0));
+    m.quad_up(
+        [
+            Vec3::new(-hl + 0.1, 0.012, -hw + 0.05),
+            Vec3::new(hl - 0.1, 0.012, -hw + 0.05),
+            Vec3::new(hl - 0.1, 0.012, hw - 0.05),
+            Vec3::new(-hl + 0.1, 0.012, hw - 0.05),
+        ],
+        [sh[0] + 0.02, sh[1] + 0.02, sh[2] + 0.02, 1.0],
+    );
+    m
+}
+
+/// Glass strips on both sides of the cabin between `x1` (front) and `x0`.
+fn side_windows(m: &mut MeshBuilder, x1: f32, x0: f32, y0: f32, y1: f32, z: f32) {
+    let g = palette::CAR_GLASS;
+    let z = z + 0.01;
+    m.quad(
+        Vec3::new(x0, y0, z),
+        Vec3::new(x1, y0, z),
+        Vec3::new(x1 - 0.15, y1, z),
+        Vec3::new(x0 + 0.1, y1, z),
+        g,
+    );
+    m.quad(
+        Vec3::new(x1, y0, -z),
+        Vec3::new(x0, y0, -z),
+        Vec3::new(x0 + 0.1, y1, -z),
+        Vec3::new(x1 - 0.15, y1, -z),
+        g,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cars_fit_a_lane_and_sit_on_the_ground() {
+        for shape in 0..SHAPES {
+            let m = car_model(Color::WHITE, shape);
+            let (mut min, mut max) = (Vec3::MAX, Vec3::MIN);
+            for p in &m.pos {
+                min = min.min(Vec3::from(*p));
+                max = max.max(Vec3::from(*p));
+            }
+            assert!(min.y >= -0.001 && min.y < 0.05, "{min}");
+            assert!(max.z - min.z < 2.1 && max.x - min.x < 5.0, "{min} {max}");
+        }
+    }
+
+    #[test]
+    fn extruded_faces_point_outward() {
+        let mut m = MeshBuilder::new();
+        let prof = [
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(0.8, 1.0),
+            Vec2::new(-0.8, 1.0),
+        ];
+        extrude(&mut m, &prof, -0.5, 0.5, Color::WHITE, &|_| Color::WHITE);
+        let c = Vec3::new(0.0, 0.5, 0.0);
+        for t in m.idx.chunks(3) {
+            let p: Vec<Vec3> = t.iter().map(|&i| Vec3::from(m.pos[i as usize])).collect();
+            let n = (p[1] - p[0]).cross(p[2] - p[0]);
+            assert!(n.dot((p[0] + p[1] + p[2]) / 3.0 - c) > 0.0);
+        }
+    }
+}

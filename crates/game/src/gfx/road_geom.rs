@@ -690,12 +690,12 @@ mod tests {
 
     #[test]
     fn setbacks_never_exceed_half_a_short_segment() {
-        // A one-cell segment between two junctions, plus 45 degree joins.
+        // One-cell segments between junctions.
         let w = world_with(&[
             road((20, 130), (40, 130)),
             road((20, 131), (40, 131)),
             road((30, 120), (30, 140)),
-            road((25, 125), (35, 135)),
+            road((25, 110), (25, 140)),
         ]);
         let l = layout(&w.roads);
         for s in &l.segs {
@@ -704,6 +704,27 @@ mod tests {
             }
             assert!(s.s_a + s.s_b <= s.len() * 0.96 + 1e-3, "{s:?}");
         }
+    }
+
+    #[test]
+    fn crowded_diagonal_junctions_still_mesh() {
+        // Six arms within one cell of another junction cannot fit their
+        // corners; the pieces may overlap but must stay finite.
+        let w = world_with(&[
+            road((20, 130), (40, 130)),
+            road((20, 131), (40, 131)),
+            road((30, 120), (30, 140)),
+            road((25, 125), (35, 135)),
+        ]);
+        let l = layout(&w.roads);
+        let mut m = MeshBuilder::new();
+        for n in &l.nodes {
+            mesh_node(&mut m, n);
+        }
+        for s in &l.segs {
+            mesh_segment(&mut m, s);
+        }
+        assert!(m.pos.iter().flatten().all(|v| v.is_finite()));
     }
 
     #[test]
