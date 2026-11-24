@@ -20,7 +20,9 @@ pub enum Command {
     /// Straight road between two cell centres (horizontal, vertical or 45°).
     BuildRoad { from: Cell, to: Cell },
     /// Remove road pieces touching cells in the rectangle, and buildings
-    /// overlapping it. The highway stub is not removable.
+    /// overlapping it. The highway stub is not removable. Allowed without
+    /// the money for it (the cost then pushes money negative), so a city in
+    /// debt can still demolish roads to cut upkeep.
     Bulldoze { min: Cell, max: Cell },
     /// Zone (or with `None`, unzone) the eligible cells in the rectangle.
     SetZone { min: Cell, max: Cell, zone: Option<Zone> },
@@ -261,8 +263,9 @@ fn plan_bulldoze(world: &World, rect: CellRect) -> Result<Plan, CommandError> {
         }
     }
     let cells: Vec<Cell> = cells.into_iter().collect();
+    // Never refused for money: a player in debt must be able to demolish
+    // roads to cut their upkeep. The small cost may push money negative.
     let cost = cells.len() as i64 * balance::BULLDOZE_COST_PER_CELL;
-    afford(world, cost)?;
     Ok(Plan::Bulldoze {
         pieces: pieces.into_iter().collect(),
         buildings,

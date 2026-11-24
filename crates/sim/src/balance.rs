@@ -22,15 +22,43 @@
 //! workers.
 
 // ---------------------------------------------------------------- money ----
+//
+// Targets (checked by the `headless` example and `tests/balance.rs`), over
+// a 30-minute game at 2.5x:
+//
+// * A sensible layout stays solvent however it is built. A town runs a
+//   small deficit only on its first day or two while it is still empty,
+//   then a clear and growing surplus. That holds for a whole two-district
+//   grid laid on day one (976 road cells, `scenarios::prebuilt`: never
+//   below ~$29k), for a player who spends most of the start money on a
+//   district on day one and then follows demand (`GridPlayer::build_ahead`),
+//   and for one who builds block by block (`GridPlayer`).
+// * Construction is the big expense, so money stays a constraint while the
+//   city expands: the block-by-block player holds at most ~$31-34k by
+//   5,000 residents (it used to be ~$110k and climbing), never waits for
+//   money, and never has less than 100 road cells' worth in hand. 100 road
+//   cells ($6.5k) are about one day of its net income at 5,000.
+// * Running costs (road upkeep + services) take ~40 % of tax income in a
+//   sensible city, but a network far bigger than its town needs (the
+//   pre-built `overbuilt` mesh, ~9,000 cells) loses money every day.
 
-/// Money at the start of a new game.
-pub const STARTING_MONEY: i64 = 50_000;
+/// Money at the start of a new game: the first 460 road cells.
+pub const STARTING_MONEY: i64 = 30_000;
 /// Cost of one cell of newly built road (per cell-to-cell piece of length).
-pub const ROAD_COST_PER_CELL: i64 = 25;
+/// The main money sink: an expanding city spends most of its surplus here.
+pub const ROAD_COST_PER_CELL: i64 = 65;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
-pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 2;
+/// Low enough that a sensible network built ahead of its town (2-3 road
+/// cells per resident while it fills) is carried by the town after a day
+/// or two; a mesh many times bigger than its town still sinks it.
+pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 1;
+/// Daily cost of city services per resident (police, fire, schools...,
+/// abstracted), charged at midnight with road upkeep. Keeps the margin per
+/// resident moderate (residents and their jobs pay ~$2.1 a day in taxes at
+/// the default rate), so a bigger city is not a money machine.
+pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 0.75;
 
 /// Tax rate of a new game.
 pub const DEFAULT_TAX_RATE: f32 = 0.09;
@@ -253,9 +281,21 @@ pub const CAPACITY_PER_CELL: [[u32; 3]; 3] = [[4, 9, 18], [3, 6, 10], [4, 8, 8]]
 pub const BIG_FOOTPRINT_PERCENT: [u32; 3] = [0, 35, 60];
 /// A building empty at this many consecutive midnights is abandoned.
 pub const ABANDON_EMPTY_DAYS: u8 = 3;
-/// A building without road access to the highway at this many consecutive
-/// midnights is abandoned.
+/// No longer used by the sim (kept so existing code still compiles): it was
+/// "abandoned at this many consecutive midnights without road access",
+/// which killed a building whose road was cut at 23:59 for a rebuild.
+/// Abandonment for lost road access now uses
+/// [`ABANDON_UNREACHABLE_GRACE_TICKS`]. `BuildingMeta::unreachable_days`
+/// still counts those midnights for display.
 pub const ABANDON_UNREACHABLE_DAYS: u8 = 1;
+/// A building that has been continuously without road access to the
+/// highway for this long (sim ticks, one in-game day: 4 real minutes at
+/// 1x, 80 s at 3x) is abandoned. Reconnecting it at any point before that
+/// resets the clock, so a player can cut a road and rebuild it.
+pub const ABANDON_UNREACHABLE_GRACE_TICKS: u64 = TICKS_PER_DAY as u64;
+/// Road access of every building is checked this often (ticks; one in-game
+/// hour), so the grace period above ends within an hour of running out.
+pub const REACHABILITY_CHECK_INTERVAL_TICKS: u64 = TICKS_PER_HOUR as u64;
 
 // ------------------------------------------------------------------ map ----
 

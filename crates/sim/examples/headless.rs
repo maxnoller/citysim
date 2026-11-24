@@ -8,12 +8,19 @@
 //! Prints one line per in-game day and writes hourly CSVs to
 //! `target/headless/<scenario>.csv` (override with `CITYSIM_HEADLESS_OUT`).
 //! "min" is real minutes assuming the player runs at 2.5x on average.
+//! Money columns: `income` (taxes), `upkeep` (roads), `svc` (services),
+//! `net` (income - upkeep - services, before construction), `d/100c`
+//! (days of net income that pay for 100 road cells).
 
 use std::fmt::Write as _;
 use std::time::Instant;
 
 use citysim_sim::scenarios::{self, GridPlayer};
 use citysim_sim::{TICKS_PER_SECOND, World, Zone, balance};
+
+/// Blocks `[R, C, I]` the "upfront" player lays out on day one (~290 road
+/// cells, ~60 % of the start money).
+const UPFRONT_BLOCKS: [usize; 3] = [8, 3, 3];
 
 /// Average game speed assumed when converting ticks to real minutes.
 const ASSUMED_SPEED: f64 = 2.5;
@@ -28,6 +35,11 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "grid",
         about: "sensible player: grid blocks following demand, all zone types",
+        days: 20,
+    },
+    Scenario {
+        name: "upfront",
+        about: "lays out a district of 14 blocks on day one with its own money, then follows demand",
         days: 20,
     },
     Scenario {
@@ -52,7 +64,7 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "overbuilt",
-        about: "builds far more road than it needs",
+        about: "a road mesh far bigger than its town (pre-built), a little zoning",
         days: 10,
     },
 ];
@@ -66,15 +78,26 @@ fn run(sc: &Scenario, out_dir: &str) {
     let mut player = None;
     match sc.name {
         "grid" => player = Some(GridPlayer::new(&Zone::ALL)),
+        "upfront" => {
+            let mut p = GridPlayer::new(&Zone::ALL);
+            p.build_ahead(&mut w, UPFRONT_BLOCKS);
+            println!(
+                "upfront: built {} road cells, ${} left",
+                w.stats.road_cells, w.economy.money
+            );
+            player = Some(p);
+        }
         "res_only" => player = Some(GridPlayer::new(&[Zone::Residential])),
-        "two_grid" => scenarios::two_districts(&mut w, true),
-        "artery" | "artery_fixed" => scenarios::two_districts(&mut w, false),
-        "overbuilt" => scenarios::overbuilt(&mut w),
+        // The static layouts lay every road on day one; they get that
+        // construction for free and then run on the normal economy.
+        "two_grid" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, true)),
+        "artery" | "artery_fixed" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false)),
+        "overbuilt" => scenarios::prebuilt(&mut w, scenarios::overbuilt),
         _ => unreachable!(),
     }
     println!("\n=== {} — {}", sc.name, sc.about);
     println!(
-        "{:>3} {:>5} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6} {:>5} {:>9} {:>7} {:>7}  demand R/C/I",
+        "{:>3} {:>5} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6} {:>5} {:>9} {:>7} {:>7} {:>6} {:>6} {:>6}  demand R/C/I",
         "day",
         "min",
         "pop",
@@ -88,7 +111,10 @@ fn run(sc: &Scenario, out_dir: &str) {
         "jam",
         "money",
         "income",
-        "upkeep"
+        "upkeep",
+        "svc",
+        "net",
+        "d/100c"
     );
     let mut csv = String::from(
         "tick,day,hour,minutes,population,households,jobs,employed,unemployment,buildings,vehicles,avg_commute_s,avg_speed,congested,money,dem_r,dem_c,dem_i,waiting\n",
@@ -162,8 +188,14 @@ fn run(sc: &Scenario, out_dir: &str) {
             } else {
                 0.0
             };
+            let b = h.budget;
+            let per_100 = if b.net() > 0 {
+                format!("{:.2}", 100.0 * balance::ROAD_COST_PER_CELL as f64 / b.net() as f64)
+            } else {
+                "-".into()
+            };
             println!(
-                "{:>3} {:>5.1} {:>6} {:>5} {:>5} {:>5.2} {:>5} {:>5} {:>6.1} {:>6.1} {:>5.1} {:>9} {:>7} {:>7}  {:+.2} {:+.2} {:+.2}",
+                "{:>3} {:>5.1} {:>6} {:>5} {:>5} {:>5.2} {:>5} {:>5} {:>6.1} {:>6.1} {:>5.1} {:>9} {:>7} {:>7} {:>6} {:>6} {:>6}  {:+.2} {:+.2} {:+.2}",
                 h.day,
                 minutes(w.time.tick),
                 h.population,
@@ -177,7 +209,10 @@ fn run(sc: &Scenario, out_dir: &str) {
                 jam_max,
                 h.money,
                 h.income,
-                h.expenses,
+                b.road_upkeep,
+                b.services,
+                b.net(),
+                per_100,
                 h.demand[0],
                 h.demand[1],
                 h.demand[2],
@@ -209,16 +244,30 @@ fn run(sc: &Scenario, out_dir: &str) {
         None => println!("did not reach 5,000 residents (final {})", w.stats.population),
     }
     if let Some(p) = &player {
-        println!("blocks built: {}", p.blocks_built);
+        println!(
+            "blocks built: {}; waited for money {:.0} s in total, longest {:.0} s (real time at {ASSUMED_SPEED}x)",
+            p.blocks_built,
+            minutes(p.money_wait_ticks) * 60.0,
+            minutes(p.longest_money_wait_ticks) * 60.0
+        );
     }
+    let money_max = w.economy.history.iter().map(|h| h.money).max().unwrap_or(0);
+    let money_min = w.economy.history.iter().map(|h| h.money).min().unwrap_or(0);
+    println!(
+        "money: lowest ${money_min}, highest ${money_max}, final ${}",
+        w.economy.money
+    );
     let path = format!("{out_dir}/{}.csv", sc.name);
     std::fs::write(&path, csv).expect("write csv");
-    let mut days =
-        String::from("day,minutes,population,peak_vehicles,peak_congestion,avg_commute_s,money,income,expenses\n");
+    let mut days = String::from(
+        "day,minutes,population,peak_vehicles,peak_congestion,avg_commute_s,money,income,expenses,\
+         residential_tax,commercial_tax,industrial_tax,road_upkeep,services,road_cells\n",
+    );
     for h in &w.economy.history {
+        let b = h.budget;
         let _ = writeln!(
             days,
-            "{},{:.3},{},{},{:.4},{:.1},{},{},{}",
+            "{},{:.3},{},{},{:.4},{:.1},{},{},{},{},{},{},{},{},{}",
             h.day,
             minutes(h.day as u64 * balance::TICKS_PER_DAY as u64),
             h.population,
@@ -227,7 +276,13 @@ fn run(sc: &Scenario, out_dir: &str) {
             h.avg_commute_s,
             h.money,
             h.income,
-            h.expenses
+            h.expenses,
+            b.residential_tax,
+            b.commercial_tax,
+            b.industrial_tax,
+            b.road_upkeep,
+            b.services,
+            h.road_cells
         );
     }
     std::fs::write(format!("{out_dir}/{}_days.csv", sc.name), days).expect("write csv");

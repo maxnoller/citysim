@@ -95,6 +95,7 @@ fn road_edits_do_not_starve_departures() {
 #[test]
 fn stale_commute_average_does_not_freeze_an_empty_city() {
     let mut w = World::new(9);
+    w.economy.money = 100_000;
     // Homes and jobs at opposite ends of a very long loop.
     road(&mut w, (11, 128), (250, 128));
     road(&mut w, (250, 128), (250, 140));

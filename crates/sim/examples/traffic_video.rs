@@ -139,9 +139,9 @@ fn draw(c: &mut Canvas, w: &World, ox: f32) {
 fn main() {
     let start_day = 6u64;
     let mut good = World::new(8);
-    citysim_sim::scenarios::two_districts(&mut good, true);
+    citysim_sim::scenarios::prebuilt(&mut good, |w| citysim_sim::scenarios::two_districts(w, true));
     let mut bad = World::new(8);
-    citysim_sim::scenarios::two_districts(&mut bad, false);
+    citysim_sim::scenarios::prebuilt(&mut bad, |w| citysim_sim::scenarios::two_districts(w, false));
     let start = (start_day - 1) * balance::TICKS_PER_DAY as u64 + balance::TICKS_PER_HOUR as u64; // 07:00
     while good.time.tick < start {
         good.step();

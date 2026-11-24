@@ -3,9 +3,10 @@
 //! Every `GROWTH_INTERVAL_TICKS` each zone accumulates `demand *
 //! GROWTH_PER_HOUR` growth events; each event builds one building on a
 //! random zoned, empty cell with road access to the highway, or (sometimes,
-//! or when no land is left) upgrades a full building one level. At
-//! midnight buildings that stayed empty or lost their road connection for
-//! too long are abandoned and removed (the zoning stays).
+//! or when no land is left) upgrades a full building one level. Buildings
+//! that stayed empty for several midnights, or that have been cut off from
+//! the highway for longer than `ABANDON_UNREACHABLE_GRACE_TICKS` (checked
+//! every in-game hour), are abandoned and removed (the zoning stays).
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +22,16 @@ pub struct BuildingMeta {
     /// Consecutive midnights with nobody in it.
     pub empty_days: u8,
     /// Consecutive midnights without a road connection to the highway.
+    /// Informational; abandonment uses `unreachable_since`.
     pub unreachable_days: u8,
+    /// Tick at which the building was first found without a road
+    /// connection to the highway (checked every
+    /// `balance::REACHABILITY_CHECK_INTERVAL_TICKS`); `None` while
+    /// connected. The building is abandoned once
+    /// `balance::ABANDON_UNREACHABLE_GRACE_TICKS` have passed since.
+    /// (Saved in the save file's extension block.)
+    #[serde(skip)]
+    pub unreachable_since: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -47,7 +57,12 @@ fn demand_of(world: &World, z: Zone) -> f32 {
 }
 
 pub(crate) fn tick(world: &mut World) {
-    if world.time.tick_of_day == 0 {
+    if world.time.tick_of_day == 0
+        || world
+            .time
+            .tick
+            .is_multiple_of(balance::REACHABILITY_CHECK_INTERVAL_TICKS)
+    {
         abandon(world);
     }
     if !world.time.tick.is_multiple_of(balance::GROWTH_INTERVAL_TICKS) {
@@ -182,10 +197,13 @@ fn upgrade(world: &mut World, z: Zone) -> bool {
     true
 }
 
-/// Midnight: count empty / unreachable days and remove abandoned buildings.
+/// Every hour: track road access and abandon buildings cut off for longer
+/// than the grace period. At midnight also count empty / unreachable days
+/// and abandon buildings that stayed empty too long.
 fn abandon(world: &mut World) {
     world.cache.ensure_roads(&world.roads, world.versions.roads);
     let now = world.time.tick;
+    let midnight = world.time.tick_of_day == 0;
     let mut doomed = Vec::new();
     let ids: Vec<BuildingId> = world.buildings.keys().collect();
     for id in ids {
@@ -194,13 +212,23 @@ fn abandon(world: &mut World) {
         let empty = b.occupied == 0 && old_enough;
         let reachable = households::connected(world, b.footprint);
         let m = world.growth.meta.entry(id);
-        m.empty_days = if empty { m.empty_days.saturating_add(1) } else { 0 };
-        m.unreachable_days = if reachable {
-            0
-        } else {
-            m.unreachable_days.saturating_add(1)
-        };
-        if m.empty_days >= balance::ABANDON_EMPTY_DAYS || m.unreachable_days >= balance::ABANDON_UNREACHABLE_DAYS {
+        if reachable {
+            m.unreachable_since = None;
+        } else if m.unreachable_since.is_none() {
+            m.unreachable_since = Some(now);
+        }
+        if midnight {
+            m.empty_days = if empty { m.empty_days.saturating_add(1) } else { 0 };
+            m.unreachable_days = if reachable {
+                0
+            } else {
+                m.unreachable_days.saturating_add(1)
+            };
+        }
+        let cut_off_too_long = m
+            .unreachable_since
+            .is_some_and(|t| now.saturating_sub(t) >= balance::ABANDON_UNREACHABLE_GRACE_TICKS);
+        if m.empty_days >= balance::ABANDON_EMPTY_DAYS || cut_off_too_long {
             doomed.push(id);
         }
     }

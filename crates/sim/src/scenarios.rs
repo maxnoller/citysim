@@ -28,6 +28,17 @@ pub fn zone(w: &mut World, a: (i32, i32), b: (i32, i32), z: Zone) {
     });
 }
 
+/// Run a scripted layout with its construction paid for: money is the same
+/// afterwards as before. The static layouts ([`two_districts`]) build a
+/// whole town at once, which costs more than a new game starts with; use
+/// this to compare them on traffic and running costs.
+pub fn prebuilt(w: &mut World, build: impl FnOnce(&mut World)) {
+    let money = w.economy.money;
+    w.economy.money = i64::MAX / 4;
+    build(w);
+    w.economy.money = money;
+}
+
 /// Rows (y) of the east-west streets of the static district layout.
 const NORTH_RIBS: [i32; 5] = [123, 118, 113, 108, 103];
 const SOUTH_RIBS: [i32; 5] = [133, 138, 143, 148, 153];
@@ -43,6 +54,8 @@ const EAST_X: i32 = 80;
 ///   passes the single junction `(20, 128)` — a deliberately bad layout.
 ///
 /// Zoning is identical up to the few cells the extra grid streets occupy.
+/// The roads cost more than `STARTING_MONEY`: build it inside [`prebuilt`]
+/// unless the world has the money.
 pub fn two_districts(w: &mut World, grid: bool) {
     road(w, (11, 128), (EAST_X + 5, 128));
     road(w, (WEST_X, NORTH_RIBS[4]), (WEST_X, SOUTH_RIBS[4]));
@@ -119,6 +132,13 @@ pub struct GridPlayer {
     pub zones: Vec<Zone>,
     /// Blocks built so far.
     pub blocks_built: u32,
+    /// Ticks during which the player wanted to build its next block but
+    /// could not afford it (summed over all such stretches).
+    pub money_wait_ticks: u64,
+    /// Longest single stretch of such waiting, ticks.
+    pub longest_money_wait_ticks: u64,
+    /// Start of the current stretch of waiting for money, if any.
+    waiting_since: Option<u64>,
 }
 
 impl GridPlayer {
@@ -157,6 +177,9 @@ impl GridPlayer {
             ],
             zones: zones.to_vec(),
             blocks_built: 0,
+            money_wait_ticks: 0,
+            longest_money_wait_ticks: 0,
+            waiting_since: None,
         }
     }
 
@@ -183,25 +206,80 @@ impl GridPlayer {
         }
         let free = Self::free_cells(w);
         let d = [w.demand.residential, w.demand.commercial, w.demand.industrial];
+        let mut short_of_money = false;
         for z in self.zones.clone() {
             let zi = crate::derived::zone_index(z);
             // Always keep a little land of each used type available early on.
             let want = d[zi] > 0.1 || (free[zi] == 0 && self.next[zi] == 0);
-            if want
-                && free[zi] < 24
-                && w.economy.money > Block::max_cost() + 1_000
-                && let Some(b) = self.lists[zi].get(self.next[zi]).copied()
-                && b.build(w, z)
-            {
+            let Some(b) = self.lists[zi].get(self.next[zi]).copied() else {
+                continue;
+            };
+            if !want || free[zi] >= 24 {
+                continue;
+            }
+            if w.economy.money <= Block::max_cost() + 1_000 {
+                short_of_money = true;
+            } else if b.build(w, z) {
                 self.next[zi] += 1;
                 self.blocks_built += 1;
             }
         }
+        let now = w.time.tick;
+        match (short_of_money, self.waiting_since) {
+            (true, None) => self.waiting_since = Some(now),
+            (false, Some(t0)) => {
+                self.waiting_since = None;
+                self.money_wait_ticks += now - t0;
+            }
+            _ => {}
+        }
+        if let Some(t0) = self.waiting_since {
+            self.longest_money_wait_ticks = self.longest_money_wait_ticks.max(now - t0);
+        }
+    }
+
+    /// Lay out the next `blocks[z]` blocks of each zone type `[R, C, I]`
+    /// right now, paying for them (a player who builds a whole district on
+    /// day one instead of following demand). Stops at the first block it
+    /// cannot afford; returns the number built. `act` then carries on from
+    /// there.
+    pub fn build_ahead(&mut self, w: &mut World, blocks: [usize; 3]) -> u32 {
+        let mut built = 0;
+        if w.roads.segments.len() == 1 {
+            road(w, (11, 128), (20, 128));
+        }
+        // Interleave the zone types so a short budget still gives a mix.
+        for round in 0..blocks.into_iter().max().unwrap_or(0) {
+            for z in self.zones.clone() {
+                let zi = crate::derived::zone_index(z);
+                if round >= blocks[zi] {
+                    continue;
+                }
+                let Some(b) = self.lists[zi].get(self.next[zi]).copied() else {
+                    continue;
+                };
+                if !b.build(w, z) {
+                    return built;
+                }
+                self.next[zi] += 1;
+                self.blocks_built += 1;
+                built += 1;
+            }
+        }
+        built
+    }
+
+    /// Ticks the player has been waiting for money for its next block, 0
+    /// when it is not waiting.
+    pub fn waiting_for_money_ticks(&self, w: &World) -> u64 {
+        self.waiting_since.map_or(0, |t0| w.time.tick - t0)
     }
 }
 
 /// An over-eager builder: lays a dense mesh of roads far beyond what the
-/// city needs, then zones a little housing.
+/// city needs, then zones a little housing. Paying for it, it stops when
+/// the money runs out (a few hundred cells); inside [`prebuilt`] it lays
+/// the whole ~9,000-cell mesh, whose upkeep the town can never carry.
 pub fn overbuilt(w: &mut World) {
     road(w, (11, 128), (200, 128));
     for x in (20..=200).step_by(6) {

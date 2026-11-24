@@ -10,16 +10,23 @@ pub struct Stats {
     pub population: u32,
     /// Job places (capacity of commercial + industrial buildings).
     pub jobs: u32,
-    /// Households with a job (one worker per household).
+    /// Workers with a job. Every household has exactly one worker (the
+    /// other members are dependants), so this is also the number of
+    /// households with a job, and the number of filled job places.
     pub employed: u32,
+    /// Households living in the city (including those still driving in).
     pub households: u32,
+    /// Buildings of all kinds.
     pub buildings: u32,
+    /// Cars on the road right now.
     pub vehicles_on_road: u32,
+    /// Road cells, highway stub included.
     pub road_cells: u32,
-    /// Households without a job.
+    /// Workers without a job: `workforce - employed`.
     #[serde(default)]
     pub unemployed: u32,
-    /// `unemployed / households`, `0.0..=1.0`.
+    /// Unemployment rate, `unemployed / workforce` (0 when nobody lives in
+    /// town), `0.0..=1.0`.
     #[serde(default)]
     pub unemployment: f32,
     /// Resident capacity of all residential buildings.
@@ -49,6 +56,16 @@ pub struct Stats {
     /// `congested_segments` / all segments, `0.0..=1.0`.
     #[serde(default)]
     pub congestion_share: f32,
+    /// The workforce: people who want a job. One worker per household
+    /// (children, retirees and partners are not modelled as workers), so
+    /// this equals `households`. `employed + unemployed == workforce`.
+    /// (Not stored in saves; restored on load.)
+    #[serde(skip)]
+    pub workforce: u32,
+    /// Job places nobody fills: `jobs - employed`.
+    /// (Not stored in saves; restored on load.)
+    #[serde(skip)]
+    pub vacant_jobs: u32,
 }
 
 /// The float fields are never NaN.
@@ -90,9 +107,11 @@ pub(crate) fn update(world: &mut World) {
             s.employed += 1;
         }
     }
-    s.unemployed = s.households - s.employed;
-    s.unemployment = if s.households > 0 {
-        s.unemployed as f32 / s.households as f32
+    s.workforce = s.households;
+    s.unemployed = s.workforce - s.employed;
+    s.vacant_jobs = s.jobs.saturating_sub(s.employed);
+    s.unemployment = if s.workforce > 0 {
+        s.unemployed as f32 / s.workforce as f32
     } else {
         0.0
     };

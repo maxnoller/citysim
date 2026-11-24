@@ -92,7 +92,7 @@ fn growth_needs_a_road_connection_to_the_highway() {
 #[test]
 fn growth_is_gradual() {
     let mut w = World::new(4);
-    scenarios::two_districts(&mut w, true);
+    scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, true));
     let mut max_per_tick = 0;
     for _ in 0..DAY {
         let before = w.buildings.len();
@@ -161,7 +161,7 @@ fn path_exists_and_vehicles_arrive() {
 /// Mean car speed over all ticks with cars, and the final average commute.
 fn run_layout(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32, u32) {
     let mut w = World::new(8);
-    scenarios::two_districts(&mut w, grid);
+    scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, grid));
     let (mut speed, mut n) = (0.0f64, 0u32);
     let mut commute = Vec::new();
     for _ in 0..days as u64 * DAY {
@@ -315,16 +315,33 @@ fn economy_books_taxes_and_upkeep_daily() {
 
 #[test]
 fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
+    // The whole over-eager mesh, built for free: its upkeep sinks the town.
     let mut over = World::new(16);
-    scenarios::overbuilt(&mut over);
+    scenarios::prebuilt(&mut over, scenarios::overbuilt);
+    // The static districts, built for free, run on the normal economy.
     let mut good = World::new(16);
-    scenarios::two_districts(&mut good, true);
+    scenarios::prebuilt(&mut good, |w| scenarios::two_districts(w, true));
+    // The scripted sensible player pays for everything it builds and always
+    // keeps the price of 100 road cells in hand.
+    let mut player = World::new(16);
+    let mut p = Some(GridPlayer::new(&Zone::ALL));
+    let hundred_cells = 100 * balance::ROAD_COST_PER_CELL;
     for _ in 0..4 * DAY {
         over.step();
         good.step();
+        let next = player.time.tick + 1;
+        run_to(&mut player, &mut p, next);
+        assert!(player.economy.money >= hundred_cells, "{}", player.economy.money);
     }
     assert!(over.economy.money < 0, "{}", over.economy.money);
     assert!(good.economy.money > 0, "{}", good.economy.money);
+    // Its roads cost more to keep than its town pays (the young player city
+    // is about break-even on day 4 and in profit later).
+    let (over_net, player_net) = (over.economy.last_day.net(), player.economy.last_day.net());
+    assert!(
+        over_net < 0 && over_net < player_net - 1000,
+        "{over_net} vs {player_net}"
+    );
     // Broke: building fails with the usual error.
     let err = over.apply(Command::BuildRoad {
         from: c(30, 30),
