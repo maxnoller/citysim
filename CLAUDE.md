@@ -9,7 +9,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - Ownership check (must stay warning-free): `cargo clippy -p citysim --no-default-features --features gfx`
   and `... --features ui`. Both must also run.
 
-## Layout and ownership (three parallel agents: SIM, GFX, UI)
+## Layout and ownership (sim, gfx and ui are owned separately; keep the boundaries)
 - `crates/sim` (`citysim_sim`) — SIM only. ALL state and rules. No Bevy, deterministic (only `world.rng`), serde.
   Mutate via `World::apply(Command)` / `World::step()`. `preview(cmd)` is Ok exactly when `apply(cmd)` would be.
 - `crates/game/src/gfx/` — GFX only: scene/ground/lights, camera, roads, zones, buildings, vehicles, hovered-cell +
@@ -18,7 +18,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   quality keys, save/load. One `UiPlugin`. Assets in `crates/game/assets/ui/`.
 - `crates/game/src/shared.rs` — the ONLY contract between gfx and ui; change it only by agreement. gfx and ui
   never import each other. `main.rs` just builds the App (features `gfx`, `ui`, both default).
-- `dev/` (script demo, autoshot) and `dev_demo.rs` (THROWAWAY fake town) — tooling, not owned by gfx/ui.
+- `crates/game/src/dev/` — development tooling, not owned by gfx/ui: `scenario` (real scripted towns), `autoshot`
+  (screenshot and exit), `control` (file control channel for scripted play). `scripts/play.py` plays the real game with
+  OS input (xdotool) through that channel.
+- `docs/screenshot.png` (README), `THIRD_PARTY_NOTICES.md` (bundled font licences; licence files stay next to the fonts).
 - Asset root resolves to `crates/game/assets` for `cargo run -p citysim` and for the binary run directly.
 
 ## shared.rs contract (summary)
@@ -56,15 +59,20 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - Scenarios: `scenarios::{GridPlayer, two_districts, add_connections, overbuilt}`; `scenarios::prebuilt(w, f)` pays
   for a static layout (they cost more than a new game's money).
 - Sim balance runs: `cargo run -p citysim_sim --release --example headless` (scripted cities in `citysim_sim::scenarios`).
-- `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep). `// PHASE2:` marks sim stubs.
+- `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep).
 
 ## Dev / headless flags (need `DISPLAY=:0`; llvmpipe works)
-- `CITYSIM_DEMO=town` (~350 buildings over 20 s, 300 cars, live loads/demand/money) · `stress` (6,000 / 3,000)
-  · `script` (alias `1`; ~15 s tool demo through synthetic input; `CITYSIM_DEMO_DELAY=s`).
+- `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000) · `jam` (bad layout, one overloaded junction): real towns
+  built by `citysim_sim::scenarios` through commands and fast-forwarded before the first frame (< 1 s release, a few s
+  debug). `CITYSIM_DEMO_POP=n` target, `CITYSIM_DEMO_HOUR=h` stop time (default 8 = morning rush).
 - `CITYSIM_AUTOSHOT=out.png` (or `--autoshot`): screenshot then exit 0. `CITYSIM_SHOT_VIEW=wide|street|close`,
   `CITYSIM_SHOT_DELAY=25` (s, default 3), `CITYSIM_SHOT_OVERLAY=none|zones|traffic`. Without a demo it builds
   a small sample city. Example: `CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png CITYSIM_SHOT_DELAY=25 cargo run -p citysim`.
-- `CITYSIM_LOG_FPS=1` logs FPS (llvmpipe: town ≈ 12–24, stress ≈ 8). `CITYSIM_SEED=n` sets the world seed.
+- `CITYSIM_LOG_FPS=1` logs FPS (llvmpipe, 4 vCPU: small town 5–8, 5,000 residents ≈ 2–3). `CITYSIM_SEED=n` world seed.
+- `CITYSIM_CONTROL=dir` + `scripts/play.py` (see its docstring): `launch`, `start`, `grow --until-pop N`, `road`, `zone`,
+  `bulldoze`, `look`, `shot`, `stats`, `counts`, `cmd 'until-day N'`. The channel only reads numbers, frames the camera,
+  fast-forwards (`turbo`, `until-*`; they fail while paused) and takes screenshots; all play goes through real input.
+- UI capture: `CITYSIM_UI_SHOTS=dir` (interface states; `CITYSIM_SAVE_DIR` for the save/load step), `CITYSIM_UI_TOUR=1`.
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`).
@@ -79,6 +87,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `near_clip_plane` (use `..default()`). Text: `FontSize::Px(18.0)`, lengths `px(8)`. `WindowResolution::new(u32,u32)`.
 - `single()` returns `Result`; `Single<D, F>` param. Mesh: `bevy::mesh::{Indices, PrimitiveTopology}`,
   `bevy::asset::RenderAssetUsages`. UI picking is on by default: `bevy::picking::hover::HoverMap`.
+- Never `remove::<Mesh3d>()` to hide something and re-insert it later: such an entity was not drawn again (0.20.1).
+  Toggle `Visibility` and keep the mesh (cursor ghost, zones, overlay, trees do this).
 - `Window::set_cursor_position` also warps the OS cursor. Required components: `Mesh3d` brings `Visibility`,
   `MeshMaterial3d` alone does not — spawn `Visibility` explicitly if you query it before a mesh exists.
 - Bevy features: `default-features = false, features = ["3d", "ui"]`. Workspace drops `rust_2018_idioms`.

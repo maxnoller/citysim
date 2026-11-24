@@ -381,6 +381,9 @@ fn run(
             }
             if reached(&cx.sim.world, goal) && !matches!(goal, Goal::Hour(_)) {
                 ctl.reply(seq, true, "already reached");
+            } else if cx.clock.paused {
+                // Turbo only runs while the clock does: fail instead of hanging.
+                return Err("the game is paused".to_string());
             } else {
                 let n = match args.get(1) {
                     Some(_) => num(args, 1)?,

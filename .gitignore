@@ -2,3 +2,5 @@
 *.png
 !assets/**/*.png
 *.citysave
+__pycache__/
+!docs/*.png

@@ -209,9 +209,36 @@ def clear_way(a, b):
         c = (int(r[1]), int(r[2]))
         log(f"building in the way at {c}: bulldozing it")
         select_tool("bulldoze")
+        if cmd(f"screen {c[0]} {c[1]}").split()[2] != "inside":
+            look(c[0], c[1])
         move_to(*c)
         click()
         wait_frames(2)
+    return False
+
+
+def hovered():
+    """The cell under the pointer, or None (off the map or over the UI)."""
+    r = cmd("hover")
+    cell, over_ui = r.split(" over_ui=")
+    c = cell.removeprefix("cell=")
+    return None if c == "none" or over_ui == "true" else tuple(map(int, c.split()))
+
+
+def frame(a, b):
+    """Centre the camera on a..b, far enough out to see both ends."""
+    span = max(abs(a[0] - b[0]), abs(a[1] - b[1])) * 8.0
+    look((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0.0, 1.15, max(260.0, span * 2.2))
+
+
+def point_at(c, a, b):
+    """Move the pointer onto cell c; re-frame if the UI covers it."""
+    for attempt in range(2):
+        move_to(*c)
+        if hovered() == tuple(c):
+            return True
+        frame(a, b)
+    log(f"cell {c} not reachable under the pointer")
     return False
 
 
@@ -220,14 +247,19 @@ def build_road(a, b):
         return stats()
     # Frame both ends: the clicks must land on visible cells.
     if any(cmd(f"screen {c[0]} {c[1]}").split()[2] != "inside" for c in (a, b)):
-        span = max(abs(a[0] - b[0]), abs(a[1] - b[1])) * 8.0
-        look((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0.0, 1.15, max(260.0, span * 1.5))
-    select_tool("road")
-    move_to(*a)
-    click()
-    move_to(*b)
-    click()
-    key("Escape")  # end the chain (keeps the Road tool)
+        frame(a, b)
+    for _ in range(2):
+        select_tool("road")
+        if point_at(a, a, b):
+            click()
+            if point_at(b, a, b):
+                click()
+        if tool() == "road":
+            key("Escape")  # end the chain (keeps the Road tool)
+        if cmd(f"preview-road {a[0]} {a[1]} {b[0]} {b[1]}") == "ok 0":
+            break
+        log(f"road {a}->{b} not built yet, retrying")
+        frame(a, b)
     after = stats()
     log(f"road {a}->{b}: segments {after['segments']} money {after['money']}")
     return after
