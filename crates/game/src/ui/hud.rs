@@ -623,6 +623,10 @@ fn update_top_bar(
             HudText::JobsCaption => {
                 if s.workforce == 0 {
                     ("Jobs".to_string(), t::TEXT_MUTED)
+                } else if s.jobs == 0 {
+                    // The first homes always fill before any shop or
+                    // factory exists: say so calmly instead of "100 %".
+                    ("No jobs yet · zone shops or industry".to_string(), t::TEXT_MUTED)
                 } else {
                     // The sim's own figure: unemployed / workforce.
                     let u = s.unemployment;

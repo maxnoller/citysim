@@ -12,6 +12,8 @@
 //! * `screen X Y` — window position (logical px) of cell (X, Y)'s centre:
 //!   `X Y inside|outside`.
 //! * `hover` — the hovered cell and whether the pointer is over UI.
+//! * `preview-road X1 Y1 X2 Y2` — `ok COST`, `blocked X Y` (a building in the
+//!   way) or `error ...` (the sim's `CommandError`), without building.
 //! * `camera X Z YAW PITCH DIST` (metres) / `look CX CY YAW PITCH DIST`
 //!   (cells) / `camera off` — set or clear `CameraOverride`.
 //! * `shot PATH` — screenshot of the window, replies once written.
@@ -311,6 +313,21 @@ fn run(
                 true,
                 &format!("{:.0} {:.0} {}", p.x, p.y, if inside { "inside" } else { "outside" }),
             );
+        }
+        "preview-road" => {
+            // What the sim says about a road (no change): `ok COST` or the
+            // CommandError, e.g. `BlockedByBuilding(Cell { x: 20, y: 125 })`.
+            let cmd = citysim_sim::Command::BuildRoad {
+                from: Cell::new(num(args, 0)?, num(args, 1)?),
+                to: Cell::new(num(args, 2)?, num(args, 3)?),
+            };
+            match cx.sim.world.preview(&cmd) {
+                Ok(p) => ctl.reply(seq, true, &format!("ok {}", p.cost)),
+                Err(citysim_sim::CommandError::BlockedByBuilding(c)) => {
+                    ctl.reply(seq, true, &format!("blocked {} {}", c.x, c.y))
+                }
+                Err(e) => ctl.reply(seq, true, &format!("error {e:?}")),
+            }
         }
         "hover" => {
             let c = cx.hovered.0.map_or("none".to_string(), |c| format!("{} {}", c.x, c.y));

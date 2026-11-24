@@ -195,7 +195,29 @@ def select_tool(name):
     raise RuntimeError(f"could not select tool {name} (have {tool()})")
 
 
+def clear_way(a, b):
+    """Like a player: bulldoze buildings standing where the road must go
+    (the sim's own BlockedByBuilding answer names each one). Returns False
+    if the road is impossible for another reason (logged)."""
+    for _ in range(12):
+        r = cmd(f"preview-road {a[0]} {a[1]} {b[0]} {b[1]}").split()
+        if r[0] == "ok":
+            return True
+        if r[0] != "blocked":
+            log(f"road {a}->{b} impossible: {' '.join(r[1:])}")
+            return False
+        c = (int(r[1]), int(r[2]))
+        log(f"building in the way at {c}: bulldozing it")
+        select_tool("bulldoze")
+        move_to(*c)
+        click()
+        wait_frames(2)
+    return False
+
+
 def build_road(a, b):
+    if not clear_way(a, b):
+        return stats()
     select_tool("road")
     move_to(*a)
     click()
