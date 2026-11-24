@@ -551,6 +551,12 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
             guardrail(m, s.a, dir, n * side, h + 0.9, t0, t1);
         }
     }
+    if st.walk > 0.0 {
+        street_lamps(m, s, t0, t1);
+    } else if s.id.is_none() {
+        // The road out of town: a sign gantry just past the map edge.
+        sign_gantry(m, s.b - dir * 35.0, dir, h);
+    }
     // Markings.
     let white = lin(palette::MARKING);
     let margin = |deg: usize, straight: bool| match deg {
@@ -614,6 +620,81 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
                 oa.max(ob),
                 MARK_Y,
                 white,
+            );
+        }
+    }
+}
+
+/// Street lamps on alternating sides, clear of the junction ends.
+fn street_lamps(m: &mut MeshBuilder, s: &SegLayout, t0: f32, t1: f32) {
+    let dir = s.dir();
+    let n = perp(dir);
+    let off = s.style.h + s.style.walk * 0.62;
+    let (a, b) = (t0 + 5.0, t1 - 5.0);
+    if b <= a {
+        return;
+    }
+    let count = ((b - a) / 26.0).floor() as usize + 1;
+    let pole = palette::LAMP;
+    for k in 0..count {
+        let t = if count == 1 {
+            (a + b) * 0.5
+        } else {
+            a + (b - a) * k as f32 / (count - 1) as f32
+        };
+        // Alternate sides, phase from the position so neighbours agree.
+        let side = if ((s.a + dir * t).dot(Vec2::ONE) / 26.0).round() as i32 % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let base = s.a + dir * t + n * side * off;
+        m.box_yaw(lift(base, WALK_Y), Vec3::new(0.14, 4.6, 0.14), 0.0, pole, pole);
+        // Arm reaching over the road and the lamp head.
+        let tip = base - n * side * 1.1;
+        let mid = (base + tip) * 0.5;
+        let yaw = -n.y.atan2(n.x);
+        m.box_yaw(lift(mid, WALK_Y + 4.5), Vec3::new(1.2, 0.1, 0.1), yaw, pole, pole);
+        m.box_yaw(
+            lift(tip, WALK_Y + 4.3),
+            Vec3::new(0.5, 0.18, 0.28),
+            yaw,
+            pole,
+            palette::LAMP_GLASS,
+        );
+    }
+}
+
+/// Overhead sign gantry across a highway at `p` (direction of travel `dir`).
+fn sign_gantry(m: &mut MeshBuilder, p: Vec2, dir: Vec2, h: f32) {
+    let n = perp(dir);
+    let steel = palette::GUARDRAIL;
+    let w = h + 1.6;
+    let yaw = -n.y.atan2(n.x);
+    for side in [1.0f32, -1.0] {
+        let c = p + n * side * w;
+        m.box_yaw(lift(c, 0.0), Vec3::new(0.35, 6.6, 0.35), 0.0, steel, steel);
+    }
+    m.box_yaw(lift(p, 6.0), Vec3::new(2.0 * w + 0.4, 0.45, 0.4), yaw, steel, steel);
+    // A green board over each carriageway, facing the traffic.
+    for side in [1.0f32, -1.0] {
+        let c = p + n * side * h * 0.5 + dir * side * 0.3;
+        m.box_yaw(
+            lift(c, 5.0),
+            Vec3::new(h * 0.8, 1.8, 0.12),
+            yaw,
+            palette::SIGN_GREEN,
+            palette::SIGN_GREEN,
+        );
+        // White text bars and an arrow-ish bar.
+        let face = c + dir * side * 0.07 * -1.0;
+        for (k, len) in [(0, 0.55f32), (1, 0.4)] {
+            m.box_yaw(
+                lift(face, 6.15 - k as f32 * 0.55),
+                Vec3::new(h * 0.8 * len, 0.16, 0.02),
+                yaw,
+                palette::MARKING,
+                palette::MARKING,
             );
         }
     }
@@ -748,12 +829,11 @@ mod tests {
         assert!(m.pos.iter().flatten().all(|v| v.is_finite()));
         // Every upward face of the road surface lies on a known level.
         for (p, nrm) in m.pos.iter().zip(&m.nrm) {
-            if nrm[1] > 0.99 {
+            // Road surfaces (props such as lamps and rails stand higher).
+            if nrm[1] > 0.99 && p[1] < 0.5 {
                 let y = p[1];
                 assert!(
-                    [ROAD_Y, WALK_Y, MARK_Y, 0.025, 0.78, 0.7]
-                        .iter()
-                        .any(|l| (y - l).abs() < 1e-4),
+                    [ROAD_Y, WALK_Y, MARK_Y, 0.025].iter().any(|l| (y - l).abs() < 1e-4),
                     "unexpected level {y}"
                 );
             }

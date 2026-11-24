@@ -47,6 +47,9 @@ pub const SIDEWALK: Color = c(0xB9B4A8);
 pub const KERB: Color = c(0x9A958A);
 pub const GUARDRAIL: Color = c(0xC9CCCF);
 pub const GRAVEL: Color = c(0x9C9584);
+pub const LAMP: Color = c(0x5E656B);
+pub const LAMP_GLASS: Color = c(0xF4EED8);
+pub const SIGN_GREEN: Color = c(0x2E7D4F);
 
 // ------------------------------------------------------------ houses
 pub const HOUSE_WALLS: [Color; 6] = [

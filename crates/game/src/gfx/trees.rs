@@ -127,13 +127,16 @@ fn draw_tree(m: &mut MeshBuilder, t: &Tree, cheap: bool) {
         (_, false) if t.pine => props::pine_tree(m, t.pos, t.scale, t.canopy, t.yaw),
         (_, false) => props::round_tree(m, t.pos, t.scale, t.canopy, t.yaw),
         (_, true) if t.pine => m.cone(t.pos, 1.9 * t.scale, 7.5 * t.scale, 5, t.canopy, t.yaw),
-        (_, true) => props::octa_blob(
-            m,
-            t.pos + Vec3::Y * 4.0 * t.scale,
-            Vec3::new(2.4, 2.6, 2.4) * t.scale,
-            t.canopy,
-            t.yaw,
-        ),
+        (_, true) => {
+            props::octa_blob(
+                m,
+                t.pos + Vec3::Y * 4.0 * t.scale,
+                Vec3::new(2.4, 2.6, 2.4) * t.scale,
+                t.canopy,
+                t.yaw,
+            );
+            m.cylinder(t.pos, 0.22 * t.scale, 1.6 * t.scale, 3, palette::TRUNK, palette::TRUNK);
+        }
     }
 }
 
@@ -295,8 +298,10 @@ fn rebuild_outside(
                     cell_trees(cx, cy, &mut trees);
                     // Thin out with distance so the edge melts into the fog.
                     let fade = 1.0 - (out / OUTSIDE_REACH) * 0.5;
+                    // Full trees near the map, where the camera can get close.
+                    let cheap = out > 300.0;
                     for t in trees.iter().filter(|t| keep(t, dens * fade) && t.small == 0) {
-                        draw_tree(&mut m, t, true);
+                        draw_tree(&mut m, t, cheap);
                     }
                 }
             }
