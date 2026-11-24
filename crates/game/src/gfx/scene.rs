@@ -1,4 +1,4 @@
-//! Static scene: ground plane the size of the map, sun, ambient light.
+//! Static scene: sky colour, ground plane the size of the map, lights.
 
 use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
@@ -11,13 +11,14 @@ pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(GlobalAmbientLight {
-            color: Color::WHITE,
-            brightness: 400.0,
-            ..default()
-        })
-        .add_systems(Startup, setup_scene)
-        .add_systems(Update, draw_map_border);
+        app.insert_resource(ClearColor(SKY_COLOR))
+            .insert_resource(GlobalAmbientLight {
+                color: Color::WHITE,
+                brightness: 400.0,
+                ..default()
+            })
+            .add_systems(Startup, setup_scene)
+            .add_systems(Update, draw_map_border);
     }
 }
 

@@ -1,64 +1,60 @@
 //! CitySim game binary: Bevy front-end for the `citysim_sim` crate.
 //!
-//! The game owns a `citysim_sim::World` (in [`sim_driver::SimWorld`]), sends
-//! it `Command`s, steps it on the fixed timestep and draws what it reads from
-//! the World's public fields. No game rules live in this crate.
+//! Layout and ownership (see CLAUDE.md):
+//! * `shared` — the only types `gfx` and `ui` both use (sim driver, tool /
+//!   preview / overlay / quality resources, hover picking, coordinates).
+//! * `gfx` — all 3D drawing and the camera (`GfxPlugin`, feature `gfx`).
+//! * `ui` — 2D interface, tools, input, save/load (`UiPlugin`, feature `ui`).
+//! * `dev`, `dev_demo` — development-only scripted runs and fake data.
 
-mod camera;
-mod coords;
-mod cursor;
-mod hud;
-mod mesh_util;
-mod road_render;
-mod scene;
-mod script;
-mod sim_driver;
-mod tools;
-mod zone_render;
+mod dev;
+mod dev_demo;
+#[cfg(feature = "gfx")]
+mod gfx;
+// Partial builds (one side disabled) leave parts of the shared contract unused.
+#[cfg_attr(not(all(feature = "gfx", feature = "ui")), allow(dead_code))]
+mod shared;
+#[cfg(feature = "ui")]
+mod ui;
 
 use bevy::prelude::*;
 use bevy::window::{PresentMode, WindowResolution};
 
-/// Frame phases, run in this order every `Update`.
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GameSet {
-    /// Read devices / scripts into resources (cursor cell, pointer buttons).
-    Input,
-    /// Camera movement and tool logic; tools emit `SimCommand`s.
-    Tools,
-    /// Apply queued `SimCommand`s to the World.
-    Sim,
-    /// Rebuild meshes / HUD from World state.
-    Render,
+/// `crates/game/assets` when it exists (so the binary also finds assets when
+/// started directly instead of via `cargo run`), else `assets` next to it.
+fn asset_root() -> String {
+    let dev_path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
+    if std::path::Path::new(dev_path).is_dir() {
+        dev_path.to_string()
+    } else {
+        "assets".to_string()
+    }
 }
 
 fn main() {
-    let script = script::ScriptMode::from_env();
-    App::new()
-        .insert_resource(ClearColor(scene::SKY_COLOR))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "CitySim".into(),
-                resolution: WindowResolution::new(1280, 720),
-                present_mode: PresentMode::AutoVsync,
+    let dev = dev::DevConfig::from_env();
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "CitySim".into(),
+                    resolution: WindowResolution::new(1280, 720),
+                    present_mode: PresentMode::AutoVsync,
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(AssetPlugin {
+                file_path: asset_root(),
                 ..default()
             }),
-            ..default()
-        }))
-        .configure_sets(
-            Update,
-            (GameSet::Input, GameSet::Tools, GameSet::Sim, GameSet::Render).chain(),
-        )
-        .add_plugins((
-            sim_driver::SimDriverPlugin,
-            scene::ScenePlugin,
-            camera::CameraPlugin,
-            cursor::CursorPlugin,
-            tools::ToolsPlugin,
-            road_render::RoadRenderPlugin,
-            zone_render::ZoneRenderPlugin,
-            hud::HudPlugin,
-            script::ScriptPlugin { mode: script },
-        ))
-        .run();
+    )
+    .add_plugins(shared::SharedPlugin);
+    #[cfg(feature = "gfx")]
+    app.add_plugins(gfx::GfxPlugin);
+    #[cfg(feature = "ui")]
+    app.add_plugins(ui::UiPlugin);
+    app.add_plugins(dev::DevPlugin { config: dev });
+    app.run();
 }

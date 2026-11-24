@@ -1,12 +1,12 @@
 //! Tints zoned cells (green / blue / yellow), rebuilt when `versions.grid`
-//! changes.
+//! changes. Stronger in `OverlayMode::Zones`, hidden in `Traffic`.
 
 use bevy::prelude::*;
 use citysim_sim::{Cell, MAP_CELLS, Zone};
 
-use crate::mesh_util::FlatMeshBuilder;
-use crate::sim_driver::SimWorld;
-use crate::{GameSet, coords};
+use super::heights;
+use super::mesh_util::FlatMeshBuilder;
+use crate::shared::{GameSet, OverlayMode, SimWorld, cell_corners};
 
 pub fn zone_color(zone: Zone) -> Color {
     match zone {
@@ -19,12 +19,12 @@ pub fn zone_color(zone: Zone) -> Color {
 #[derive(Component)]
 struct ZoneMesh(Zone);
 
-pub struct ZoneRenderPlugin;
+pub struct ZonesPlugin;
 
-impl Plugin for ZoneRenderPlugin {
+impl Plugin for ZonesPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_zone_entities)
-            .add_systems(Update, rebuild_zones.in_set(GameSet::Render));
+            .add_systems(Update, (rebuild_zones, apply_overlay).in_set(GameSet::Render));
     }
 }
 
@@ -40,6 +40,7 @@ fn spawn_zone_entities(mut commands: Commands, mut materials: ResMut<Assets<Stan
                 ..default()
             })),
             Transform::default(),
+            Visibility::default(),
         ));
     }
 }
@@ -63,7 +64,7 @@ fn rebuild_zones(
             for x in 0..MAP_CELLS {
                 let c = Cell::new(x, y);
                 if grid.get(c).and_then(|cd| cd.zone) == Some(*zone) {
-                    b.quad(coords::cell_corners(c, 0.6, coords::ZONE_Y));
+                    b.quad(cell_corners(c, 0.6, heights::ZONE));
                 }
             }
         }
@@ -71,6 +72,27 @@ fn rebuild_zones(
             commands.entity(e).remove::<Mesh3d>();
         } else {
             commands.entity(e).insert(Mesh3d(meshes.add(b.build())));
+        }
+    }
+}
+
+fn apply_overlay(
+    mode: Res<OverlayMode>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&ZoneMesh, &MeshMaterial3d<StandardMaterial>, &mut Visibility)>,
+) {
+    if !mode.is_changed() {
+        return;
+    }
+    for (ZoneMesh(zone), mat, mut vis) in &mut q {
+        *vis = if *mode == OverlayMode::Traffic {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        let alpha = if *mode == OverlayMode::Zones { 0.9 } else { 0.55 };
+        if let Some(mut m) = materials.get_mut(&mat.0) {
+            m.base_color = zone_color(*zone).with_alpha(alpha);
         }
     }
 }

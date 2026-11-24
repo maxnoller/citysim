@@ -1,11 +1,13 @@
-//! On-screen text: money, day/time, speed, tool, ghost cost / last error.
+//! On-screen text: money, day/time, speed, tool, preview cost / errors,
+//! hovered cell (Inspect), plus a key help line.
 
 use bevy::prelude::*;
-use citysim_sim::Command;
+use citysim_sim::{Command, Occupant, Zone};
 
-use crate::GameSet;
-use crate::sim_driver::{LastCommand, SPEEDS, SimClock, SimWorld};
-use crate::tools::{Ghost, ToolState};
+use crate::shared::{
+    ActiveTool, GameSet, GraphicsQuality, HoveredCell, LastCommand, OverlayMode, PreviewKind, SPEEDS, SimClock,
+    SimWorld, ToolPreview,
+};
 
 #[derive(Component)]
 struct HudText;
@@ -44,7 +46,8 @@ fn spawn_hud(mut commands: Commands) {
     commands.spawn((
         Name::new("Help"),
         Text::new(
-            "WASD pan  Q/E or middle-drag rotate  wheel zoom  |  R road  Z zone  B bulldoze  Esc cancel  |  Space pause  1/2/3 speed  F5/F9 save/load",
+            "WASD pan  Q/E rotate  wheel zoom  |  I inspect  R road  Z zone  B bulldoze  Esc cancel  |  \
+             Space pause  1/2/3 speed  O overlay  G quality  F5/F9 save/load",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
@@ -72,6 +75,18 @@ pub fn format_money(v: i64) -> String {
     if v < 0 { format!("-${out}") } else { format!("${out}") }
 }
 
+fn tool_label(t: ActiveTool) -> &'static str {
+    match t {
+        ActiveTool::Inspect => "Inspect",
+        ActiveTool::Road => "Road",
+        ActiveTool::Zone(Some(Zone::Residential)) => "Zone: Residential",
+        ActiveTool::Zone(Some(Zone::Commercial)) => "Zone: Commercial",
+        ActiveTool::Zone(Some(Zone::Industrial)) => "Zone: Industrial",
+        ActiveTool::Zone(None) => "Zone: Remove",
+        ActiveTool::Bulldoze => "Bulldoze",
+    }
+}
+
 fn command_label(cmd: &Command) -> &'static str {
     match cmd {
         Command::BuildRoad { .. } => "road",
@@ -81,11 +96,15 @@ fn command_label(cmd: &Command) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_hud(
     sim: Res<SimWorld>,
     clock: Res<SimClock>,
-    tools: Res<ToolState>,
-    ghost: Res<Ghost>,
+    tool: Res<ActiveTool>,
+    preview: Res<ToolPreview>,
+    hovered: Res<HoveredCell>,
+    overlay: Res<OverlayMode>,
+    quality: Res<GraphicsQuality>,
     last: Res<LastCommand>,
     time: Res<Time<Real>>,
     mut q: Query<&mut Text, With<HudText>>,
@@ -102,17 +121,39 @@ fn update_hud(
         format_money(w.economy.money),
         w.time.day,
         hour as u32,
-        ((hour.fract()) * 60.0) as u32,
+        (hour.fract() * 60.0) as u32,
         speed,
-        tools.tool.label(),
+        tool_label(*tool),
     );
-    match &ghost.result {
-        Some(Ok(p)) if p.cost > 0 => line.push_str(&format!("   cost {}", format_money(p.cost))),
-        Some(Ok(p)) if matches!(ghost.cmd, Some(Command::SetZone { .. })) => {
-            line.push_str(&format!("   {} cells", p.cells.len()))
+    if preview.kind != PreviewKind::None {
+        match &preview.error {
+            Some(e) => line.push_str(&format!("   ({e})")),
+            None if preview.cost > 0 => line.push_str(&format!("   cost {}", format_money(preview.cost))),
+            None if matches!(preview.kind, PreviewKind::Zone(_)) => {
+                line.push_str(&format!("   {} cells", preview.cells.len()))
+            }
+            None => {}
         }
-        Some(Err(e)) => line.push_str(&format!("   ({e})")),
-        _ => {}
+    }
+    let s = &w.stats;
+    let d = &w.demand;
+    line.push_str(&format!(
+        "\nPop {}  Jobs {}  Cars {}   Demand R {:+.2} C {:+.2} I {:+.2}   Overlay {:?}  Quality {:?}",
+        s.population, s.jobs, s.vehicles_on_road, d.residential, d.commercial, d.industrial, *overlay, *quality
+    ));
+    if *tool == ActiveTool::Inspect
+        && let Some(c) = hovered.0
+        && let Some(cd) = w.grid.get(c)
+    {
+        let what = match cd.occupant {
+            Occupant::Empty => "empty".to_string(),
+            Occupant::Road => "road".to_string(),
+            Occupant::Building(id) => match w.buildings.get(id) {
+                Some(b) => format!("{:?} building L{} {}/{}", b.kind, b.level, b.occupied, b.capacity),
+                None => "building?".to_string(),
+            },
+        };
+        line.push_str(&format!("\nCell ({}, {}): {}, zone {:?}", c.x, c.y, what, cd.zone));
     }
     if let Some((cmd, Err(e))) = &last.result
         && time.elapsed_secs() - last.at < 4.0
