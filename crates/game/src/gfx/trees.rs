@@ -234,9 +234,11 @@ fn rebuild_trees(
             for (e, mut mb) in ents.into_iter().zip([m, far]) {
                 mb.translate(-centre);
                 if mb.is_empty() {
-                    commands.entity(e).remove::<Mesh3d>();
+                    commands.entity(e).insert(Visibility::Hidden); // never remove Mesh3d: see cursor.rs
                 } else {
-                    commands.entity(e).insert(Mesh3d(meshes.add(mb.build())));
+                    commands
+                        .entity(e)
+                        .insert((Mesh3d(meshes.add(mb.build())), Visibility::Inherited));
                 }
             }
             state.chunks.insert(c, (hash, ents, placed));

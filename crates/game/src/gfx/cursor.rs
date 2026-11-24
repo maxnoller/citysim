@@ -295,12 +295,12 @@ fn draw_ghost(
     mut commands: Commands,
     preview: Res<ToolPreview>,
     mut meshes: ResMut<Assets<Mesh>>,
-    q: Query<Entity, With<GhostMesh>>,
+    mut q: Query<(Entity, &mut Visibility), With<GhostMesh>>,
 ) {
     if !preview.is_changed() {
         return;
     }
-    let Ok(entity) = q.single() else { return };
+    let Ok((entity, mut vis)) = q.single_mut() else { return };
     let mut m = MeshBuilder::new();
     let valid = preview.is_valid();
     match preview.kind {
@@ -343,9 +343,12 @@ fn draw_ghost(
             }
         }
     }
+    // Hide rather than remove `Mesh3d`: an entity whose Mesh3d was removed
+    // and later re-inserted was never drawn again (seen with Bevy 0.20.1).
     if m.is_empty() {
-        commands.entity(entity).remove::<Mesh3d>();
+        vis.set_if_neq(Visibility::Hidden);
     } else {
         commands.entity(entity).insert(Mesh3d(meshes.add(m.build())));
+        vis.set_if_neq(Visibility::Inherited);
     }
 }

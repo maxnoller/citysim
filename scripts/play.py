@@ -247,7 +247,7 @@ ROWS = {
     "i": [(1, True), (3, False), (4, False), (6, False), (7, True)],
 }
 ZI = {"r": 0, "c": 1, "i": 2}
-ROAD_COST_PER_CELL = 25
+ROAD_COST_PER_CELL = 65  # citysim_sim::balance::ROAD_COST_PER_CELL
 BLOCK_MAX_COST = 30 * ROAD_COST_PER_CELL
 
 

@@ -43,7 +43,7 @@ struct ZoneChunks {
     /// Grid key the chunks were last built for.
     key: Option<(u64, u64)>,
     shown: bool,
-    chunks: HashMap<IVec2, (u64, Entity)>,
+    chunks: HashMap<IVec2, (u64, Entity, bool)>,
 }
 
 pub struct ZonesPlugin;
@@ -152,9 +152,9 @@ fn rebuild_zones(
         } else {
             Visibility::Hidden
         };
-        for (_, e) in state.chunks.values() {
+        for (_, e, has_mesh) in state.chunks.values() {
             if let Ok(mut vis) = vis.get_mut(*e) {
-                vis.set_if_neq(v);
+                vis.set_if_neq(if *has_mesh { v } else { Visibility::Hidden });
             }
         }
     }
@@ -170,14 +170,17 @@ fn rebuild_zones(
         for cx in 0..n {
             let c = IVec2::new(cx, cy);
             let hash = chunk_hash(grid, cx, cy);
-            if state.chunks.get(&c).is_some_and(|(h, _)| *h == hash) {
+            if state.chunks.get(&c).is_some_and(|(h, _, _)| *h == hash) {
                 continue;
             }
             let mesh = chunk_mesh(grid, cx, cy);
             match (mesh, state.chunks.get_mut(&c)) {
-                (Some(mesh), Some((h, e))) => {
+                (Some(mesh), Some((h, e, has_mesh))) => {
                     *h = hash;
-                    commands.entity(*e).insert(Mesh3d(meshes.add(mesh)));
+                    *has_mesh = true;
+                    commands
+                        .entity(*e)
+                        .insert((Mesh3d(meshes.add(mesh)), Visibility::Inherited));
                 }
                 (Some(mesh), None) => {
                     let e = commands
@@ -190,11 +193,13 @@ fn rebuild_zones(
                             NotShadowCaster,
                         ))
                         .id();
-                    state.chunks.insert(c, (hash, e));
+                    state.chunks.insert(c, (hash, e, true));
                 }
-                (None, Some((h, e))) => {
+                (None, Some((h, e, has_mesh))) => {
                     *h = hash;
-                    commands.entity(*e).remove::<Mesh3d>();
+                    *has_mesh = false;
+                    // Hide, never remove Mesh3d (see cursor.rs).
+                    commands.entity(*e).insert(Visibility::Hidden);
                 }
                 (None, None) => {}
             }

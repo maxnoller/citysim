@@ -200,9 +200,11 @@ fn draw_traffic(
     state.last = now;
     let m = strips(&sim.world.roads, &state.layout);
     if m.is_empty() {
-        commands.entity(entity).remove::<Mesh3d>();
+        commands.entity(entity).insert(Visibility::Hidden); // never remove Mesh3d: see cursor.rs
     } else {
-        commands.entity(entity).insert(Mesh3d(meshes.add(m.build())));
+        commands
+            .entity(entity)
+            .insert((Mesh3d(meshes.add(m.build())), Visibility::Inherited));
     }
 }
 
