@@ -169,6 +169,14 @@ pub enum OverlayMode {
     Traffic,
 }
 
+/// Traffic overlay bands for a segment direction's `congestion_in` (load /
+/// capacity). The sim counts a direction as congested above 0.8 (cars crawl
+/// below ~12 km/h, `stats.congestion_share`); 0.5 is where cars start to
+/// slow noticeably. Below `CONGESTION_BUSY` = free flow (green), up to
+/// `CONGESTION_JAM` = busy (amber), from it on = jammed (red).
+pub const CONGESTION_BUSY: f32 = 0.5;
+pub const CONGESTION_JAM: f32 = 0.8;
+
 /// Rendering quality preset (written by ui, applied by gfx).
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GraphicsQuality {
