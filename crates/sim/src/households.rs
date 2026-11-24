@@ -209,7 +209,7 @@ pub(crate) fn trip_ended(world: &mut World, (household, purpose, end): traffic::
             };
         }
         TripPurpose::ToHome | TripPurpose::MoveIn => h.state = HouseholdState::AtHome,
-        TripPurpose::MoveOut => {}
+        TripPurpose::MoveOut | TripPurpose::Shopping | TripPurpose::Goods => {}
     }
     let secs = if end == TripEnd::Cancelled {
         Some(balance::MAX_DEPARTURE_WAIT_S)

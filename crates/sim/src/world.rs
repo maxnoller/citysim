@@ -129,6 +129,7 @@ impl World {
         demand::tick(self);
         growth::tick(self);
         households::tick(self);
+        crate::errands::tick(self);
         traffic::tick(self);
         if new_day {
             economy::end_of_day(self);
@@ -142,6 +143,54 @@ impl World {
 
     pub fn load(bytes: &[u8]) -> Result<World, save::LoadError> {
         save::load(bytes)
+    }
+
+    /// Check the simulation's own invariants (cheap enough for big worlds):
+    /// households point at existing buildings, building occupancy equals
+    /// what the households say, vehicles sit on existing segments within
+    /// their length, every car of a household is known to it.
+    pub fn check_sim_invariants(&self) -> Result<(), String> {
+        let mut occ: std::collections::BTreeMap<BuildingId, u32> = Default::default();
+        for (hid, h) in self.households.iter() {
+            if !self.buildings.contains_key(h.home) {
+                return Err(format!("{hid:?} has missing home"));
+            }
+            *occ.entry(h.home).or_default() += h.members as u32;
+            if let Some(j) = h.job {
+                if !self.buildings.contains_key(j) {
+                    return Err(format!("{hid:?} has missing job"));
+                }
+                *occ.entry(j).or_default() += 1;
+            }
+            if let Some(v) = h.vehicle
+                && self.vehicles.get(v).and_then(|v| v.household) != Some(hid)
+            {
+                return Err(format!("{hid:?} vehicle {v:?} does not point back"));
+            }
+        }
+        for (bid, b) in self.buildings.iter() {
+            let want = occ.get(&bid).copied().unwrap_or(0);
+            if b.occupied != want {
+                return Err(format!("{bid:?} occupied {} but households say {want}", b.occupied));
+            }
+            if b.occupied > b.capacity {
+                return Err(format!("{bid:?} over capacity"));
+            }
+        }
+        for (vid, v) in self.vehicles.iter() {
+            let Some(seg) = v.segment.and_then(|s| self.roads.segments.get(s)) else {
+                return Err(format!("{vid:?} not on an existing segment"));
+            };
+            if !(-0.01..=seg.length + 0.01).contains(&v.progress) || !v.pos[0].is_finite() {
+                return Err(format!("{vid:?} progress {} outside 0..{}", v.progress, seg.length));
+            }
+            if let Some(h) = v.household
+                && self.households.get(h).and_then(|h| h.vehicle) != Some(vid)
+            {
+                return Err(format!("{vid:?} household {h:?} does not point back"));
+            }
+        }
+        Ok(())
     }
 
     /// Check cross-structure invariants (road graph valid, grid road cells

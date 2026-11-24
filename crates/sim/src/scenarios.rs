@@ -107,8 +107,9 @@ impl Block {
 /// highway, following the demand bars. Each in-game hour, for every zone
 /// type whose demand is clearly positive and that has little free zoned
 /// land left, it builds and zones the next block for that type (if it can
-/// afford it). Housing goes north of the avenue, shops along it on the
-/// south side, industry further south.
+/// afford it). Rows of housing, shops and industry alternate on both sides
+/// of the avenue so every neighbourhood has jobs nearby; the city grows east
+/// column by column, then outwards.
 #[derive(Debug, Clone)]
 pub struct GridPlayer {
     /// Next block index per zone `[R, C, I]`.
@@ -123,29 +124,36 @@ pub struct GridPlayer {
 impl GridPlayer {
     pub fn new(zones: &[Zone]) -> GridPlayer {
         let cols = 9;
-        // The city grows east as a band: column by column, housing in the
-        // first rows north of the avenue, shops and industry south of it;
-        // once all columns are used, a second band further out.
-        let order = |bands: &[&[i32]], north: bool| {
+        // Rows `(index, north)`, filled column by column (east-growing band).
+        let order_mixed = |rows: &[(i32, bool)]| {
             let mut v: Vec<(i32, Block)> = Vec::new();
-            for (band, rows) in bands.iter().enumerate() {
-                for (k, &row) in rows.iter().enumerate() {
-                    for j in 0..cols {
-                        let x0 = 20 + 10 * j;
-                        let y0 = if north { 128 - 5 * (row + 1) } else { 128 + 5 * row };
-                        v.push((band as i32 * 1000 + j * 10 + k as i32, Block { x0, y0 }));
-                    }
+            for (k, &(row, north)) in rows.iter().enumerate() {
+                for j in 0..cols {
+                    let x0 = 20 + 10 * j;
+                    let y0 = if north { 128 - 5 * (row + 1) } else { 128 + 5 * row };
+                    let band = row / 3;
+                    v.push((band * 1000 + j * 10 + k as i32, Block { x0, y0 }));
                 }
             }
             v.sort_by_key(|(d, b)| (*d, b.x0, b.y0));
             v.into_iter().map(|(_, b)| b).collect::<Vec<_>>()
         };
+        // Mixed neighbourhoods: every housing row is next to a row of jobs.
         GridPlayer {
             next: [0; 3],
             lists: [
-                order(&[&[0, 1, 2], &[3, 4, 5], &[6, 7, 8]], true),
-                order(&[&[0], &[3], &[6]], false),
-                order(&[&[1, 2], &[4, 5], &[7, 8]], false),
+                order_mixed(&[
+                    (0, true),
+                    (0, false),
+                    (2, true),
+                    (2, false),
+                    (3, true),
+                    (5, true),
+                    (5, false),
+                    (6, true),
+                ]),
+                order_mixed(&[(1, false), (4, true), (7, false)]),
+                order_mixed(&[(1, true), (3, false), (4, false), (6, false), (7, true)]),
             ],
             zones: zones.to_vec(),
             blocks_built: 0,

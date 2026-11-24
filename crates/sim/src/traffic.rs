@@ -69,6 +69,11 @@ pub enum TripPurpose {
     MoveIn,
     /// Household that left town driving out to the highway.
     MoveOut,
+    /// Shopping run between a home and a shop (no household attached).
+    Shopping,
+    /// Goods delivery: industry to shop, or to / from the highway. Renderers
+    /// may draw these as trucks (look up `world.traffic.trips`).
+    Goods,
 }
 
 /// Where a trip starts or ends.
@@ -110,10 +115,45 @@ pub struct Departure {
 /// Junction control state per node slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Junction {
-    /// No car may enter before this tick.
+    /// Approaches outside the current phase may not enter before this tick
+    /// (last crossing + clearance time).
     pub busy_until: u64,
-    /// Index (into the node's `segments`) of the approach served last.
+    /// Index (into the node's `segments`) of the approach that opened the
+    /// current phase; approaches parallel to it (straight across) share it.
     pub last_served: u8,
+    /// Cars let through in the current phase.
+    #[serde(default)]
+    pub phase_count: u16,
+}
+
+/// Unit direction from node `n` along its `i`-th segment.
+fn approach_dir(roads: &RoadNetwork, n: NodeId, i: usize) -> [f32; 2] {
+    let node = &roads.nodes[n];
+    let Some(&s) = node.segments.get(i) else {
+        return [0.0, 0.0];
+    };
+    let other = roads.nodes[roads.segments[s].other(n)].pos;
+    let d = geom::sub(other, node.pos);
+    let l = geom::dot(d, d).sqrt().max(1e-6);
+    [d[0] / l, d[1] / l]
+}
+
+/// Do two approaches of a junction move in the same signal phase (they lie
+/// on one straight line, or are the same approach)?
+fn same_phase(roads: &RoadNetwork, n: NodeId, a: usize, b: usize) -> bool {
+    a == b || geom::cross(approach_dir(roads, n, a), approach_dir(roads, n, b)).abs() < 0.35
+}
+
+/// Is the move from segment `from` into segment `to` at node `n` a turn?
+fn is_turn(roads: &RoadNetwork, n: NodeId, from: SegmentId, to: SegmentId) -> bool {
+    let node = &roads.nodes[n];
+    let i = node.segments.iter().position(|&s| s == from);
+    let j = node.segments.iter().position(|&s| s == to);
+    match (i, j) {
+        // Straight on: the outgoing direction is opposite the incoming one.
+        (Some(i), Some(j)) => geom::dot(approach_dir(roads, n, i), approach_dir(roads, n, j)) > -0.9,
+        _ => true,
+    }
 }
 
 /// How a trip ended, reported to the household.
@@ -154,6 +194,13 @@ pub struct TrafficState {
     pub peak_yesterday: u32,
     /// Completed car trips today.
     pub trips_today: u32,
+    /// Pending shopping / goods trips (`errands`).
+    pub errand_acc: [f32; 2],
+    /// Share of segments with a direction above 80 % of capacity, now and
+    /// the highest today / yesterday.
+    pub congestion_share: f32,
+    pub peak_congestion_today: f32,
+    pub peak_congestion_yesterday: f32,
 }
 
 const DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
@@ -366,6 +413,8 @@ pub(crate) fn tick(world: &mut World) {
     if world.time.tick_of_day == 0 {
         world.traffic.peak_yesterday = world.traffic.peak_today;
         world.traffic.peak_today = 0;
+        world.traffic.peak_congestion_yesterday = world.traffic.peak_congestion_today;
+        world.traffic.peak_congestion_today = 0.0;
         world.traffic.trips_today = 0;
     }
     move_vehicles(world, &mut ended);
@@ -466,18 +515,39 @@ fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
                 }
             }
         } else {
+            // Signal-like phases: approaches on one straight line flow
+            // together for up to PHASE_MAX_CARS cars, then (after the
+            // clearance time) the next waiting approach gets its phase.
             let j = &mut traffic.junctions[requests[k].node_slot];
-            if j.busy_until <= now {
-                let last = j.last_served as usize;
-                let pick = requests[k..e]
-                    .iter()
-                    .filter(|r| !lane_taken.contains(&r.next_lane))
-                    .min_by_key(|r| (r.approach + deg - last - 1) % deg);
-                if let Some(r) = pick {
-                    lane_taken.push(r.next_lane);
-                    granted[r.order_idx] = true;
-                    j.busy_until = now + secs_to_ticks(balance::JUNCTION_HEADWAY_S);
-                    j.last_served = r.approach as u8;
+            let cur = (j.last_served as usize).min(deg - 1);
+            let reqs = &requests[k..e];
+            let in_phase = |a: usize| same_phase(roads, node, a, cur);
+            let any_in = reqs.iter().any(|r| in_phase(r.approach));
+            let others = reqs.iter().filter(|r| !in_phase(r.approach));
+            let waiting_others = others.clone().count() > 0;
+            let phase = if any_in && (j.phase_count < balance::PHASE_MAX_CARS || !waiting_others) {
+                if j.phase_count >= balance::PHASE_MAX_CARS {
+                    j.phase_count = 0;
+                }
+                Some(cur)
+            } else if waiting_others && j.busy_until <= now {
+                let pick = others
+                    .min_by_key(|r| (r.approach + deg - cur - 1) % deg)
+                    .expect("waiting");
+                j.last_served = pick.approach as u8;
+                j.phase_count = 0;
+                Some(pick.approach)
+            } else {
+                None
+            };
+            if let Some(p) = phase {
+                for r in reqs {
+                    if same_phase(roads, node, r.approach, p) && !lane_taken.contains(&r.next_lane) {
+                        lane_taken.push(r.next_lane);
+                        granted[r.order_idx] = true;
+                        j.phase_count = j.phase_count.saturating_add(1);
+                        j.busy_until = now + secs_to_ticks(balance::JUNCTION_CLEARANCE_S);
+                    }
                 }
             }
         }
@@ -537,15 +607,20 @@ fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
                     Some(n) => {
                         let deg = roads.nodes[n.node].segments.len();
                         let eta = d_end / v.speed.max(1.0);
-                        let free_at = traffic.junctions.get(key_index(n.node)).map_or(0, |j| j.busy_until);
-                        let clear = lane_rear[n.lane] >= balance::MIN_GAP_M
-                            && (deg <= 2 || free_at <= now + secs_to_ticks(eta));
+                        let open = deg <= 2
+                            || traffic.junctions.get(key_index(n.node)).is_some_and(|j| {
+                                let me = roads.nodes[n.node].segments.iter().position(|&x| x == s).unwrap_or(0);
+                                (same_phase(roads, n.node, me, j.last_served as usize)
+                                    && j.phase_count < balance::PHASE_MAX_CARS)
+                                    || j.busy_until <= now + secs_to_ticks(eta)
+                            });
+                        let clear = lane_rear[n.lane] >= balance::MIN_GAP_M && open;
                         if clear {
                             target = target.min(follow_speed(d_end + lane_rear[n.lane].min(1e6)));
                         } else {
                             target = target.min(stop_speed(d_end - balance::STOP_LINE_M));
                         }
-                        if deg >= 3 {
+                        if deg >= 3 && is_turn(roads, n.node, s, n.segment) {
                             let jv = balance::JUNCTION_SPEED;
                             target = target.min((jv * jv + 2.0 * balance::BRAKING * d_end.max(0.0)).sqrt());
                         }
@@ -845,9 +920,13 @@ fn update_loads(world: &mut World) {
         }
     }
     let n = world.vehicles.len();
+    let nseg = world.roads.segments.len();
+    let jammed = world.roads.segments.values().filter(|s| s.congestion() > 0.8).count();
     let t = &mut world.traffic;
     t.avg_speed = if n > 0 { speed_sum / n as f32 } else { 0.0 };
     t.peak_today = t.peak_today.max(n as u32);
+    t.congestion_share = if nseg > 0 { jammed as f32 / nseg as f32 } else { 0.0 };
+    t.peak_congestion_today = t.peak_congestion_today.max(t.congestion_share);
 }
 
 /// Queue a household-less trip between two positions (tests, tools).

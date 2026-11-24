@@ -30,11 +30,14 @@ SCENARIOS = [
     ("artery_fixed", "Bad layout, fixed on day 4", "fixed"),
     ("overbuilt", "Overbuilt roads", "overbuilt"),
 ]
+# (column, title, scale, label format, source: "hourly" or "daily")
 PANELS = [
-    ("population", "Population", 1.0, "{:,.0f}"),
-    ("vehicles", "Cars on the road", 1.0, "{:,.0f}"),
-    ("avg_commute_s", "Average car commute (s)", 1.0, "{:.0f}"),
-    ("money", "Money ($ thousands)", 0.001, "{:,.0f}k"),
+    ("population", "Population", 1.0, "{:,.0f}", "hourly"),
+    ("vehicles", "Cars on the road (every half hour)", 1.0, "{:,.0f}", "hourly"),
+    ("peak_vehicles", "Peak cars on the road per day", 1.0, "{:,.0f}", "daily"),
+    ("peak_congestion", "Peak congestion per day (% of segments over 80% capacity)", 100.0, "{:.0f}%", "daily"),
+    ("avg_commute_s", "Average car commute (s)", 1.0, "{:.0f}", "hourly"),
+    ("money", "Money ($ thousands)", 0.001, "{:,.0f}k", "hourly"),
 ]
 
 
@@ -48,13 +51,17 @@ def main():
     out = sys.argv[2] if len(sys.argv) > 2 else "headless.png"
     title = sys.argv[3] if len(sys.argv) > 3 else "CitySim headless runs"
     data = {}
+    daily = {}
     for key, _, _ in SCENARIOS:
         p = os.path.join(src, key + ".csv")
         if os.path.exists(p):
             data[key] = load(p)
+        p = os.path.join(src, key + "_days.csv")
+        if os.path.exists(p):
+            daily[key] = load(p)
     plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "text.color": TEXT})
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9), facecolor=SURFACE)
-    for ax, (col, label, scale, fmt) in zip(axes.flat, PANELS):
+    fig, axes = plt.subplots(3, 2, figsize=(14, 13), facecolor=SURFACE)
+    for ax, (col, label, scale, fmt, source) in zip(axes.flat, PANELS):
         ax.set_facecolor(SURFACE)
         ax.grid(True, color=GRID, linewidth=0.8)
         ax.set_axisbelow(True)
@@ -64,7 +71,7 @@ def main():
         ax.set_title(label, loc="left", color=TEXT, fontsize=12, fontweight="bold")
         ends = []
         for i, (key, name, short) in enumerate(SCENARIOS):
-            rows = data.get(key)
+            rows = (data if source == "hourly" else daily).get(key)
             if not rows:
                 continue
             x = [float(r["minutes"]) for r in rows]
@@ -73,7 +80,10 @@ def main():
                 # Hourly samples are noisy; smooth over ~half a day.
                 k = 12
                 y = [sum(y[max(0, j - k) : j + 1]) / len(y[max(0, j - k) : j + 1]) for j in range(len(y))]
-            ax.plot(x, y, color=SERIES[i], linewidth=2, label=name, solid_capstyle="round")
+            if source == "daily":
+                ax.plot(x, y, color=SERIES[i], linewidth=2, label=name, marker="o", markersize=4)
+            else:
+                ax.plot(x, y, color=SERIES[i], linewidth=2, label=name, solid_capstyle="round")
             ends.append((y[-1], x[-1], short, SERIES[i]))
         # Direct labels at line ends, nudged apart.
         ends.sort()

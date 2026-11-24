@@ -98,7 +98,7 @@ fn run(sc: &Scenario, out_dir: &str) {
     let (mut rush_sum, mut rush_n, mut rush_max) = (0u128, 0u64, 0u128);
     let mut reached_5k: Option<u64> = None;
     let mut speed_acc = (0.0f64, 0u32);
-    let mut jam_max = 0;
+    let mut jam_max = 0.0f32;
     for _ in 0..total {
         if let Some(p) = player.as_mut() {
             p.act(&mut w);
@@ -127,7 +127,7 @@ fn run(sc: &Scenario, out_dir: &str) {
             speed_acc.0 += w.stats.avg_speed as f64;
             speed_acc.1 += 1;
         }
-        jam_max = jam_max.max(w.stats.congested_segments);
+        jam_max = jam_max.max(w.stats.congestion_share * 100.0);
         if w.time.tick.is_multiple_of(balance::TICKS_PER_HOUR as u64 / 2) {
             let s = &w.stats;
             let d = &w.demand;
@@ -163,7 +163,7 @@ fn run(sc: &Scenario, out_dir: &str) {
                 0.0
             };
             println!(
-                "{:>3} {:>5.1} {:>6} {:>5} {:>5} {:>5.2} {:>5} {:>5} {:>6.1} {:>6.1} {:>5} {:>9} {:>7} {:>7}  {:+.2} {:+.2} {:+.2}",
+                "{:>3} {:>5.1} {:>6} {:>5} {:>5} {:>5.2} {:>5} {:>5} {:>6.1} {:>6.1} {:>5.1} {:>9} {:>7} {:>7}  {:+.2} {:+.2} {:+.2}",
                 h.day,
                 minutes(w.time.tick),
                 h.population,
@@ -183,7 +183,7 @@ fn run(sc: &Scenario, out_dir: &str) {
                 h.demand[2],
             );
             speed_acc = (0.0, 0);
-            jam_max = 0;
+            jam_max = 0.0;
         }
     }
     w.check_invariants().expect("invariants");
@@ -213,6 +213,24 @@ fn run(sc: &Scenario, out_dir: &str) {
     }
     let path = format!("{out_dir}/{}.csv", sc.name);
     std::fs::write(&path, csv).expect("write csv");
+    let mut days =
+        String::from("day,minutes,population,peak_vehicles,peak_congestion,avg_commute_s,money,income,expenses\n");
+    for h in &w.economy.history {
+        let _ = writeln!(
+            days,
+            "{},{:.3},{},{},{:.4},{:.1},{},{},{}",
+            h.day,
+            minutes(h.day as u64 * balance::TICKS_PER_DAY as u64),
+            h.population,
+            h.peak_vehicles,
+            h.peak_congestion,
+            h.avg_commute_s,
+            h.money,
+            h.income,
+            h.expenses
+        );
+    }
+    std::fs::write(format!("{out_dir}/{}_days.csv", sc.name), days).expect("write csv");
 }
 
 fn main() {

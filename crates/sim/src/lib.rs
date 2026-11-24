@@ -14,6 +14,7 @@ pub mod command;
 pub mod demand;
 pub mod derived;
 pub mod economy;
+pub mod errands;
 pub mod geom;
 pub mod grid;
 pub mod growth;

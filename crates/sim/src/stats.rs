@@ -46,6 +46,9 @@ pub struct Stats {
     /// Segments with a direction over 80 % of capacity.
     #[serde(default)]
     pub congested_segments: u32,
+    /// `congested_segments` / all segments, `0.0..=1.0`.
+    #[serde(default)]
+    pub congestion_share: f32,
 }
 
 /// The float fields are never NaN.
@@ -99,5 +102,6 @@ pub(crate) fn update(world: &mut World) {
         .values()
         .filter(|seg| seg.congestion() > 0.8)
         .count() as u32;
+    s.congestion_share = world.traffic.congestion_share;
     world.stats = s;
 }

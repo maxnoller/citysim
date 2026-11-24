@@ -47,6 +47,8 @@ pub struct DaySummary {
     /// Moving average of car commutes, vehicle seconds.
     pub avg_commute_s: f32,
     pub demand: [f32; 3],
+    /// Highest share of road segments above 80 % of capacity during the day.
+    pub peak_congestion: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,6 +125,10 @@ pub(crate) fn end_of_day(world: &mut World) {
         peak_vehicles: world.traffic.peak_yesterday.max(world.traffic.peak_today),
         avg_commute_s: world.traffic.avg_commute_s,
         demand: [d.residential, d.commercial, d.industrial],
+        peak_congestion: world
+            .traffic
+            .peak_congestion_yesterday
+            .max(world.traffic.peak_congestion_today),
     };
     e.history.push(summary);
 }
