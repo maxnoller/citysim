@@ -82,7 +82,7 @@ fn straight_road_cost_and_cells() {
     let seg = w.roads.segments.values().next().unwrap();
     assert_eq!(seg.length, 64.0);
     assert_eq!(seg.speed_limit, balance::STREET_SPEED_LIMIT);
-    assert!(seg.capacity > 0.0);
+    assert!(seg.capacity[0] > 0.0 && seg.capacity[0] == seg.capacity[1]);
     for x in 2..=10 {
         assert!(w.grid.is_road(c(x, 5)));
     }
@@ -292,6 +292,9 @@ fn road_blocked_by_building() {
         level: 1,
         capacity: 4,
         occupied: 0,
+        facing: Facing::MinusY,
+        seed: 7,
+        created_tick: 0,
     });
     w.grid.get_mut(c(5, 1)).unwrap().occupant = Occupant::Building(id);
     assert_eq!(
@@ -582,6 +585,9 @@ fn bulldoze_removes_buildings_and_keeps_zone() {
         level: 1,
         capacity: 8,
         occupied: 0,
+        facing: Facing::MinusY,
+        seed: 7,
+        created_tick: 0,
     });
     for cell in fp.cells() {
         w.grid.get_mut(cell).unwrap().occupant = Occupant::Building(id);
@@ -756,4 +762,91 @@ fn random_edits_keep_graph_valid() {
         check(&w);
     }
     assert!(streets(&w) > 10);
+}
+
+#[test]
+fn per_direction_load_survives_split_and_merge() {
+    let mut w = blank();
+    road(&mut w, (0, 5), (10, 5)).unwrap();
+    let s = w.roads.segments.keys().next().unwrap();
+    w.roads.segments[s].load = [4.0, 2.0];
+    // T-junction splits the segment at x=5: loads split proportionally.
+    road(&mut w, (5, 5), (5, 9)).unwrap();
+    let main: Vec<_> = w
+        .roads
+        .segments
+        .values()
+        .filter(|g| w.roads.node_pos(g.a)[1] == w.roads.node_pos(g.b)[1])
+        .collect();
+    let total: [f32; 2] = main
+        .iter()
+        .fold([0.0, 0.0], |acc, g| [acc[0] + g.load[0], acc[1] + g.load[1]]);
+    assert!(
+        (total[0] - 4.0).abs() < 1e-4 && (total[1] - 2.0).abs() < 1e-4,
+        "{total:?}"
+    );
+    // Removing the stem merges the halves back; per-direction totals kept.
+    w.apply(Command::Bulldoze {
+        min: c(5, 6),
+        max: c(5, 9),
+    })
+    .unwrap();
+    assert_eq!(w.roads.segments.len(), 1);
+    let g = w.roads.segments.values().next().unwrap();
+    let (pa, pb) = (w.roads.node_pos(g.a), w.roads.node_pos(g.b));
+    let l = if pa[0] < pb[0] { g.load } else { [g.load[1], g.load[0]] };
+    assert!((l[0] - 4.0).abs() < 1e-4 && (l[1] - 2.0).abs() < 1e-4, "{l:?}");
+    assert!(g.congestion_in(true) >= 0.0 && g.congestion() <= 1.0);
+}
+
+#[test]
+fn merge_of_opposite_oriented_segments_matches_directions() {
+    let mut w = blank();
+    // Two roads drawn towards each other: segments point in opposite ways.
+    road(&mut w, (0, 3), (5, 3)).unwrap();
+    road(&mut w, (10, 3), (6, 3)).unwrap();
+    let west = w.roads.piece(c(0, 3), c(1, 3)).unwrap();
+    let east = w.roads.piece(c(9, 3), c(10, 3)).unwrap();
+    // Load travelling +x on both: index 0 on the west one, 1 on the east one.
+    w.roads.segments[west].load = [3.0, 0.0];
+    w.roads.segments[east].load = [0.0, 5.0];
+    road(&mut w, (5, 3), (6, 3)).unwrap();
+    assert_eq!(w.roads.segments.len(), 1);
+    let g = w.roads.segments.values().next().unwrap();
+    let plus_x = if w.roads.node_pos(g.a)[0] < w.roads.node_pos(g.b)[0] {
+        g.load[0]
+    } else {
+        g.load[1]
+    };
+    assert!((plus_x - 8.0).abs() < 1e-4, "{:?}", g.load);
+    assert!((g.total_load() - 8.0).abs() < 1e-4);
+}
+
+#[test]
+fn facing_helpers() {
+    assert_eq!(Facing::PlusX.offset(), (1, 0));
+    assert_eq!(Facing::MinusY.offset(), (0, -1));
+    assert!((Facing::PlusY.angle() - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    assert_eq!(Facing::default(), Facing::PlusY);
+}
+
+#[test]
+fn building_visual_fields_round_trip() {
+    let mut w = blank();
+    let id = w.buildings.insert(Building {
+        kind: Zone::Commercial,
+        footprint: CellRect::from_corners(c(1, 1), c(2, 3)),
+        level: 3,
+        capacity: 20,
+        occupied: 5,
+        facing: Facing::MinusX,
+        seed: 0xDEAD_BEEF,
+        created_tick: 1234,
+    });
+    let loaded = World::load(&w.save()).unwrap();
+    let b = &loaded.buildings[id];
+    assert_eq!(
+        (b.facing, b.seed, b.created_tick, b.size()),
+        (Facing::MinusX, 0xDEAD_BEEF, 1234, (2, 3))
+    );
 }

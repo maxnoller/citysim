@@ -26,7 +26,7 @@ pub mod time;
 pub mod traffic;
 pub mod world;
 
-pub use buildings::{Building, BuildingId};
+pub use buildings::{Building, BuildingId, Facing};
 pub use command::{Command, CommandError, Outcome, Preview};
 pub use demand::Demand;
 pub use economy::Economy;

@@ -6,7 +6,7 @@ use crate::World;
 
 pub const MAGIC: &[u8; 4] = b"CSIM";
 /// Bump when the World layout changes incompatibly.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {

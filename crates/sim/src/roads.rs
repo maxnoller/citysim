@@ -62,10 +62,12 @@ pub struct RoadSegment {
     pub length: f32,
     /// Metres per second.
     pub speed_limit: f32,
-    /// Vehicles that fit on the segment (both directions) before it is jammed.
-    pub capacity: f32,
-    /// Vehicles currently on the segment. PHASE2: maintained by traffic.
-    pub load: f32,
+    /// Vehicles that fit per direction before it is jammed, indexed by
+    /// [`RoadSegment::dir`]: `[a -> b, b -> a]`.
+    pub capacity: [f32; 2],
+    /// Vehicles currently on the segment per direction, `[a -> b, b -> a]`.
+    /// PHASE2: maintained by traffic.
+    pub load: [f32; 2],
 }
 
 impl RoadSegment {
@@ -73,18 +75,37 @@ impl RoadSegment {
         if self.a == n { self.b } else { self.a }
     }
 
-    /// `load / capacity`, 0 when empty, 1 when jammed.
-    pub fn congestion(&self) -> f32 {
-        if self.capacity > 0.0 {
-            (self.load / self.capacity).clamp(0.0, 1.0)
+    /// Index into `load` / `capacity`: 0 for travel `a -> b` (`forward`),
+    /// 1 for `b -> a`.
+    pub fn dir(forward: bool) -> usize {
+        if forward { 0 } else { 1 }
+    }
+
+    /// `load / capacity` in one direction: 0 empty, 1 jammed.
+    pub fn congestion_in(&self, forward: bool) -> f32 {
+        let d = Self::dir(forward);
+        if self.capacity[d] > 0.0 {
+            (self.load[d] / self.capacity[d]).clamp(0.0, 1.0)
         } else {
             0.0
         }
     }
+
+    /// The worse of the two directions.
+    pub fn congestion(&self) -> f32 {
+        self.congestion_in(true).max(self.congestion_in(false))
+    }
+
+    /// Both directions together.
+    pub fn total_load(&self) -> f32 {
+        self.load[0] + self.load[1]
+    }
 }
 
-fn capacity_for(kind: RoadKind, length: f32) -> f32 {
-    (length * kind.lanes() * 2.0 / balance::VEHICLE_SPACING_M).max(1.0)
+/// Per-direction capacity.
+fn capacity_for(kind: RoadKind, length: f32) -> [f32; 2] {
+    let c = (length * kind.lanes() / balance::VEHICLE_SPACING_M).max(1.0);
+    [c, c]
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -172,7 +193,7 @@ impl RoadNetwork {
             length,
             speed_limit: kind.speed_limit(),
             capacity: capacity_for(kind, length),
-            load: 0.0,
+            load: [0.0; 2],
         });
         self.nodes[a].segments.push(s);
         self.nodes[b].segments.push(s);
@@ -215,12 +236,12 @@ impl RoadNetwork {
             first.b = mid;
             first.length = len_a;
             first.capacity = capacity_for(seg.kind, len_a);
-            first.load = seg.load * frac_a;
+            first.load = seg.load.map(|l| l * frac_a);
         }
         self.nodes[seg.b].segments.retain(|&x| x != s);
         self.nodes[mid].segments.push(s);
         let second = self.add_segment(mid, seg.b, seg.kind);
-        self.segments[second].load = seg.load * (1.0 - frac_a);
+        self.segments[second].load = seg.load.map(|l| l * (1.0 - frac_a));
         mid
     }
 
@@ -260,6 +281,7 @@ impl RoadNetwork {
                 }
                 // Keep s1, extend it to end2 through n; drop s2.
                 let seg2 = self.segments.remove(s2).expect("s2 exists");
+                let s2_dir = geom::sub(self.nodes[seg2.b].pos, self.nodes[seg2.a].pos);
                 self.nodes[end2].segments.retain(|&x| x != s2);
                 self.nodes[end2].segments.push(s1);
                 let first = &mut self.segments[s1];
@@ -270,7 +292,17 @@ impl RoadNetwork {
                 }
                 first.length += seg2.length;
                 first.capacity = capacity_for(first.kind, first.length);
-                first.load += seg2.load;
+                // Add s2's load per direction, matching travel directions.
+                let (fa, fb) = (first.a, first.b);
+                let s1_dir = geom::sub(self.nodes[fb].pos, self.nodes[fa].pos);
+                let first = &mut self.segments[s1];
+                if geom::dot(s1_dir, s2_dir) > 0.0 {
+                    first.load[0] += seg2.load[0];
+                    first.load[1] += seg2.load[1];
+                } else {
+                    first.load[0] += seg2.load[1];
+                    first.load[1] += seg2.load[0];
+                }
                 self.nodes.remove(n);
                 true
             }

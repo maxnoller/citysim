@@ -16,13 +16,15 @@ new_key_type! {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vehicle {
-    /// Position in sim metres.
+    /// Position in sim metres, on the segment centre line (renderers offset
+    /// to the driving lane using `heading`).
     pub pos: [f32; 2],
     /// Heading in radians, `atan2(dy, dx)` in sim space.
     pub heading: f32,
     /// Segment currently driven on.
     pub segment: Option<SegmentId>,
-    /// Metres travelled along `segment` from the node it entered by.
+    /// Metres travelled along `segment` from the node it entered by
+    /// (`0..=segment.length`; from `a` if `forward`, else from `b`).
     pub progress: f32,
     /// True when driving from the segment's `a` node towards `b`.
     pub forward: bool,
@@ -33,6 +35,9 @@ pub struct Vehicle {
     /// Final node of the trip.
     pub destination: Option<NodeId>,
     pub household: Option<HouseholdId>,
+    /// Stable random number for purely visual variation.
+    #[serde(default)]
+    pub seed: u32,
 }
 
 /// Shortest route (by travel time) from `from` to `to` as a list of segments.

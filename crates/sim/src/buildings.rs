@@ -22,4 +22,55 @@ pub struct Building {
     pub capacity: u32,
     /// Residents or workers currently there.
     pub occupied: u32,
+    /// Which side of the footprint faces the road it is accessed from.
+    #[serde(default)]
+    pub facing: Facing,
+    /// Stable random number for purely visual variation (model, colour...).
+    #[serde(default)]
+    pub seed: u32,
+    /// `world.time.tick` when the building appeared (for grow-in animations).
+    #[serde(default)]
+    pub created_tick: u64,
+}
+
+impl Building {
+    /// Footprint size in cells `(width along x, depth along y)`.
+    pub fn size(&self) -> (i32, i32) {
+        (self.footprint.width(), self.footprint.height())
+    }
+}
+
+/// One of the four sides of a cell or footprint, in sim axes
+/// (sim `+y` is Bevy `+z`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum Facing {
+    /// Front faces `+x`.
+    PlusX,
+    /// Front faces `+y`.
+    #[default]
+    PlusY,
+    /// Front faces `-x`.
+    MinusX,
+    /// Front faces `-y`.
+    MinusY,
+}
+
+impl Facing {
+    pub const ALL: [Facing; 4] = [Facing::PlusX, Facing::PlusY, Facing::MinusX, Facing::MinusY];
+
+    /// Unit cell offset towards the front.
+    pub fn offset(self) -> (i32, i32) {
+        match self {
+            Facing::PlusX => (1, 0),
+            Facing::PlusY => (0, 1),
+            Facing::MinusX => (-1, 0),
+            Facing::MinusY => (0, -1),
+        }
+    }
+
+    /// Direction of the front in sim space, radians, `atan2(dy, dx)`.
+    pub fn angle(self) -> f32 {
+        let (dx, dy) = self.offset();
+        (dy as f32).atan2(dx as f32)
+    }
 }
