@@ -22,12 +22,12 @@ use bevy::prelude::*;
 
 /// Heights above the ground for flat overlays, to avoid z-fighting.
 pub(crate) mod heights {
-    pub const ZONE: f32 = 0.07;
+    pub const ZONE: f32 = 0.045;
     pub const ROAD: f32 = 0.06;
     pub const HIGHWAY: f32 = 0.07;
     pub const OVERLAY: f32 = 0.10;
-    pub const GHOST: f32 = 0.12;
-    pub const HIGHLIGHT: f32 = 0.15;
+    pub const GHOST: f32 = 0.24;
+    pub const HIGHLIGHT: f32 = 0.27;
 }
 
 pub struct GfxPlugin;

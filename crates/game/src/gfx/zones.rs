@@ -60,7 +60,6 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         fog_enabled: true,
-        depth_bias: 2.0,
         ..default()
     })));
 }
@@ -86,16 +85,16 @@ fn chunk_hash(grid: &Grid, cx: i32, cy: i32, full: bool) -> u64 {
 fn chunk_mesh(grid: &Grid, cx: i32, cy: i32, full: bool) -> Option<Mesh> {
     let mut m = MeshBuilder::new();
     let y = heights::ZONE;
-    let (fill_a, line_a) = if full { (0.35, 0.9) } else { (0.10, 0.38) };
+    let (fill_a, line_a) = if full { (0.4, 1.0) } else { (0.10, 0.38) };
     let inset = 0.0;
-    let line_w = if full { 0.45 } else { 0.3 };
+    let line_w = if full { 0.6 } else { 0.3 };
     for cyy in cy * CHUNK..(cy + 1) * CHUNK {
         for cxx in cx * CHUNK..(cx + 1) * CHUNK {
             let c = Cell::new(cxx, cyy);
             let Some(z) = shown(grid, c, full) else { continue };
             let base = zone_color(z);
             let fill = lin(base.with_alpha(fill_a));
-            let line = lin(palette::mix(base, Color::WHITE, 0.35).with_alpha(line_a));
+            let line = lin(palette::mix(base, Color::WHITE, 0.45).with_alpha(line_a));
             let (x0, z0) = (cxx as f32 * CELL_SIZE + inset, cyy as f32 * CELL_SIZE + inset);
             let (x1, z1) = (
                 (cxx + 1) as f32 * CELL_SIZE - inset,
