@@ -71,7 +71,7 @@ fn read_save() -> Result<World, String> {
     World::load(&bytes).map_err(|e| format!("Couldn't load: {e}"))
 }
 
-fn save_load(
+pub(super) fn save_load(
     keys: Res<ButtonInput<KeyCode>>,
     mut actions: MessageReader<UiAction>,
     mut sim: ResMut<SimWorld>,

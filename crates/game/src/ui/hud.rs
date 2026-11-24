@@ -1,5 +1,7 @@
 //! Top bar: date / time with a day-progress bar, money (opens the budget),
-//! population, jobs; speed controls on the right; a "Paused" pill below.
+//! population, jobs with the sim's unemployment, average commute; speed
+//! controls on the right; a "Paused" pill below. Warns once (toast) when the
+//! city's money goes negative.
 
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
@@ -7,11 +9,13 @@ use bevy::prelude::*;
 use super::UiState;
 use super::format;
 use super::theme::{self as t, UiFonts, icon};
+use super::toasts::{Toast, ToastKind};
 use super::widgets::{
     ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, approach, label, layout, number, panel, spawn_button,
     spawn_key_badge,
 };
 use crate::shared::{GameSet, SimClock, SimWorld};
+use citysim_sim::balance;
 
 pub struct HudPlugin;
 
@@ -31,10 +35,16 @@ enum HudText {
     Money,
     MoneyDelta,
     MoneyDeltaIcon,
+    MoneyIcon,
     Population,
     Jobs,
     JobsCaption,
+    Commute,
+    CommuteCaption,
 }
+
+#[derive(Component)]
+struct MoneyIconBox;
 
 #[derive(Component)]
 struct DayBar;
@@ -42,12 +52,43 @@ struct DayBar;
 #[derive(Component)]
 struct PausedPill;
 
-/// Money as displayed (rolls towards the real value).
+/// Money as displayed (rolls towards the real value; snaps when another
+/// world is loaded, keyed by `SimWorld::generation`).
 #[derive(Resource, Default)]
-struct MoneyShown(Option<f64>);
+struct MoneyShown {
+    value: Option<f64>,
+    generation: u64,
+    /// The broke warning was shown for the current spell of debt.
+    warned_broke: bool,
+}
+
+/// Everything the top bar shows; texts are rewritten only when it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HudKey {
+    generation: u64,
+    money_shown: i64,
+    money: i64,
+    day: u32,
+    clock: u32,
+    day_bar: u32,
+    population: u32,
+    jobs: u32,
+    jobless_permille: u32,
+    workforce: u32,
+    commute: u32,
+    booked: usize,
+    paused: bool,
+    menu: bool,
+}
 
 /// Rounded square holding a chip's icon.
-fn spawn_icon_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, glyph: char, color: Color, marker: Option<HudText>) {
+fn spawn_icon_box(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    glyph: char,
+    color: Color,
+    marker: Option<HudText>,
+) -> Entity {
     p.spawn(layout(Node {
         width: px(30),
         height: px(30),
@@ -63,7 +104,8 @@ fn spawn_icon_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, glyph: char, co
         if let Some(m) = marker {
             e.insert(m);
         }
-    });
+    })
+    .id()
 }
 
 /// Hover help for a non-button element.
@@ -126,7 +168,10 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                 // Date & time.
                 left.spawn((
                     panel(chip_node()),
-                    info_tip("Date & time", "One in-game day lasts two minutes at normal speed."),
+                    info_tip(
+                        "Date & time",
+                        "One in-game day lasts four minutes at normal speed. Taxes and upkeep are booked at midnight.",
+                    ),
                 ))
                 .with_children(|c| {
                     spawn_icon_box(c, fonts, icon::SUN, t::WARNING, Some(HudText::DayIcon));
@@ -194,12 +239,13 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                         },
                         Some(Tooltip {
                             title: "Budget",
-                            desc: "Balance, yesterday's income and expenses, tax rate.",
+                            desc: "Balance, taxes, road upkeep and city services by day; the tax rate.",
                             key: None,
                             price: None,
                         }),
                         |b, id| {
-                            spawn_icon_box(b, fonts, icon::WALLET, t::ACCENT, None);
+                            let icon_box = spawn_icon_box(b, fonts, icon::WALLET, t::ACCENT, Some(HudText::MoneyIcon));
+                            b.commands().entity(icon_box).insert(MoneyIconBox);
                             b.spawn(layout(Node {
                                 min_width: px(92),
                                 ..text_column()
@@ -261,7 +307,8 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                     panel(chip_node()),
                     info_tip(
                         "Jobs",
-                        "Workplaces in shops, offices and industry. Jobless: residents without work.",
+                        "Workplaces in shops, offices and industry. Jobless: share of the workforce (one worker \
+                         per household) without a job. Jobless households move away after a few days.",
                     ),
                 ))
                 .with_children(|c| {
@@ -271,6 +318,33 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                         col.spawn((
                             label(fonts, "Jobs", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
                             HudText::JobsCaption,
+                        ));
+                    });
+                });
+
+                // Average commute.
+                left.spawn((
+                    panel(chip_node()),
+                    info_tip(
+                        "Average commute",
+                        "Average door-to-door drive to work, in real seconds at normal speed (the game \
+                         clock runs faster). Over a minute and fewer people want to move in.",
+                    ),
+                ))
+                .with_children(|c| {
+                    spawn_icon_box(c, fonts, icon::TRAFFIC, t::ACCENT, None);
+                    c.spawn(layout(text_column())).with_children(|col| {
+                        col.spawn((
+                            number(fonts, "\u{2014}", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT),
+                            HudText::Commute,
+                            Node {
+                                min_width: px(44),
+                                ..default()
+                            },
+                        ));
+                        col.spawn((
+                            label(fonts, "Commute", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
+                            HudText::CommuteCaption,
                         ));
                     });
                 });
@@ -301,7 +375,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                     UiAction::Speed(0),
                     1,
                     "Normal speed",
-                    "One in-game day every two minutes.",
+                    "One in-game day every four minutes.",
                     "1",
                 );
                 spawn_speed_button(
@@ -410,6 +484,33 @@ fn spawn_speed_button(
     );
 }
 
+/// Average commute for the HUD: real driving seconds at 1x ("—" before
+/// the first commute finished).
+pub fn commute_text(secs: f32) -> String {
+    if secs <= 0.0 || !secs.is_finite() {
+        return "\u{2014}".to_string();
+    }
+    let s = secs.round() as u32;
+    if s < 60 {
+        format!("{s} s")
+    } else {
+        format!("{} min {:02} s", s / 60, s % 60)
+    }
+}
+
+/// Colour for the average commute: fine up to `COMMUTE_OK_S` (where it
+/// starts to cut residential demand), red from `HOPELESS_COMMUTE_S` (where
+/// households start giving up).
+fn commute_color(secs: f32) -> Color {
+    if secs >= balance::HOPELESS_COMMUTE_S {
+        t::NEGATIVE
+    } else if secs > balance::COMMUTE_OK_S {
+        t::WARNING
+    } else {
+        t::TEXT
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_top_bar(
     sim: Res<SimWorld>,
@@ -417,30 +518,65 @@ fn update_top_bar(
     state: Res<UiState>,
     time: Res<Time<Real>>,
     mut shown: ResMut<MoneyShown>,
+    mut toasts: MessageWriter<Toast>,
     mut texts: Query<(&HudText, &mut Text, &mut TextColor)>,
     mut bar: Query<(&mut Node, &mut BackgroundColor), With<DayBar>>,
     mut pill: Query<&mut Node, (With<PausedPill>, Without<DayBar>)>,
+    mut money_box: Query<&mut BackgroundColor, (With<MoneyIconBox>, Without<DayBar>)>,
+    mut last: Local<Option<HudKey>>,
 ) {
     let w = &sim.world;
     let hour = w.time.hour();
     let day = (6.0..18.0).contains(&hour);
     let money = w.economy.money as f64;
-    let m = shown.0.get_or_insert(money);
+    if shown.generation != sim.generation {
+        // Another world was loaded: show it as it is, no roll.
+        shown.generation = sim.generation;
+        shown.value = None;
+    }
+    let m = shown.value.get_or_insert(money);
     if (*m - money).abs() < 1.0 {
         *m = money;
     } else {
         *m += (money - *m) * approach(time.delta_secs(), 0.12) as f64;
     }
     let money_shown = m.round() as i64;
-    let net = w.economy.last_day_income - w.economy.last_day_expenses;
-    let has_history = w.economy.last_day_income != 0 || w.economy.last_day_expenses != 0;
+    // The clock moves in 10-minute steps (a game minute is 1/6 s at 1x).
     let s = &w.stats;
-    let unemployed = if s.population > 0 {
-        s.population.saturating_sub(s.employed) as f32 / s.population as f32
-    } else {
-        0.0
+    let key = HudKey {
+        generation: sim.generation,
+        money_shown,
+        money: w.economy.money,
+        day: w.time.day,
+        clock: ((hour * 6.0) as u32).min(143),
+        day_bar: (hour / 24.0 * 96.0) as u32,
+        population: s.population,
+        jobs: s.jobs,
+        jobless_permille: (s.unemployment * 1000.0) as u32,
+        workforce: s.workforce,
+        commute: s.avg_commute_s.round() as u32,
+        booked: w.economy.history.len(),
+        paused: clock.paused,
+        menu: state.menu_open,
     };
-    let net_color = if !has_history {
+    if *last == Some(key) {
+        return;
+    }
+    *last = Some(key);
+    let broke = w.economy.money < 0;
+    if broke && !shown.warned_broke {
+        shown.warned_broke = true;
+        toasts.write(Toast::new(
+            ToastKind::Warning,
+            "Money is below zero. New roads wait until taxes bring it back; bulldozing still works.",
+        ));
+    } else if !broke {
+        shown.warned_broke = false;
+    }
+    // Booked at midnight; nothing to show before the first one.
+    let booked = !w.economy.history.is_empty();
+    let net = w.economy.last_day.income() - w.economy.last_day.expenses();
+    let net_color = if !booked {
         t::TEXT_MUTED
     } else if net >= 0 {
         t::POSITIVE
@@ -450,7 +586,7 @@ fn update_top_bar(
     for (which, mut text, mut color) in &mut texts {
         let (s, c): (String, Color) = match which {
             HudText::Day => (format!("Day {}", w.time.day), t::TEXT),
-            HudText::Time => (format::clock(hour), t::TEXT_MUTED),
+            HudText::Time => (format!("{:02}:{:02}", key.clock / 6, key.clock % 6 * 10), t::TEXT_MUTED),
             HudText::DayIcon => {
                 let glyph = match hour as u32 {
                     5 | 6 => icon::SUNRISE,
@@ -460,15 +596,16 @@ fn update_top_bar(
                 };
                 (glyph.to_string(), if day { t::WARNING } else { t::ACCENT })
             }
-            HudText::Money => (
-                format::money(money_shown),
-                if w.economy.money < 0 { t::NEGATIVE } else { t::TEXT },
+            HudText::Money => (format::money(money_shown), if broke { t::NEGATIVE } else { t::TEXT }),
+            HudText::MoneyIcon => (
+                if broke { icon::ALERT } else { icon::WALLET }.to_string(),
+                if broke { t::NEGATIVE } else { t::ACCENT },
             ),
             HudText::MoneyDelta => (
-                if has_history {
+                if booked {
                     format!("{} / day", format::signed_money(net))
                 } else {
-                    "No taxes yet".to_string()
+                    "Booked at midnight".to_string()
                 },
                 net_color,
             ),
@@ -484,25 +621,34 @@ fn update_top_bar(
             HudText::Population => (format::group(s.population as u64), t::TEXT),
             HudText::Jobs => (format::group(s.jobs as u64), t::TEXT),
             HudText::JobsCaption => {
-                if s.population == 0 {
+                if s.workforce == 0 {
                     ("Jobs".to_string(), t::TEXT_MUTED)
                 } else {
-                    let c = if unemployed > 0.15 {
+                    // The sim's own figure: unemployed / workforce.
+                    let u = s.unemployment;
+                    let c = if u > 0.15 {
                         t::NEGATIVE
-                    } else if unemployed > 0.08 {
+                    } else if u > 0.08 {
                         t::WARNING
                     } else {
                         t::TEXT_MUTED
                     };
                     (
-                        format!(
-                            "Jobs · {} jobless",
-                            format::percent((unemployed * 100.0).round() / 100.0)
-                        ),
+                        format!("Jobs · {} jobless", format::percent((u * 100.0).round() / 100.0)),
                         c,
                     )
                 }
             }
+            HudText::Commute => (commute_text(s.avg_commute_s), commute_color(s.avg_commute_s)),
+            HudText::CommuteCaption => (
+                if s.avg_commute_s > 0.0 {
+                    "Avg. drive to work"
+                } else {
+                    "No commutes yet"
+                }
+                .to_string(),
+                t::TEXT_MUTED,
+            ),
         };
         if text.0 != s {
             text.0 = s;
@@ -511,8 +657,14 @@ fn update_top_bar(
             color.0 = c;
         }
     }
+    if let Ok(mut bg) = money_box.single_mut() {
+        bg.set_if_neq(BackgroundColor(t::alpha(
+            if broke { t::NEGATIVE } else { t::ACCENT },
+            0.14,
+        )));
+    }
     if let Ok((mut node, mut bg)) = bar.single_mut() {
-        let w = percent(hour / 24.0 * 100.0);
+        let w = percent(key.day_bar as f32 / 96.0 * 100.0);
         if node.width != w {
             node.width = w;
         }
@@ -527,5 +679,25 @@ fn update_top_bar(
         if node.display != d {
             node.display = d;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hud_texts_match_the_sim_clock() {
+        // The tooltips say "four minutes" and "over a minute".
+        assert_eq!(balance::TICKS_PER_DAY, 4 * 60 * citysim_sim::TICKS_PER_SECOND);
+        assert_eq!(balance::COMMUTE_OK_S, 60.0);
+    }
+
+    #[test]
+    fn commute_formatting() {
+        assert_eq!(commute_text(0.0), "\u{2014}");
+        assert_eq!(commute_text(42.4), "42 s");
+        assert_eq!(commute_text(59.6), "1 min 00 s");
+        assert_eq!(commute_text(125.0), "2 min 05 s");
     }
 }

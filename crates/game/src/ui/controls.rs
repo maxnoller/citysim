@@ -12,7 +12,10 @@ use super::UiState;
 use super::budget::TAX_STEP;
 use super::tools::ToolState;
 use super::widgets::{UiAction, button_clicks};
-use crate::shared::{ActiveTool, GameSet, GraphicsQuality, OverlayMode, PointerOverUi, SimClock, SimCommand, SimWorld};
+use crate::shared::{
+    ActiveTool, CameraInputBlocked, GameSet, GraphicsQuality, OverlayMode, PointerOverUi, SimClock, SimCommand,
+    SimWorld,
+};
 use citysim_sim::{Command, balance};
 
 pub struct ControlsPlugin;
@@ -24,8 +27,21 @@ impl Plugin for ControlsPlugin {
             (button_clicks, control_keys, handle_actions)
                 .chain()
                 .in_set(GameSet::Input),
+        )
+        .add_systems(
+            Update,
+            block_camera_input
+                .in_set(GameSet::Input)
+                .after(handle_actions)
+                .after(super::save_load::save_load),
         );
     }
+}
+
+/// The pause menu owns keyboard and mouse: tell gfx to leave the camera
+/// alone while it is open (after this frame's menu open / close / load).
+fn block_camera_input(ui: Res<UiState>, mut blocked: ResMut<CameraInputBlocked>) {
+    blocked.set_if_neq(CameraInputBlocked(ui.menu_open));
 }
 
 #[allow(clippy::too_many_arguments)]

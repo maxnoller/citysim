@@ -2,12 +2,12 @@
 //! slide in and auto-dismiss. Rejected commands become error toasts.
 
 use bevy::prelude::*;
-use citysim_sim::Command;
+use citysim_sim::{CellRect, Command};
 
-use super::context::error_text;
+use super::context::{error_text, zone_noop_reason};
 use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{approach, label, layout, panel};
-use crate::shared::{GameSet, LastCommand};
+use crate::shared::{GameSet, LastCommand, SimWorld};
 
 pub struct ToastsPlugin;
 
@@ -89,7 +89,9 @@ fn kind_style(kind: ToastKind) -> (char, Color) {
     }
 }
 
-fn command_toasts(last: Res<LastCommand>, mut out: MessageWriter<Toast>) {
+/// Every rejected command as a toast in the sim's own terms; zoning that
+/// changed nothing says why (the sim accepts it as a no-op).
+fn command_toasts(last: Res<LastCommand>, sim: Res<SimWorld>, mut out: MessageWriter<Toast>) {
     if !last.is_changed() {
         return;
     }
@@ -97,13 +99,29 @@ fn command_toasts(last: Res<LastCommand>, mut out: MessageWriter<Toast>) {
         Some((_, Err(e))) => {
             out.write(Toast::new(ToastKind::Error, error_text(e)));
         }
-        Some((Command::SetZone { zone: Some(_), .. }, Ok(o))) if o.cells.is_empty() => {
-            out.write(Toast::new(
-                ToastKind::Warning,
-                "Nothing zoned: zones must be within 2 cells of a road",
-            ));
+        Some((Command::SetZone { min, max, zone }, Ok(o))) if o.cells.is_empty() => {
+            let (reason, color) = zone_noop_reason(&sim.world, CellRect::from_corners(*min, *max), *zone);
+            let kind = if color == t::WARNING {
+                ToastKind::Warning
+            } else {
+                ToastKind::Info
+            };
+            let what = if zone.is_some() {
+                "Nothing zoned"
+            } else {
+                "Nothing unzoned"
+            };
+            out.write(Toast::new(kind, format!("{what}: {}", lower_first(&reason))));
         }
         _ => {}
+    }
+}
+
+fn lower_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_lowercase().chain(c).collect(),
+        None => String::new(),
     }
 }
 
@@ -159,7 +177,9 @@ fn animate_toasts(
     time: Res<Time<Real>>,
     mut items: Query<(Entity, &mut ToastItem, &mut UiTransform)>,
 ) {
-    let dt = time.delta_secs();
+    // Clamp: one long frame (a load rebuilding the whole scene) must not
+    // eat the "City loaded" toast before anyone saw it.
+    let dt = time.delta_secs().min(0.1);
     for (e, mut item, mut tf) in &mut items {
         item.age += dt;
         if item.age > item.life {

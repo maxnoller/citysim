@@ -1,8 +1,10 @@
 //! `CITYSIM_UI_SHOTS=dir` (best with `CITYSIM_DEMO=town`): walks through
 //! every interface state and saves `dir/NN-name.png` for each, then exits.
-//! States: idle HUD, inspect a building and a road, a tooltip, road preview
-//! (valid and blocked), zone drag with the flyout, bulldoze drag, budget,
-//! toasts, pause menu, first-run hint, and the HUD at 2560x1440.
+//! States: idle HUD, inspect a home, a shop, an empty building and the
+//! busiest road, a tooltip, road preview (valid, blocked, and while broke),
+//! zone drag with the flyout, bulldoze drag, traffic overlay with its
+//! legend, budget (with history and on day 1), toasts from real rejected
+//! commands, pause menu, first-run hint, and the HUD at 2560x1440.
 //! `CITYSIM_UI_SHOTS_ONLY=name,name` limits it to some states.
 //!
 //! Drives the real ui through synthetic cursor / mouse input and resources.
@@ -13,15 +15,30 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::UiGlobalTransform;
 use bevy::window::PrimaryWindow;
-use citysim_sim::{Cell, Occupant, Zone};
+use citysim_sim::{Building, Cell, Command, Occupant, Zone};
 
 use super::UiState;
 use super::toasts::{Toast, ToastKind};
 use super::tools::{Action, ToolState};
 use super::widgets::{UiAction, UiButton};
 use crate::shared::{
-    ActiveTool, CameraOverride, CameraPose, GameSet, OverlayMode, SimClock, SimWorld, WorldCamera, cell_center,
+    ActiveTool, CameraOverride, CameraPose, GameSet, OverlayMode, SimClock, SimCommand, SimWorld, WorldCamera,
+    cell_center,
 };
+
+/// The scenario's world while a step shows a modified copy (broke, day 1);
+/// `reset` puts it back.
+#[derive(Resource, Default)]
+struct SavedWorld(Option<citysim_sim::World>);
+
+/// Keep the current world for `reset` and return a mutable handle to it.
+fn stash_world(w: &mut World) {
+    let copy = w.resource::<SimWorld>().world.clone();
+    let mut saved = w.resource_mut::<SavedWorld>();
+    if saved.0.is_none() {
+        saved.0 = Some(copy);
+    }
+}
 
 pub struct ShotsPlugin {
     pub dir: PathBuf,
@@ -47,6 +64,7 @@ impl Plugin for ShotsPlugin {
             frames: 0,
         })
         .init_resource::<Pointer>()
+        .init_resource::<SavedWorld>()
         .add_systems(
             Update,
             run_shots.in_set(GameSet::Input).before(super::widgets::button_clicks),
@@ -114,6 +132,9 @@ fn pose() -> CameraPose {
 }
 
 fn reset(world: &mut World) {
+    if let Some(saved) = world.resource_mut::<SavedWorld>().0.take() {
+        world.resource_mut::<SimWorld>().replace(saved);
+    }
     world.resource_mut::<CameraOverride>().0 = Some(pose());
     *world.resource_mut::<ActiveTool>() = ActiveTool::Inspect;
     *world.resource_mut::<OverlayMode>() = OverlayMode::None;
@@ -133,12 +154,24 @@ fn find_building(world: &World) -> Option<Cell> {
 }
 
 fn find_building_near(world: &World, focus: Cell) -> Option<Cell> {
+    find_building_where(world, focus, |_| true)
+}
+
+/// Building nearest to `focus` that matches `pred`.
+fn find_building_where(world: &World, focus: Cell, pred: impl Fn(&Building) -> bool) -> Option<Cell> {
     let sim = world.resource::<SimWorld>();
     sim.world
         .buildings
         .values()
+        .filter(|b| pred(b))
         .map(|b| b.footprint.min)
         .min_by_key(|c| c.chebyshev(focus))
+}
+
+fn point_at(w: &mut World, c: Option<Cell>) {
+    if let Some(c) = c {
+        w.resource_mut::<Pointer>().target = PointerTarget::Cell(c);
+    }
 }
 
 fn find_road(world: &World) -> Option<Cell> {
@@ -210,13 +243,75 @@ fn steps() -> Vec<Step> {
             setup: reset,
         },
         Step {
-            name: "inspect-building",
+            name: "inspect-home",
             wait: 1.0,
             setup: |w| {
                 reset(w);
-                if let Some(c) = find_building(w) {
-                    w.resource_mut::<Pointer>().target = PointerTarget::Cell(c);
+                let c = find_building_where(w, Cell::new(48, 130), |b| {
+                    b.kind == Zone::Residential && b.level > 1 && b.occupied > 0
+                });
+                point_at(w, c);
+            },
+        },
+        Step {
+            name: "inspect-shop",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                let c = find_building_where(w, Cell::new(48, 130), |b| b.kind == Zone::Commercial);
+                point_at(w, c);
+            },
+        },
+        Step {
+            name: "inspect-empty",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                let c = find_building_where(w, Cell::new(48, 130), |b| b.occupied == 0).or_else(|| find_building(w));
+                point_at(w, c);
+            },
+        },
+        Step {
+            name: "inspect-cutoff",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                stash_world(w);
+                // The sim's own countdown for a home found cut off from the
+                // network 7 in-game hours ago (paused, so the hourly check
+                // does not clear it again).
+                w.resource_mut::<SimClock>().paused = true;
+                let c = find_building_where(w, Cell::new(48, 130), |b| b.kind == Zone::Residential && b.occupied > 0);
+                let world = &mut w.resource_mut::<SimWorld>().into_inner().world;
+                if let Some(c) = c
+                    && let Some(Occupant::Building(id)) = world.grid.get(c).map(|cd| cd.occupant)
+                {
+                    let hour = citysim_sim::balance::TICKS_PER_HOUR as u64;
+                    let since = (world.time.tick / hour).saturating_sub(7) * hour;
+                    world.growth.meta.entry(id).unreachable_since = Some(since);
                 }
+                point_at(w, c);
+            },
+        },
+        Step {
+            name: "zone-hover-zoned",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
+                // An empty lot that is already residential (the old bug said
+                // "needs a road" here).
+                let sim = &w.resource::<SimWorld>().world;
+                let focus = Cell::new(48, 130);
+                let lot = (0..sim.grid.cells.len() as i32)
+                    .map(|i| Cell::new(i % citysim_sim::MAP_CELLS, i / citysim_sim::MAP_CELLS))
+                    .filter(|&c| {
+                        sim.grid
+                            .get(c)
+                            .is_some_and(|cd| cd.zone == Some(Zone::Residential) && cd.occupant == Occupant::Empty)
+                    })
+                    .min_by_key(|c| c.chebyshev(focus));
+                point_at(w, lot);
             },
         },
         Step {
@@ -224,9 +319,8 @@ fn steps() -> Vec<Step> {
             wait: 1.0,
             setup: |w| {
                 reset(w);
-                if let Some(c) = find_road(w) {
-                    w.resource_mut::<Pointer>().target = PointerTarget::Cell(c);
-                }
+                let c = busiest_road_near(w, Cell::new(46, 128)).or_else(|| find_road(w));
+                point_at(w, c);
             },
         },
         Step {
@@ -263,6 +357,26 @@ fn steps() -> Vec<Step> {
                 let start = Cell::new(b.x, b.y - 8);
                 w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
                 w.resource_mut::<Pointer>().target = PointerTarget::Cell(Cell::new(b.x, b.y + 3));
+            },
+        },
+        Step {
+            name: "road-broke",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                stash_world(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                // Find a buildable road first, then go broke.
+                let found = find_new_road(w);
+                w.resource_mut::<SimWorld>().world.economy.money = -420;
+                let Some((start, end)) = found else { return };
+                let mid = (cell_center(start, 0.0) + cell_center(end, 0.0)) * 0.5;
+                let mut p = pose();
+                p.focus = mid;
+                p.distance = 260.0;
+                w.resource_mut::<CameraOverride>().0 = Some(p);
+                w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(end);
             },
         },
         Step {
@@ -312,20 +426,59 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            name: "budget-day1",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                stash_world(w);
+                // A fresh city half a day into day 1: one street, homes and
+                // shops zoned beside it.
+                let mut fresh = citysim_sim::World::new(1);
+                let _ = fresh.apply(Command::BuildRoad {
+                    from: Cell::new(11, 128),
+                    to: Cell::new(40, 128),
+                });
+                let _ = fresh.apply(Command::SetZone {
+                    min: Cell::new(14, 126),
+                    max: Cell::new(38, 127),
+                    zone: Some(Zone::Residential),
+                });
+                let _ = fresh.apply(Command::SetZone {
+                    min: Cell::new(14, 129),
+                    max: Cell::new(30, 130),
+                    zone: Some(Zone::Commercial),
+                });
+                for _ in 0..citysim_sim::balance::TICKS_PER_DAY / 2 {
+                    fresh.step();
+                }
+                w.resource_mut::<SimWorld>().replace(fresh);
+                w.resource_mut::<UiState>().budget_open = true;
+            },
+        },
+        Step {
             name: "toasts",
             wait: 0.8,
             setup: |w| {
                 reset(w);
-                for (k, s) in [
-                    (ToastKind::Success, "City saved"),
-                    (ToastKind::Error, "Not enough money: costs $1,240, you have $860"),
-                    (ToastKind::Error, "Roads must be straight or at 45 degrees"),
-                    (
-                        ToastKind::Warning,
-                        "Nothing zoned: zones must be within 2 cells of a road",
-                    ),
-                ] {
-                    w.write_message(Toast::new(k, s));
+                w.write_message(Toast::new(ToastKind::Success, "City saved"));
+                // A real rejected command: a road through a building.
+                if let Some(b) = find_building(w) {
+                    w.write_message(SimCommand(Command::BuildRoad {
+                        from: Cell::new(b.x, b.y - 6),
+                        to: Cell::new(b.x, b.y + 2),
+                    }));
+                }
+            },
+        },
+        Step {
+            name: "save-load",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                // Only into a scratch slot: never over the player's save.
+                if std::env::var_os("CITYSIM_SAVE_DIR").is_some_and(|d| !d.is_empty()) {
+                    w.write_message(UiAction::Save);
+                    w.write_message(UiAction::Load);
                 }
             },
         },
@@ -431,8 +584,9 @@ fn drive_pointer(
             .and_then(|(cam, tf)| cam.world_to_viewport(tf, cell_center(c, 0.0)).ok())
     };
     let target = match pointer.target {
-        // Park the pointer just outside the window so nothing is hovered.
-        PointerTarget::None => Some(Vec2::new(-4.0, -4.0)),
+        // Park the pointer over open land at the right, away from every
+        // panel (X ignores warps outside the window).
+        PointerTarget::None => Some(Vec2::new(win.width() * 0.86, win.height() * 0.42)),
         PointerTarget::Cell(c) => cell_pos(c),
         PointerTarget::Data(i) => data.as_ref().and_then(|d| d.cells.get(i).copied()).and_then(cell_pos),
         PointerTarget::Button(a) => buttons

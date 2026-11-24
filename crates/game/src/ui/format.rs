@@ -1,4 +1,4 @@
-//! Number, money and time formatting for the interface.
+//! Number and money formatting for the interface.
 
 /// Thousands separators: 1234567 -> "1,234,567".
 pub fn group(v: u64) -> String {
@@ -32,12 +32,6 @@ pub fn signed_money(v: i64) -> String {
     }
 }
 
-/// Hour of day (0..24) -> "08:30".
-pub fn clock(hour: f32) -> String {
-    let minutes = (hour.rem_euclid(24.0) * 60.0) as u32;
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
-}
-
 pub fn percent(fraction: f32) -> String {
     let p = fraction * 100.0;
     if p.fract().abs() < 0.05 {
@@ -63,10 +57,7 @@ mod tests {
     }
 
     #[test]
-    fn time_formatting() {
-        assert_eq!(clock(8.5), "08:30");
-        assert_eq!(clock(23.999), "23:59");
-        assert_eq!(clock(0.0), "00:00");
+    fn percent_formatting() {
         assert_eq!(percent(0.09), "9%");
         assert_eq!(percent(0.095), "9.5%");
     }

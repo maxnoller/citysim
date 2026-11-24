@@ -264,7 +264,7 @@ fn start_fresh_game(sim: Res<SimWorld>, mut clock: ResMut<SimClock>, mut state: 
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_menu(
     time: Res<Time<Real>>,
     state: Res<UiState>,
@@ -273,6 +273,7 @@ fn update_menu(
     mut card: Query<&mut UiTransform, With<MenuCard>>,
     mut subtitle: Query<&mut Text, With<MenuSubtitle>>,
     mut anim: Local<f32>,
+    mut last: Local<Option<(u64, u32, i64, u32)>>,
 ) {
     let Ok((mut node, mut bg)) = root.single_mut() else {
         return;
@@ -281,18 +282,29 @@ fn update_menu(
     if node.display != d {
         node.display = d;
         *anim = 0.0;
+        *last = None;
     }
     if !state.menu_open {
         return;
     }
-    *anim += (1.0 - *anim) * approach(time.delta_secs(), 0.07);
-    let a = *anim;
-    bg.0 = t::alpha(t::BACKDROP, t::BACKDROP.alpha() * a);
-    if let Ok(mut tf) = card.single_mut() {
-        tf.scale = Vec2::splat(0.95 + 0.05 * a);
-        tf.translation = Val2::px(0.0, (1.0 - a) * 10.0);
+    if *anim < 1.0 {
+        *anim += (1.0 - *anim) * approach(time.delta_secs(), 0.07);
+        if *anim > 0.995 {
+            *anim = 1.0;
+        }
+        let a = *anim;
+        bg.0 = t::alpha(t::BACKDROP, t::BACKDROP.alpha() * a);
+        if let Ok(mut tf) = card.single_mut() {
+            tf.scale = Vec2::splat(0.95 + 0.05 * a);
+            tf.translation = Val2::px(0.0, (1.0 - a) * 10.0);
+        }
     }
     let w = &sim.world;
+    let key = (sim.generation, w.time.day, w.economy.money, w.stats.population);
+    if *last == Some(key) {
+        return;
+    }
+    *last = Some(key);
     let s = format!(
         "Day {} · {} · {} residents",
         w.time.day,
@@ -432,8 +444,13 @@ fn update_hint(
     if !show {
         return;
     }
-    progress.anim += (1.0 - progress.anim) * approach(time.delta_secs(), 0.08);
-    tf.translation = Val2::px((1.0 - progress.anim) * -12.0, 0.0);
+    if progress.anim < 1.0 {
+        progress.anim += (1.0 - progress.anim) * approach(time.delta_secs(), 0.08);
+        if progress.anim > 0.995 {
+            progress.anim = 1.0;
+        }
+        tf.translation = Val2::px((1.0 - progress.anim) * -12.0, 0.0);
+    }
     for (HintStep(i), mut text, mut color) in &mut steps {
         let (g, c) = if progress.done[*i] {
             (icon::CHECK_CIRCLE, t::POSITIVE)

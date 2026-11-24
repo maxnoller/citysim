@@ -12,6 +12,7 @@ mod controls;
 mod demand;
 mod format;
 mod hud;
+mod legend;
 mod menu;
 mod pointer;
 mod save_load;
@@ -71,6 +72,7 @@ impl Plugin for UiPlugin {
                 toolbar::ToolbarPlugin,
                 demand::DemandPlugin,
                 context::ContextPlugin,
+                legend::LegendPlugin,
                 budget::BudgetPlugin,
                 toasts::ToastsPlugin,
                 menu::MenuPlugin,

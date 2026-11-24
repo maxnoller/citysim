@@ -224,10 +224,18 @@ fn update_tooltip(
         center.y - size.y * 0.5 - gap - tip_size.y
     };
     let left = (center.x - tip_size.x * 0.5).clamp(t::EDGE, (screen.x - t::EDGE - tip_size.x).max(t::EDGE));
-    node.left = px(left.round());
-    node.top = px(top.round());
-    state.slide += (1.0 - state.slide) * approach(dt, 0.05);
-    let offset = (1.0 - state.slide) * if below { -4.0 } else { 4.0 };
-    tf.translation = Val2::px(0.0, offset);
+    let (left, top) = (px(left.round()), px(top.round()));
+    if node.left != left || node.top != top {
+        node.left = left;
+        node.top = top;
+    }
+    if state.slide < 1.0 {
+        state.slide += (1.0 - state.slide) * approach(dt, 0.05);
+        if state.slide > 0.995 {
+            state.slide = 1.0;
+        }
+        let offset = (1.0 - state.slide) * if below { -4.0 } else { 4.0 };
+        tf.translation = Val2::px(0.0, offset);
+    }
     vis.set_if_neq(Visibility::Inherited);
 }

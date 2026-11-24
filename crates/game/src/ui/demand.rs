@@ -24,7 +24,24 @@ struct DemandFill {
     shown: f32,
 }
 
-const TRACK_W: f32 = 104.0;
+/// Word next to a bar, so the meter reads at a glance at -1, 0 and +1.
+#[derive(Component)]
+struct DemandWord(Zone);
+
+const TRACK_W: f32 = 96.0;
+
+/// Plain reading of a demand value (`-1..=1`).
+pub fn demand_word(v: f32) -> (&'static str, Color) {
+    if v >= 0.5 {
+        ("High", t::TEXT)
+    } else if v >= 0.15 {
+        ("Some", t::TEXT_MUTED)
+    } else if v > -0.15 {
+        ("None", t::TEXT_FAINT)
+    } else {
+        ("Surplus", t::TEXT_FAINT)
+    }
+}
 
 /// Bottom-left column: first-run hint card (menu.rs) above the demand meter.
 #[derive(Component)]
@@ -51,7 +68,11 @@ pub fn spawn_meter(mut commands: Commands, fonts: Res<UiFonts>) {
         .spawn((
             Name::new("Demand meter"),
             ChildOf(stack),
-            super::hud::info_tip("Demand", "What the city wants next. Zone the types with long bars."),
+            super::hud::info_tip(
+                "Demand",
+                "What the city wants next, from the sim's demand: bars right of the line want more of that zone, \
+                 bars left mean there is already too much of it. Zone the types with long bars.",
+            ),
             panel(Node {
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::new(px(t::S4), px(t::S4), px(t::S3 + 2.0), px(t::S4)),
@@ -135,26 +156,48 @@ pub fn spawn_meter(mut commands: Commands, fonts: Res<UiFonts>) {
                             BackgroundColor(t::alpha(t::TEXT, 0.35)),
                         ));
                     });
+                    row.spawn(layout(Node {
+                        width: px(46),
+                        justify_content: JustifyContent::End,
+                        flex_shrink: 0.0,
+                        ..default()
+                    }))
+                    .with_child((
+                        DemandWord(zone),
+                        label(fonts, "", t::FONT_CAPTION + 0.5, t::W_MEDIUM, t::TEXT_FAINT),
+                    ));
                 });
             }
         });
 }
 
+#[allow(clippy::type_complexity)]
 fn update_meter(
     time: Res<Time<Real>>,
     sim: Res<SimWorld>,
     mut fills: Query<(&mut DemandFill, &mut Node, &mut BackgroundColor)>,
+    mut words: Query<(&DemandWord, &mut Text, &mut TextColor)>,
 ) {
     let d = &sim.world.demand;
-    let k = approach(time.delta_secs(), 0.35);
-    for (mut fill, mut node, mut bg) in &mut fills {
-        let target = match fill.zone {
+    let value = |z: Zone| {
+        match z {
             Zone::Residential => d.residential,
             Zone::Commercial => d.commercial,
             Zone::Industrial => d.industrial,
         }
-        .clamp(-1.0, 1.0);
+        .clamp(-1.0, 1.0)
+    };
+    let k = approach(time.delta_secs(), 0.35);
+    for (mut fill, mut node, mut bg) in &mut fills {
+        let target = value(fill.zone);
+        if fill.shown == target {
+            continue;
+        }
         fill.shown += (target - fill.shown) * k;
+        // Settle exactly, so a still meter stops touching the layout.
+        if (target - fill.shown).abs() < 0.002 {
+            fill.shown = target;
+        }
         let v = fill.shown;
         let half = v.abs() * 50.0;
         let (left, width) = if v >= 0.0 { (50.0, half) } else { (50.0 - half, half) };
@@ -166,5 +209,25 @@ fn update_meter(
         let color = t::zone_color(Some(fill.zone));
         let c = if v >= 0.0 { color } else { t::alpha(color, 0.45) };
         bg.set_if_neq(BackgroundColor(c));
+    }
+    for (DemandWord(z), mut text, mut color) in &mut words {
+        let (w, c) = demand_word(value(*z));
+        if text.0 != w {
+            text.0 = w.to_string();
+        }
+        color.set_if_neq(TextColor(c));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demand_words_cover_the_range() {
+        assert_eq!(demand_word(1.0).0, "High");
+        assert_eq!(demand_word(0.3).0, "Some");
+        assert_eq!(demand_word(0.0).0, "None");
+        assert_eq!(demand_word(-1.0).0, "Surplus");
     }
 }
