@@ -69,10 +69,11 @@ pub fn car_model(body: Color, shape: u32, lod: bool) -> MeshBuilder {
     let glass = palette::CAR_GLASS;
     let dark = shade(body, 0.75);
     let (len, wid) = match shape {
-        2 => (4.6, 1.9),
-        3 => (4.8, 1.9),
-        1 => (3.7, 1.75),
-        _ => (4.2, 1.8),
+        // Lengths fit the sim's 5.5 m queue spacing (with lane compression).
+        2 => (4.3, 1.85),
+        3 => (4.4, 1.85),
+        1 => (3.6, 1.72),
+        _ => (4.0, 1.78),
     };
     let (hl, hw) = (len * 0.5, wid * 0.5);
     let wr = 0.34;
@@ -229,7 +230,7 @@ mod tests {
                 max = max.max(Vec3::from(*p));
             }
             assert!(min.y >= -0.001 && min.y < 0.05, "{min}");
-            assert!(max.z - min.z < 2.1 && max.x - min.x < 5.0, "{min} {max}");
+            assert!(max.z - min.z < 2.1 && max.x - min.x <= 4.42, "{min} {max}");
         }
     }
 

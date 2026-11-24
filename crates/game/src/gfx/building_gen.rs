@@ -929,7 +929,7 @@ fn office(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     }
     // Entrance canopy in the accent colour and a crown band.
     let f = Face::of(body, 0.0)[0];
-    f.slab(m, f.width * 0.3, f.width * 0.7, 3.5, 3.7, 1.8, accent, accent);
+    f.slab(m, f.width * 0.3, f.width * 0.7, 3.5, 3.7, 1.2, accent, accent);
     if rng.chance(0.5) {
         let crown = Face::of(if setback { body.inset(0.9) } else { body }, 0.0);
         for f in &crown {
