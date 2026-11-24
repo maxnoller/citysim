@@ -6,8 +6,9 @@ use bevy::prelude::*;
 use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 
+use super::UiState;
 use super::theme::{self as t, UiFonts};
-use super::widgets::{Tooltip, approach, label, layout, paragraph};
+use super::widgets::{Tooltip, UiAction, UiButton, approach, label, layout, paragraph};
 use crate::shared::GameSet;
 
 pub struct TooltipPlugin;
@@ -140,7 +141,9 @@ fn update_tooltip(
         &ComputedNode,
         &UiGlobalTransform,
         &InheritedVisibility,
+        Option<&UiButton>,
     )>,
+    ui: Res<UiState>,
     mut root: Query<
         (&mut Node, &mut Visibility, &ComputedNode, &mut UiTransform),
         (With<TooltipRoot>, Without<TipPart>),
@@ -153,7 +156,11 @@ fn update_tooltip(
     };
     let hovered = buttons
         .iter()
-        .find(|(_, _, h, _, _, v)| h.get() && v.get())
+        .find(|(_, _, h, _, _, v, b)| {
+            // No help for a toggle whose panel is already open (it would cover it).
+            let redundant = b.is_some_and(|b| b.action == UiAction::ToggleBudget && ui.budget_open);
+            h.get() && v.get() && !redundant
+        })
         .map(|(e, ..)| e);
     if hovered != state.target {
         state.target = hovered;
@@ -173,7 +180,7 @@ fn update_tooltip(
         return;
     };
     state.since_visible = 0.0;
-    let Ok((_, tip, _, bn, bt, _)) = buttons.get(target) else {
+    let Ok((_, tip, _, bn, bt, _, _)) = buttons.get(target) else {
         return;
     };
     if state.content != Some(target) {

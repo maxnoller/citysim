@@ -8,7 +8,8 @@ use super::UiState;
 use super::format;
 use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
-    ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, approach, label, layout, panel, spawn_button, spawn_key_badge,
+    ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, approach, label, layout, number, panel, spawn_button,
+    spawn_key_badge,
 };
 use crate::shared::{GameSet, SimClock, SimWorld};
 
@@ -131,7 +132,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                     spawn_icon_box(c, fonts, icon::SUN, t::WARNING, Some(HudText::DayIcon));
                     c.spawn(layout(text_column())).with_children(|col| {
                         col.spawn((
-                            label(fonts, "Day 1", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT),
+                            number(fonts, "Day 1", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT),
                             HudText::Day,
                         ));
                         col.spawn(layout(Node {
@@ -141,7 +142,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                         }))
                         .with_children(|row| {
                             row.spawn((
-                                label(fonts, "06:00", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
+                                number(fonts, "06:00", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
                                 HudText::Time,
                                 Node {
                                     min_width: px(34),
@@ -205,7 +206,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                             }))
                             .with_children(|col| {
                                 col.spawn((
-                                    label(fonts, "$0", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT),
+                                    number(fonts, "$0", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT),
                                     HudText::Money,
                                 ));
                                 col.spawn(layout(Node {
@@ -219,7 +220,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                                         HudText::MoneyDeltaIcon,
                                     ));
                                     row.spawn((
-                                        label(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
+                                        number(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
                                         HudText::MoneyDelta,
                                     ));
                                 });
@@ -244,7 +245,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                     spawn_icon_box(c, fonts, icon::USERS, t::ACCENT, None);
                     c.spawn(layout(text_column())).with_children(|col| {
                         col.spawn((
-                            label(fonts, "0", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT),
+                            number(fonts, "0", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT),
                             HudText::Population,
                             Node {
                                 min_width: px(44),
@@ -266,7 +267,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                 .with_children(|c| {
                     spawn_icon_box(c, fonts, icon::BRIEFCASE, t::ACCENT, None);
                     c.spawn(layout(text_column())).with_children(|col| {
-                        col.spawn((label(fonts, "0", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT), HudText::Jobs));
+                        col.spawn((number(fonts, "0", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT), HudText::Jobs));
                         col.spawn((
                             label(fonts, "Jobs", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
                             HudText::JobsCaption,

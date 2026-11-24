@@ -207,7 +207,9 @@ pub fn tool_card(
                         card.title = "Build road".into();
                         card.line = format!("{} · {}", plural(n, "cell", "cells"), cost_text(preview.cost));
                     }
-                    card.hint = if held {
+                    card.hint = if preview.error.is_some() {
+                        "Pick another end point · Right-click to cancel".into()
+                    } else if held {
                         "Release to build · Right-click to cancel".into()
                     } else {
                         "Click to build · Right-click to cancel".into()

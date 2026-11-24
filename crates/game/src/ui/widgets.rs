@@ -145,6 +145,18 @@ pub fn label(fonts: &UiFonts, s: impl Into<String>, size: f32, weight: u16, colo
     )
 }
 
+/// Single-line live number (tabular figures).
+pub fn number(fonts: &UiFonts, s: impl Into<String>, size: f32, weight: u16, color: Color) -> impl Bundle {
+    (
+        Text::new(s),
+        fonts.numbers(size, weight),
+        TextColor(color),
+        LineHeight::RelativeToFont(1.25),
+        TextLayout::no_wrap(),
+        Pickable::IGNORE,
+    )
+}
+
 /// Wrapping text; give it (or its parent) a definite width.
 pub fn paragraph(fonts: &UiFonts, s: impl Into<String>, size: f32, weight: u16, color: Color) -> impl Bundle {
     (

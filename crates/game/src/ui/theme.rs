@@ -183,15 +183,21 @@ impl FromWorld for UiFonts {
 }
 
 impl UiFonts {
-    /// Body text: Inter at `size` and `weight`, tabular figures so numbers
-    /// do not jitter while they change.
+    /// Body text: Inter at `size` and `weight`.
     pub fn text(&self, size: f32, weight: u16) -> TextFont {
         TextFont {
             font: self.text.clone().into(),
             font_size: FontSize::Px(size),
             weight: FontWeight(weight),
-            font_features: FontFeatures::from([FontFeatureTag::TABULAR_FIGURES]),
             ..default()
+        }
+    }
+
+    /// Numbers that change live: tabular figures so they do not jitter.
+    pub fn numbers(&self, size: f32, weight: u16) -> TextFont {
+        TextFont {
+            font_features: FontFeatures::from([FontFeatureTag::TABULAR_FIGURES]),
+            ..self.text(size, weight)
         }
     }
 

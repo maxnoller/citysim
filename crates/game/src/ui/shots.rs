@@ -244,6 +244,11 @@ fn steps() -> Vec<Step> {
                 reset(w);
                 *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
                 let Some((start, end)) = find_new_road(w) else { return };
+                let mid = (cell_center(start, 0.0) + cell_center(end, 0.0)) * 0.5;
+                let mut p = pose();
+                p.focus = mid;
+                p.distance = 260.0;
+                w.resource_mut::<CameraOverride>().0 = Some(p);
                 w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
                 w.resource_mut::<Pointer>().target = PointerTarget::Cell(end);
             },
@@ -349,11 +354,21 @@ fn steps() -> Vec<Step> {
                 reset(w);
                 w.resource_mut::<UiState>().budget_open = true;
                 *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
-                w.resource_mut::<Pointer>().target =
-                    PointerTarget::Button(UiAction::Tool(ActiveTool::Zone(Some(Zone::Industrial))));
+                // The X screen is 1920x1080: keep the pointer in its top-left part.
+                w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::ToggleBudget);
                 if let Ok(mut win) = w.query_filtered::<&mut Window, With<PrimaryWindow>>().single_mut(w) {
                     win.resolution.set(2560.0, 1440.0);
                 }
+            },
+        },
+        Step {
+            name: "1440p-menu",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::OpenMenu);
+                w.write_message(Toast::new(ToastKind::Success, "City saved"));
+                w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::Load);
             },
         },
     ]

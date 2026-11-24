@@ -12,7 +12,7 @@ use super::UiState;
 use super::format;
 use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
-    ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, approach, hdivider, label, layout, panel, spawn_button,
+    ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, approach, hdivider, label, layout, number, panel, spawn_button,
 };
 use crate::shared::{GameSet, SimCommand, SimWorld};
 
@@ -79,7 +79,7 @@ fn row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, name: &str, caption: Optio
                 l.spawn((label(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED), c));
             }
         });
-        r.spawn((label(fonts, "", t::FONT_BODY, t::W_SEMIBOLD, t::TEXT), value));
+        r.spawn((number(fonts, "", t::FONT_BODY, t::W_SEMIBOLD, t::TEXT), value));
     });
 }
 
@@ -134,7 +134,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>) {
             });
             section_title(p, fonts, "BALANCE");
             p.spawn((
-                label(fonts, "$0", t::FONT_DISPLAY, t::W_BOLD, t::TEXT),
+                number(fonts, "$0", t::FONT_DISPLAY, t::W_BOLD, t::TEXT),
                 BudgetText::Balance,
             ));
             p.spawn(hdivider()).insert(Node {
@@ -178,7 +178,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>) {
                     l.spawn(label(fonts, "Tax rate", t::FONT_BODY, t::W_MEDIUM, t::TEXT));
                 });
                 r.spawn((
-                    label(fonts, "9%", t::FONT_VALUE, t::W_SEMIBOLD, t::ACCENT),
+                    number(fonts, "9%", t::FONT_VALUE, t::W_SEMIBOLD, t::ACCENT),
                     BudgetText::TaxValue,
                 ));
             });
