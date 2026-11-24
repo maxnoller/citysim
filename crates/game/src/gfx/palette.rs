@@ -100,8 +100,14 @@ pub const CANOPIES: [Color; 3] = [c(0x4E8B4A), c(0x5E9C52), c(0x3F7A46)];
 pub const TRUNK: Color = c(0x6B4E36);
 
 // ------------------------------------------------------------ sky
-pub const SKY_HORIZON: Color = c(0xDCEAF2);
-pub const SKY_ZENITH: Color = c(0x8DBBE6);
+/// Horizon haze (also the fog colour): pale and slightly warm.
+pub const SKY_HORIZON: Color = c(0xDCE5E6);
+/// Clear blue a little above the horizon.
+pub const SKY_MID: Color = c(0x6FA9EA);
+/// Deeper blue overhead.
+pub const SKY_ZENITH: Color = c(0x3B7BD8);
+/// Warm glow towards the sun near the horizon.
+pub const SKY_GLOW: Color = c(0xF6E7C8);
 pub const SUN: Color = c(0xFFF1DC);
 
 // ------------------------------------------------------------ vehicles

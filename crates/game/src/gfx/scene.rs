@@ -240,31 +240,40 @@ fn boundary_mesh() -> Mesh {
     b.build()
 }
 
-fn sky_mesh() -> Mesh {
-    let mut b = MeshBuilder::new();
-    let rings = 14;
-    let sectors = 36;
+/// Sky colour for a unit direction: pale warm haze at the horizon (the fog
+/// colour, so the ground melts into it), clear blue a little higher up and a
+/// deeper blue overhead, with a soft warm glow towards the sun.
+pub fn sky_color(p: Vec3) -> Color {
     let sun = -sun_direction();
     let sun_h = Vec2::new(sun.x, sun.z).normalize();
-    // Elevation from -20 to 90 degrees.
-    let elev = |r: usize| (-20.0 + 110.0 * (r as f32 / rings as f32).powf(1.4)).to_radians();
+    let h = p.y.max(0.0);
+    let low = (h / 0.22).clamp(0.0, 1.0).powf(0.55);
+    let high = ((h - 0.22) / 0.78).clamp(0.0, 1.0);
+    let base = if h < 0.22 {
+        mix(palette::SKY_HORIZON, palette::SKY_MID, low)
+    } else {
+        mix(palette::SKY_MID, palette::SKY_ZENITH, high)
+    };
+    let toward = Vec2::new(p.x, p.z).normalize_or_zero().dot(sun_h).max(0.0);
+    let glow = toward.powf(4.0) * (1.0 - low) * 0.45;
+    mix(base, palette::SKY_GLOW, glow)
+}
+
+fn sky_mesh() -> Mesh {
+    let mut b = MeshBuilder::new();
+    let sectors = 40;
+    // Elevations (degrees): fine steps near the horizon where the gradient is.
+    let elevs = [
+        -30.0f32, -4.0, 0.0, 1.5, 3.0, 5.0, 7.5, 10.0, 13.0, 17.0, 22.0, 28.0, 36.0, 46.0, 58.0, 72.0, 90.0,
+    ];
     let point = |r: usize, s: usize| {
-        let (e, a) = (elev(r), s as f32 / sectors as f32 * std::f32::consts::TAU);
+        let (e, a) = (elevs[r].to_radians(), s as f32 / sectors as f32 * std::f32::consts::TAU);
         Vec3::new(e.cos() * a.cos(), e.sin(), e.cos() * a.sin())
     };
-    let color = |p: Vec3| {
-        let h = p.y.max(0.0);
-        let t = h.powf(0.55);
-        let base = mix(palette::SKY_HORIZON, palette::SKY_ZENITH, t);
-        // Warm glow near the horizon towards the sun.
-        let toward = Vec2::new(p.x, p.z).normalize_or_zero().dot(sun_h).max(0.0);
-        let glow = toward.powf(6.0) * (1.0 - t) * 0.35;
-        lin(mix(base, Color::srgb(1.0, 0.95, 0.85), glow))
-    };
-    for r in 0..rings {
+    for r in 0..elevs.len() - 1 {
         for s in 0..sectors {
             let q = [point(r, s), point(r, s + 1), point(r + 1, s + 1), point(r + 1, s)];
-            let c = q.map(color);
+            let c = q.map(|p| lin(sky_color(p)));
             b.quad_c(q.map(|p| p * SKY_RADIUS), c);
         }
     }
@@ -414,8 +423,8 @@ fn tune_fog_and_shadows(
     *last = Some((d, *quality));
     for mut fog in &mut fogs {
         fog.falloff = FogFalloff::Linear {
-            start: d * 1.2 + 500.0,
-            end: d * 2.6 + 3200.0,
+            start: d * 1.6 + 1200.0,
+            end: d * 2.2 + 6500.0,
         };
     }
     let s = quality_settings(*quality);
