@@ -324,6 +324,33 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            name: "inspect-jam",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                // The most congested street of the whole map, centred.
+                let sim = &w.resource::<SimWorld>().world;
+                let worst = sim
+                    .roads
+                    .segments
+                    .values()
+                    .filter(|s| s.kind == citysim_sim::RoadKind::Street)
+                    .max_by(|a, b| a.congestion().total_cmp(&b.congestion()))
+                    .map(|s| {
+                        let (pa, pb) = (sim.roads.node_pos(s.a), sim.roads.node_pos(s.b));
+                        Cell::from_pos([(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5])
+                    });
+                if let Some(c) = worst {
+                    let mut p = pose();
+                    p.focus = cell_center(c, 0.0);
+                    p.distance = 220.0;
+                    w.resource_mut::<CameraOverride>().0 = Some(p);
+                    *w.resource_mut::<OverlayMode>() = OverlayMode::Traffic;
+                }
+                point_at(w, worst);
+            },
+        },
+        Step {
             name: "tooltip",
             wait: 1.2,
             setup: |w| {
