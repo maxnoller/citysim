@@ -238,6 +238,37 @@ impl GridPlayer {
         }
     }
 
+    /// Lay out the next `blocks[z]` blocks of each zone type `[R, C, I]`
+    /// right now, paying for them (a player who builds a whole district on
+    /// day one instead of following demand). Stops at the first block it
+    /// cannot afford; returns the number built. `act` then carries on from
+    /// there.
+    pub fn build_ahead(&mut self, w: &mut World, blocks: [usize; 3]) -> u32 {
+        let mut built = 0;
+        if w.roads.segments.len() == 1 {
+            road(w, (11, 128), (20, 128));
+        }
+        // Interleave the zone types so a short budget still gives a mix.
+        for round in 0..blocks.into_iter().max().unwrap_or(0) {
+            for z in self.zones.clone() {
+                let zi = crate::derived::zone_index(z);
+                if round >= blocks[zi] {
+                    continue;
+                }
+                let Some(b) = self.lists[zi].get(self.next[zi]).copied() else {
+                    continue;
+                };
+                if !b.build(w, z) {
+                    return built;
+                }
+                self.next[zi] += 1;
+                self.blocks_built += 1;
+                built += 1;
+            }
+        }
+        built
+    }
+
     /// Ticks the player has been waiting for money for its next block, 0
     /// when it is not waiting.
     pub fn waiting_for_money_ticks(&self, w: &World) -> u64 {
@@ -246,7 +277,9 @@ impl GridPlayer {
 }
 
 /// An over-eager builder: lays a dense mesh of roads far beyond what the
-/// city needs (until the money runs out), then zones a little housing.
+/// city needs, then zones a little housing. Paying for it, it stops when
+/// the money runs out (a few hundred cells); inside [`prebuilt`] it lays
+/// the whole ~9,000-cell mesh, whose upkeep the town can never carry.
 pub fn overbuilt(w: &mut World) {
     road(w, (11, 128), (200, 128));
     for x in (20..=200).step_by(6) {
