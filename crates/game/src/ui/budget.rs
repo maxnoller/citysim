@@ -738,7 +738,7 @@ fn update_budget(
     // over the buildings) a few times a second, and the table when it or
     // the booked days / balance / tax rate changed.
     cache.age += time.delta_secs();
-    if cache.age >= PROJECTION_EVERY {
+    if cache.age >= PROJECTION_EVERY || cache.key.is_some_and(|k| k.0 != sim.generation) {
         cache.age = 0.0;
         cache.today = budget_now(w);
     }

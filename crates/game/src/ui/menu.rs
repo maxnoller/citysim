@@ -393,6 +393,7 @@ fn spawn_hint(mut commands: Commands, fonts: Res<UiFonts>, stack: Query<Entity, 
 
 #[derive(Default)]
 struct HintProgress {
+    generation: Option<u64>,
     done: [bool; 3],
     grid_version: Option<(u64, u64)>,
     all_done_for: f32,
@@ -415,6 +416,12 @@ fn update_hint(
         return;
     };
     let w = &sim.world;
+    if progress.generation != Some(sim.generation) {
+        // Another city (load / new game): its own progress.
+        progress.generation = Some(sim.generation);
+        progress.done = [false; 3];
+        progress.all_done_for = 0.0;
+    }
     if w.roads.segments.len() > 1 {
         progress.done[0] = true;
     }

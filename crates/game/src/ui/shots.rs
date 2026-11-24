@@ -496,6 +496,8 @@ fn steps() -> Vec<Step> {
             wait: 1.0,
             setup: |w| {
                 reset(w);
+                stash_world(w);
+                w.resource_mut::<SimWorld>().replace(citysim_sim::World::new(1));
                 w.resource_mut::<UiState>().hint_visible = true;
                 w.resource_mut::<SimClock>().paused = true;
             },
