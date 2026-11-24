@@ -13,15 +13,15 @@ use super::palette;
 use super::road_geom::{ROAD_Y, lane_offset};
 use super::scene::WorldMaterials;
 use super::vehicle_gen::{self, SHAPES};
-use crate::shared::{GameSet, SimWorld};
+use crate::shared::{GameSet, SimWorld, WorldCamera};
 
 /// If a vehicle moves further than this in one tick it teleported (new trip).
 const TELEPORT_M: f32 = 30.0;
 
 #[derive(Resource)]
 pub struct VehicleModels {
-    /// `[shape * colours + colour]`.
-    meshes: Vec<Handle<Mesh>>,
+    /// `[shape * colours + colour]` -> (detailed, distant).
+    meshes: Vec<(Handle<Mesh>, Handle<Mesh>)>,
 }
 
 impl VehicleModels {
@@ -30,10 +30,17 @@ impl VehicleModels {
     }
 }
 
+/// Camera distance beyond which cars use the simplified model (with a
+/// little hysteresis so they do not flicker between models).
+const LOD_FAR: f32 = 480.0;
+const LOD_NEAR: f32 = 440.0;
+
 #[derive(Component)]
 struct VehicleVisual {
     prev: (Vec2, f32),
     cur: (Vec2, f32),
+    model: usize,
+    lod: bool,
 }
 
 #[derive(Default)]
@@ -59,7 +66,10 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     let mut handles = Vec::new();
     for shape in 0..SHAPES {
         for &c in &palette::CAR_BODIES {
-            handles.push(meshes.add(vehicle_gen::car_model(c, shape).build()));
+            handles.push((
+                meshes.add(vehicle_gen::car_model(c, shape, false).build()),
+                meshes.add(vehicle_gen::car_model(c, shape, true).build()),
+            ));
         }
     }
     commands.insert_resource(VehicleModels { meshes: handles });
@@ -103,8 +113,10 @@ fn sync_vehicles(
     models: Res<VehicleModels>,
     mats: Res<WorldMaterials>,
     mut state: Local<SyncState>,
-    mut q: Query<(&mut VehicleVisual, &mut Transform)>,
+    cams: Query<&GlobalTransform, With<WorldCamera>>,
+    mut q: Query<(&mut VehicleVisual, &mut Transform, &mut Mesh3d)>,
 ) {
+    let cam = cams.single().map_or(Vec3::ZERO, |c| c.translation());
     let world = &sim.world;
     if state.generation != sim.generation {
         for (_, e) in state.entities.drain() {
@@ -138,7 +150,9 @@ fn sync_vehicles(
         let now = sample(world, v);
         match state.entities.get(&id) {
             Some(&e) => {
-                let Ok((mut vis, mut t)) = q.get_mut(e) else { continue };
+                let Ok((mut vis, mut t, mut mesh)) = q.get_mut(e) else {
+                    continue;
+                };
                 if stepped {
                     vis.prev = if advanced { vis.cur } else { now };
                     vis.cur = now;
@@ -152,12 +166,28 @@ fn sync_vehicles(
                 if *t != new {
                     *t = new;
                 }
+                let d = cam.distance(new.translation);
+                let lod = if vis.lod { d > LOD_NEAR } else { d > LOD_FAR };
+                if lod != vis.lod {
+                    vis.lod = lod;
+                    let (near, far) = &models.meshes[vis.model];
+                    mesh.0 = if lod { far.clone() } else { near.clone() };
+                }
             }
             None => {
+                let model = model_index(v.seed);
+                let pos = Vec3::new(now.0.x, ROAD_Y, now.0.y);
+                let lod = cam.distance(pos) > LOD_FAR;
+                let (near, far) = &models.meshes[model];
                 let e = commands
                     .spawn((
-                        VehicleVisual { prev: now, cur: now },
-                        Mesh3d(models.meshes[model_index(v.seed)].clone()),
+                        VehicleVisual {
+                            prev: now,
+                            cur: now,
+                            model,
+                            lod,
+                        },
+                        Mesh3d(if lod { far.clone() } else { near.clone() }),
                         MeshMaterial3d(mats.lit.clone()),
                         Transform::from_xyz(now.0.x, ROAD_Y, now.0.y).with_rotation(Quat::from_rotation_y(-now.1)),
                     ))

@@ -119,10 +119,12 @@ impl Face {
     /// Framed window centred at `a`, sill at `b`.
     fn window(&self, m: &mut MeshBuilder, a: f32, b: f32, w: f32, h: f32, frame: Color, glass: Color) {
         let f = 0.1;
+        if m.lod {
+            self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, mix(glass, frame, 0.25));
+            return;
+        }
         self.rect(m, a - w * 0.5 - f, a + w * 0.5 + f, b - f, b + h + f, 0.03, frame);
         self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, glass);
-        // Mullion.
-        self.rect(m, a - 0.03, a + 0.03, b, b + h, 0.06, frame);
     }
 
     /// Box sticking out of the face (canopies, balconies, signs).
@@ -313,6 +315,10 @@ fn flat_roof(m: &mut MeshBuilder, r: Rect, top: f32, wall: Color, roof: Color, p
 
 /// Rooftop clutter: AC boxes, vents, a water tank.
 fn roof_details(m: &mut MeshBuilder, rng: &mut Stream, r: Rect, top: f32) {
+    m.detail_only(|m| roof_details_inner(m, rng, r, top));
+}
+
+fn roof_details_inner(m: &mut MeshBuilder, rng: &mut Stream, r: Rect, top: f32) {
     let n = 1 + rng.below(3);
     for _ in 0..n {
         let w = rng.range(0.8, 1.6);
@@ -353,6 +359,10 @@ fn hedge(m: &mut MeshBuilder, a: Vec2, b: Vec2, h: f32) {
 }
 
 fn fence(m: &mut MeshBuilder, a: Vec2, b: Vec2) {
+    m.detail_only(|m| fence_inner(m, a, b));
+}
+
+fn fence_inner(m: &mut MeshBuilder, a: Vec2, b: Vec2) {
     let len = a.distance(b);
     if len < 0.3 {
         return;
@@ -920,7 +930,8 @@ fn supermarket(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
         if i < n && rng.chance(0.55) {
             let body_col = rng.pick(&palette::CAR_BODIES);
             let c = Vec3::new(x + 1.3, 0.03, (bay_z0 + bay_z1) * 0.5);
-            super::vehicle_gen::car(m, c, std::f32::consts::FRAC_PI_2, body_col, rng.below(3));
+            let shape = rng.below(3);
+            m.detail_only(|m| super::vehicle_gen::car(m, c, std::f32::consts::FRAC_PI_2, body_col, shape));
         }
     }
 }
@@ -1064,8 +1075,9 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
 // ------------------------------------------------------------------ entry
 
 /// Build the model for `key`.
-pub fn generate(key: ModelKey) -> MeshBuilder {
+pub fn generate(key: ModelKey, lod: bool) -> MeshBuilder {
     let mut m = MeshBuilder::with_ground_ao(0.32);
+    m.lod = lod;
     let w = key.cells.0 as f32 * citysim_sim::CELL_SIZE;
     let d = key.cells.1 as f32 * citysim_sim::CELL_SIZE;
     let lot = Rect {
@@ -1110,12 +1122,15 @@ mod tests {
             for level in 1..=5u8 {
                 for cells in [(1, 1), (2, 2), (1, 2), (2, 1), (3, 3)] {
                     for variant in 0..VARIANTS as u8 {
-                        let m = generate(ModelKey {
-                            kind,
-                            cells,
-                            level,
-                            variant,
-                        });
+                        let m = generate(
+                            ModelKey {
+                                kind,
+                                cells,
+                                level,
+                                variant,
+                            },
+                            variant % 2 == 0,
+                        );
                         assert!(m.triangle_count() > 20, "{kind:?} {level} {cells:?}");
                         let half = cells.0.max(cells.1) as f32 * 4.0 + 1.0;
                         for p in &m.pos {
@@ -1127,5 +1142,44 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tri_report {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn report_triangles() {
+        for kind in Zone::ALL {
+            for level in 1..=4u8 {
+                let total: usize = (0..VARIANTS as u8)
+                    .map(|variant| {
+                        generate(
+                            ModelKey {
+                                kind,
+                                cells: (1, 1),
+                                level,
+                                variant,
+                            },
+                            true,
+                        )
+                        .triangle_count()
+                    })
+                    .sum();
+                println!("{kind:?} L{level}: avg {} tris", total / VARIANTS as usize);
+            }
+        }
+        let mut m = MeshBuilder::new();
+        props::round_tree(&mut m, Vec3::ZERO, 1.0, Color::WHITE, 0.0);
+        println!("round tree {}", m.triangle_count());
+        let mut m = MeshBuilder::new();
+        props::pine_tree(&mut m, Vec3::ZERO, 1.0, Color::WHITE, 0.0);
+        println!("pine {}", m.triangle_count());
+        println!(
+            "car {}",
+            super::super::vehicle_gen::car_model(Color::WHITE, 0, false).triangle_count()
+        );
     }
 }

@@ -64,6 +64,25 @@ pub fn blob(m: &mut MeshBuilder, c: Vec3, r: Vec3, color: Color, yaw: f32) {
     }
 }
 
+/// Eight-sided canopy for distant trees.
+pub fn octa_blob(m: &mut MeshBuilder, c: Vec3, r: Vec3, color: Color, yaw: f32) {
+    let q = Quat::from_rotation_y(yaw);
+    let top = c + Vec3::Y * r.y;
+    let bottom = c - Vec3::Y * r.y;
+    let ring: Vec<Vec3> = (0..4)
+        .map(|i| {
+            let a = i as f32 * std::f32::consts::FRAC_PI_2;
+            c + q * Vec3::new(a.cos() * r.x, 0.0, a.sin() * r.z)
+        })
+        .collect();
+    let low = shade(color, 0.78);
+    for i in 0..4 {
+        let (a, b) = (ring[i], ring[(i + 1) % 4]);
+        m.tri(top, b, a, color);
+        m.tri(bottom, a, b, low);
+    }
+}
+
 /// Broadleaf tree: trunk and one or two canopy blobs. `s` scales it
 /// (1.0 is about 7 m tall).
 pub fn round_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32) {
@@ -81,12 +100,12 @@ pub fn pine_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f3
 
 /// Low garden bush.
 pub fn bush(m: &mut MeshBuilder, base: Vec3, s: f32, color: Color, yaw: f32) {
-    blob(m, base + Vec3::Y * 0.5 * s, Vec3::new(0.8, 0.58, 0.8) * s, color, yaw);
+    m.detail_only(|m| blob(m, base + Vec3::Y * 0.5 * s, Vec3::new(0.8, 0.58, 0.8) * s, color, yaw));
 }
 
 /// Wooden crate.
 pub fn crate_box(m: &mut MeshBuilder, base: Vec3, size: f32, yaw: f32) {
-    m.box_yaw(base, Vec3::splat(size), yaw, palette::CRATE, shade(palette::CRATE, 1.1));
+    m.detail_only(|m| m.box_yaw(base, Vec3::splat(size), yaw, palette::CRATE, shade(palette::CRATE, 1.1)));
 }
 
 #[cfg(test)]
@@ -101,6 +120,13 @@ mod tests {
             let p: Vec<Vec3> = t.iter().map(|&i| Vec3::from(m.pos[i as usize])).collect();
             let n = (p[1] - p[0]).cross(p[2] - p[0]);
             assert!(n.dot(p[0] + p[1] + p[2]) > 0.0);
+        }
+        let mut m = MeshBuilder::new();
+        octa_blob(&mut m, Vec3::ZERO, Vec3::ONE, Color::WHITE, 0.4);
+        for t in m.idx.chunks(3) {
+            let p: Vec<Vec3> = t.iter().map(|&i| Vec3::from(m.pos[i as usize])).collect();
+            let n = (p[1] - p[0]).cross(p[2] - p[0]);
+            assert!(n.dot(p[0] + p[1] + p[2]) > 0.0, "octa face inward");
         }
         let mut m = MeshBuilder::new();
         round_tree(&mut m, Vec3::ZERO, 1.0, Color::WHITE, 0.0);

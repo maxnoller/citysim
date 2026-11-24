@@ -24,44 +24,48 @@ fn extrude(m: &mut MeshBuilder, prof: &[Vec2], z0: f32, z1: f32, side: Color, ar
     }
 }
 
-/// Box-ish wheel (8-sided disc along z).
+/// Six-sided wheel along z with a cap on the outer side only.
 fn wheel(m: &mut MeshBuilder, c: Vec3, r: f32, w: f32) {
-    let prof: Vec<Vec2> = (0..8)
-        .map(|i| {
-            let a = (i as f32 + 0.5) / 8.0 * std::f32::consts::TAU;
-            Vec2::new(c.x + r * a.cos(), c.y + r * a.sin())
-        })
-        .collect();
-    let hub = shade(palette::GUARDRAIL, 0.8);
-    extrude(m, &prof, c.z - w * 0.5, c.z + w * 0.5, palette::TYRE, &|_| {
-        palette::TYRE
-    });
-    // Hub caps on the outer side.
+    let n = 6;
+    let p = |i: usize, z: f32| {
+        let a = (i as f32 + 0.5) / n as f32 * std::f32::consts::TAU;
+        Vec3::new(c.x + r * a.cos(), c.y + r * a.sin(), z)
+    };
     let s = if c.z > 0.0 { 1.0 } else { -1.0 };
-    let z = c.z + s * (w * 0.5 + 0.005);
-    let k = r * 0.5;
-    let q = [
-        Vec3::new(c.x - k, c.y - k, z),
-        Vec3::new(c.x + k, c.y - k, z),
-        Vec3::new(c.x + k, c.y + k, z),
-        Vec3::new(c.x - k, c.y + k, z),
-    ];
-    if s > 0.0 {
-        m.quad(q[0], q[1], q[2], q[3], hub);
-    } else {
-        m.quad(q[0], q[3], q[2], q[1], hub);
+    let zo = c.z + s * w * 0.5;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        // Tread, facing away from the axle.
+        m.quad(
+            p(i, c.z - w * 0.5),
+            p(j, c.z - w * 0.5),
+            p(j, c.z + w * 0.5),
+            p(i, c.z + w * 0.5),
+            palette::TYRE,
+        );
+    }
+    let hub = shade(palette::GUARDRAIL, 0.75);
+    let cap: Vec<Vec3> = (0..n).map(|i| p(i, zo)).collect();
+    for i in 1..n - 1 {
+        if s > 0.0 {
+            m.tri(cap[0], cap[i], cap[i + 1], hub);
+        } else {
+            m.tri(cap[0], cap[i + 1], cap[i], hub);
+        }
     }
 }
 
 /// A car centred at `c`, rotated `yaw` about +y, into `out`.
 pub fn car(out: &mut MeshBuilder, c: Vec3, yaw: f32, body: Color, shape: u32) {
-    let m = car_model(body, shape);
+    let m = car_model(body, shape, false);
     out.append(&m, c, yaw, Vec3::ONE, [1.0; 4]);
 }
 
-/// Car model in its local frame.
-pub fn car_model(body: Color, shape: u32) -> MeshBuilder {
+/// Car model in its local frame. `lod`: the distant version (no wheels,
+/// lights or side glass).
+pub fn car_model(body: Color, shape: u32, lod: bool) -> MeshBuilder {
     let mut m = MeshBuilder::new();
+    m.lod = lod;
     let glass = palette::CAR_GLASS;
     let dark = shade(body, 0.75);
     let (len, wid) = match shape {
@@ -145,6 +149,9 @@ pub fn car_model(body: Color, shape: u32) -> MeshBuilder {
             side_windows(&mut m, front + 0.05, back + 0.1, 0.98, 1.36, cw - 0.05);
         }
     }
+    if lod {
+        return m;
+    }
     // Lights.
     let head = Color::srgb(0.98, 0.96, 0.85);
     let tail = Color::srgb(0.75, 0.12, 0.1);
@@ -187,6 +194,9 @@ pub fn car_model(body: Color, shape: u32) -> MeshBuilder {
 
 /// Glass strips on both sides of the cabin between `x1` (front) and `x0`.
 fn side_windows(m: &mut MeshBuilder, x1: f32, x0: f32, y0: f32, y1: f32, z: f32) {
+    if m.lod {
+        return;
+    }
     let g = palette::CAR_GLASS;
     let z = z + 0.01;
     m.quad(
@@ -212,7 +222,7 @@ mod tests {
     #[test]
     fn cars_fit_a_lane_and_sit_on_the_ground() {
         for shape in 0..SHAPES {
-            let m = car_model(Color::WHITE, shape);
+            let m = car_model(Color::WHITE, shape, false);
             let (mut min, mut max) = (Vec3::MAX, Vec3::MIN);
             for p in &m.pos {
                 min = min.min(Vec3::from(*p));

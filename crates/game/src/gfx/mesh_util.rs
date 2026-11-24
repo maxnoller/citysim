@@ -21,6 +21,8 @@ pub struct MeshBuilder {
     /// When > 0, vertical faces get darker towards the ground (baked
     /// ambient occlusion), by up to this fraction at `y = 0`.
     pub ground_ao: f32,
+    /// Building the distant level of detail: generators skip small things.
+    pub lod: bool,
 }
 
 impl MeshBuilder {
@@ -37,6 +39,29 @@ impl MeshBuilder {
 
     pub fn is_empty(&self) -> bool {
         self.idx.is_empty()
+    }
+
+    /// Current size, for [`MeshBuilder::rollback`].
+    pub fn mark(&self) -> (usize, usize) {
+        (self.pos.len(), self.idx.len())
+    }
+
+    /// Drop everything added since `mark`.
+    pub fn rollback(&mut self, mark: (usize, usize)) {
+        self.pos.truncate(mark.0);
+        self.nrm.truncate(mark.0);
+        self.col.truncate(mark.0);
+        self.idx.truncate(mark.1);
+    }
+
+    /// Run `f`, keeping its geometry only in the detailed model (random
+    /// numbers are still drawn so both levels of detail stay identical).
+    pub fn detail_only(&mut self, f: impl FnOnce(&mut MeshBuilder)) {
+        let mark = self.mark();
+        f(self);
+        if self.lod {
+            self.rollback(mark);
+        }
     }
 
     pub fn triangle_count(&self) -> usize {

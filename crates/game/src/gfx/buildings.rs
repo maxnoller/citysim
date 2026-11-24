@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 use citysim_sim::{Building, BuildingId, CELL_SIZE, Facing};
 
@@ -19,21 +20,30 @@ const SHRINK_SECS: f32 = 0.35;
 /// a loaded save) just appear.
 const ANIMATE_IF_YOUNGER: u64 = 3 * citysim_sim::TICKS_PER_SECOND as u64;
 
-/// Cache of generated building models.
+/// Camera distance (m) where buildings cross-fade to their simplified model.
+pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
+
+/// Cache of generated building models: `(detailed, distant)` per key.
 #[derive(Resource, Default)]
 pub struct BuildingModels {
-    meshes: HashMap<ModelKey, Handle<Mesh>>,
+    meshes: HashMap<ModelKey, (Handle<Mesh>, Handle<Mesh>)>,
 }
 
 impl BuildingModels {
+    /// Number of distinct building models (each has two levels of detail).
     pub fn count(&self) -> usize {
         self.meshes.len()
     }
 
-    fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+    fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
         self.meshes
             .entry(key)
-            .or_insert_with(|| meshes.add(building_gen::generate(key).build()))
+            .or_insert_with(|| {
+                (
+                    meshes.add(building_gen::generate(key, false).build()),
+                    meshes.add(building_gen::generate(key, true).build()),
+                )
+            })
             .clone()
     }
 }
@@ -139,11 +149,28 @@ fn sync_buildings(
         let mk = model_key(b);
         let young = world.time.tick.saturating_sub(b.created_tick) < ANIMATE_IF_YOUNGER && !reloaded;
         let tf = Transform::from_translation(footprint_center(b)).with_rotation(facing_rotation(b.facing));
-        let mut ec = commands.spawn((
-            BuildingVisual,
-            Mesh3d(models.get(mk, &mut meshes)),
-            MeshMaterial3d(mats.lit.clone()),
-        ));
+        let (detail, far) = models.get(mk, &mut meshes);
+        let mut ec = commands.spawn((BuildingVisual, Visibility::default()));
+        ec.with_children(|p| {
+            p.spawn((
+                Mesh3d(detail),
+                MeshMaterial3d(mats.lit.clone()),
+                VisibilityRange {
+                    start_margin: 0.0..0.0,
+                    end_margin: LOD_DISTANCE,
+                    use_aabb: false,
+                },
+            ));
+            p.spawn((
+                Mesh3d(far),
+                MeshMaterial3d(mats.lit.clone()),
+                VisibilityRange {
+                    start_margin: LOD_DISTANCE,
+                    end_margin: 1e6..1e6,
+                    use_aabb: false,
+                },
+            ));
+        });
         if young {
             ec.insert((tf.with_scale(Vec3::new(0.9, 0.01, 0.9)), Growing { start: now }));
         } else {

@@ -13,6 +13,7 @@ mod props;
 mod road_geom;
 mod roads;
 mod scene;
+mod stats;
 mod trees;
 mod vehicle_gen;
 mod vehicles;
@@ -44,6 +45,7 @@ impl Plugin for GfxPlugin {
             cursor::CursorPlugin,
             overlay::OverlayPlugin,
             trees::TreesPlugin,
+            stats::StatsPlugin,
         ));
     }
 }

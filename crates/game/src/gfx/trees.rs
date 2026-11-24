@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 use citysim_sim::{CELL_SIZE, Cell, Grid, MAP_CELLS, MAP_SIZE_M, Occupant, World};
 
@@ -24,14 +25,18 @@ use crate::shared::{GameSet, GraphicsQuality, SimWorld};
 const CHUNK: i32 = 32;
 /// How far the countryside trees reach beyond the map edge, metres.
 const OUTSIDE_REACH: f32 = 1100.0;
+/// Camera distance ranges for detailed and distant tree chunks (measured
+/// to the chunk centre, so generous).
+const TREE_LOD_NEAR: (std::ops::Range<f32>, std::ops::Range<f32>) = (0.0..0.0, 800.0..860.0);
+const TREE_LOD_FAR: (std::ops::Range<f32>, std::ops::Range<f32>) = (800.0..860.0, 1e6..1e6);
 /// Countryside chunk size, metres.
 const OUT_CHUNK: f32 = 512.0;
 
 #[derive(Default)]
 struct TreeChunks {
     key: Option<((u64, u64), GraphicsQuality)>,
-    /// Chunk -> (cells hash, entity, trees placed).
-    chunks: HashMap<IVec2, (u64, Entity, usize)>,
+    /// Chunk -> (cells hash, [near, far] entities, trees placed).
+    chunks: HashMap<IVec2, (u64, [Entity; 2], usize)>,
     outside: Vec<Entity>,
     outside_key: Option<(GraphicsQuality, Option<[u32; 2]>)>,
 }
@@ -110,6 +115,7 @@ fn keep(t: &Tree, density: f32) -> bool {
 
 fn draw_tree(m: &mut MeshBuilder, t: &Tree, cheap: bool) {
     match (t.small, cheap) {
+        (_, true) if t.small > 0 => {}
         (1, _) => props::bush(m, t.pos, t.scale, t.canopy, t.yaw),
         (2, _) => props::blob(
             m,
@@ -121,16 +127,13 @@ fn draw_tree(m: &mut MeshBuilder, t: &Tree, cheap: bool) {
         (_, false) if t.pine => props::pine_tree(m, t.pos, t.scale, t.canopy, t.yaw),
         (_, false) => props::round_tree(m, t.pos, t.scale, t.canopy, t.yaw),
         (_, true) if t.pine => m.cone(t.pos, 1.9 * t.scale, 7.5 * t.scale, 5, t.canopy, t.yaw),
-        (_, true) => {
-            props::blob(
-                m,
-                t.pos + Vec3::Y * 3.6 * t.scale,
-                Vec3::new(2.3, 2.6, 2.3) * t.scale,
-                t.canopy,
-                t.yaw,
-            );
-            m.cylinder(t.pos, 0.25 * t.scale, 1.5 * t.scale, 3, palette::TRUNK, palette::TRUNK);
-        }
+        (_, true) => props::octa_blob(
+            m,
+            t.pos + Vec3::Y * 4.0 * t.scale,
+            Vec3::new(2.4, 2.6, 2.4) * t.scale,
+            t.canopy,
+            t.yaw,
+        ),
     }
 }
 
@@ -187,6 +190,7 @@ fn rebuild_trees(
                 continue;
             }
             let mut m = MeshBuilder::new();
+            let mut far = MeshBuilder::new();
             let mut placed = 0;
             for y in cy * CHUNK..(cy + 1) * CHUNK {
                 for x in cx * CHUNK..(cx + 1) * CHUNK {
@@ -197,28 +201,37 @@ fn rebuild_trees(
                     cell_trees(x, y, &mut trees);
                     for t in trees.iter().filter(|t| keep(t, dens)) {
                         draw_tree(&mut m, t, false);
+                        draw_tree(&mut far, t, true);
                         placed += usize::from(t.small == 0);
                     }
                 }
             }
-            let old = state.chunks.get(&c).map(|(_, e, _)| *e);
-            let e = match old {
-                Some(e) => e,
-                None => commands
-                    .spawn((
-                        Name::new("Trees"),
-                        MeshMaterial3d(mats.lit.clone()),
-                        Transform::default(),
-                        Visibility::default(),
-                    ))
-                    .id(),
+            let ents = match state.chunks.get(&c) {
+                Some((_, e, _)) => *e,
+                None => [TREE_LOD_NEAR, TREE_LOD_FAR].map(|range| {
+                    commands
+                        .spawn((
+                            Name::new("Trees"),
+                            MeshMaterial3d(mats.lit.clone()),
+                            Transform::default(),
+                            Visibility::default(),
+                            VisibilityRange {
+                                start_margin: range.0,
+                                end_margin: range.1,
+                                use_aabb: true,
+                            },
+                        ))
+                        .id()
+                }),
             };
-            if m.is_empty() {
-                commands.entity(e).remove::<Mesh3d>();
-            } else {
-                commands.entity(e).insert(Mesh3d(meshes.add(m.build())));
+            for (e, mb) in ents.into_iter().zip([m, far]) {
+                if mb.is_empty() {
+                    commands.entity(e).remove::<Mesh3d>();
+                } else {
+                    commands.entity(e).insert(Mesh3d(meshes.add(mb.build())));
+                }
             }
-            state.chunks.insert(c, (hash, e, placed));
+            state.chunks.insert(c, (hash, ents, placed));
         }
     }
     count.0 = state.chunks.values().map(|(_, _, n)| n).sum();
