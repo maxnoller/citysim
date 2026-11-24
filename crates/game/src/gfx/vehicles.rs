@@ -470,7 +470,7 @@ enum Kind {
 }
 
 #[derive(Component)]
-struct VehicleVisual {
+pub(super) struct VehicleVisual {
     prev: (Vec2, f32),
     cur: (Vec2, f32),
     seg: Option<(SegmentId, bool)>,

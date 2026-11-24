@@ -8,9 +8,10 @@ use std::collections::HashMap;
 
 use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
-use citysim_sim::{Building, BuildingId, CELL_SIZE, Facing};
+use citysim_sim::{Building, BuildingId, CELL_SIZE, Facing, RoadNetwork};
 
 use super::building_gen::{self, ModelKey, VARIANTS};
+use super::road_geom;
 use super::scene::WorldMaterials;
 use crate::shared::{GameSet, SimWorld};
 
@@ -49,7 +50,7 @@ impl BuildingModels {
 }
 
 #[derive(Component)]
-struct BuildingVisual;
+pub(super) struct BuildingVisual;
 
 #[derive(Component)]
 struct Growing {
@@ -57,14 +58,147 @@ struct Growing {
 }
 
 #[derive(Component)]
-struct Shrinking {
+pub(super) struct Shrinking {
     start: f32,
 }
 
 #[derive(Default)]
 struct Spawned {
-    key: Option<(u64, u64)>,
-    entities: HashMap<BuildingId, (Entity, ModelKey, Facing)>,
+    key: Option<((u64, u64), (u64, u64))>,
+    entities: HashMap<BuildingId, (Entity, ModelKey, Facing, Inset)>,
+}
+
+/// How a building model is shrunk away from a diagonal road: uniform
+/// scale about the lot corner farthest from the road, and the resulting
+/// shift of the lot centre (world xz).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Inset {
+    pub scale: f32,
+    pub shift: Vec2,
+}
+
+impl Inset {
+    const NONE: Inset = Inset {
+        scale: 1.0,
+        shift: Vec2::ZERO,
+    };
+}
+
+/// Clearance kept between a building lot and a diagonal road's edge, m.
+const ROAD_CLEARANCE: f32 = 0.3;
+/// A building is never shrunk below this.
+const MIN_INSET_SCALE: f32 = 0.45;
+
+/// Diagonal road segments as (a, b, half-width incl. sidewalks). Roads
+/// along the grid axes fill their cells exactly and need no inset.
+pub fn diagonal_roads(roads: &RoadNetwork) -> Vec<(Vec2, Vec2, f32)> {
+    roads
+        .segments
+        .iter()
+        .filter_map(|(_, seg)| {
+            let a = Vec2::from(roads.nodes.get(seg.a)?.pos);
+            let b = Vec2::from(roads.nodes.get(seg.b)?.pos);
+            let d = (b - a).normalize_or_zero();
+            (d.x.abs() > 0.02 && d.y.abs() > 0.02).then_some((a, b, road_geom::style(seg.kind).outer()))
+        })
+        .collect()
+}
+
+/// Distance from point `p` to segment `a..b`.
+fn point_seg(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
+/// Distance between segment `a..b` and the rectangle `min..max` (0 when
+/// they intersect).
+fn seg_rect(a: Vec2, b: Vec2, min: Vec2, max: Vec2) -> f32 {
+    // Liang-Barsky clip: does the segment enter the rectangle?
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    let mut inside = true;
+    for (p, q) in [
+        (-d.x, a.x - min.x),
+        (d.x, max.x - a.x),
+        (-d.y, a.y - min.y),
+        (d.y, max.y - a.y),
+    ] {
+        if p.abs() < 1e-9 {
+            if q < 0.0 {
+                inside = false;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                t0 = t0.max(r);
+            } else {
+                t1 = t1.min(r);
+            }
+        }
+    }
+    if inside && t0 <= t1 {
+        return 0.0;
+    }
+    let corners = [min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)];
+    let to_rect = |p: Vec2| p.clamp(min, max).distance(p);
+    corners
+        .iter()
+        .map(|&c| point_seg(c, a, b))
+        .chain([to_rect(a), to_rect(b)])
+        .fold(f32::MAX, f32::min)
+}
+
+/// Shrink a lot (`min..max`, world xz) away from the diagonal roads that
+/// cut into it (on a 45 degree road the road surface covers the corners of
+/// the zoned cells beside it).
+pub fn diagonal_inset(min: Vec2, max: Vec2, roads: &[(Vec2, Vec2, f32)]) -> Inset {
+    let mut best = Inset::NONE;
+    let corners = [min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)];
+    let centre = (min + max) * 0.5;
+    for &(a, b, w) in roads {
+        let need = w + ROAD_CLEARANCE;
+        // Cheap reject on bounding boxes.
+        if a.x.min(b.x) - need > max.x
+            || a.x.max(b.x) + need < min.x
+            || a.y.min(b.y) - need > max.y
+            || a.y.max(b.y) + need < min.y
+            || seg_rect(a, b, min, max) >= need
+        {
+            continue;
+        }
+        // Scale about the corner farthest from the road.
+        let anchor = *corners
+            .iter()
+            .max_by(|p, q| point_seg(**p, a, b).total_cmp(&point_seg(**q, a, b)))
+            .expect("corners");
+        if point_seg(anchor, a, b) < need {
+            continue;
+        }
+        let fits = |s: f32| {
+            let (lo, hi) = (anchor + (min - anchor) * s, anchor + (max - anchor) * s);
+            seg_rect(a, b, lo.min(hi), lo.max(hi)) >= need
+        };
+        let (mut lo, mut hi) = (MIN_INSET_SCALE, 1.0f32);
+        if !fits(lo) {
+            continue;
+        }
+        for _ in 0..14 {
+            let mid = (lo + hi) * 0.5;
+            if fits(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo < best.scale {
+            best = Inset {
+                scale: lo,
+                shift: (anchor + (centre - anchor) * lo) - centre,
+            };
+        }
+    }
+    best
 }
 
 pub struct BuildingsPlugin;
@@ -124,19 +258,28 @@ fn sync_buildings(
     mut meshes: ResMut<Assets<Mesh>>,
     mut spawned: Local<Spawned>,
 ) {
-    let key = sim.key(sim.world.versions.buildings);
+    let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
     if spawned.key == Some(key) {
         return;
     }
-    let reloaded = spawned.key.is_some_and(|(g, _)| g != sim.generation);
+    let reloaded = spawned.key.is_some_and(|((g, _), _)| g != sim.generation);
     spawned.key = Some(key);
     let now = time.elapsed_secs();
     let world = &sim.world;
     let buildings = &world.buildings;
-    spawned.entities.retain(|id, (e, k, f)| {
+    let diagonals = diagonal_roads(&world.roads);
+    let inset_of = |b: &Building| {
+        if diagonals.is_empty() {
+            return Inset::NONE;
+        }
+        let (w, d) = b.size();
+        let min = Vec2::new(b.footprint.min.x as f32, b.footprint.min.y as f32) * CELL_SIZE;
+        diagonal_inset(min, min + Vec2::new(w as f32, d as f32) * CELL_SIZE, &diagonals)
+    };
+    spawned.entities.retain(|id, (e, k, f, i)| {
         let keep = buildings
             .get(*id)
-            .is_some_and(|b| model_key(b) == *k && b.facing == *f && !reloaded);
+            .is_some_and(|b| model_key(b) == *k && b.facing == *f && inset_of(b) == *i && !reloaded);
         if !keep {
             commands.entity(*e).remove::<Growing>().insert(Shrinking { start: now });
         }
@@ -148,11 +291,18 @@ fn sync_buildings(
         }
         let mk = model_key(b);
         let young = world.time.tick.saturating_sub(b.created_tick) < ANIMATE_IF_YOUNGER && !reloaded;
-        let tf = Transform::from_translation(footprint_center(b)).with_rotation(facing_rotation(b.facing));
+        let rot = facing_rotation(b.facing);
+        let tf = Transform::from_translation(footprint_center(b)).with_rotation(rot);
+        let inset = inset_of(b);
+        // The inset lives on the model children, so the grow animation can
+        // scale the parent freely.
+        let model_tf = Transform::from_translation(rot.inverse() * Vec3::new(inset.shift.x, 0.0, inset.shift.y))
+            .with_scale(Vec3::splat(inset.scale));
         let (detail, far) = models.get(mk, &mut meshes);
         let mut ec = commands.spawn((BuildingVisual, Visibility::default()));
         ec.with_children(|p| {
             p.spawn((
+                model_tf,
                 Mesh3d(detail),
                 MeshMaterial3d(mats.lit.clone()),
                 VisibilityRange {
@@ -162,6 +312,7 @@ fn sync_buildings(
                 },
             ));
             p.spawn((
+                model_tf,
                 Mesh3d(far),
                 MeshMaterial3d(mats.lit.clone()),
                 VisibilityRange {
@@ -176,7 +327,7 @@ fn sync_buildings(
         } else {
             ec.insert(tf);
         }
-        spawned.entities.insert(id, (ec.id(), mk, b.facing));
+        spawned.entities.insert(id, (ec.id(), mk, b.facing, inset));
     }
 }
 
@@ -234,5 +385,91 @@ mod tests {
     fn grow_easing_ends_at_one() {
         assert!(ease_out_back(0.0).abs() < 1e-6);
         assert!((ease_out_back(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    /// A town with a 45 degree street and housing zoned on both sides.
+    fn diagonal_town() -> citysim_sim::World {
+        use citysim_sim::{Cell, Command, World, Zone};
+        let mut w = World::new(3);
+        w.economy.money = 1_000_000;
+        for (a, b) in [((11, 128), (40, 128)), ((40, 128), (60, 108)), ((25, 120), (25, 136))] {
+            w.apply(Command::BuildRoad {
+                from: Cell::new(a.0, a.1),
+                to: Cell::new(b.0, b.1),
+            })
+            .expect("road");
+        }
+        w.apply(Command::SetZone {
+            min: Cell::new(38, 104),
+            max: Cell::new(64, 130),
+            zone: Some(Zone::Residential),
+        })
+        .expect("zone");
+        w.apply(Command::SetZone {
+            min: Cell::new(12, 120),
+            max: Cell::new(37, 127),
+            zone: Some(Zone::Commercial),
+        })
+        .expect("zone");
+        for _ in 0..citysim_sim::balance::TICKS_PER_DAY * 2 {
+            w.step();
+        }
+        w
+    }
+
+    #[test]
+    fn buildings_beside_a_diagonal_road_are_inset_clear_of_it() {
+        let w = diagonal_town();
+        let diagonals = diagonal_roads(&w.roads);
+        assert!(!diagonals.is_empty());
+        let mut inset_count = 0;
+        let mut beside = 0;
+        for (_, b) in w.buildings.iter() {
+            let (sw, sd) = b.size();
+            let min = Vec2::new(b.footprint.min.x as f32, b.footprint.min.y as f32) * CELL_SIZE;
+            let max = min + Vec2::new(sw as f32, sd as f32) * CELL_SIZE;
+            let raw = diagonals
+                .iter()
+                .map(|&(a, c, _)| seg_rect(a, c, min, max))
+                .fold(f32::MAX, f32::min);
+            if raw < 4.0 {
+                beside += 1;
+            }
+            let i = diagonal_inset(min, max, &diagonals);
+            if i.scale < 1.0 {
+                inset_count += 1;
+            }
+            // The drawn lot after the inset.
+            let c = (min + max) * 0.5 + i.shift;
+            let half = (max - min) * 0.5 * i.scale;
+            for &(a, c2, hw) in &diagonals {
+                let d = seg_rect(a, c2, c - half, c + half);
+                assert!(
+                    d >= hw + ROAD_CLEARANCE - 0.05,
+                    "building at {min} clips a diagonal road: {d}"
+                );
+            }
+        }
+        println!(
+            "{} buildings, {beside} beside the diagonal, {inset_count} inset",
+            w.buildings.len()
+        );
+        assert!(
+            beside > 0 && inset_count > 0,
+            "the test town grew no buildings beside the diagonal"
+        );
+    }
+
+    #[test]
+    fn inset_keeps_the_far_corner_and_shrinks_toward_it() {
+        // A cell whose corner touches a 45 degree centre line.
+        let road = [(Vec2::new(0.0, 16.0), Vec2::new(16.0, 0.0), 4.0)];
+        let (min, max) = (Vec2::new(8.0, 8.0), Vec2::new(16.0, 16.0));
+        let i = diagonal_inset(min, max, &road);
+        assert!(i.scale < 0.8 && i.scale > MIN_INSET_SCALE, "{i:?}");
+        // Anchored at the far corner (16, 16): the centre moves towards it.
+        assert!(i.shift.x > 0.0 && i.shift.y > 0.0);
+        // A lot far away is untouched.
+        assert_eq!(diagonal_inset(min + 40.0, max + 40.0, &road), Inset::NONE);
     }
 }

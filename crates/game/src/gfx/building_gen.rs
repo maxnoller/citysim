@@ -517,7 +517,7 @@ fn detached(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
         z0: lot.z1 - front_yard - bd,
         z1: lot.z1 - front_yard,
     };
-    let storeys = if rng.chance(0.7) { 1 } else { 2 };
+    let storeys = if rng.chance(0.8) { 1 } else { 2 };
     let door = rng.range(0.9, bw - 0.9);
     let roof_kind = rng.below(3);
     house_body(m, rng, body, storeys, &st, Some(door), roof_kind);
@@ -573,15 +573,14 @@ fn detached(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
     yard_greenery(m, rng, lot, body);
 }
 
-/// Two or three narrow townhouses in a row (level 2).
-fn terrace(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
+/// A row of narrow townhouses (level 2) with `storeys` floors.
+fn terrace(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     lot_ground(m, lot, lawn_color(rng));
     let units = if lot.w() > 12.0 { 4 } else { 2 };
     let front_yard = rng.range(1.4, 2.0);
     let depth = (lot.d() - front_yard - 1.0).min(6.0);
     let inner = lot.w() - 0.8;
     let uw = inner / units as f32;
-    let storeys = 2 + rng.below(2);
     let roof = rng.pick(&palette::HOUSE_ROOFS);
     let front_gables = rng.chance(0.5);
     for u in 0..units {
@@ -1112,7 +1111,12 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
     if rng.chance(if level >= 2 { 0.55 } else { 0.25 }) {
         let x = if rng.chance(0.5) { body.x0 + 1.0 } else { body.x1 - 1.0 };
         let c = Vec3::new(x, h - 0.5, body.z0 + 1.0);
-        let ch = rng.range(5.0, 9.0) + if big { 4.0 } else { 0.0 };
+        // Small works get a stubby flue; the tall stacks come with level 2.
+        let ch = if level >= 2 {
+            rng.range(5.0, 9.0) + if big { 3.0 } else { 0.0 }
+        } else {
+            rng.range(2.2, 3.6)
+        };
         m.cylinder(c, 0.5, ch, 8, palette::BRICK, shade(palette::BRICK, 0.45));
         m.cylinder(
             c + Vec3::Y * (ch - 0.8),
@@ -1179,45 +1183,48 @@ pub fn generate(key: ModelKey, lod: bool) -> MeshBuilder {
         key.variant as u32 * 7919 + key.level as u32 * 131 + kind_salt * 1_000_003 + key.cells.0 as u32 * 17,
     );
     let big = key.cells.0 >= 2 && key.cells.1 >= 2;
-    // Level 1 is low (houses, single-storey shops, sheds), level 2 two to
-    // three storeys, and the top levels cap at six to eight storeys with a
-    // bulky body that fills the lot.
+    // Heights grow only with level (the sim's top levels are
+    // `balance::MAX_LEVEL` = R 3, C 3, I 2), so a young town is low-rise
+    // and the skyline is earned by level-ups:
+    // * level 1: one-storey houses (a few with a second floor), one-storey
+    //   shops or a big-box store, small sheds (~4-7 m);
+    // * level 2: two-storey townhouses and shops, taller works (~7-9 m);
+    // * level 3: the tallest tier, 3-4 storey apartments and offices (one
+    //   more on a big lot, ~11-17 m), so even a 5,000-resident city keeps a
+    //   modest skyline. Levels 4-5 (unused) step up from there.
     let tall = |base: u32, rng: &mut Stream| (base + rng.below(2) + u32::from(big)).min(8);
     match key.kind {
         Zone::Residential => match key.level {
-            0 | 1 if big => terrace(&mut m, &mut rng, lot),
+            0 | 1 if big => terrace(&mut m, &mut rng, lot, 1),
             0 | 1 => detached(&mut m, &mut rng, lot),
-            2 => terrace(&mut m, &mut rng, lot),
+            2 => terrace(&mut m, &mut rng, lot, 2),
             3 => {
                 let n = tall(3, &mut rng);
                 apartments(&mut m, &mut rng, lot, n)
             }
             4 => {
-                let n = tall(4, &mut rng);
+                let n = tall(5, &mut rng);
                 apartments(&mut m, &mut rng, lot, n)
             }
             _ => {
-                let n = tall(5, &mut rng) + u32::from(big);
+                let n = tall(6, &mut rng) + u32::from(big);
                 apartments(&mut m, &mut rng, lot, n.min(8))
             }
         },
         Zone::Commercial => match key.level {
             0 | 1 if big => supermarket(&mut m, &mut rng, lot),
             0 | 1 => shop(&mut m, &mut rng, lot, 1),
-            2 => {
-                let n = 2 + rng.below(2);
-                shop(&mut m, &mut rng, lot, n)
-            }
+            2 => shop(&mut m, &mut rng, lot, 2),
             3 => {
                 let n = tall(3, &mut rng);
                 office(&mut m, &mut rng, lot, n)
             }
             4 => {
-                let n = tall(4, &mut rng);
+                let n = tall(5, &mut rng);
                 office(&mut m, &mut rng, lot, n)
             }
             _ => {
-                let n = tall(5, &mut rng) + u32::from(big);
+                let n = tall(6, &mut rng) + u32::from(big);
                 office(&mut m, &mut rng, lot, n.min(8))
             }
         },
@@ -1253,6 +1260,64 @@ mod tests {
                             assert!(p[1] >= -0.01 && p[1] < 60.0, "height {p:?}");
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod height_tests {
+    use super::*;
+
+    /// (min, mean, max) model height over all variants.
+    fn heights(kind: Zone, level: u8, cells: (u8, u8)) -> (f32, f32, f32) {
+        let hs: Vec<f32> = (0..VARIANTS as u8)
+            .map(|variant| {
+                let m = generate(
+                    ModelKey {
+                        kind,
+                        cells,
+                        level,
+                        variant,
+                    },
+                    true,
+                );
+                m.pos.iter().map(|p| p[1]).fold(0.0, f32::max)
+            })
+            .collect();
+        let min = hs.iter().copied().fold(f32::MAX, f32::min);
+        let max = hs.iter().copied().fold(0.0, f32::max);
+        (min, hs.iter().sum::<f32>() / hs.len() as f32, max)
+    }
+
+    #[test]
+    fn skyline_grows_with_level_and_level_one_is_low_rise() {
+        for (kind, max_level) in Zone::ALL.into_iter().zip(citysim_sim::balance::MAX_LEVEL) {
+            for cells in [(1, 1), (2, 2)] {
+                let per: Vec<_> = (1..=max_level).map(|l| heights(kind, l, cells)).collect();
+                for (l, h) in per.iter().enumerate() {
+                    println!(
+                        "{kind:?} {cells:?} L{}: min {:.1} mean {:.1} max {:.1}",
+                        l + 1,
+                        h.0,
+                        h.1,
+                        h.2
+                    );
+                }
+                for w in per.windows(2) {
+                    assert!(
+                        w[1].1 > w[0].1 + 0.8,
+                        "{kind:?} {cells:?}: mean height must grow per level"
+                    );
+                }
+                // Level 1 is low-rise: houses, small shops, sheds.
+                assert!(per[0].1 < 8.0, "{kind:?} {cells:?} level 1 too tall: {:?}", per[0]);
+                // The top level is clearly the tallest tier (no overlap with
+                // level 1 and the mean well above level 2's tallest).
+                if max_level == 3 {
+                    assert!(per[2].0 > per[0].2, "{kind:?} {cells:?}");
+                    assert!(per[2].1 > per[1].2, "{kind:?} {cells:?}");
                 }
             }
         }
