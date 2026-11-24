@@ -1,7 +1,9 @@
 //! Traffic overlay (`OverlayMode::Traffic`): a light veil dims the map and
-//! each direction of every segment gets a strip coloured green -> yellow ->
-//! red by its load / capacity (`congestion_in`). Strips follow the road
-//! layout (they stop at junction edges) and refresh a few times a second.
+//! each direction of every segment gets a strip coloured by its load /
+//! capacity (`congestion_in`) in the bands shared with the ui legend:
+//! green below `CONGESTION_BUSY`, amber up to `CONGESTION_JAM`, red from it
+//! on. Strips follow the road layout (they stop at junction edges) and
+//! refresh a few times a second.
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
@@ -10,7 +12,7 @@ use citysim_sim::{MAP_SIZE_M, RoadNetwork};
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix};
 use super::road_geom::{self, RoadLayout};
-use crate::shared::{GameSet, OverlayMode, SimWorld};
+use crate::shared::{CONGESTION_BUSY, CONGESTION_JAM, GameSet, OverlayMode, SimWorld};
 
 const REFRESH_SECS: f32 = 0.25;
 const STRIP_Y: f32 = 0.30;
@@ -80,13 +82,28 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
     ));
 }
 
-/// Overlay colour for a congestion level in `[0, 1]`.
+/// Overlay colour for a congestion level (`congestion_in`, 0..=1): one hue
+/// per band, with a gentle ramp inside each band (greener when quieter,
+/// deeper red when fully stopped) so the band edges stay unmistakable.
 pub fn congestion_color(t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
-    if t < 0.5 {
-        mix(palette::TRAFFIC_FREE, palette::TRAFFIC_BUSY, t * 2.0)
+    if t < CONGESTION_BUSY {
+        let k = t / CONGESTION_BUSY;
+        mix(
+            palette::TRAFFIC_FREE,
+            mix(palette::TRAFFIC_FREE, palette::TRAFFIC_BUSY, 0.2),
+            k,
+        )
+    } else if t < CONGESTION_JAM {
+        let k = (t - CONGESTION_BUSY) / (CONGESTION_JAM - CONGESTION_BUSY);
+        mix(
+            palette::TRAFFIC_BUSY,
+            mix(palette::TRAFFIC_BUSY, palette::TRAFFIC_JAM, 0.3),
+            k,
+        )
     } else {
-        mix(palette::TRAFFIC_BUSY, palette::TRAFFIC_JAM, (t - 0.5) * 2.0)
+        let k = (t - CONGESTION_JAM) / (1.0 - CONGESTION_JAM).max(1e-3);
+        mix(palette::TRAFFIC_JAM, palette::shade(palette::TRAFFIC_JAM, 0.7), k)
     }
 }
 
@@ -115,6 +132,31 @@ fn strips(roads: &RoadNetwork, layout: &RoadLayout) -> MeshBuilder {
             ];
             m.quad_up(q.map(|p| Vec3::new(p.x, STRIP_Y, p.y)), c);
         }
+    }
+    // Junction surfaces take the colour of their worst approach, so an
+    // overloaded junction reads as one red patch.
+    for node in &layout.nodes {
+        if node.entry || node.arms.len() < 2 {
+            continue;
+        }
+        let mut worst = 0.0f32;
+        let mut ring = Vec::with_capacity(node.arms.len() * 2 + 1);
+        for arm in &node.arms {
+            if let Some(seg) = roads.segments.get(arm.seg) {
+                // Travel towards this node is `a -> b` when it is `b`.
+                worst = worst.max(seg.congestion_in(seg.b == node.id));
+            }
+            let n = Vec2::new(-arm.dir.y, arm.dir.x);
+            let (s, h) = (arm.setback, arm.style.h - 0.15);
+            ring.push(node.pos + arm.dir * s - n * h);
+            ring.push(node.pos + arm.dir * s + n * h);
+        }
+        let ring: Vec<Vec3> = ring.iter().map(|p| Vec3::new(p.x, STRIP_Y, p.y)).collect();
+        m.fan_up(
+            Vec3::new(node.pos.x, STRIP_Y, node.pos.y),
+            &ring,
+            lin(congestion_color(worst)),
+        );
     }
     m
 }
@@ -168,11 +210,24 @@ fn draw_traffic(
 mod tests {
     use super::*;
 
+    fn hue(t: f32) -> f32 {
+        Hsla::from(congestion_color(t)).hue
+    }
+
     #[test]
-    fn congestion_runs_green_to_red() {
-        let free = congestion_color(0.0).to_srgba();
-        let jam = congestion_color(1.0).to_srgba();
-        assert!(free.green > free.red);
-        assert!(jam.red > jam.green);
+    fn congestion_bands_are_green_amber_red() {
+        // Green (hue ~ 90-150) below BUSY.
+        for t in [0.0, 0.25, CONGESTION_BUSY - 0.01] {
+            assert!((85.0..160.0).contains(&hue(t)), "{t}: {}", hue(t));
+        }
+        // Amber (hue ~ 25-55) between BUSY and JAM.
+        for t in [CONGESTION_BUSY, 0.65, CONGESTION_JAM - 0.01] {
+            assert!((25.0..55.0).contains(&hue(t)), "{t}: {}", hue(t));
+        }
+        // Red (hue < 15 or > 345) from JAM on.
+        for t in [CONGESTION_JAM, 0.9, 1.0, 1.5] {
+            let h = hue(t);
+            assert!(!(15.0..345.0).contains(&h), "{t}: {h}");
+        }
     }
 }

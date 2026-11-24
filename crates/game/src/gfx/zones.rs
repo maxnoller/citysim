@@ -1,12 +1,11 @@
 //! Zoning on the ground.
 //!
-//! * Normally only zoned cells that are still empty get a faint tint and a
-//!   thin outline ("surveyed plots"), so the player sees where things will
-//!   grow without the map turning into a colour chart.
-//! * The full overlay (35 % fill and a bright outline on every zoned cell)
-//!   shows in `OverlayMode::Zones` or while a zoning tool is active.
+//! Zones are drawn only while they matter: in `OverlayMode::Zones` or while
+//! a zoning tool is active (a 40 % fill and a bright outline on every zoned
+//! cell). The rest of the time the ground carries no zone colour at all.
 //!
-//! Chunked; a chunk is re-meshed only when its cells or the mode change.
+//! Chunked; a chunk is re-meshed only when its cells change while the
+//! overlay is showing. Hiding it just hides the chunk entities.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -14,7 +13,7 @@ use std::hash::{Hash, Hasher};
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use citysim_sim::{CELL_SIZE, Cell, Grid, MAP_CELLS, Occupant, Zone};
+use citysim_sim::{CELL_SIZE, Cell, Grid, MAP_CELLS, Zone};
 
 use super::heights;
 use super::mesh_util::MeshBuilder;
@@ -31,7 +30,7 @@ pub fn zone_color(zone: Zone) -> Color {
     }
 }
 
-/// Whether the full overlay is showing.
+/// Whether the zone overlay is showing.
 pub fn full_overlay(mode: OverlayMode, tool: ActiveTool) -> bool {
     mode == OverlayMode::Zones || matches!(tool, ActiveTool::Zone(_))
 }
@@ -41,7 +40,9 @@ struct ZoneMaterial(Handle<StandardMaterial>);
 
 #[derive(Default)]
 struct ZoneChunks {
-    key: Option<((u64, u64), bool, bool)>,
+    /// Grid key the chunks were last built for.
+    key: Option<(u64, u64)>,
+    shown: bool,
     chunks: HashMap<IVec2, (u64, Entity)>,
 }
 
@@ -64,34 +65,31 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     })));
 }
 
-fn shown(grid: &Grid, c: Cell, full: bool) -> Option<Zone> {
-    let cd = grid.get(c)?;
-    let z = cd.zone?;
-    (full || cd.occupant == Occupant::Empty).then_some(z)
+fn shown(grid: &Grid, c: Cell) -> Option<Zone> {
+    grid.get(c)?.zone
 }
 
-fn chunk_hash(grid: &Grid, cx: i32, cy: i32, full: bool) -> u64 {
+fn chunk_hash(grid: &Grid, cx: i32, cy: i32) -> u64 {
     let mut h = DefaultHasher::new();
-    full.hash(&mut h);
     // Include a one-cell border: outlines depend on neighbours.
     for y in cy * CHUNK - 1..=(cy + 1) * CHUNK {
         for x in cx * CHUNK - 1..=(cx + 1) * CHUNK {
-            shown(grid, Cell::new(x, y), full).hash(&mut h);
+            shown(grid, Cell::new(x, y)).hash(&mut h);
         }
     }
     h.finish()
 }
 
-fn chunk_mesh(grid: &Grid, cx: i32, cy: i32, full: bool) -> Option<Mesh> {
+fn chunk_mesh(grid: &Grid, cx: i32, cy: i32) -> Option<Mesh> {
     let mut m = MeshBuilder::new();
     let y = heights::ZONE;
-    let (fill_a, line_a) = if full { (0.4, 1.0) } else { (0.10, 0.38) };
+    let (fill_a, line_a) = (0.4, 1.0);
     let inset = 0.0;
-    let line_w = if full { 0.6 } else { 0.3 };
+    let line_w = 0.6;
     for cyy in cy * CHUNK..(cy + 1) * CHUNK {
         for cxx in cx * CHUNK..(cx + 1) * CHUNK {
             let c = Cell::new(cxx, cyy);
-            let Some(z) = shown(grid, c, full) else { continue };
+            let Some(z) = shown(grid, c) else { continue };
             let base = zone_color(z);
             let fill = lin(base.with_alpha(fill_a));
             let line = lin(palette::mix(base, Color::WHITE, 0.45).with_alpha(line_a));
@@ -118,7 +116,7 @@ fn chunk_mesh(grid: &Grid, cx: i32, cy: i32, full: bool) -> Option<Mesh> {
                 (0, 1, [x0, z1 - w, x1, z1]),
                 (0, -1, [x0, z0, x1, z0 + w]),
             ] {
-                if shown(grid, c.offset(dx, dy), full) != Some(z) {
+                if shown(grid, c.offset(dx, dy)) != Some(z) {
                     m.quad_up(
                         [
                             Vec3::new(r[0], yl, r[1]),
@@ -144,11 +142,25 @@ fn rebuild_zones(
     mat: Res<ZoneMaterial>,
     mut state: Local<ZoneChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut vis: Query<&mut Visibility>,
 ) {
-    let full = full_overlay(*mode, *tool);
-    let hide = *mode == OverlayMode::Traffic;
-    let key = (sim.key(sim.world.versions.grid), full, hide);
-    if state.key == Some(key) {
+    let show = full_overlay(*mode, *tool);
+    if show != state.shown {
+        state.shown = show;
+        let v = if show {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        for (_, e) in state.chunks.values() {
+            if let Ok(mut vis) = vis.get_mut(*e) {
+                vis.set_if_neq(v);
+            }
+        }
+    }
+    // Re-mesh only while showing; a hidden overlay catches up when shown.
+    let key = sim.key(sim.world.versions.grid);
+    if !show || state.key == Some(key) {
         return;
     }
     state.key = Some(key);
@@ -157,11 +169,11 @@ fn rebuild_zones(
     for cy in 0..n {
         for cx in 0..n {
             let c = IVec2::new(cx, cy);
-            let hash = if hide { 0 } else { chunk_hash(grid, cx, cy, full) };
+            let hash = chunk_hash(grid, cx, cy);
             if state.chunks.get(&c).is_some_and(|(h, _)| *h == hash) {
                 continue;
             }
-            let mesh = if hide { None } else { chunk_mesh(grid, cx, cy, full) };
+            let mesh = chunk_mesh(grid, cx, cy);
             match (mesh, state.chunks.get_mut(&c)) {
                 (Some(mesh), Some((h, e))) => {
                     *h = hash;
@@ -174,6 +186,7 @@ fn rebuild_zones(
                             Mesh3d(meshes.add(mesh)),
                             MeshMaterial3d(mat.0.clone()),
                             Transform::default(),
+                            Visibility::Inherited,
                             NotShadowCaster,
                         ))
                         .id();

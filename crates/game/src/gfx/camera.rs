@@ -8,6 +8,7 @@
 //! * The tilt follows the zoom: low and cinematic close up, more top-down
 //!   (a flatter, map-like view) when zoomed out; middle-drag adds an offset.
 //! * Focus is clamped to the map. `CameraOverride` shows an exact pose.
+//! * While `CameraInputBlocked` (pause menu) all camera input is ignored.
 
 use bevy::camera::PerspectiveProjection;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
@@ -16,7 +17,7 @@ use bevy::window::PrimaryWindow;
 use citysim_sim::{MAP_SIZE_M, World};
 
 use super::scene::camera_look;
-use crate::shared::{CameraOverride, CameraPose, GameSet, PointerOverUi, WorldCamera, cell_center};
+use crate::shared::{CameraInputBlocked, CameraOverride, CameraPose, GameSet, PointerOverUi, WorldCamera, cell_center};
 
 pub const MIN_DISTANCE: f32 = 22.0;
 pub const MAX_DISTANCE: f32 = 2000.0;
@@ -162,6 +163,7 @@ fn camera_controls(
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     over_ui: Res<PointerOverUi>,
+    blocked: Res<CameraInputBlocked>,
     overridden: Res<CameraOverride>,
     gfx_pose: Res<GfxPose>,
     tour: Res<GfxTour>,
@@ -177,6 +179,9 @@ fn camera_controls(
             rig.tilt = pose.pitch - auto_pitch(pose.distance);
             continue;
         }
+        // A modal ui (pause menu) owns the keyboard and mouse: no input,
+        // but the shown pose still settles towards the target.
+        let input = !blocked.0;
         let mut pan = Vec2::ZERO;
         if keys.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]) {
             pan.y += 1.0;
@@ -195,24 +200,24 @@ fn camera_controls(
         } else {
             1.0
         };
-        if pan != Vec2::ZERO {
+        if input && pan != Vec2::ZERO {
             let yaw = rig.target.yaw;
             let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
             let right = Vec3::new(-forward.z, 0.0, forward.x);
             let speed = rig.target.distance.max(60.0) * 1.1 * boost;
             rig.target.focus += (forward * pan.y + right * pan.x).normalize() * speed * dt;
         }
-        if keys.pressed(KeyCode::KeyQ) {
+        if input && keys.pressed(KeyCode::KeyQ) {
             rig.target.yaw -= 1.6 * dt;
         }
-        if keys.pressed(KeyCode::KeyE) {
+        if input && keys.pressed(KeyCode::KeyE) {
             rig.target.yaw += 1.6 * dt;
         }
-        if mouse.pressed(MouseButton::Middle) {
+        if input && mouse.pressed(MouseButton::Middle) {
             rig.target.yaw -= motion.delta.x * 0.006;
             rig.tilt += motion.delta.y * 0.004;
         }
-        if !over_ui.0 {
+        if input && !over_ui.0 {
             let lines = match scroll.unit {
                 MouseScrollUnit::Line => scroll.delta.y,
                 MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
