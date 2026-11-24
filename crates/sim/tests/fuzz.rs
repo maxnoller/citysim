@@ -398,3 +398,22 @@ fn busy_city_save_load_lockstep() {
     }
     assert!(a == b);
 }
+
+#[test]
+#[ignore = "long: run with --ignored --release"]
+fn fuzz_busy_cities_long() {
+    for seed in 200..216 {
+        let (w, _) = fuzz(
+            FuzzOpts {
+                seed,
+                ticks: 6 * DAY,
+                check: true,
+                full_every: 200,
+                reload_permille: 30,
+                calm_until: 2 * DAY + seed % 8 * HOUR,
+            },
+            &[],
+        );
+        sanity(&w);
+    }
+}
