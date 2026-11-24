@@ -26,16 +26,33 @@ struct DemandFill {
 
 const TRACK_W: f32 = 104.0;
 
-fn spawn_meter(mut commands: Commands, fonts: Res<UiFonts>) {
+/// Bottom-left column: first-run hint card (menu.rs) above the demand meter.
+#[derive(Component)]
+pub struct BottomLeftStack;
+
+pub fn spawn_meter(mut commands: Commands, fonts: Res<UiFonts>) {
     let fonts = fonts.into_inner();
-    commands
+    let stack = commands
         .spawn((
-            Name::new("Demand meter"),
-            super::hud::info_tip("Demand", "What the city wants next. Zone the types with long bars."),
-            panel(Node {
+            Name::new("Bottom-left stack"),
+            BottomLeftStack,
+            layout(Node {
                 position_type: PositionType::Absolute,
                 left: px(t::EDGE),
                 bottom: px(t::EDGE),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Stretch,
+                row_gap: px(t::S3),
+                ..default()
+            }),
+        ))
+        .id();
+    commands
+        .spawn((
+            Name::new("Demand meter"),
+            ChildOf(stack),
+            super::hud::info_tip("Demand", "What the city wants next. Zone the types with long bars."),
+            panel(Node {
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::new(px(t::S4), px(t::S4), px(t::S3 + 2.0), px(t::S4)),
                 row_gap: px(t::S3),
@@ -83,7 +100,8 @@ fn spawn_meter(mut commands: Commands, fonts: Res<UiFonts>) {
                         },
                     ));
                     row.spawn(layout(Node {
-                        width: px(TRACK_W),
+                        min_width: px(TRACK_W),
+                        flex_grow: 1.0,
                         height: px(8),
                         border_radius: BorderRadius::all(px(4)),
                         ..default()

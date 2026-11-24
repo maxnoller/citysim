@@ -18,7 +18,7 @@ pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_menu, spawn_hint))
+        app.add_systems(Startup, (spawn_menu, spawn_hint.after(super::demand::spawn_meter)))
             .add_systems(PostStartup, start_fresh_game)
             .add_systems(Update, (update_menu, update_hint).in_set(GameSet::Render));
     }
@@ -314,16 +314,14 @@ const STEPS: [(&str, &str); 3] = [
     ("Unpause to let the city grow", "Space"),
 ];
 
-fn spawn_hint(mut commands: Commands, fonts: Res<UiFonts>) {
+fn spawn_hint(mut commands: Commands, fonts: Res<UiFonts>, stack: Query<Entity, With<super::demand::BottomLeftStack>>) {
     let fonts = fonts.into_inner();
-    commands
+    let Ok(stack) = stack.single() else { return };
+    let hint = commands
         .spawn((
             Name::new("Hint card"),
             HintRoot,
             panel(Node {
-                position_type: PositionType::Absolute,
-                top: px(t::BELOW_TOP_BAR),
-                left: px(t::EDGE),
                 width: px(318),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::new(px(t::S4 + 2.0), px(t::S3), px(t::S3), px(t::S4)),
@@ -376,7 +374,9 @@ fn spawn_hint(mut commands: Commands, fonts: Res<UiFonts>) {
                     spawn_key_badge(r, fonts, key);
                 });
             }
-        });
+        })
+        .id();
+    commands.entity(stack).insert_children(0, &[hint]);
 }
 
 #[derive(Default)]
