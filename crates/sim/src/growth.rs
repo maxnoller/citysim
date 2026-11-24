@@ -57,7 +57,12 @@ fn demand_of(world: &World, z: Zone) -> f32 {
 }
 
 pub(crate) fn tick(world: &mut World) {
-    if world.time.tick_of_day == 0 || world.time.tick.is_multiple_of(balance::REACHABILITY_CHECK_INTERVAL_TICKS) {
+    if world.time.tick_of_day == 0
+        || world
+            .time
+            .tick
+            .is_multiple_of(balance::REACHABILITY_CHECK_INTERVAL_TICKS)
+    {
         abandon(world);
     }
     if !world.time.tick.is_multiple_of(balance::GROWTH_INTERVAL_TICKS) {

@@ -337,7 +337,10 @@ fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
     // Its roads cost more to keep than its town pays (the young player city
     // is about break-even on day 4 and in profit later).
     let (over_net, player_net) = (over.economy.last_day.net(), player.economy.last_day.net());
-    assert!(over_net < 0 && over_net < player_net - 1000, "{over_net} vs {player_net}");
+    assert!(
+        over_net < 0 && over_net < player_net - 1000,
+        "{over_net} vs {player_net}"
+    );
     // Broke: building fails with the usual error.
     let err = over.apply(Command::BuildRoad {
         from: c(30, 30),

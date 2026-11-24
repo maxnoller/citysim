@@ -14,7 +14,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BuildingId, Budget, MAP_CELLS, World, balance};
+use crate::{Budget, BuildingId, MAP_CELLS, World, balance};
 
 pub const MAGIC: &[u8; 4] = b"CSIM";
 /// Bump when the World layout changes incompatibly.

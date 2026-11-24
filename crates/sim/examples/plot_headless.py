@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Chart the CSVs written by the `headless` example.
 
-    python3 crates/sim/examples/plot_headless.py target/headless out.png
+    python3 crates/sim/examples/plot_headless.py target/headless out.png [title] [before_dir]
+
+With `before_dir` (CSVs of an earlier run), the money panel also shows the
+earlier grid player's money as a dashed grey reference line.
 
 Small multiples (one measure per panel, shared x = real minutes at 2.5x):
 population, cars on the road, average car commute, money. One line per
@@ -37,7 +40,7 @@ PANELS = [
     ("peak_vehicles", "Peak cars on the road per day", 1.0, "{:,.0f}", "daily"),
     ("peak_congestion", "Peak congestion per day (% of segments over 80% capacity)", 100.0, "{:.0f}%", "daily"),
     ("avg_commute_s", "Average car commute (s)", 1.0, "{:.0f}", "hourly"),
-    ("money", "Money ($ thousands)", 0.001, "{:,.0f}k", "hourly"),
+    ("money", "Money ($ thousands; dashed: grid player before the balance pass)", 0.001, "{:,.0f}k", "hourly"),
 ]
 
 
@@ -50,6 +53,10 @@ def main():
     src = sys.argv[1] if len(sys.argv) > 1 else "target/headless"
     out = sys.argv[2] if len(sys.argv) > 2 else "headless.png"
     title = sys.argv[3] if len(sys.argv) > 3 else "CitySim headless runs"
+    before = sys.argv[4] if len(sys.argv) > 4 else None
+    before_grid = None
+    if before and os.path.exists(os.path.join(before, "grid.csv")):
+        before_grid = load(os.path.join(before, "grid.csv"))
     data = {}
     daily = {}
     for key, _, _ in SCENARIOS:
@@ -59,7 +66,7 @@ def main():
         p = os.path.join(src, key + "_days.csv")
         if os.path.exists(p):
             daily[key] = load(p)
-    plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "text.color": TEXT})
+    plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "text.color": TEXT, "text.parse_math": False})
     fig, axes = plt.subplots(3, 2, figsize=(14, 13), facecolor=SURFACE)
     for ax, (col, label, scale, fmt, source) in zip(axes.flat, PANELS):
         ax.set_facecolor(SURFACE)
@@ -85,14 +92,31 @@ def main():
             else:
                 ax.plot(x, y, color=SERIES[i], linewidth=2, label=name, solid_capstyle="round")
             ends.append((y[-1], x[-1], short, SERIES[i]))
+        if col == "money" and before_grid:
+            x = [float(r["minutes"]) for r in before_grid]
+            y = [float(r["money"]) * scale for r in before_grid]
+            ax.plot(x, y, color=TEXT2, linewidth=1.5, linestyle=(0, (4, 3)))
+            ax.annotate(
+                f"grid player before  {fmt.format(y[-1])}",
+                (x[-1], y[-1]),
+                xytext=(6, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=8,
+                color=TEXT2,
+            )
         # Direct labels at line ends, nudged apart.
         ends.sort()
         lo, hi = ax.get_ylim()
-        gap = (hi - lo) * 0.045
-        last = None
+        gap = (hi - lo) * 0.065
+        placed = []  # (x, label y) of labels already placed
         for y, x, name, color in ends:
-            yy = y if last is None or y - last >= gap else last + gap
-            last = yy
+            # Only labels ending at about the same x can collide.
+            yy = y
+            for px, py in sorted(placed, key=lambda p: p[1]):
+                if abs(px - x) < 4 and yy - py < gap:
+                    yy = py + gap
+            placed.append((x, yy))
             ax.plot([x], [y], "o", color=color, markersize=5, markeredgecolor=SURFACE, markeredgewidth=1.5)
             ax.annotate(
                 f"{name}  {fmt.format(y)}",

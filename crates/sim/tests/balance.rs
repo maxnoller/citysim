@@ -1,6 +1,6 @@
 //! Game-feel rules: how fast a new town comes alive, the grace period for
 //! buildings cut off from the highway, and the HUD numbers (budget by
-//! category, unemployment).
+//! category, unemployment) and the money targets of `balance`.
 
 mod common;
 
@@ -156,7 +156,10 @@ fn cutting_a_road_just_before_midnight_and_rebuilding_it_abandons_nothing() {
     for _ in 0..HOUR + 1 {
         w.step();
     }
-    assert!(ids.iter().all(|&id| w.growth.meta.get(id).unwrap().unreachable_since.is_none()));
+    assert!(
+        ids.iter()
+            .all(|&id| w.growth.meta.get(id).unwrap().unreachable_since.is_none())
+    );
     for _ in 0..2 * DAY {
         w.step();
     }
@@ -180,9 +183,13 @@ fn buildings_cut_off_for_good_are_abandoned_after_the_grace_period() {
         for _ in 0..2 * HOUR + 1 {
             w.step();
         }
-        assert_eq!(alive(&w, &ids), 0, "cut at {hour}:00, not abandoned after the grace period");
+        assert_eq!(
+            alive(&w, &ids),
+            0,
+            "cut at {hour}:00, not abandoned after the grace period"
+        );
         // The zoning stays; the buildings near the stub are untouched.
-        assert!(w.buildings.len() > 0);
+        assert!(!w.buildings.is_empty());
         assert_eq!(w.grid.get(c(30, 127)).unwrap().zone, Some(Zone::Residential));
     }
 }
@@ -221,7 +228,10 @@ fn budget_by_category_and_unemployment_for_the_hud() {
     let e = &w.economy;
     assert_eq!(e.history.len(), 3);
     let b = e.last_day;
-    assert!(b.residential_tax > 0 && b.commercial_tax > 0 && b.industrial_tax > 0, "{b:?}");
+    assert!(
+        b.residential_tax > 0 && b.commercial_tax > 0 && b.industrial_tax > 0,
+        "{b:?}"
+    );
     assert!(b.road_upkeep > 0 && b.services > 0, "{b:?}");
     assert_eq!(e.last_day_income, b.income());
     assert_eq!(e.last_day_expenses, b.expenses());
@@ -231,7 +241,10 @@ fn budget_by_category_and_unemployment_for_the_hud() {
     for d in &e.history {
         assert_eq!(d.income, d.budget.income());
         assert_eq!(d.expenses, d.budget.expenses());
-        assert_eq!(d.budget.road_upkeep, d.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY);
+        assert_eq!(
+            d.budget.road_upkeep,
+            d.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
+        );
         let services = (d.population as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64).round() as i64;
         assert_eq!(d.budget.services, services);
         money += d.budget.net();
@@ -268,12 +281,21 @@ fn money_stays_meaningful_for_a_sensible_player_and_overbuilding_goes_broke() {
         }
     }
     let minutes = real_s(reached_5k.expect("reaches 5,000 residents")) / 60.0;
-    assert!((24.0..=34.0).contains(&minutes), "5,000 residents after {minutes:.1} min");
+    assert!(
+        (24.0..=34.0).contains(&minutes),
+        "5,000 residents after {minutes:.1} min"
+    );
     let at_5k = w.economy.history.iter().find(|d| d.population >= 5000).unwrap().budget;
     let margin = at_5k.net() as f64 / at_5k.income() as f64;
-    assert!((0.2..=0.35).contains(&margin), "net margin at 5,000: {margin:.2} ({at_5k:?})");
+    assert!(
+        (0.2..=0.35).contains(&margin),
+        "net margin at 5,000: {margin:.2} ({at_5k:?})"
+    );
     let days_per_100 = hundred_cells as f64 / at_5k.net() as f64;
-    assert!((1.0..=2.5).contains(&days_per_100), "100 cells = {days_per_100:.2} days of net");
+    assert!(
+        (1.0..=2.5).contains(&days_per_100),
+        "100 cells = {days_per_100:.2} days of net"
+    );
     assert!(lowest >= hundred_cells, "lowest cash ${lowest}");
     let waited = real_s(p.longest_money_wait_ticks);
     assert!(waited <= 60.0, "waited {waited:.0} s for money");

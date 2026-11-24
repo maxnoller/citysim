@@ -235,7 +235,10 @@ fn run(sc: &Scenario, out_dir: &str) {
     }
     let money_max = w.economy.history.iter().map(|h| h.money).max().unwrap_or(0);
     let money_min = w.economy.history.iter().map(|h| h.money).min().unwrap_or(0);
-    println!("money: lowest ${money_min}, highest ${money_max}, final ${}", w.economy.money);
+    println!(
+        "money: lowest ${money_min}, highest ${money_max}, final ${}",
+        w.economy.money
+    );
     let path = format!("{out_dir}/{}.csv", sc.name);
     std::fs::write(&path, csv).expect("write csv");
     let mut days = String::from(
