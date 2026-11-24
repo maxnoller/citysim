@@ -10,8 +10,11 @@
 //!   exit; `CITYSIM_SHOT_VIEW=wide|street|close`, `CITYSIM_SHOT_DELAY=secs`,
 //!   `CITYSIM_SHOT_OVERLAY=none|zones|traffic`.
 //! * `CITYSIM_LOG_FPS=1` — log frame time / FPS every second.
+//! * `CITYSIM_CONTROL=dir` — file control channel for scripted play-throughs
+//!   (`scripts/play.py`, see `control`).
 
 mod autoshot;
+mod control;
 mod scenario;
 mod script;
 
@@ -52,6 +55,8 @@ pub struct DevConfig {
     pub shot: Option<ShotConfig>,
     /// Seconds the script demo holds still before starting.
     pub script_delay: f32,
+    /// Control channel directory (`CITYSIM_CONTROL`).
+    pub control: Option<std::path::PathBuf>,
 }
 
 fn env_f32(name: &str) -> Option<f32> {
@@ -104,6 +109,9 @@ impl DevConfig {
             demo,
             shot,
             script_delay: env_f32("CITYSIM_DEMO_DELAY").unwrap_or(0.0),
+            control: std::env::var_os("CITYSIM_CONTROL")
+                .filter(|d| !d.is_empty())
+                .map(Into::into),
         }
     }
 }
@@ -129,6 +137,9 @@ impl Plugin for DevPlugin {
                 bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
                 bevy::diagnostic::LogDiagnosticsPlugin::default(),
             ));
+        }
+        if let Some(dir) = &c.control {
+            app.add_plugins(control::ControlPlugin { dir: dir.clone() });
         }
         if let Some(shot) = &c.shot {
             app.add_plugins(autoshot::AutoshotPlugin {
