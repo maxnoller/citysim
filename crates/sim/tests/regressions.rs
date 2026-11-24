@@ -271,3 +271,42 @@ fn negative_edge_costs_do_not_hang_the_path_search() {
     }
     w.check_sim_invariants().unwrap();
 }
+
+/// Saves that decode but carry damage the sim cannot survive (bad road
+/// graph or numbers, wrong grid size) are rejected on load instead of
+/// crashing or hanging the game later.
+#[test]
+fn load_rejects_inconsistent_saves() {
+    let mut w = ring_with_trips();
+    for _ in 0..100 {
+        w.step();
+    }
+    assert!(World::load(&w.save()).is_ok());
+    let corrupt = |f: &dyn Fn(&mut World)| {
+        let mut bad = w.clone();
+        f(&mut bad);
+        matches!(World::load(&bad.save()), Err(LoadError::Corrupt(_)))
+    };
+    let street = w
+        .roads
+        .segments
+        .iter()
+        .find(|(_, s)| s.kind == RoadKind::Street)
+        .unwrap()
+        .0;
+    assert!(corrupt(&|b| b.roads.segments[street].speed_limit = -1.0));
+    assert!(corrupt(&|b| b.roads.segments[street].speed_limit = f32::NAN));
+    assert!(corrupt(&|b| b.roads.segments[street].capacity = [f32::INFINITY; 2]));
+    assert!(corrupt(&|b| b.roads.segments[street].length *= 2.0));
+    assert!(corrupt(&|b| b.grid.cells.truncate(100)));
+    assert!(corrupt(&|b| b.grid.size = 300));
+    assert!(corrupt(&|b| {
+        let n = b.roads.add_node([3.0, 3.0]);
+        b.roads.segments[street].b = n;
+    }));
+    assert!(corrupt(&|b| b.economy.tax_rate = f32::NAN));
+    assert!(corrupt(&|b| {
+        let n = b.roads.segments[street].a;
+        b.roads.nodes[n].pos = [f32::NAN, 0.0];
+    }));
+}
