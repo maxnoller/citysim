@@ -206,6 +206,10 @@ fn rebuild_trees(
                     }
                 }
             }
+            // Meshes are local to the chunk centre: the LOD cross-fade is
+            // measured from the entity origin.
+            let size = CHUNK as f32 * CELL_SIZE;
+            let centre = Vec3::new((cx as f32 + 0.5) * size, 0.0, (cy as f32 + 0.5) * size);
             let ents = match state.chunks.get(&c) {
                 Some((_, e, _)) => *e,
                 None => [TREE_LOD_NEAR, TREE_LOD_FAR].map(|range| {
@@ -213,18 +217,19 @@ fn rebuild_trees(
                         .spawn((
                             Name::new("Trees"),
                             MeshMaterial3d(mats.lit.clone()),
-                            Transform::default(),
+                            Transform::from_translation(centre),
                             Visibility::default(),
                             VisibilityRange {
                                 start_margin: range.0,
                                 end_margin: range.1,
-                                use_aabb: true,
+                                use_aabb: false,
                             },
                         ))
                         .id()
                 }),
             };
-            for (e, mb) in ents.into_iter().zip([m, far]) {
+            for (e, mut mb) in ents.into_iter().zip([m, far]) {
+                mb.translate(-centre);
                 if mb.is_empty() {
                     commands.entity(e).remove::<Mesh3d>();
                 } else {

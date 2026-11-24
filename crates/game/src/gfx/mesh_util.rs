@@ -41,6 +41,15 @@ impl MeshBuilder {
         self.idx.is_empty()
     }
 
+    /// Move every vertex by `v`.
+    pub fn translate(&mut self, v: Vec3) {
+        for p in &mut self.pos {
+            p[0] += v.x;
+            p[1] += v.y;
+            p[2] += v.z;
+        }
+    }
+
     /// Current size, for [`MeshBuilder::rollback`].
     pub fn mark(&self) -> (usize, usize) {
         (self.pos.len(), self.idx.len())
