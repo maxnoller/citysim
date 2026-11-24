@@ -5,15 +5,15 @@
 //! `World::apply` executes the plan. So `preview(c).is_ok()` exactly when
 //! `apply(c)` would succeed, and both report the same cost and cells.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::geom::{Cell, CellRect};
 use crate::grid::{Occupant, Zone};
-use crate::roads::RoadKind;
-use crate::{BuildingId, World, balance};
+use crate::roads::{NodeId, RoadKind, RoadNetwork, SegmentId};
+use crate::{BuildingId, World, balance, geom};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Command {
@@ -190,21 +190,66 @@ fn plan_road(world: &World, from: Cell, to: Cell) -> Result<Plan, CommandError> 
     })
 }
 
+/// Cells a segment passes through, from its `a` end to its `b` end, when
+/// both ends are cell centres on one straight (8-way) line, as for every
+/// road built by commands. Its unit pieces are the consecutive pairs.
+fn segment_cells(roads: &RoadNetwork, s: SegmentId) -> Option<Vec<Cell>> {
+    let (pa, pb) = roads.segment_ends(s);
+    let (ca, cb) = (Cell::from_pos(pa), Cell::from_pos(pb));
+    if !geom::same_pos(ca.center(), pa) || !geom::same_pos(cb.center(), pb) {
+        return None;
+    }
+    ca.straight_line_to(cb).filter(|l| l.len() >= 2)
+}
+
+/// Bounding rectangle of the cells a segment touches.
+fn segment_bounds(roads: &RoadNetwork, s: SegmentId) -> CellRect {
+    let (pa, pb) = roads.segment_ends(s);
+    CellRect::from_corners(Cell::from_pos(pa), Cell::from_pos(pb))
+}
+
 fn plan_bulldoze(world: &World, rect: CellRect) -> Result<Plan, CommandError> {
     let rect = rect.clamp_to_map().ok_or(CommandError::OutOfBounds)?;
+    // Street pieces with an end in the rectangle. Walk each segment once
+    // (looking pieces up per cell scanned every segment per cell and
+    // direction: seconds for a big selection on a dense map).
     let mut pieces = BTreeSet::new();
     let mut cells = BTreeSet::new();
-    for c in rect.cells() {
-        if !world.grid.is_road(c) {
+    for (s, seg) in world.roads.segments.iter() {
+        let bounds = segment_bounds(&world.roads, s);
+        if seg.kind == RoadKind::Highway || !bounds.intersects(&rect) {
             continue;
         }
-        for (dx, dy) in DIRS8 {
-            let q = c.offset(dx, dy);
-            if let Some(s) = world.roads.piece(c, q)
-                && world.roads.segments[s].kind != RoadKind::Highway
-            {
-                pieces.insert(ordered(c, q));
-                cells.insert(c);
+        if let Some(line) = segment_cells(&world.roads, s) {
+            for w in line.windows(2) {
+                let (p, q) = (w[0], w[1]);
+                let (p_in, q_in) = (rect.contains(p), rect.contains(q));
+                if p_in || q_in {
+                    pieces.insert(ordered(p, q));
+                }
+                if p_in {
+                    cells.insert(p);
+                }
+                if q_in {
+                    cells.insert(q);
+                }
+            }
+            continue;
+        }
+        // Not on cell centres (never built by commands): test each cell.
+        let (pa, pb) = world.roads.segment_ends(s);
+        let min = Cell::new(bounds.min.x.max(rect.min.x), bounds.min.y.max(rect.min.y));
+        let max = Cell::new(bounds.max.x.min(rect.max.x), bounds.max.y.min(rect.max.y));
+        for c in CellRect::from_corners(min, max).cells() {
+            if !geom::on_segment(c.center(), pa, pb) {
+                continue;
+            }
+            for (dx, dy) in DIRS8 {
+                let q = c.offset(dx, dy);
+                if geom::on_segment(q.center(), pa, pb) {
+                    pieces.insert(ordered(c, q));
+                    cells.insert(c);
+                }
             }
         }
     }
@@ -282,27 +327,7 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             cost,
             ..
         } => {
-            let roads = &mut world.roads;
-            for &(p, q) in &pieces {
-                let a = roads.ensure_node(p.center());
-                let b = roads.ensure_node(q.center());
-                if let Some(s) = roads.segment_between(a, b) {
-                    roads.remove_segment(s);
-                }
-            }
-            let touched: BTreeSet<Cell> = pieces.iter().flat_map(|&(p, q)| [p, q]).collect();
-            for &c in &touched {
-                if let Some(n) = roads.node_at(c.center()) {
-                    roads.simplify_node(n);
-                }
-            }
-            for &c in &touched {
-                let covered = roads.covers(c.center());
-                let cd = world.grid.get_mut(c).expect("in bounds");
-                if !covered && cd.occupant == Occupant::Road {
-                    cd.occupant = Occupant::Empty;
-                }
-            }
+            remove_pieces(world, &pieces);
             for id in &buildings {
                 if let Some(b) = world.buildings.remove(*id) {
                     for c in b.footprint.cells() {
@@ -338,5 +363,110 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
     Outcome {
         cost: preview.cost,
         cells: preview.cells,
+    }
+}
+
+/// Remove unit road pieces (bulldoze), tidy the nodes at their ends and
+/// clear the grid cells no road passes any more.
+///
+/// Each segment carrying removed pieces is cut once per run of removed
+/// pieces, so the work is proportional to the road length touched (looking
+/// nodes and segments up by position per piece scans the whole network:
+/// seconds for a big selection on a dense map).
+fn remove_pieces(world: &mut World, pieces: &[(Cell, Cell)]) {
+    if pieces.is_empty() {
+        return;
+    }
+    let doomed: BTreeSet<(Cell, Cell)> = pieces.iter().copied().collect();
+    let area = pieces.iter().fold(CellRect::single(pieces[0].0), |r, &(p, q)| {
+        CellRect::from_corners(
+            Cell::new(r.min.x.min(p.x).min(q.x), r.min.y.min(p.y).min(q.y)),
+            Cell::new(r.max.x.max(p.x).max(q.x), r.max.y.max(p.y).max(q.y)),
+        )
+    });
+    let roads = &mut world.roads;
+    let mut handled: BTreeSet<(Cell, Cell)> = BTreeSet::new();
+    // Inner cells of removed runs: only that segment passed their centre
+    // (any other road through a centre meets it at a node).
+    let mut cleared: Vec<Cell> = Vec::new();
+    // Nodes at the ends of removed runs.
+    let mut ends: BTreeMap<Cell, NodeId> = BTreeMap::new();
+    let ids: Vec<SegmentId> = roads.segments.keys().collect();
+    for s in ids {
+        if roads.segments[s].kind == RoadKind::Highway || !segment_bounds(roads, s).intersects(&area) {
+            continue;
+        }
+        let Some(line) = segment_cells(roads, s) else { continue };
+        let removed: Vec<bool> = line.windows(2).map(|w| doomed.contains(&ordered(w[0], w[1]))).collect();
+        if !removed.contains(&true) {
+            continue;
+        }
+        // `cur` runs from `line[k]` (node `start`) to the segment's far end.
+        let (mut cur, mut start, mut k) = (s, roads.segments[s].a, 0);
+        while k < removed.len() {
+            let mut e = k + 1;
+            while e < removed.len() && removed[e] == removed[k] {
+                e += 1;
+            }
+            // Cut `cur` at line[e] unless that is its end; `cur` keeps the
+            // part from line[k], the rest becomes `rest`.
+            let (end, rest) = if e < removed.len() {
+                let mid = roads.split_segment(cur, line[e].center());
+                let rest = roads.nodes[mid]
+                    .segments
+                    .iter()
+                    .copied()
+                    .find(|&x| x != cur)
+                    .expect("split adds the far half");
+                (mid, Some(rest))
+            } else {
+                (roads.segments[cur].b, None)
+            };
+            if removed[k] {
+                for w in line[k..=e].windows(2) {
+                    handled.insert(ordered(w[0], w[1]));
+                }
+                cleared.extend_from_slice(&line[k + 1..e]);
+                ends.insert(line[k], start);
+                ends.insert(line[e], end);
+                roads.remove_segment(cur);
+            }
+            if let Some(r) = rest {
+                cur = r;
+            }
+            start = end;
+            k = e;
+        }
+    }
+    // Pieces of segments off the cell centres (never built by commands):
+    // look them up by position.
+    let mut touched: BTreeSet<Cell> = BTreeSet::new();
+    for &(p, q) in doomed.difference(&handled) {
+        let a = roads.ensure_node(p.center());
+        let b = roads.ensure_node(q.center());
+        if let Some(s) = roads.segment_between(a, b) {
+            roads.remove_segment(s);
+        }
+        touched.extend([p, q]);
+    }
+    for (&c, &n) in &ends {
+        let degree = roads.nodes.get(n).map(|node| node.segments.len());
+        // A merged node's cell is still covered by the merged segment.
+        let gone = roads.simplify_node(n);
+        if gone && degree != Some(2) {
+            cleared.push(c);
+        }
+    }
+    for &c in &touched {
+        if let Some(n) = roads.node_at(c.center()) {
+            roads.simplify_node(n);
+        }
+    }
+    cleared.extend(touched.iter().copied().filter(|&c| !roads.covers(c.center())));
+    for c in cleared {
+        let cd = world.grid.get_mut(c).expect("in bounds");
+        if cd.occupant == Occupant::Road {
+            cd.occupant = Occupant::Empty;
+        }
     }
 }

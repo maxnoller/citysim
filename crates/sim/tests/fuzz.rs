@@ -2,6 +2,8 @@
 //! with consistency checks after every command, determinism and save/load
 //! lockstep under the same fuzz, and extreme road layouts.
 
+use std::collections::BTreeSet;
+
 use citysim_sim::scenarios::GridPlayer;
 use citysim_sim::*;
 
@@ -237,6 +239,57 @@ fn rand_command(r: &mut Rng) -> Command {
     }
 }
 
+/// Unit road pieces `(p, q, highway)` with `p < q`.
+fn pieces(w: &World) -> BTreeSet<(Cell, Cell, bool)> {
+    let mut out = BTreeSet::new();
+    for (s, seg) in w.roads.segments.iter() {
+        let (pa, pb) = w.roads.segment_ends(s);
+        let line = Cell::from_pos(pa)
+            .straight_line_to(Cell::from_pos(pb))
+            .expect("straight");
+        for p in line.windows(2) {
+            let (a, b) = if p[0] <= p[1] { (p[0], p[1]) } else { (p[1], p[0]) };
+            out.insert((a, b, seg.kind == RoadKind::Highway));
+        }
+    }
+    out
+}
+
+/// A bulldoze removed exactly the street pieces with an end in the
+/// rectangle and the buildings overlapping it, reported exactly the cells it
+/// cleared, and left grid road cells matching the remaining pieces.
+fn check_bulldoze(before: &World, after: &World, rect: CellRect, cells: &[Cell]) {
+    let Some(rect) = rect.clamp_to_map() else { return };
+    let old = pieces(before);
+    let want: BTreeSet<_> = old
+        .iter()
+        .copied()
+        .filter(|&(a, b, hw)| hw || !(rect.contains(a) || rect.contains(b)))
+        .collect();
+    let got = pieces(after);
+    assert_eq!(got, want, "bulldoze {rect:?} left the wrong pieces");
+    let mut reported: BTreeSet<Cell> = old
+        .difference(&want)
+        .flat_map(|&(a, b, _)| [a, b])
+        .filter(|&x| rect.contains(x))
+        .collect();
+    for b in before.buildings.values().filter(|b| b.footprint.intersects(&rect)) {
+        reported.extend(b.footprint.cells());
+        assert!(!after.buildings.values().any(|a| a == b), "{b:?} survived");
+    }
+    assert_eq!(cells, reported.into_iter().collect::<Vec<_>>().as_slice());
+    after.roads.validate().unwrap();
+    let covered: BTreeSet<Cell> = got.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+    for (i, cd) in after.grid.cells.iter().enumerate() {
+        let cell = c(i as i32 % MAP_CELLS, i as i32 / MAP_CELLS);
+        assert_eq!(
+            cd.occupant == Occupant::Road,
+            covered.contains(&cell),
+            "{cell:?} after {rect:?}"
+        );
+    }
+}
+
 /// Apply `cmd` the way the game does, checking that `preview` agrees with
 /// `apply` and that a failed command changes nothing.
 fn apply_checked(w: &mut World, cmd: Command) {
@@ -246,6 +299,9 @@ fn apply_checked(w: &mut World, cmd: Command) {
     match (&preview, &got) {
         (Ok(p), Ok(o)) => {
             assert_eq!((p.cost, &p.cells), (o.cost, &o.cells), "{cmd:?}");
+            if let Command::Bulldoze { min, max } = cmd {
+                check_bulldoze(&before, w, CellRect::from_corners(min, max), &o.cells);
+            }
         }
         (Err(a), Err(b)) => {
             assert_eq!(format!("{a:?}"), format!("{b:?}"), "{cmd:?}");

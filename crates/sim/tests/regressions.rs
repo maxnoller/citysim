@@ -1,6 +1,9 @@
 //! Regression tests for defects found by review and fuzzing. Each test
 //! failed before its fix.
 
+use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
+
 use citysim_sim::*;
 
 const DAY: u64 = balance::TICKS_PER_DAY as u64;
@@ -141,4 +144,125 @@ fn stale_commute_average_does_not_freeze_an_empty_city() {
         w.buildings.len(),
         w.traffic.avg_commute_s
     );
+}
+
+/// All unit road pieces `(p, q)` (adjacent cell centres joined by a road),
+/// with `p < q`, and whether they are highway.
+fn pieces(w: &World) -> BTreeSet<(Cell, Cell, bool)> {
+    let mut out = BTreeSet::new();
+    for (s, seg) in w.roads.segments.iter() {
+        let (pa, pb) = w.roads.segment_ends(s);
+        let (ca, cb) = (Cell::from_pos(pa), Cell::from_pos(pb));
+        let line = ca.straight_line_to(cb).expect("straight");
+        for p in line.windows(2) {
+            let (a, b) = if p[0] <= p[1] { (p[0], p[1]) } else { (p[1], p[0]) };
+            out.insert((a, b, seg.kind == RoadKind::Highway));
+        }
+    }
+    out
+}
+
+/// Road graph valid and the grid's road cells exactly the cells roads pass
+/// (`check_invariants` does this too, but slowly on a dense map).
+fn check_roads(w: &World) {
+    w.roads.validate().unwrap();
+    let covered: BTreeSet<Cell> = pieces(w).into_iter().flat_map(|(a, b, _)| [a, b]).collect();
+    for y in 0..MAP_CELLS {
+        for x in 0..MAP_CELLS {
+            let cell = c(x, y);
+            assert_eq!(w.grid.is_road(cell), covered.contains(&cell), "{cell:?}");
+        }
+    }
+}
+
+/// What a bulldoze must leave: every piece without an end in the
+/// rectangle, plus all highway pieces.
+fn expected_after_bulldoze(before: &BTreeSet<(Cell, Cell, bool)>, rect: CellRect) -> BTreeSet<(Cell, Cell, bool)> {
+    before
+        .iter()
+        .copied()
+        .filter(|&(a, b, hw)| hw || !(rect.contains(a) || rect.contains(b)))
+        .collect()
+}
+
+/// Bulldoze planning looked up every road piece with a scan over all
+/// segments, per road cell and direction, and execution did the same per
+/// piece. On a dense map a full-map drag took seconds per preview (the UI
+/// previews every frame) and seconds to apply.
+#[test]
+fn bulldoze_preview_and_apply_scale_on_a_dense_map() {
+    let mut w = World::new(4);
+    mesh(&mut w, 12, 250, 4, 250, 6);
+    // Diagonals through the mesh as well.
+    w.economy.money = i64::MAX / 4;
+    for k in (0..200).step_by(12) {
+        let _ = w.apply(Command::BuildRoad {
+            from: c(12 + k, 4),
+            to: c(12 + k + 40, 44),
+        });
+    }
+    check_roads(&w);
+    let before = pieces(&w);
+    assert!(w.roads.segments.len() > 1500, "{}", w.roads.segments.len());
+    let all = Command::Bulldoze {
+        min: c(0, 0),
+        max: c(255, 255),
+    };
+    let t = Instant::now();
+    let p = w.preview(&all).unwrap();
+    let preview_time = t.elapsed();
+    assert!(p.cells.len() > 10_000, "{}", p.cells.len());
+
+    // Partial bulldoze first: exact result, then the rest.
+    let rect = CellRect::from_corners(c(30, 30), c(130, 140));
+    let t = Instant::now();
+    w.apply(Command::Bulldoze {
+        min: rect.min,
+        max: rect.max,
+    })
+    .unwrap();
+    let partial_time = t.elapsed();
+    check_roads(&w);
+    assert_eq!(pieces(&w), expected_after_bulldoze(&before, rect));
+
+    let t = Instant::now();
+    w.apply(all).unwrap();
+    let apply_time = t.elapsed();
+    w.check_invariants().unwrap();
+    assert_eq!(w.roads.segments.len(), 1, "only the highway is left");
+    let limit = Duration::from_millis(400);
+    assert!(
+        preview_time < limit && partial_time < limit && apply_time < limit,
+        "preview {preview_time:?}, partial apply {partial_time:?}, apply {apply_time:?}"
+    );
+}
+
+/// Roads not lying on cell centres are never built by commands, but the
+/// graph allows them: bulldozing one still removes exactly the pieces in
+/// the rectangle (slow path).
+#[test]
+fn bulldoze_handles_a_segment_off_the_cell_centres() {
+    let mut w = World::new(6);
+    let y = 60;
+    let a = w.roads.add_node([20.0 * CELL_SIZE + 1.0, (y as f32 + 0.5) * CELL_SIZE]);
+    let b = w.roads.add_node([31.0 * CELL_SIZE - 1.0, (y as f32 + 0.5) * CELL_SIZE]);
+    w.roads.add_segment(a, b, RoadKind::Street);
+    for x in 20..=30 {
+        w.grid.get_mut(c(x, y)).unwrap().occupant = Occupant::Road;
+    }
+    w.versions.roads += 1;
+    w.versions.grid += 1;
+    w.check_invariants().unwrap();
+    let out = w
+        .apply(Command::Bulldoze {
+            min: c(24, y - 3),
+            max: c(26, y + 3),
+        })
+        .unwrap();
+    assert_eq!(out.cells, vec![c(24, y), c(25, y), c(26, y)]);
+    w.check_invariants().unwrap();
+    for x in 20..=30 {
+        assert_eq!(w.grid.is_road(c(x, y)), !(24..=26).contains(&x), "{x}");
+    }
+    assert_eq!(w.roads.segments.len(), 3, "highway and the two remaining ends");
 }
