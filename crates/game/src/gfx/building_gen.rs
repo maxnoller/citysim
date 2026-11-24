@@ -645,8 +645,8 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     let top = ground + (main - 1) as f32 * sh;
     // Podium ground floor in a darker base colour, then the upper floors.
     m.cuboid2(
-        Vec3::new(body.x0 - 0.06, 0.0, body.z0 - 0.06),
-        Vec3::new(body.x1 + 0.06, ground, body.z1 + 0.06),
+        Vec3::new(body.x0, 0.0, body.z0),
+        Vec3::new(body.x1, ground, body.z1),
         base_col,
         base_col,
     );
@@ -1109,7 +1109,7 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
         z0: body.z1 + 0.3,
         z1: lot.z1 - 0.3,
     };
-    if level >= 2 || rng.chance(0.4) {
+    if rng.chance(if level >= 2 { 0.55 } else { 0.25 }) {
         let x = if rng.chance(0.5) { body.x0 + 1.0 } else { body.x1 - 1.0 };
         let c = Vec3::new(x, h - 0.5, body.z0 + 1.0);
         let ch = rng.range(5.0, 9.0) + if big { 4.0 } else { 0.0 };
