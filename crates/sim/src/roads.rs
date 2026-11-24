@@ -1,0 +1,345 @@
+//! The road network: a general graph of nodes (metre positions) joined by
+//! straight segments.
+//!
+//! Pathfinding, vehicles and rendering rely only on this graph, never on the
+//! grid, so other build tools (free-form, curved) can be added later by only
+//! changing how commands edit the graph. Segments are two-way.
+
+use serde::{Deserialize, Serialize};
+use slotmap::new_key_type;
+
+use crate::IdMap;
+
+use crate::balance;
+use crate::geom::{self, Cell};
+
+new_key_type! {
+    /// Stable id of a [`RoadNode`].
+    pub struct NodeId;
+    /// Stable id of a [`RoadSegment`].
+    pub struct SegmentId;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoadKind {
+    Street,
+    /// The pre-built stub connecting the map to the outside. Not bulldozable.
+    Highway,
+}
+
+impl RoadKind {
+    /// Metres per second.
+    pub fn speed_limit(self) -> f32 {
+        match self {
+            RoadKind::Street => balance::STREET_SPEED_LIMIT,
+            RoadKind::Highway => balance::HIGHWAY_SPEED_LIMIT,
+        }
+    }
+
+    /// Lanes per direction.
+    pub fn lanes(self) -> f32 {
+        match self {
+            RoadKind::Street => balance::STREET_LANES,
+            RoadKind::Highway => balance::HIGHWAY_LANES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoadNode {
+    /// Position in sim metres.
+    pub pos: [f32; 2],
+    /// Segments attached to this node (its degree is `segments.len()`).
+    pub segments: Vec<SegmentId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoadSegment {
+    pub a: NodeId,
+    pub b: NodeId,
+    pub kind: RoadKind,
+    /// Metres. Straight for now: `dist(a.pos, b.pos)`.
+    pub length: f32,
+    /// Metres per second.
+    pub speed_limit: f32,
+    /// Vehicles that fit on the segment (both directions) before it is jammed.
+    pub capacity: f32,
+    /// Vehicles currently on the segment. PHASE2: maintained by traffic.
+    pub load: f32,
+}
+
+impl RoadSegment {
+    pub fn other(&self, n: NodeId) -> NodeId {
+        if self.a == n { self.b } else { self.a }
+    }
+
+    /// `load / capacity`, 0 when empty, 1 when jammed.
+    pub fn congestion(&self) -> f32 {
+        if self.capacity > 0.0 {
+            (self.load / self.capacity).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+fn capacity_for(kind: RoadKind, length: f32) -> f32 {
+    (length * kind.lanes() * 2.0 / balance::VEHICLE_SPACING_M).max(1.0)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoadNetwork {
+    pub nodes: IdMap<NodeId, RoadNode>,
+    pub segments: IdMap<SegmentId, RoadSegment>,
+    /// Where newcomers arrive: the outer end of the highway stub.
+    pub entry: Option<NodeId>,
+}
+
+impl RoadNetwork {
+    pub fn new() -> RoadNetwork {
+        RoadNetwork::default()
+    }
+
+    pub fn node_pos(&self, n: NodeId) -> [f32; 2] {
+        self.nodes[n].pos
+    }
+
+    /// Both end positions of a segment.
+    pub fn segment_ends(&self, s: SegmentId) -> ([f32; 2], [f32; 2]) {
+        let seg = &self.segments[s];
+        (self.nodes[seg.a].pos, self.nodes[seg.b].pos)
+    }
+
+    /// Node exactly at `pos`, if any.
+    pub fn node_at(&self, pos: [f32; 2]) -> Option<NodeId> {
+        self.nodes
+            .iter()
+            .find(|(_, n)| geom::same_pos(n.pos, pos))
+            .map(|(id, _)| id)
+    }
+
+    /// Segment whose interior (not its ends) passes through `pos`.
+    pub fn segment_through(&self, pos: [f32; 2]) -> Option<SegmentId> {
+        self.segments.keys().find(|&s| {
+            let (a, b) = self.segment_ends(s);
+            geom::on_segment_interior(pos, a, b)
+        })
+    }
+
+    /// Does any node or segment lie at `pos`?
+    pub fn covers(&self, pos: [f32; 2]) -> bool {
+        self.node_at(pos).is_some() || self.segment_through(pos).is_some()
+    }
+
+    /// A segment containing both points (closed). With no overlapping
+    /// segments this is the road piece from `p` to `q`, if built.
+    pub fn segment_containing(&self, p: [f32; 2], q: [f32; 2]) -> Option<SegmentId> {
+        self.segments.keys().find(|&s| {
+            let (a, b) = self.segment_ends(s);
+            geom::on_segment(p, a, b) && geom::on_segment(q, a, b)
+        })
+    }
+
+    /// Segment directly joining two nodes.
+    pub fn segment_between(&self, a: NodeId, b: NodeId) -> Option<SegmentId> {
+        self.nodes[a]
+            .segments
+            .iter()
+            .copied()
+            .find(|&s| self.segments[s].other(a) == b)
+    }
+
+    /// The segment carrying the road piece between two cell centres.
+    pub fn piece(&self, p: Cell, q: Cell) -> Option<SegmentId> {
+        self.segment_containing(p.center(), q.center())
+    }
+
+    pub fn add_node(&mut self, pos: [f32; 2]) -> NodeId {
+        self.nodes.insert(RoadNode {
+            pos,
+            segments: Vec::new(),
+        })
+    }
+
+    /// Join two distinct nodes with a straight segment.
+    pub fn add_segment(&mut self, a: NodeId, b: NodeId, kind: RoadKind) -> SegmentId {
+        assert_ne!(a, b, "zero-length segment");
+        let length = geom::dist(self.nodes[a].pos, self.nodes[b].pos);
+        let s = self.segments.insert(RoadSegment {
+            a,
+            b,
+            kind,
+            length,
+            speed_limit: kind.speed_limit(),
+            capacity: capacity_for(kind, length),
+            load: 0.0,
+        });
+        self.nodes[a].segments.push(s);
+        self.nodes[b].segments.push(s);
+        s
+    }
+
+    /// Remove a segment; its nodes stay (call [`Self::simplify_node`]).
+    pub fn remove_segment(&mut self, s: SegmentId) {
+        if let Some(seg) = self.segments.remove(s) {
+            for n in [seg.a, seg.b] {
+                if let Some(node) = self.nodes.get_mut(n) {
+                    node.segments.retain(|&x| x != s);
+                }
+            }
+        }
+    }
+
+    /// The node at `pos`: an existing one, one made by splitting the segment
+    /// passing through `pos`, or a new unconnected node.
+    pub fn ensure_node(&mut self, pos: [f32; 2]) -> NodeId {
+        if let Some(n) = self.node_at(pos) {
+            return n;
+        }
+        if let Some(s) = self.segment_through(pos) {
+            return self.split_segment(s, pos);
+        }
+        self.add_node(pos)
+    }
+
+    /// Split `s` at interior point `pos`. `s` keeps its id and becomes the
+    /// `a`-side half; a new segment is the `b`-side half.
+    pub fn split_segment(&mut self, s: SegmentId, pos: [f32; 2]) -> NodeId {
+        let mid = self.add_node(pos);
+        let seg = self.segments[s].clone();
+        let len_a = geom::dist(self.nodes[seg.a].pos, pos);
+        let len_b = geom::dist(pos, self.nodes[seg.b].pos);
+        let frac_a = len_a / (len_a + len_b);
+        {
+            let first = &mut self.segments[s];
+            first.b = mid;
+            first.length = len_a;
+            first.capacity = capacity_for(seg.kind, len_a);
+            first.load = seg.load * frac_a;
+        }
+        self.nodes[seg.b].segments.retain(|&x| x != s);
+        self.nodes[mid].segments.push(s);
+        let second = self.add_segment(mid, seg.b, seg.kind);
+        self.segments[second].load = seg.load * (1.0 - frac_a);
+        mid
+    }
+
+    /// Tidy a node after edits: delete it if it has no segments (unless it
+    /// is the entry), or merge its two segments into one if they are
+    /// collinear and of the same kind. Returns true if the node is gone.
+    pub fn simplify_node(&mut self, n: NodeId) -> bool {
+        let Some(node) = self.nodes.get(n) else {
+            return true;
+        };
+        if Some(n) == self.entry {
+            return false;
+        }
+        match node.segments.len() {
+            0 => {
+                self.nodes.remove(n);
+                true
+            }
+            2 => {
+                let (s1, s2) = (node.segments[0], node.segments[1]);
+                let (seg1, seg2) = (&self.segments[s1], &self.segments[s2]);
+                if seg1.kind != seg2.kind {
+                    return false;
+                }
+                let (end1, end2) = (seg1.other(n), seg2.other(n));
+                if end1 == end2 {
+                    return false;
+                }
+                let p = node.pos;
+                let d1 = geom::sub(self.nodes[end1].pos, p);
+                let d2 = geom::sub(self.nodes[end2].pos, p);
+                let l1 = geom::dot(d1, d1).sqrt();
+                let l2 = geom::dot(d2, d2).sqrt();
+                let collinear = (geom::cross(d1, d2) / (l1 * l2)).abs() < 1e-4 && geom::dot(d1, d2) < 0.0;
+                if !collinear {
+                    return false;
+                }
+                // Keep s1, extend it to end2 through n; drop s2.
+                let seg2 = self.segments.remove(s2).expect("s2 exists");
+                self.nodes[end2].segments.retain(|&x| x != s2);
+                self.nodes[end2].segments.push(s1);
+                let first = &mut self.segments[s1];
+                if first.a == n {
+                    first.a = end2;
+                } else {
+                    first.b = end2;
+                }
+                first.length += seg2.length;
+                first.capacity = capacity_for(first.kind, first.length);
+                first.load += seg2.load;
+                self.nodes.remove(n);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Check graph invariants. Used by tests; cheap enough for debug asserts
+    /// on small maps (O(nodes * segments)).
+    pub fn validate(&self) -> Result<(), String> {
+        for (s, seg) in &self.segments {
+            if seg.a == seg.b {
+                return Err(format!("{s:?} is a loop"));
+            }
+            for n in [seg.a, seg.b] {
+                let node = self.nodes.get(n).ok_or(format!("{s:?} references missing {n:?}"))?;
+                if !node.segments.contains(&s) {
+                    return Err(format!("{n:?} does not list {s:?}"));
+                }
+            }
+            let (pa, pb) = self.segment_ends(s);
+            let d = geom::dist(pa, pb);
+            if d < geom::POS_EPS {
+                return Err(format!("{s:?} has zero length"));
+            }
+            if (d - seg.length).abs() > 0.01 {
+                return Err(format!("{s:?} length {} != {d}", seg.length));
+            }
+            for (n, node) in &self.nodes {
+                if geom::on_segment_interior(node.pos, pa, pb) {
+                    return Err(format!("{n:?} lies inside {s:?} (unsplit intersection/overlap)"));
+                }
+            }
+        }
+        for (n, node) in &self.nodes {
+            for &s in &node.segments {
+                let seg = self.segments.get(s).ok_or(format!("{n:?} lists missing {s:?}"))?;
+                if seg.a != n && seg.b != n {
+                    return Err(format!("{n:?} lists unrelated {s:?}"));
+                }
+            }
+            let mut sorted = node.segments.clone();
+            sorted.sort();
+            sorted.dedup();
+            if sorted.len() != node.segments.len() {
+                return Err(format!("{n:?} lists a segment twice"));
+            }
+            if node.segments.is_empty() && Some(n) != self.entry {
+                return Err(format!("{n:?} is dangling"));
+            }
+            for (m, other) in &self.nodes {
+                if m != n && geom::same_pos(node.pos, other.pos) {
+                    return Err(format!("{n:?} and {m:?} are duplicates"));
+                }
+            }
+            // Duplicate segments between the same pair of nodes.
+            let mut ends: Vec<NodeId> = node.segments.iter().map(|&s| self.segments[s].other(n)).collect();
+            ends.sort();
+            let len = ends.len();
+            ends.dedup();
+            if ends.len() != len {
+                return Err(format!("{n:?} has two segments to the same node"));
+            }
+        }
+        if let Some(e) = self.entry
+            && !self.nodes.contains_key(e)
+        {
+            return Err("entry node missing".into());
+        }
+        Ok(())
+    }
+}
