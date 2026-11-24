@@ -73,11 +73,41 @@ fn gfx_pose_from_env() -> Option<CameraPose> {
     })
 }
 
+/// Dev aid: `CITYSIM_GFX_TOUR=1` flies a fixed camera path (for videos).
+#[derive(Resource, Default)]
+struct GfxTour(bool);
+
+/// Tour keyframes: (seconds, focus x, focus z, yaw, pitch, distance).
+const TOUR: [(f32, f32, f32, f32, f32, f32); 6] = [
+    (0.0, 330.0, 1010.0, 0.25, 1.05, 760.0),
+    (5.0, 400.0, 1000.0, 0.7, 0.85, 330.0),
+    (10.0, 300.0, 1030.0, 1.3, 0.42, 120.0),
+    (15.0, 285.0, 1032.0, 2.2, 0.3, 70.0),
+    (19.0, 330.0, 1040.0, 2.9, 0.45, 160.0),
+    (24.0, 420.0, 1010.0, 3.4, 0.9, 520.0),
+];
+
+fn tour_pose(t: f32) -> CameraPose {
+    let k = TOUR.iter().rposition(|f| f.0 <= t).unwrap_or(0).min(TOUR.len() - 2);
+    let (a, b) = (TOUR[k], TOUR[k + 1]);
+    let u = ((t - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
+    let u = u * u * (3.0 - 2.0 * u);
+    let l = |x: f32, y: f32| x + (y - x) * u;
+    CameraPose {
+        focus: Vec3::new(l(a.1, b.1), 0.0, l(a.2, b.2)),
+        yaw: l(a.3, b.3),
+        pitch: l(a.4, b.4),
+        distance: (a.5.ln() + (b.5.ln() - a.5.ln()) * u).exp(),
+    }
+}
+
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
+        let tour = std::env::var("CITYSIM_GFX_TOUR").is_ok_and(|v| !v.is_empty() && v != "0");
         app.insert_resource(GfxPose(gfx_pose_from_env()))
+            .insert_resource(GfxTour(tour))
             .add_systems(Startup, spawn_camera)
             .add_systems(Update, (camera_controls, apply_rig).chain().in_set(GameSet::Tools));
     }
@@ -134,12 +164,14 @@ fn camera_controls(
     over_ui: Res<PointerOverUi>,
     overridden: Res<CameraOverride>,
     gfx_pose: Res<GfxPose>,
+    tour: Res<GfxTour>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut rigs: Query<(&mut CameraRig, &Camera, &GlobalTransform)>,
 ) {
     let dt = time.delta_secs().min(0.1);
     for (mut rig, camera, cam_tf) in &mut rigs {
-        if let Some(pose) = gfx_pose.0.or(overridden.0) {
+        let toured = tour.0.then(|| tour_pose(time.elapsed_secs() - 1.0));
+        if let Some(pose) = toured.or(gfx_pose.0).or(overridden.0) {
             rig.target = pose;
             rig.current = pose;
             rig.tilt = pose.pitch - auto_pitch(pose.distance);
