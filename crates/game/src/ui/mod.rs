@@ -3,7 +3,8 @@
 //! the game only through `crate::shared` (never import from `crate::gfx`).
 //!
 //! Design tokens live in `theme.rs`; reusable pieces in `widgets.rs`.
-//! `CITYSIM_UI_SHOTS=dir` captures every UI state to `dir` (see `shots.rs`).
+//! `CITYSIM_UI_SHOTS=dir` captures every UI state to `dir`; `CITYSIM_UI_TOUR=1`
+//! plays a ~30 s scripted walk through the interface for videos (`shots.rs`).
 
 mod budget;
 mod context;
@@ -79,6 +80,8 @@ impl Plugin for UiPlugin {
             .add_systems(PreUpdate, scale_ui);
         if let Some(dir) = std::env::var_os("CITYSIM_UI_SHOTS").filter(|d| !d.is_empty()) {
             app.add_plugins(shots::ShotsPlugin { dir: dir.into() });
+        } else if std::env::var("CITYSIM_UI_TOUR").is_ok_and(|v| !v.is_empty() && v != "0") {
+            app.add_plugins(shots::TourPlugin);
         }
     }
 }
