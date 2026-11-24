@@ -136,6 +136,8 @@ struct FuzzOpts {
     /// Replace the world by `load(save())` with this chance per burst
     /// (per mille).
     reload_permille: u32,
+    /// No random commands before this tick (lets a busy city grow first).
+    calm_until: u64,
 }
 
 /// Run a randomised game: a growing city (GridPlayer) plus random player
@@ -178,7 +180,7 @@ fn fuzz(o: FuzzOpts, checkpoints: &[u64]) -> (World, Vec<Vec<u8>>) {
             w.economy.money += 100_000;
         }
         // Few edits while the town is young, more once it has grown.
-        let n = if w.time.tick < DAY && cmd_rng.below(4) != 0 {
+        let n = if w.time.tick < o.calm_until || (w.time.tick < DAY && cmd_rng.below(4) != 0) {
             0
         } else {
             cmd_rng.below(3)
@@ -236,6 +238,7 @@ fn fuzz_commands_and_steps_keep_the_world_consistent() {
                 check: true,
                 full_every: 150,
                 reload_permille: 0,
+                calm_until: 0,
             },
             &[],
         );
@@ -256,6 +259,7 @@ fn fuzz_long() {
                 check: true,
                 full_every: 400,
                 reload_permille: 20,
+                calm_until: 0,
             },
             &[],
         );
@@ -285,6 +289,7 @@ fn fuzz_is_deterministic_and_save_load_keeps_lockstep() {
         check: false,
         full_every: 0,
         reload_permille: 0,
+        calm_until: 0,
     };
     let (a, sa) = fuzz(opts, &cps);
     let (b, sb) = fuzz(opts, &cps);
@@ -322,6 +327,7 @@ fn fuzz_determinism_long() {
             check: false,
             full_every: 0,
             reload_permille: 0,
+            calm_until: 0,
         };
         let (_, sa) = fuzz(opts, &cps);
         let (_, sb) = fuzz(opts, &cps);
@@ -337,4 +343,58 @@ fn fuzz_determinism_long() {
             assert!(sa[i] == sc[i], "seed {seed}: save/load diverged by tick {}", cps[i]);
         }
     }
+}
+
+/// A grown city (several hundred households) torn at by random edits right
+/// through the morning rush, checked after every command.
+#[test]
+fn fuzz_a_busy_city_through_rush_hour() {
+    let (w, _) = fuzz(
+        FuzzOpts {
+            seed: 41,
+            ticks: 2 * DAY + 7 * HOUR,
+            check: true,
+            full_every: 60,
+            reload_permille: 0,
+            calm_until: 2 * DAY + HOUR,
+        },
+        &[],
+    );
+    sanity(&w);
+    assert!(w.households.len() > 200, "{}", w.households.len());
+}
+
+/// Same busy city: identical inputs give identical saves, and reloading at
+/// random points (mid-rush) does not change anything.
+#[test]
+fn busy_city_save_load_lockstep() {
+    let ticks = 2 * DAY + 6 * HOUR;
+    let mut cps: Vec<u64> = checkpoints(43, ticks, 12)
+        .into_iter()
+        .filter(|&t| t > 2 * DAY)
+        .collect();
+    cps.push(2 * DAY + 2 * HOUR + 7);
+    cps.sort();
+    let opts = FuzzOpts {
+        seed: 43,
+        ticks,
+        check: false,
+        full_every: 0,
+        reload_permille: 0,
+        calm_until: 2 * DAY,
+    };
+    let (a, sa) = fuzz(opts, &cps);
+    sanity(&a);
+    assert!(a.households.len() > 200, "{}", a.households.len());
+    let (b, sb) = fuzz(
+        FuzzOpts {
+            reload_permille: 300,
+            ..opts
+        },
+        &cps,
+    );
+    for (i, (x, y)) in sa.iter().zip(&sb).enumerate() {
+        assert!(x == y, "save/load broke lockstep by tick {}", cps[i]);
+    }
+    assert!(a == b);
 }
