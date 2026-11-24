@@ -20,7 +20,8 @@ pub struct Versions {
     pub roads: u64,
     /// Any cell's zone or occupant changed.
     pub grid: u64,
-    /// Buildings added, removed or changed.
+    /// Buildings added, removed, or a drawn field changed (kind, footprint,
+    /// level, facing, seed). Occupancy changes do not bump it.
     pub buildings: u64,
 }
 
