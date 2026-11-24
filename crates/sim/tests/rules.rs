@@ -349,6 +349,23 @@ fn insufficient_funds() {
 }
 
 #[test]
+fn bulldozing_is_allowed_in_debt() {
+    let mut w = blank();
+    road(&mut w, (0, 0), (8, 0)).unwrap();
+    w.economy.money = -5_000;
+    assert!(road(&mut w, (0, 2), (3, 2)).is_err());
+    let cmd = Command::Bulldoze {
+        min: c(3, 0),
+        max: c(5, 0),
+    };
+    let cost = w.preview(&cmd).unwrap().cost;
+    assert!(cost > 0);
+    assert_eq!(w.apply(cmd).unwrap().cost, cost);
+    assert_eq!(w.economy.money, -5_000 - cost);
+    check(&w);
+}
+
+#[test]
 fn zoning_needs_nearby_road() {
     let mut w = blank();
     road(&mut w, (10, 10), (20, 10)).unwrap();
