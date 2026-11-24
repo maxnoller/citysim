@@ -31,6 +31,7 @@ fn spawn_meter(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
             Name::new("Demand meter"),
+            super::hud::info_tip("Demand", "What the city wants next. Zone the types with long bars."),
             panel(Node {
                 position_type: PositionType::Absolute,
                 left: px(t::EDGE),

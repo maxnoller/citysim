@@ -1,6 +1,7 @@
 //! Top bar: date / time with a day-progress bar, money (opens the budget),
 //! population, jobs; speed controls on the right; a "Paused" pill below.
 
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 
 use super::UiState;
@@ -64,6 +65,19 @@ fn spawn_icon_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, glyph: char, co
     });
 }
 
+/// Hover help for a non-button element.
+pub fn info_tip(title: &'static str, desc: &'static str) -> impl Bundle {
+    (
+        Tooltip {
+            title,
+            desc,
+            key: None,
+            price: None,
+        },
+        Hovered::default(),
+    )
+}
+
 fn chip_node() -> Node {
     Node {
         height: px(t::TOP_BAR_H),
@@ -109,7 +123,11 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
             }))
             .with_children(|left| {
                 // Date & time.
-                left.spawn(panel(chip_node())).with_children(|c| {
+                left.spawn((
+                    panel(chip_node()),
+                    info_tip("Date & time", "One in-game day lasts two minutes at normal speed."),
+                ))
+                .with_children(|c| {
                     spawn_icon_box(c, fonts, icon::SUN, t::WARNING, Some(HudText::DayIcon));
                     c.spawn(layout(text_column())).with_children(|col| {
                         col.spawn((
@@ -218,7 +236,11 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                 });
 
                 // Population.
-                left.spawn(panel(chip_node())).with_children(|c| {
+                left.spawn((
+                    panel(chip_node()),
+                    info_tip("Residents", "People living in your city. Zone homes to grow it."),
+                ))
+                .with_children(|c| {
                     spawn_icon_box(c, fonts, icon::USERS, t::ACCENT, None);
                     c.spawn(layout(text_column())).with_children(|col| {
                         col.spawn((
@@ -234,7 +256,14 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                 });
 
                 // Jobs.
-                left.spawn(panel(chip_node())).with_children(|c| {
+                left.spawn((
+                    panel(chip_node()),
+                    info_tip(
+                        "Jobs",
+                        "Workplaces in shops, offices and industry. Jobless: residents without work.",
+                    ),
+                ))
+                .with_children(|c| {
                     spawn_icon_box(c, fonts, icon::BRIEFCASE, t::ACCENT, None);
                     c.spawn(layout(text_column())).with_children(|col| {
                         col.spawn((label(fonts, "0", t::FONT_VALUE, t::W_SEMIBOLD, t::TEXT), HudText::Jobs));

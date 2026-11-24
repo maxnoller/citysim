@@ -17,7 +17,8 @@ const fn rgba(hex: u32, a: f32) -> Color {
 
 // ---------------------------------------------------------------- colours
 
-pub const PANEL: Color = rgba(0x14181D, 0.88);
+/// ~88% perceived opacity (UI blends in linear space, so a bit higher).
+pub const PANEL: Color = rgba(0x14181D, 0.92);
 /// Slightly lifted surface (tooltips, modal card).
 pub const PANEL_RAISED: Color = rgba(0x1B2027, 0.97);
 pub const PANEL_BORDER: Color = rgba(0xFFFFFF, 0.08);
