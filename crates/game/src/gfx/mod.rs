@@ -109,10 +109,11 @@ mod reload_tests {
     /// (road vertices, zone vertices, buildings, vehicles, trees) as drawn.
     fn snapshot(app: &mut App) -> (usize, usize, usize, usize, usize) {
         let w = app.world_mut();
-        let mut q = w.query::<(&Name, &Mesh3d)>();
+        let mut q = w.query::<(&Name, &Mesh3d, Option<&Visibility>)>();
         let meshes = w.resource::<Assets<Mesh>>();
         let (mut roads, mut zones) = (0, 0);
-        for (name, mesh) in q.iter(w) {
+        // Hidden entities keep their last mesh (Mesh3d is never removed).
+        for (name, mesh, _) in q.iter(w).filter(|(_, _, v)| v.is_none_or(|v| *v != Visibility::Hidden)) {
             let n = meshes.get(&mesh.0).map_or(0, |m| m.count_vertices());
             if name.as_str().starts_with("Roads") {
                 roads += n;
