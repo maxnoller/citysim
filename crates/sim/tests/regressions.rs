@@ -1,17 +1,13 @@
 //! Regression tests for defects found by review and fuzzing. Each test
 //! failed before its fix.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use citysim_sim::*;
-
-const DAY: u64 = balance::TICKS_PER_DAY as u64;
-const HOUR: u64 = balance::TICKS_PER_HOUR as u64;
-
-fn c(x: i32, y: i32) -> Cell {
-    Cell::new(x, y)
-}
+use common::*;
 
 fn road(w: &mut World, a: (i32, i32), b: (i32, i32)) {
     w.apply(Command::BuildRoad {
@@ -144,35 +140,6 @@ fn stale_commute_average_does_not_freeze_an_empty_city() {
         w.buildings.len(),
         w.traffic.avg_commute_s
     );
-}
-
-/// All unit road pieces `(p, q)` (adjacent cell centres joined by a road),
-/// with `p < q`, and whether they are highway.
-fn pieces(w: &World) -> BTreeSet<(Cell, Cell, bool)> {
-    let mut out = BTreeSet::new();
-    for (s, seg) in w.roads.segments.iter() {
-        let (pa, pb) = w.roads.segment_ends(s);
-        let (ca, cb) = (Cell::from_pos(pa), Cell::from_pos(pb));
-        let line = ca.straight_line_to(cb).expect("straight");
-        for p in line.windows(2) {
-            let (a, b) = if p[0] <= p[1] { (p[0], p[1]) } else { (p[1], p[0]) };
-            out.insert((a, b, seg.kind == RoadKind::Highway));
-        }
-    }
-    out
-}
-
-/// Road graph valid and the grid's road cells exactly the cells roads pass
-/// (`check_invariants` does this too, but slowly on a dense map).
-fn check_roads(w: &World) {
-    w.roads.validate().unwrap();
-    let covered: BTreeSet<Cell> = pieces(w).into_iter().flat_map(|(a, b, _)| [a, b]).collect();
-    for y in 0..MAP_CELLS {
-        for x in 0..MAP_CELLS {
-            let cell = c(x, y);
-            assert_eq!(w.grid.is_road(cell), covered.contains(&cell), "{cell:?}");
-        }
-    }
 }
 
 /// What a bulldoze must leave: every piece without an end in the
