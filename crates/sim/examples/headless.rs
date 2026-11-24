@@ -18,6 +18,10 @@ use std::time::Instant;
 use citysim_sim::scenarios::{self, GridPlayer};
 use citysim_sim::{TICKS_PER_SECOND, World, Zone, balance};
 
+/// Blocks `[R, C, I]` the "upfront" player lays out on day one (~290 road
+/// cells, ~60 % of the start money).
+const UPFRONT_BLOCKS: [usize; 3] = [8, 3, 3];
+
 /// Average game speed assumed when converting ticks to real minutes.
 const ASSUMED_SPEED: f64 = 2.5;
 
@@ -31,6 +35,11 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "grid",
         about: "sensible player: grid blocks following demand, all zone types",
+        days: 20,
+    },
+    Scenario {
+        name: "upfront",
+        about: "lays out a district of 14 blocks on day one with its own money, then follows demand",
         days: 20,
     },
     Scenario {
@@ -55,7 +64,7 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "overbuilt",
-        about: "builds far more road than it needs",
+        about: "a road mesh far bigger than its town (pre-built), a little zoning",
         days: 10,
     },
 ];
@@ -69,12 +78,21 @@ fn run(sc: &Scenario, out_dir: &str) {
     let mut player = None;
     match sc.name {
         "grid" => player = Some(GridPlayer::new(&Zone::ALL)),
+        "upfront" => {
+            let mut p = GridPlayer::new(&Zone::ALL);
+            p.build_ahead(&mut w, UPFRONT_BLOCKS);
+            println!(
+                "upfront: built {} road cells, ${} left",
+                w.stats.road_cells, w.economy.money
+            );
+            player = Some(p);
+        }
         "res_only" => player = Some(GridPlayer::new(&[Zone::Residential])),
-        // The static layouts build a whole district at once; they get that
+        // The static layouts lay every road on day one; they get that
         // construction for free and then run on the normal economy.
         "two_grid" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, true)),
         "artery" | "artery_fixed" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false)),
-        "overbuilt" => scenarios::overbuilt(&mut w),
+        "overbuilt" => scenarios::prebuilt(&mut w, scenarios::overbuilt),
         _ => unreachable!(),
     }
     println!("\n=== {} — {}", sc.name, sc.about);

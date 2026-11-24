@@ -24,7 +24,7 @@ TEXT = "#0b0b0b"
 TEXT2 = "#52514e"
 GRID = "#e4e3df"
 # Validated categorical order (fixed, never cycled).
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
 SCENARIOS = [
     ("grid", "Grid player", "grid player"),
     ("res_only", "Residential only", "res only"),
@@ -32,6 +32,7 @@ SCENARIOS = [
     ("artery", "Two districts, one junction", "bad layout"),
     ("artery_fixed", "Bad layout, fixed on day 4", "fixed"),
     ("overbuilt", "Overbuilt roads", "overbuilt"),
+    ("upfront", "District built on day one", "up front"),
 ]
 # (column, title, scale, label format, source: "hourly" or "daily")
 PANELS = [
@@ -118,10 +119,13 @@ def main():
                     yy = py + gap
             placed.append((x, yy))
             ax.plot([x], [y], "o", color=color, markersize=5, markeredgecolor=SURFACE, markeredgewidth=1.5)
+            if yy != y:
+                # Label pushed away from its line end: a thin leader line.
+                ax.plot([x, x + (ax.get_xlim()[1] - ax.get_xlim()[0]) * 0.012], [y, yy], color=GRID, linewidth=1)
             ax.annotate(
                 f"{name}  {fmt.format(y)}",
                 (x, yy),
-                xytext=(6, 0),
+                xytext=(10 if yy != y else 6, 0),
                 textcoords="offset points",
                 va="center",
                 fontsize=8,
@@ -133,7 +137,7 @@ def main():
         if col == "money":
             ax.axhline(0, color=TEXT2, linewidth=1)
     handles, labels = axes.flat[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=6, frameon=False, bbox_to_anchor=(0.5, 0.965))
+    fig.legend(handles, labels, loc="upper center", ncol=4, frameon=False, bbox_to_anchor=(0.5, 0.965))
     fig.suptitle(title, x=0.01, ha="left", fontsize=15, fontweight="bold", color=TEXT)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(out, dpi=110, facecolor=SURFACE)

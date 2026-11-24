@@ -23,38 +23,42 @@
 
 // ---------------------------------------------------------------- money ----
 //
-// Targets (checked by the `headless` example and `tests/balance.rs`), for a
-// sensible player (the scripted `GridPlayer`: grid of 10x5 blocks built as
-// demand asks) over a 30-minute game at 2.5x:
+// Targets (checked by the `headless` example and `tests/balance.rs`), over
+// a 30-minute game at 2.5x:
 //
-// * Starting money pays for the first days, when taxes do not yet cover
-//   upkeep and services, and is mostly spent by the middle of the game:
-//   cash bottoms out around $6k (about 120 road cells) on days 11-14.
-// * At 5,000 residents the daily net (taxes - road upkeep - services) is
-//   20-35 % of tax income, about $3k; 100 road cells ($5k) cost 1.5-2 days
-//   of it, so every expansion and every rebuild is a real expense.
-// * The player never waits more than about a minute for the money for its
-//   next block, and never has less than 100 road cells' worth in hand.
-// * Cash at 30 minutes stays below $25k (it used to be $127k and climbing).
-// * Road upkeep is the biggest cost: a network with much more road per
-//   resident than a grid (the `overbuilt` scenario) loses money every day.
+// * A sensible layout stays solvent however it is built. A town runs a
+//   small deficit only on its first day or two while it is still empty,
+//   then a clear and growing surplus. That holds for a whole two-district
+//   grid laid on day one (976 road cells, `scenarios::prebuilt`: never
+//   below ~$29k), for a player who spends most of the start money on a
+//   district on day one and then follows demand (`GridPlayer::build_ahead`),
+//   and for one who builds block by block (`GridPlayer`).
+// * Construction is the big expense, so money stays a constraint while the
+//   city expands: the block-by-block player holds at most ~$31-34k by
+//   5,000 residents (it used to be ~$110k and climbing), never waits for
+//   money, and never has less than 100 road cells' worth in hand. 100 road
+//   cells ($6.5k) are about one day of its net income at 5,000.
+// * Running costs (road upkeep + services) take ~40 % of tax income in a
+//   sensible city, but a network far bigger than its town needs (the
+//   pre-built `overbuilt` mesh, ~9,000 cells) loses money every day.
 
-/// Money at the start of a new game: the first 600 road cells, or the
-/// roads of a town of about 3,500.
+/// Money at the start of a new game: the first 460 road cells.
 pub const STARTING_MONEY: i64 = 30_000;
 /// Cost of one cell of newly built road (per cell-to-cell piece of length).
-pub const ROAD_COST_PER_CELL: i64 = 50;
+/// The main money sink: an expanding city spends most of its surplus here.
+pub const ROAD_COST_PER_CELL: i64 = 65;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
-/// A road cell of a sensible grid serves ~6.5 residents and their jobs, who
-/// pay ~$10 a day net of services: upkeep takes most of that, so wasted
-/// road shows.
-pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 6;
+/// Low enough that a sensible network built ahead of its town (2-3 road
+/// cells per resident while it fills) is carried by the town after a day
+/// or two; a mesh many times bigger than its town still sinks it.
+pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 1;
 /// Daily cost of city services per resident (police, fire, schools...,
 /// abstracted), charged at midnight with road upkeep. Keeps the margin per
-/// resident thin, so a bigger city is not automatically a money machine.
-pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 0.6;
+/// resident moderate (residents and their jobs pay ~$2.1 a day in taxes at
+/// the default rate), so a bigger city is not a money machine.
+pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 0.75;
 
 /// Tax rate of a new game.
 pub const DEFAULT_TAX_RATE: f32 = 0.09;

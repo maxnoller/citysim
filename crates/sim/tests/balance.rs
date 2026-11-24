@@ -261,50 +261,115 @@ fn budget_by_category_and_unemployment_for_the_hud() {
     assert_eq!(loaded, w);
 }
 
-/// The money targets of `balance` (see the comment above its money
-/// section) over a 30-minute game of the scripted sensible player, and the
-/// over-eager road builder going broke.
+// ------------------------------------------------- money targets ----
+// See the comment above the money section of `balance`.
+
+fn real_s(ticks: u64) -> f64 {
+    ticks as f64 / TICKS_PER_SECOND as f64 / 2.5
+}
+
+/// Plays `p` for 20 days; returns the most money held before reaching
+/// 5,000 residents, the lowest money at any tick and the tick it reached
+/// 5,000 residents.
+fn play(w: &mut World, p: &mut GridPlayer) -> (i64, i64, u64) {
+    let (mut most, mut lowest, mut reached) = (i64::MIN, i64::MAX, None);
+    while w.time.tick < 20 * DAY {
+        p.act(w);
+        w.step();
+        lowest = lowest.min(w.economy.money);
+        if reached.is_none() {
+            most = most.max(w.economy.money);
+            if w.stats.population >= 5000 {
+                reached = Some(w.time.tick);
+            }
+        }
+    }
+    (most, lowest, reached.expect("reaches 5,000 residents"))
+}
+
+/// The block-by-block player reaches 5,000 residents in about 30 minutes,
+/// never waits for money and never runs low, but cannot bank much either.
 #[test]
-fn money_stays_meaningful_for_a_sensible_player_and_overbuilding_goes_broke() {
-    let real_s = |ticks: u64| ticks as f64 / TICKS_PER_SECOND as f64 / 2.5;
+fn money_stays_a_constraint_for_a_player_who_keeps_expanding() {
     let hundred_cells = 100 * balance::ROAD_COST_PER_CELL;
     let mut w = World::new(7);
     let mut p = GridPlayer::new(&Zone::ALL);
-    let mut lowest = i64::MAX;
-    let mut reached_5k = None;
-    while w.time.tick < 20 * DAY {
-        p.act(&mut w);
-        w.step();
-        lowest = lowest.min(w.economy.money);
-        if reached_5k.is_none() && w.stats.population >= 5000 {
-            reached_5k = Some(w.time.tick);
-        }
-    }
-    let minutes = real_s(reached_5k.expect("reaches 5,000 residents")) / 60.0;
+    let (most, lowest, reached) = play(&mut w, &mut p);
+    let minutes = real_s(reached) / 60.0;
     assert!(
         (24.0..=34.0).contains(&minutes),
         "5,000 residents after {minutes:.1} min"
     );
-    let at_5k = w.economy.history.iter().find(|d| d.population >= 5000).unwrap().budget;
-    let margin = at_5k.net() as f64 / at_5k.income() as f64;
     assert!(
-        (0.2..=0.35).contains(&margin),
-        "net margin at 5,000: {margin:.2} ({at_5k:?})"
-    );
-    let days_per_100 = hundred_cells as f64 / at_5k.net() as f64;
-    assert!(
-        (1.0..=2.5).contains(&days_per_100),
-        "100 cells = {days_per_100:.2} days of net"
+        (20_000..=40_000).contains(&most),
+        "most cash before 5,000 residents: ${most}"
     );
     assert!(lowest >= hundred_cells, "lowest cash ${lowest}");
     let waited = real_s(p.longest_money_wait_ticks);
     assert!(waited <= 60.0, "waited {waited:.0} s for money");
-    assert!(w.economy.money < 25_000, "hoarding: ${}", w.economy.money);
+    let at_5k = w.economy.history.iter().find(|d| d.population >= 5000).unwrap().budget;
+    let days_per_100 = hundred_cells as f64 / at_5k.net() as f64;
+    assert!(
+        (0.7..=2.0).contains(&days_per_100),
+        "100 cells = {days_per_100:.2} days of net"
+    );
+    assert!(w.economy.history.iter().skip(1).all(|d| d.budget.net() > 0));
+}
 
+/// A player who spends most of the start money on a district on day one
+/// and then follows demand is just as viable.
+#[test]
+fn building_a_district_up_front_is_viable() {
+    let mut w = World::new(7);
+    let mut p = GridPlayer::new(&Zone::ALL);
+    assert_eq!(p.build_ahead(&mut w, [8, 3, 3]), 14);
+    assert!(w.economy.money < balance::STARTING_MONEY / 2, "${}", w.economy.money);
+    let (most, lowest, reached) = play(&mut w, &mut p);
+    assert!(real_s(reached) / 60.0 <= 34.0);
+    assert!(lowest > 0, "lowest cash ${lowest}");
+    assert!(most <= 40_000, "${most}");
+    assert!(real_s(p.longest_money_wait_ticks) <= 60.0);
+}
+
+/// Every road of a growing two-district town laid on day one: a deficit on
+/// the first day or two while it is empty, then a clear, growing surplus;
+/// money never goes below zero. The same for the one-junction layout fixed
+/// on day 4 (which also pays for the fix).
+#[test]
+fn a_sensible_layout_built_all_at_once_stays_solvent() {
+    for (grid, fix) in [(true, false), (false, true)] {
+        let mut w = World::new(7);
+        scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, grid));
+        let mut lowest = i64::MAX;
+        for _ in 0..10 * DAY {
+            if fix && w.time.day == 4 && w.time.tick_of_day == 0 {
+                let before = w.economy.money;
+                scenarios::add_connections(&mut w);
+                assert!(w.economy.money < before, "the fix was built and paid");
+            }
+            w.step();
+            lowest = lowest.min(w.economy.money);
+        }
+        let h = &w.economy.history;
+        assert!(lowest > 0, "grid {grid}: lowest ${lowest}");
+        assert!(
+            h.iter().skip(2).all(|d| d.budget.net() > 0),
+            "grid {grid}: deficit after day 2"
+        );
+        assert!(h[2].budget.net() < h[9].budget.net() / 3, "grid {grid}: surplus grows");
+        assert!(h[9].money > h[5].money + 3_000, "grid {grid}: money trends up");
+    }
+}
+
+/// A road mesh far bigger than its town loses money every day.
+#[test]
+fn overbuilding_goes_broke() {
     let mut over = World::new(7);
-    scenarios::overbuilt(&mut over);
-    for _ in 0..10 * DAY {
+    scenarios::prebuilt(&mut over, scenarios::overbuilt);
+    assert!(over.stats.road_cells > 5_000);
+    for _ in 0..6 * DAY {
         over.step();
     }
-    assert!(over.economy.history.iter().all(|d| d.money < 0 && d.budget.net() < 0));
+    assert!(over.economy.history.iter().all(|d| d.budget.net() < 0));
+    assert!(over.economy.money < 0, "${}", over.economy.money);
 }

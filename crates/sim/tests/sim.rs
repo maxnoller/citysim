@@ -315,8 +315,9 @@ fn economy_books_taxes_and_upkeep_daily() {
 
 #[test]
 fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
+    // The whole over-eager mesh, built for free: its upkeep sinks the town.
     let mut over = World::new(16);
-    scenarios::overbuilt(&mut over);
+    scenarios::prebuilt(&mut over, scenarios::overbuilt);
     // The static districts, built for free, run on the normal economy.
     let mut good = World::new(16);
     scenarios::prebuilt(&mut good, |w| scenarios::two_districts(w, true));
