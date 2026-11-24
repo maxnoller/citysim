@@ -1,78 +1,111 @@
-//! Draws `world.roads` (the graph only — never the grid) as flat meshes,
-//! rebuilt when `versions.roads` changes.
+//! Draws `world.roads` (the graph only — never the grid) with the geometry
+//! from `road_geom`. The network is split into square chunks; when
+//! `versions.roads` changes only chunks whose pieces changed are re-meshed.
+
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hasher;
 
 use bevy::prelude::*;
-use citysim_sim::{RoadKind, RoadNetwork};
 
-use super::heights;
-use super::mesh_util::FlatMeshBuilder;
-use crate::shared::{GameSet, SimWorld, sim_to_world};
+use super::mesh_util::MeshBuilder;
+use super::road_geom::{self, chunk_of};
+use super::scene::WorldMaterials;
+use crate::shared::{GameSet, SimWorld};
 
-pub const STREET_WIDTH: f32 = 6.0;
-pub const HIGHWAY_WIDTH: f32 = 7.5;
-const STREET_COLOR: Color = Color::srgb(0.22, 0.22, 0.24);
-const HIGHWAY_COLOR: Color = Color::srgb(0.15, 0.15, 0.17);
+const CHUNK: f32 = 128.0;
 
-#[derive(Component)]
-struct RoadMesh(RoadKind);
+#[derive(Default)]
+struct RoadChunks {
+    key: Option<(u64, u64)>,
+    /// Chunk -> (content hash, entity).
+    chunks: HashMap<IVec2, (u64, Entity)>,
+}
 
 pub struct RoadsPlugin;
 
 impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_road_entities)
-            .add_systems(Update, rebuild_roads.in_set(GameSet::Render));
+        app.add_systems(Update, rebuild_roads.in_set(GameSet::Render));
     }
-}
-
-fn spawn_road_entities(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
-    for (kind, color) in [(RoadKind::Street, STREET_COLOR), (RoadKind::Highway, HIGHWAY_COLOR)] {
-        commands.spawn((
-            Name::new(format!("Roads {kind:?}")),
-            RoadMesh(kind),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: color,
-                perceptual_roughness: 0.9,
-                ..default()
-            })),
-            Transform::default(),
-        ));
-    }
-}
-
-/// One mesh per road kind: a strip per segment plus a disc per node end.
-fn road_mesh(roads: &RoadNetwork, kind: RoadKind) -> Option<Mesh> {
-    let (width, y) = match kind {
-        RoadKind::Street => (STREET_WIDTH, heights::ROAD),
-        RoadKind::Highway => (HIGHWAY_WIDTH, heights::HIGHWAY),
-    };
-    let mut b = FlatMeshBuilder::new();
-    for seg in roads.segments.values().filter(|s| s.kind == kind) {
-        let a = sim_to_world(roads.node_pos(seg.a), y);
-        let c = sim_to_world(roads.node_pos(seg.b), y);
-        b.strip(a, c, width);
-        b.disc(a, width * 0.5, 12);
-        b.disc(c, width * 0.5, 12);
-    }
-    (!b.is_empty()).then(|| b.build())
 }
 
 fn rebuild_roads(
     mut commands: Commands,
     sim: Res<SimWorld>,
-    mut built: Local<Option<(u64, u64)>>,
+    mut state: Local<RoadChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
-    q: Query<(Entity, &RoadMesh)>,
+    mats: Res<WorldMaterials>,
 ) {
     let key = sim.key(sim.world.versions.roads);
-    if *built == Some(key) {
+    if state.key == Some(key) {
         return;
     }
-    *built = Some(key);
-    for (e, RoadMesh(kind)) in &q {
-        match road_mesh(&sim.world.roads, *kind) {
-            Some(mesh) => commands.entity(e).insert(Mesh3d(meshes.add(mesh))),
-            None => commands.entity(e).remove::<Mesh3d>(),
-        };
+    state.key = Some(key);
+    let layout = road_geom::layout(&sim.world.roads);
+    // Bucket pieces and hash each chunk's content.
+    let mut nodes: HashMap<IVec2, Vec<usize>> = HashMap::new();
+    let mut segs: HashMap<IVec2, Vec<usize>> = HashMap::new();
+    let mut hashers: HashMap<IVec2, DefaultHasher> = HashMap::new();
+    for (i, n) in layout.nodes.iter().enumerate() {
+        let c = chunk_of(n.pos, CHUNK);
+        nodes.entry(c).or_default().push(i);
+        let h = hashers.entry(c).or_default();
+        h.write_u8(1);
+        road_geom::hash_node(n, h);
     }
+    for (i, s) in layout.segs.iter().enumerate() {
+        // The off-map highway goes in the chunk of its map end.
+        let c = chunk_of(if s.id.is_none() { s.b } else { s.mid() }, CHUNK);
+        segs.entry(c).or_default().push(i);
+        let h = hashers.entry(c).or_default();
+        h.write_u8(2);
+        road_geom::hash_seg(s, h);
+    }
+    let hashes: HashMap<IVec2, u64> = hashers.into_iter().map(|(c, h)| (c, h.finish())).collect();
+    let mut rebuilt = 0;
+    // Drop chunks that no longer have roads.
+    let gone: HashSet<IVec2> = state
+        .chunks
+        .keys()
+        .filter(|c| !hashes.contains_key(c))
+        .copied()
+        .collect();
+    for c in gone {
+        if let Some((_, e)) = state.chunks.remove(&c) {
+            commands.entity(e).despawn();
+        }
+    }
+    for (&c, &hash) in &hashes {
+        if state.chunks.get(&c).is_some_and(|(h, _)| *h == hash) {
+            continue;
+        }
+        let mut m = MeshBuilder::new();
+        for &i in nodes.get(&c).map(Vec::as_slice).unwrap_or(&[]) {
+            road_geom::mesh_node(&mut m, &layout.nodes[i]);
+        }
+        for &i in segs.get(&c).map(Vec::as_slice).unwrap_or(&[]) {
+            road_geom::mesh_segment(&mut m, &layout.segs[i]);
+        }
+        let mesh = meshes.add(m.build());
+        rebuilt += 1;
+        match state.chunks.get_mut(&c) {
+            Some((h, e)) => {
+                *h = hash;
+                commands.entity(*e).insert(Mesh3d(mesh));
+            }
+            None => {
+                let e = commands
+                    .spawn((
+                        Name::new(format!("Roads {c}")),
+                        Mesh3d(mesh),
+                        MeshMaterial3d(mats.lit.clone()),
+                        Transform::default(),
+                    ))
+                    .id();
+                state.chunks.insert(c, (hash, e));
+            }
+        }
+    }
+    debug!("roads: rebuilt {rebuilt} of {} chunks", state.chunks.len());
 }

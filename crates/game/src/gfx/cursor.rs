@@ -6,7 +6,6 @@ use citysim_sim::{CELL_SIZE, Zone};
 
 use super::heights;
 use super::mesh_util::FlatMeshBuilder;
-use super::roads::STREET_WIDTH;
 use super::zones::zone_color;
 use crate::shared::{GameSet, HoveredCell, PreviewKind, ToolPreview, cell_center, cell_corners};
 
@@ -136,7 +135,7 @@ fn draw_ghost(
         PreviewKind::Road => {
             if let Some((from, to)) = preview.line {
                 let (a, c) = (cell_center(from, y), cell_center(to, y));
-                let width = if valid { STREET_WIDTH } else { STREET_WIDTH * 0.6 };
+                let width = if valid { 8.0 } else { 8.0 * 0.6 };
                 b.strip(a, c, width);
                 b.disc(a, width * 0.5, 12);
                 b.disc(c, width * 0.5, 12);
