@@ -418,8 +418,12 @@ pub(crate) fn tick(world: &mut World) {
         world.traffic.trips_today = 0;
     }
     move_vehicles(world, &mut ended);
-    let mut budget = balance::PATH_EXPANSIONS_PER_TICK as i64;
+    let total = balance::PATH_EXPANSIONS_PER_TICK as i64;
+    let mut budget = total;
     replan_some(world, &mut budget, &mut ended);
+    // Every road edit queues all cars for a re-plan; departures keep at
+    // least half the budget so a busy editor cannot starve them.
+    let mut budget = budget.max(total / 2);
     depart_some(world, &mut budget, &mut ended);
     update_loads(world);
     for e in ended {

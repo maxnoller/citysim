@@ -135,8 +135,9 @@ pub const REPLAN_AFTER_WAIT_S: f32 = 10.0;
 /// A car that has been waiting this long gives up: it is removed and its
 /// trip ends as if it arrived (gridlock breaker).
 pub const STUCK_REMOVE_AFTER_S: f32 = 60.0;
-/// Path searches are budgeted: at most this many node expansions per tick
-/// (at least one search always runs). Others wait in the queue.
+/// Path searches are budgeted: about this many node expansions per tick
+/// (at least one search always runs). Others wait in the queue. Re-plans
+/// go first; departures always get at least half of it.
 pub const PATH_EXPANSIONS_PER_TICK: u32 = 2500;
 /// At most this many waiting departures are tried per tick.
 pub const DEPARTURES_PER_TICK: usize = 24;
