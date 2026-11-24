@@ -5,10 +5,9 @@
 //!   preview / overlay / quality resources, hover picking, coordinates).
 //! * `gfx` — all 3D drawing and the camera (`GfxPlugin`, feature `gfx`).
 //! * `ui` — 2D interface, tools, input, save/load (`UiPlugin`, feature `ui`).
-//! * `dev`, `dev_demo` — development-only scripted runs and fake data.
+//! * `dev` — development-only scenarios, scripted runs and screenshots.
 
 mod dev;
-mod dev_demo;
 #[cfg(feature = "gfx")]
 mod gfx;
 // Partial builds (one side disabled) leave parts of the shared contract unused.

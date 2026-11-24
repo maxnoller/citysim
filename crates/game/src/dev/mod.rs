@@ -2,7 +2,8 @@
 //! `crate::shared`, Bevy input and the sim.
 //!
 //! Environment variables:
-//! * `CITYSIM_DEMO=town|stress` — fake living town (see `crate::dev_demo`).
+//! * `CITYSIM_DEMO=town|city|jam` — a real town built by the sim's scripted
+//!   players and fast-forwarded before the first frame (see `scenario`).
 //! * `CITYSIM_DEMO=script` (alias `1`) — scripted ~15 s tool demo for videos;
 //!   `CITYSIM_DEMO_DELAY=secs` holds still first.
 //! * `CITYSIM_AUTOSHOT=out.png` (or `--autoshot out.png`) — screenshot and
@@ -11,6 +12,7 @@
 //! * `CITYSIM_LOG_FPS=1` — log frame time / FPS every second.
 
 mod autoshot;
+mod scenario;
 mod script;
 
 use bevy::prelude::*;
@@ -19,10 +21,12 @@ use bevy::prelude::*;
 pub enum DemoKind {
     /// Scripted tool demo (drives the real ui through synthetic input).
     Script,
-    /// Small fake town with a few hundred buildings and cars.
+    /// Real town of ~1,500 residents (scripted grid player).
     Town,
-    /// 6,000 buildings and 3,000 cars.
-    Stress,
+    /// Real city of ~5,000 residents (scripted grid player).
+    City,
+    /// Bad layout with one overloaded junction, morning rush.
+    Jam,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,10 +73,11 @@ impl DevConfig {
         {
             Some("script" | "1") => Some(DemoKind::Script),
             Some("town") => Some(DemoKind::Town),
-            Some("stress") => Some(DemoKind::Stress),
+            Some("city") => Some(DemoKind::City),
+            Some("jam") => Some(DemoKind::Jam),
             Some("" | "0") | None => None,
             Some(other) => {
-                eprintln!("unknown CITYSIM_DEMO={other:?} (use script, town or stress)");
+                eprintln!("unknown CITYSIM_DEMO={other:?} (use script, town, city or jam)");
                 None
             }
         };
@@ -111,11 +116,8 @@ impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         let c = &self.config;
         match c.demo {
-            Some(DemoKind::Town) => {
-                app.add_plugins(crate::dev_demo::DevDemoPlugin { stress: false });
-            }
-            Some(DemoKind::Stress) => {
-                app.add_plugins(crate::dev_demo::DevDemoPlugin { stress: true });
+            Some(kind @ (DemoKind::Town | DemoKind::City | DemoKind::Jam)) => {
+                app.add_plugins(scenario::ScenarioPlugin { kind });
             }
             Some(DemoKind::Script) => {
                 app.add_plugins(script::ScriptPlugin { delay: c.script_delay });

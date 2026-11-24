@@ -88,12 +88,10 @@ pub fn sample_city() -> Vec<Command> {
 pub fn view_pose(view: ShotView, demo: Option<DemoKind>) -> CameraPose {
     // (focus cell, wide distance, street-level focus cell)
     let (focus, wide, street) = match demo {
-        Some(DemoKind::Town) => (crate::dev_demo::TOWN_CENTER, 650.0, crate::dev_demo::TOWN_STREET_VIEW),
-        Some(DemoKind::Stress) => (
-            crate::dev_demo::STRESS_CENTER,
-            1700.0,
-            crate::dev_demo::TOWN_STREET_VIEW,
-        ),
+        Some(kind @ (DemoKind::Town | DemoKind::City | DemoKind::Jam)) => {
+            let (focus, wide) = super::scenario::focus(kind);
+            (focus, wide, super::scenario::street(kind))
+        }
         _ => (Cell::new(40, 137), 470.0, Cell::new(30, 128)),
     };
     match view {

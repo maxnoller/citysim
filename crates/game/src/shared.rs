@@ -6,7 +6,8 @@
 //! * `SimWorld`, `SimClock` stepping, `SimCommand` application, `HoveredCell`:
 //!   this module (`SharedPlugin`).
 //! * `ActiveTool`, `ToolPreview`, `OverlayMode`, `GraphicsQuality`,
-//!   `PointerOverUi`, `SimClock::{paused, speed}`: written by `ui`.
+//!   `PointerOverUi`, `CameraInputBlocked`, `SimClock::{paused, speed}`:
+//!   written by `ui`.
 //! * `WorldCamera` entity (and honouring `CameraOverride`): owned by `gfx`.
 //! * `CameraOverride`: written by dev tooling (scripted demo / autoshot).
 
@@ -117,6 +118,11 @@ pub struct HoveredCell(pub Option<Cell>);
 /// True while the mouse is over a UI element (written by ui).
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PointerOverUi(pub bool);
+
+/// True while a modal ui (pause menu) owns the keyboard and mouse: gfx must
+/// ignore camera keys, wheel and drags (written by ui).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CameraInputBlocked(pub bool);
 
 /// What kind of change a [`ToolPreview`] shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -263,6 +269,7 @@ impl Plugin for SharedPlugin {
         .init_resource::<ActiveTool>()
         .init_resource::<HoveredCell>()
         .init_resource::<PointerOverUi>()
+        .init_resource::<CameraInputBlocked>()
         .init_resource::<ToolPreview>()
         .init_resource::<OverlayMode>()
         .init_resource::<GraphicsQuality>()
