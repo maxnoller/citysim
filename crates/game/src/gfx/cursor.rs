@@ -13,7 +13,7 @@ use super::heights;
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix};
 use super::zones::zone_color;
-use crate::shared::{ActiveTool, GameSet, HoveredCell, PreviewKind, ToolPreview, cell_center};
+use crate::shared::{ActiveTool, GameSet, HoveredCell, PreviewKind, ToolPreview, cell_center, cell_corners};
 
 /// Grid radius around the cursor, cells.
 const GRID_R: i32 = 14;
@@ -227,20 +227,7 @@ fn rect_ring(m: &mut MeshBuilder, x0: f32, z0: f32, x1: f32, z1: f32, y: f32, w:
 }
 
 fn cell_quad(m: &mut MeshBuilder, c: Cell, inset: f32, y: f32, col: [f32; 4]) {
-    let (x0, z0) = (c.x as f32 * CELL_SIZE + inset, c.y as f32 * CELL_SIZE + inset);
-    let (x1, z1) = (
-        (c.x + 1) as f32 * CELL_SIZE - inset,
-        (c.y + 1) as f32 * CELL_SIZE - inset,
-    );
-    m.quad_up(
-        [
-            Vec3::new(x0, y, z0),
-            Vec3::new(x1, y, z0),
-            Vec3::new(x1, y, z1),
-            Vec3::new(x0, y, z1),
-        ],
-        col,
-    );
+    m.quad_up(cell_corners(c, inset, y), col);
 }
 
 /// Translucent road from `a` to `b` (Bevy positions on the ground).

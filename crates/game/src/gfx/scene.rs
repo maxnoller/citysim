@@ -55,7 +55,7 @@ impl Plugin for ScenePlugin {
         app.insert_resource(ClearColor(palette::SKY_HORIZON))
             .insert_resource(GlobalAmbientLight {
                 color: Color::srgb(0.80, 0.88, 1.0),
-                brightness: 900.0,
+                brightness: 760.0,
                 ..default()
             })
             .insert_resource(DirectionalLightShadowMap { size: 4096 })
@@ -126,7 +126,7 @@ fn setup_scene(
         Sun,
         DirectionalLight {
             color: palette::SUN,
-            illuminance: 5_200.0,
+            illuminance: 6_200.0,
             shadow_maps_enabled: true,
             ..default()
         },

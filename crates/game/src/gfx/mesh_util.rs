@@ -73,6 +73,7 @@ impl MeshBuilder {
         }
     }
 
+    #[cfg(test)]
     pub fn triangle_count(&self) -> usize {
         self.idx.len() / 3
     }
@@ -283,52 +284,6 @@ pub fn signed_area(p: &[Vec2]) -> f32 {
     (0..n).map(|i| p[i].perp_dot(p[(i + 1) % n])).sum::<f32>() * 0.5
 }
 
-/// Upward-facing flat meshes (overlays, ghosts) without colours.
-#[derive(Default)]
-pub struct FlatMeshBuilder {
-    inner: MeshBuilder,
-}
-
-impl FlatMeshBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    /// Convex quad, corners in order around the edge.
-    pub fn quad(&mut self, q: [Vec3; 4]) {
-        self.inner.quad_up(q, [1.0; 4]);
-    }
-
-    /// Regular polygon (disc) around `center`.
-    pub fn disc(&mut self, center: Vec3, radius: f32, sides: u32) {
-        let ring: Vec<Vec3> = (0..sides)
-            .map(|i| {
-                let a = i as f32 / sides as f32 * std::f32::consts::TAU;
-                center + Vec3::new(a.cos(), 0.0, a.sin()) * radius
-            })
-            .collect();
-        self.inner.fan_up(center, &ring, [1.0; 4]);
-    }
-
-    /// Thick line on the ground from `a` to `b`.
-    pub fn strip(&mut self, a: Vec3, b: Vec3, width: f32) {
-        let d = (b - a).with_y(0.0);
-        if d.length_squared() < 1e-6 {
-            return;
-        }
-        let side = Vec3::new(-d.z, 0.0, d.x).normalize() * (width * 0.5);
-        self.quad([a + side, b + side, b - side, a - side]);
-    }
-
-    pub fn build(self) -> Mesh {
-        self.inner.build()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,12 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn flat_triangles_face_up_whatever_the_input_winding() {
-        let mut b = FlatMeshBuilder::new();
-        b.quad([Vec3::ZERO, Vec3::X, Vec3::new(1.0, 0.0, 1.0), Vec3::Z]);
-        b.quad([Vec3::ZERO, Vec3::Z, Vec3::new(1.0, 0.0, 1.0), Vec3::X]);
-        b.strip(Vec3::ZERO, Vec3::new(10.0, 0.0, 3.0), 2.0);
-        b.disc(Vec3::ZERO, 1.0, 8);
+    fn upward_triangles_face_up_whatever_the_input_winding() {
+        let mut b = MeshBuilder::new();
+        b.quad_up([Vec3::ZERO, Vec3::X, Vec3::new(1.0, 0.0, 1.0), Vec3::Z], [1.0; 4]);
+        b.quad_up([Vec3::ZERO, Vec3::Z, Vec3::new(1.0, 0.0, 1.0), Vec3::X], [1.0; 4]);
+        let ring = [Vec3::X, Vec3::Z, -Vec3::X, -Vec3::Z];
+        b.fan_up(Vec3::ZERO, &ring, [1.0; 4]);
         let mesh = b.build();
         let pos = positions(&mesh);
         let Some(Indices::U32(idx)) = mesh.indices() else {

@@ -203,7 +203,7 @@ fn pitched_roof(
     // Winding is fixed after mapping because swapping axes mirrors; use
     // `face` to orient every face away from the roof's centre.
     let centre = p(0.0, 0.0, eave + rise * 0.3);
-    let mut face = |m: &mut MeshBuilder, q: &[Vec3], color: Color| {
+    let face = |m: &mut MeshBuilder, q: &[Vec3], color: Color| {
         let n = (q[1] - q[0]).cross(q[2] - q[0]);
         let mid = q.iter().copied().sum::<Vec3>() / q.len() as f32;
         let flip = n.dot(mid - centre) < 0.0;
@@ -515,7 +515,7 @@ fn detached(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
         z0: lot.z1 - front_yard - bd,
         z1: lot.z1 - front_yard,
     };
-    let storeys = if rng.chance(0.55) { 1 } else { 2 };
+    let storeys = if rng.chance(0.7) { 1 } else { 2 };
     let door = rng.range(0.9, bw - 0.9);
     let roof_kind = rng.below(3);
     house_body(m, rng, body, storeys, &st, Some(door), roof_kind);
@@ -620,28 +620,36 @@ fn terrace(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
 }
 
 /// Small apartment block (level 3+).
-fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
-    lot_ground(m, lot, mix(lawn_color(rng), palette::PAVING, 0.25));
+/// Apartment block filling the lot: a podium ground floor, balconies on
+/// the street side, a set-back attic storey on taller blocks, hipped or
+/// flat roof. `storeys` includes the ground floor.
+fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
+    lot_ground(m, lot, mix(lawn_color(rng), palette::PAVING, 0.35));
     let wall = rng.pick(&palette::HOUSE_WALLS);
     let accent = rng.pick(&palette::HOUSE_ROOFS);
-    let storeys = (level as u32 + 1 + rng.below(2)).min(7);
-    let margin = if lot.w() > 12.0 { 1.6 } else { 0.9 };
+    let base_col = mix(shade(wall, 0.82), palette::BRICK, rng.range(0.0, 0.5));
+    let big = lot.w() > 12.0;
+    let side = if big { 1.0 } else { 0.4 };
     let body = Rect {
-        x0: lot.x0 + margin,
-        x1: lot.x1 - margin,
-        z0: lot.z0 + margin,
-        z1: lot.z1 - margin - 0.6,
+        x0: lot.x0 + side,
+        x1: lot.x1 - side,
+        z0: lot.z0 + side,
+        z1: lot.z1 - 1.6,
     };
     let sh = 3.0;
-    let top = storeys as f32 * sh + 0.4;
+    let ground = 3.4;
+    let attic = storeys >= 5 && rng.chance(0.6);
+    let main = if attic { storeys - 1 } else { storeys };
+    let top = ground + (main - 1) as f32 * sh;
+    // Podium ground floor in a darker base colour, then the upper floors.
     m.cuboid2(
-        Vec3::new(body.x0 - 0.05, 0.0, body.z0 - 0.05),
-        Vec3::new(body.x1 + 0.05, 0.5, body.z1 + 0.05),
-        shade(wall, 0.75),
-        shade(wall, 0.75),
+        Vec3::new(body.x0 - 0.06, 0.0, body.z0 - 0.06),
+        Vec3::new(body.x1 + 0.06, ground, body.z1 + 0.06),
+        base_col,
+        base_col,
     );
     m.cuboid2(
-        Vec3::new(body.x0, 0.5, body.z0),
+        Vec3::new(body.x0, ground, body.z0),
         Vec3::new(body.x1, top, body.z1),
         wall,
         wall,
@@ -652,45 +660,44 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
     } else {
         shade(wall, 0.8)
     };
-    let balconies = rng.chance(0.6);
+    let balconies = rng.chance(0.75);
+    let per_of = |w: f32| ((w / 2.2).floor() as usize).clamp(1, 8);
     for (fi, f) in faces.iter().enumerate() {
-        let per = ((f.width / 2.4).floor() as usize).clamp(1, 6);
-        for s in 0..storeys {
-            let base = 0.4 + s as f32 * sh + 0.9;
+        let per = per_of(f.width);
+        for (k, a) in spread(f.width, per).into_iter().enumerate() {
+            if !(fi == 0 && k == per / 2) {
+                f.window(m, a, 0.9, 1.0, 1.5, trim, palette::WINDOW);
+            }
+        }
+        for s in 1..main {
+            let base = ground + (s - 1) as f32 * sh + 0.85;
             for (k, a) in spread(f.width, per).into_iter().enumerate() {
-                if fi == 0 && s == 0 && k == per / 2 {
-                    continue;
-                }
-                f.window(m, a, base, 0.95, 1.3, trim, palette::WINDOW);
-                if balconies && fi == 0 && s > 0 && k % 2 == 1 {
+                f.window(m, a, base, 0.95, 1.35, trim, palette::WINDOW);
+                if balconies && fi == 0 && k % 2 == (s as usize % 2) {
                     f.slab(
                         m,
-                        a - 0.9,
-                        a + 0.9,
-                        base - 0.95,
-                        base - 0.8,
-                        0.9,
+                        a - 0.95,
+                        a + 0.95,
+                        base - 0.9,
+                        base - 0.75,
+                        1.0,
                         shade(wall, 0.85),
                         wall,
                     );
-                    f.slab(m, a - 0.9, a + 0.9, base - 0.8, base - 0.2, 0.9, accent, accent);
+                    f.slab(m, a - 0.95, a + 0.95, base - 0.75, base - 0.15, 1.0, accent, accent);
                 }
             }
-        }
-        // Floor bands.
-        if fi < 4 {
-            for s in 1..storeys {
-                let y = 0.4 + s as f32 * sh;
-                f.rect(m, 0.0, f.width, y - 0.08, y + 0.08, 0.02, shade(wall, 0.88));
-            }
+            // Floor band.
+            let y = ground + (s - 1) as f32 * sh;
+            f.rect(m, 0.0, f.width, y - 0.1, y + 0.1, 0.02, shade(wall, 0.86));
         }
     }
-    // Entrance.
+    // Entrance with a canopy and a path to the pavement.
     let f = faces[0];
-    let a = spread(f.width, ((f.width / 2.4).floor() as usize).clamp(1, 6))
-        [((f.width / 2.4).floor() as usize).clamp(1, 6) / 2];
-    f.rect(m, a - 0.7, a + 0.7, 0.5, 2.6, 0.04, palette::GLASS);
-    f.slab(m, a - 1.2, a + 1.2, 2.8, 2.95, 1.3, accent, accent);
+    let per = per_of(f.width);
+    let a = spread(f.width, per)[per / 2];
+    f.rect(m, a - 0.75, a + 0.75, 0.0, 2.6, 0.08, palette::GLASS);
+    f.slab(m, a - 1.3, a + 1.3, 2.8, 2.98, 1.4, accent, accent);
     flat_patch(
         m,
         Rect {
@@ -702,23 +709,50 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
         0.05,
         palette::PATH,
     );
-    if rng.chance(0.5) {
-        flat_roof(m, body, top, wall, palette::ROOF_FLAT, 0.5);
-        roof_details(m, rng, body.inset(0.3), top);
+    let hipped = rng.chance(0.6);
+    if attic {
+        // Set-back top floor with a roof terrace in front.
+        flat_roof(m, body, top, wall, palette::ROOF_FLAT, 1.0);
+        let inner = Rect {
+            z1: body.z1 - 1.8,
+            z0: body.z0 + 0.6,
+            x0: body.x0 + 0.6,
+            x1: body.x1 - 0.6,
+        };
+        let atop = top + sh;
+        m.cuboid2(
+            Vec3::new(inner.x0, top, inner.z0),
+            Vec3::new(inner.x1, atop, inner.z1),
+            wall,
+            wall,
+        );
+        let f = Face::of(inner, top)[0];
+        f.rect(m, 0.5, f.width - 0.5, 0.3, 2.4, 0.04, palette::GLASS);
+        if hipped {
+            pitched_roof(m, inner, atop, inner.d() * 0.25, true, true, 0.3, accent, wall);
+        } else {
+            flat_roof(m, inner, atop, wall, palette::ROOF_FLAT, 0.4);
+        }
+    } else if hipped {
+        pitched_roof(m, body, top, body.d() * 0.28, true, true, 0.35, accent, wall);
     } else {
-        pitched_roof(m, body, top, body.d() * 0.3, true, true, 0.3, accent, wall);
+        flat_roof(m, body, top, wall, palette::ROOF_FLAT, 0.6);
+        roof_details(m, rng, body.inset(0.4), top);
     }
-    yard_greenery(m, rng, lot, body);
+    m.detail_only(|m| {
+        for x in [lot.x0 + 0.6, lot.x1 - 0.6] {
+            props::bush(m, Vec3::new(x, 0.0, lot.z1 - 0.8), 0.8, palette::HEDGE, x);
+        }
+    });
 }
 
 // ------------------------------------------------------------------ shops & offices
 
-fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
+fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     lot_ground(m, lot, palette::PAVING);
     let wall = rng.pick(&palette::SHOP_WALLS);
     let wall = mix(wall, rng.pick(&palette::HOUSE_WALLS), rng.range(0.0, 0.5));
     let accent = rng.pick(&palette::ACCENTS);
-    let storeys = level as u32 + rng.below(2);
     let margin = 0.5;
     let front = 0.9;
     let body = Rect {
@@ -809,12 +843,12 @@ fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
     }
 }
 
-fn office(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
+fn office(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     lot_ground(m, lot, palette::PAVING);
-    let wall = rng.pick(&palette::SHOP_WALLS);
+    let style = rng.below(3);
+    let wall = rng.pick(&palette::OFFICE_WALLS);
     let accent = rng.pick(&palette::ACCENTS);
-    let storeys = (2 + level as u32 + rng.below(2)).min(9);
-    let margin = if lot.w() > 12.0 { 1.4 } else { 0.7 };
+    let margin = if lot.w() > 12.0 { 1.0 } else { 0.35 };
     let body = Rect {
         x0: lot.x0 + margin,
         x1: lot.x1 - margin,
@@ -823,48 +857,96 @@ fn office(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
     };
     let sh = 3.3;
     let base_h = 4.0;
-    let top = base_h + (storeys - 1) as f32 * sh;
-    m.cuboid2(
-        Vec3::new(body.x0, 0.0, body.z0),
-        Vec3::new(body.x1, top, body.z1),
-        wall,
-        wall,
-    );
-    let faces = Face::of(body, 0.0);
-    let glass = mix(palette::GLASS, palette::WINDOW, rng.range(0.0, 0.5));
-    let mullion = shade(wall, 0.9);
-    let vertical = rng.chance(0.5);
-    for f in &faces {
-        // Lobby glass on the ground floor.
-        f.rect(m, 0.5, f.width - 0.5, 0.3, 3.3, 0.04, shade(glass, 0.85));
-        // Ribbon windows per storey.
-        for s in 1..storeys {
-            let y = base_h + (s - 1) as f32 * sh;
-            f.rect(m, 0.3, f.width - 0.3, y + 0.7, y + 2.7, 0.04, glass);
-            if vertical {
-                let n = (f.width / 1.6).floor().max(1.0) as usize;
-                for a in spread(f.width, n).into_iter().skip(1) {
-                    let a = a - f.width / n as f32 * 0.5;
-                    f.rect(m, a - 0.07, a + 0.07, y + 0.7, y + 2.7, 0.06, mullion);
+    // Taller blocks sometimes step back for their top floors.
+    // Four floors and up: a two-storey podium over the whole lot with the
+    // upper floors set back on top of it.
+    let setback = storeys >= 4;
+    let low_storeys = if setback { 2 } else { storeys };
+    let glass = mix(palette::GLASS, palette::WINDOW, rng.range(0.0, 0.6));
+    let section = |m: &mut MeshBuilder, r: Rect, s0: u32, s1: u32| -> f32 {
+        let y0 = if s0 == 0 { 0.0 } else { base_h + (s0 - 1) as f32 * sh };
+        let top = base_h + (s1 - 1) as f32 * sh;
+        let body_col = if style == 2 { shade(glass, 0.8) } else { wall };
+        m.cuboid2(
+            Vec3::new(r.x0, y0, r.z0),
+            Vec3::new(r.x1, top, r.z1),
+            body_col,
+            body_col,
+        );
+        let faces = Face::of(r, 0.0);
+        for f in &faces {
+            if s0 == 0 {
+                // Lobby glass on the ground floor.
+                f.rect(m, 0.5, f.width - 0.5, 0.3, 3.3, 0.04, shade(glass, 0.85));
+            }
+            for s in s0.max(1)..s1 {
+                let y = base_h + (s - 1) as f32 * sh;
+                match style {
+                    0 => {
+                        // Ribbon windows.
+                        f.rect(m, 0.3, f.width - 0.3, y + 0.75, y + 2.7, 0.04, glass);
+                    }
+                    1 => {
+                        // Punched windows in a stone or brick facade.
+                        let n = ((f.width / 1.7).floor() as usize).max(1);
+                        for a in spread(f.width, n) {
+                            f.window(m, a, y + 0.8, 0.95, 1.8, shade(wall, 0.82), glass);
+                        }
+                    }
+                    _ => {
+                        // Curtain wall: floor lines over glass.
+                        f.rect(m, 0.0, f.width, y - 0.1, y + 0.12, 0.04, palette::ROOF_DETAIL);
+                    }
+                }
+            }
+            if style == 2 {
+                let n = ((f.width / 1.5).floor() as usize).max(1);
+                for k in 1..n {
+                    let a = f.width * k as f32 / n as f32;
+                    f.rect(
+                        m,
+                        a - 0.05,
+                        a + 0.05,
+                        y0.max(3.4) - y0,
+                        top - y0,
+                        0.05,
+                        palette::ROOF_DETAIL,
+                    );
                 }
             }
         }
+        top
+    };
+    let mut top = section(m, body, 0, low_storeys);
+    let roof_wall = if style == 2 { palette::ROOF_DETAIL } else { wall };
+    if setback {
+        let inner = body.inset(0.9);
+        flat_roof(m, body, top, roof_wall, palette::ROOF_FLAT, 0.4);
+        top = section(m, inner, low_storeys, storeys);
+        flat_roof(m, inner, top, roof_wall, palette::ROOF_FLAT, 0.6);
+    } else {
+        flat_roof(m, body, top, roof_wall, palette::ROOF_FLAT, 0.6);
     }
-    // Entrance canopy in the accent colour.
-    let f = faces[0];
+    // Entrance canopy in the accent colour and a crown band.
+    let f = Face::of(body, 0.0)[0];
     f.slab(m, f.width * 0.3, f.width * 0.7, 3.5, 3.7, 1.8, accent, accent);
-    flat_roof(m, body, top, wall, palette::ROOF_FLAT, 0.6);
-    let plant = body.inset(body.w().min(body.d()) * 0.28);
+    if rng.chance(0.5) {
+        let crown = Face::of(if setback { body.inset(0.9) } else { body }, 0.0);
+        for f in &crown {
+            f.rect(m, 0.0, f.width, top - 0.7, top - 0.1, 0.06, accent);
+        }
+    }
+    let plant = body.inset(body.w().min(body.d()) * 0.3);
     m.cuboid2(
         Vec3::new(plant.x0, top, plant.z0),
-        Vec3::new(plant.x1, top + 2.2, plant.z1),
+        Vec3::new(plant.x1, top + 1.8, plant.z1),
         shade(wall, 0.85),
         palette::ROOF_DETAIL,
     );
     roof_details(m, rng, body.inset(0.4), top);
-    if rng.chance(0.5) {
-        let c = Vec3::new(plant.x1 - 0.4, top + 2.2, plant.z0 + 0.4);
-        m.cylinder(c, 0.06, 3.5, 4, palette::ROOF_DETAIL, palette::ROOF_DETAIL);
+    if rng.chance(0.4) {
+        let c = Vec3::new(plant.x1 - 0.4, top + 1.8, plant.z0 + 0.4);
+        m.detail_only(|m| m.cylinder(c, 0.06, 3.5, 4, palette::ROOF_DETAIL, palette::ROOF_DETAIL));
     }
 }
 
@@ -1095,17 +1177,47 @@ pub fn generate(key: ModelKey, lod: bool) -> MeshBuilder {
         key.variant as u32 * 7919 + key.level as u32 * 131 + kind_salt * 1_000_003 + key.cells.0 as u32 * 17,
     );
     let big = key.cells.0 >= 2 && key.cells.1 >= 2;
+    // Level 1 is low (houses, single-storey shops, sheds), level 2 two to
+    // three storeys, and the top levels cap at six to eight storeys with a
+    // bulky body that fills the lot.
+    let tall = |base: u32, rng: &mut Stream| (base + rng.below(2) + u32::from(big)).min(8);
     match key.kind {
         Zone::Residential => match key.level {
             0 | 1 if big => terrace(&mut m, &mut rng, lot),
             0 | 1 => detached(&mut m, &mut rng, lot),
-            2 if rng.chance(0.7) => terrace(&mut m, &mut rng, lot),
-            _ => apartments(&mut m, &mut rng, lot, key.level),
+            2 => terrace(&mut m, &mut rng, lot),
+            3 => {
+                let n = tall(3, &mut rng);
+                apartments(&mut m, &mut rng, lot, n)
+            }
+            4 => {
+                let n = tall(4, &mut rng);
+                apartments(&mut m, &mut rng, lot, n)
+            }
+            _ => {
+                let n = tall(5, &mut rng) + u32::from(big);
+                apartments(&mut m, &mut rng, lot, n.min(8))
+            }
         },
         Zone::Commercial => match key.level {
             0 | 1 if big => supermarket(&mut m, &mut rng, lot),
-            0..=2 => shop(&mut m, &mut rng, lot, key.level.max(1)),
-            _ => office(&mut m, &mut rng, lot, key.level - 1),
+            0 | 1 => shop(&mut m, &mut rng, lot, 1),
+            2 => {
+                let n = 2 + rng.below(2);
+                shop(&mut m, &mut rng, lot, n)
+            }
+            3 => {
+                let n = tall(3, &mut rng);
+                office(&mut m, &mut rng, lot, n)
+            }
+            4 => {
+                let n = tall(4, &mut rng);
+                office(&mut m, &mut rng, lot, n)
+            }
+            _ => {
+                let n = tall(5, &mut rng) + u32::from(big);
+                office(&mut m, &mut rng, lot, n.min(8))
+            }
         },
         Zone::Industrial => shed(&mut m, &mut rng, lot, key.level),
     }

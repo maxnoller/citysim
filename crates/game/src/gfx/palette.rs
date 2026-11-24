@@ -73,6 +73,14 @@ pub const PATH: Color = c(0xCFC6B0);
 // ------------------------------------------------------------ shops / offices
 pub const SHOP_WALLS: [Color; 2] = [c(0xE9EEF2), c(0xF3EFE6)];
 pub const GLASS: Color = c(0x7FB2D0);
+pub const OFFICE_WALLS: [Color; 6] = [
+    c(0xE9EEF2),
+    c(0xF3EFE6),
+    c(0xD9C7A7), // warm stone
+    c(0xC98B6B), // brick
+    c(0xA9ADB0), // concrete
+    c(0xE3CFA6), // sandstone
+];
 pub const ACCENTS: [Color; 4] = [c(0xE0564A), c(0x2F8FCB), c(0xF2B33D), c(0x3FA66B)];
 pub const ROOF_FLAT: Color = c(0xA9A9A2);
 pub const ROOF_DETAIL: Color = c(0x8F959A);
