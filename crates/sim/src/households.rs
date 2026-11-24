@@ -103,6 +103,12 @@ pub(crate) fn tick(world: &mut World) {
         match_jobs(world);
     }
     move_in(world);
+    // Nobody left to commute: the average describes a city that is gone.
+    // Forget it (0 = no data) so it cannot pin demand at the bottom with no
+    // commute ever finishing to correct it.
+    if world.households.is_empty() {
+        world.traffic.avg_commute_s = 0.0;
+    }
 }
 
 fn commutes(world: &mut World) {

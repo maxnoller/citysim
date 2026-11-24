@@ -3,6 +3,9 @@
 
 use citysim_sim::*;
 
+const DAY: u64 = balance::TICKS_PER_DAY as u64;
+const HOUR: u64 = balance::TICKS_PER_HOUR as u64;
+
 fn c(x: i32, y: i32) -> Cell {
     Cell::new(x, y)
 }
@@ -11,6 +14,15 @@ fn road(w: &mut World, a: (i32, i32), b: (i32, i32)) {
     w.apply(Command::BuildRoad {
         from: c(a.0, a.1),
         to: c(b.0, b.1),
+    })
+    .unwrap();
+}
+
+fn zone(w: &mut World, a: (i32, i32), b: (i32, i32), z: Zone) {
+    w.apply(Command::SetZone {
+        min: c(a.0, a.1),
+        max: c(b.0, b.1),
+        zone: Some(z),
     })
     .unwrap();
 }
@@ -74,5 +86,59 @@ fn road_edits_do_not_starve_departures() {
         w.traffic.pending.len() < 10,
         "{} trips still waiting for a car after 12 s of edits",
         w.traffic.pending.len()
+    );
+}
+
+/// `avg_commute_s` only moves when a car commute finishes. When a city
+/// with long commutes emptied out, the stale average stayed forever: with
+/// no households nobody could commute to correct it, residential demand was
+/// pinned at the bottom and a freshly built town never grew again.
+#[test]
+fn stale_commute_average_does_not_freeze_an_empty_city() {
+    let mut w = World::new(9);
+    // Homes and jobs at opposite ends of a very long loop.
+    road(&mut w, (11, 128), (250, 128));
+    road(&mut w, (250, 128), (250, 140));
+    road(&mut w, (250, 140), (12, 140));
+    zone(&mut w, (12, 126), (40, 127), Zone::Residential);
+    zone(&mut w, (12, 141), (40, 142), Zone::Commercial);
+    zone(&mut w, (12, 138), (40, 139), Zone::Industrial);
+    while w.traffic.avg_commute_s < 200.0 {
+        assert!(w.time.tick < 5 * DAY, "commutes never got long");
+        w.step();
+    }
+    // Wipe the town and build a compact one next to the highway.
+    w.economy.money = 50_000;
+    w.apply(Command::Bulldoze {
+        min: c(0, 0),
+        max: c(255, 255),
+    })
+    .unwrap();
+    w.apply(Command::SetZone {
+        min: c(0, 0),
+        max: c(255, 255),
+        zone: None,
+    })
+    .unwrap();
+    for _ in 0..HOUR {
+        w.step();
+    }
+    assert_eq!(w.households.len(), 0);
+    road(&mut w, (11, 128), (40, 128));
+    road(&mut w, (11, 133), (40, 133));
+    road(&mut w, (20, 120), (20, 136));
+    zone(&mut w, (12, 120), (40, 127), Zone::Residential);
+    zone(&mut w, (12, 129), (40, 130), Zone::Commercial);
+    zone(&mut w, (12, 131), (40, 136), Zone::Industrial);
+    let end = w.time.tick + DAY;
+    while w.time.tick < end {
+        w.step();
+    }
+    assert!(
+        w.households.len() > 20 && w.buildings.len() > 10,
+        "the new town never grew: {} households, {} buildings, avg commute {}",
+        w.households.len(),
+        w.buildings.len(),
+        w.traffic.avg_commute_s
     );
 }
