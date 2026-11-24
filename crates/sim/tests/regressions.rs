@@ -233,3 +233,41 @@ fn bulldoze_handles_a_segment_off_the_cell_centres() {
     }
     assert_eq!(w.roads.segments.len(), 3, "highway and the two remaining ends");
 }
+
+/// A ring road with one link to the highway and some trips on it.
+fn ring_with_trips() -> World {
+    let mut w = World::new(8);
+    road(&mut w, (11, 128), (40, 128));
+    for (a, b) in [
+        ((40, 120), (60, 120)),
+        ((60, 120), (60, 136)),
+        ((60, 136), (40, 136)),
+        ((40, 136), (40, 120)),
+    ] {
+        road(&mut w, a, b);
+    }
+    for k in 0..20 {
+        let from = c(41 + k % 18, 120).center();
+        let to = c(41 + (k * 7) % 18, 136).center();
+        traffic::debug_request(&mut w, from, to);
+    }
+    w
+}
+
+/// A segment with a negative speed limit (only from a corrupt save, or a
+/// front end writing the public field) gives negative edge costs: the
+/// search's back-pointers formed a cycle and rebuilding the route pushed
+/// segments forever until the process ran out of memory.
+#[test]
+fn negative_edge_costs_do_not_hang_the_path_search() {
+    let mut w = ring_with_trips();
+    for seg in w.roads.segments.values_mut() {
+        if seg.kind == RoadKind::Street {
+            seg.speed_limit = -seg.speed_limit;
+        }
+    }
+    for _ in 0..200 {
+        w.step();
+    }
+    w.check_sim_invariants().unwrap();
+}

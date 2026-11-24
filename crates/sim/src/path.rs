@@ -170,6 +170,11 @@ impl PathScratch {
         while let Some((s, p)) = self.prev[key_index(node)] {
             segments.push(s);
             node = p;
+            if segments.len() > roads.segments.len() {
+                // Back-pointers form a cycle: only possible with negative
+                // edge costs (a corrupt speed limit). No usable route.
+                return None;
+            }
         }
         segments.reverse();
         if let Target::Access(a) = target {
