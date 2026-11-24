@@ -329,19 +329,23 @@ fn road_clears_zoning() {
 #[test]
 fn insufficient_funds() {
     let mut w = blank();
-    w.economy.money = 25;
+    let per = balance::ROAD_COST_PER_CELL;
+    w.economy.money = 2 * per + per / 2;
     let cmd = Command::BuildRoad {
         from: c(0, 0),
         to: c(5, 0),
     };
-    let err = CommandError::InsufficientFunds { cost: 50, money: 25 };
+    let err = CommandError::InsufficientFunds {
+        cost: 5 * per,
+        money: 2 * per + per / 2,
+    };
     assert_eq!(w.preview(&cmd), Err(err.clone()));
     assert_eq!(w.apply(cmd), Err(err));
     assert!(w.roads.segments.is_empty());
-    assert_eq!(w.economy.money, 25);
+    assert_eq!(w.economy.money, 2 * per + per / 2);
     // Exactly affordable is fine.
     assert!(road(&mut w, (0, 0), (2, 0)).is_ok());
-    assert_eq!(w.economy.money, 5);
+    assert_eq!(w.economy.money, per / 2);
 }
 
 #[test]

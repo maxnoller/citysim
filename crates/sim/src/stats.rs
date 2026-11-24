@@ -2,26 +2,102 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Occupant, World};
+use crate::{World, Zone};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Stats {
+    /// Residents (sum of household members).
     pub population: u32,
+    /// Job places (capacity of commercial + industrial buildings).
     pub jobs: u32,
+    /// Households with a job (one worker per household).
     pub employed: u32,
     pub households: u32,
     pub buildings: u32,
     pub vehicles_on_road: u32,
     pub road_cells: u32,
+    /// Households without a job.
+    #[serde(default)]
+    pub unemployed: u32,
+    /// `unemployed / households`, `0.0..=1.0`.
+    #[serde(default)]
+    pub unemployment: f32,
+    /// Resident capacity of all residential buildings.
+    #[serde(default)]
+    pub residential_capacity: u32,
+    /// Job places by kind.
+    #[serde(default)]
+    pub commercial_jobs: u32,
+    #[serde(default)]
+    pub industrial_jobs: u32,
+    /// Buildings by kind `[residential, commercial, industrial]`.
+    #[serde(default)]
+    pub buildings_by_kind: [u32; 3],
+    /// Moving average of car commute durations, vehicle seconds (at 1x
+    /// equal to real seconds).
+    #[serde(default)]
+    pub avg_commute_s: f32,
+    /// Mean speed of the cars on the road, m/s (0 when there are none).
+    #[serde(default)]
+    pub avg_speed: f32,
+    /// Trips waiting for their car to start.
+    #[serde(default)]
+    pub waiting_departures: u32,
+    /// Segments with a direction over 80 % of capacity.
+    #[serde(default)]
+    pub congested_segments: u32,
 }
+
+/// The float fields are never NaN.
+impl Eq for Stats {}
 
 /// Recompute what can be derived cheaply from state.
 pub(crate) fn update(world: &mut World) {
-    let road_cells = world.grid.cells.iter().filter(|c| c.occupant == Occupant::Road).count() as u32;
-    let s = &mut world.stats;
-    s.road_cells = road_cells;
-    s.buildings = world.buildings.len() as u32;
-    s.households = world.households.len() as u32;
-    s.vehicles_on_road = world.vehicles.len() as u32;
-    // PHASE2: population, jobs, employed.
+    let road_cells = world.cache.road_cells(&world.grid, world.versions.grid);
+    let mut s = Stats {
+        road_cells,
+        buildings: world.buildings.len() as u32,
+        households: world.households.len() as u32,
+        vehicles_on_road: world.vehicles.len() as u32,
+        avg_commute_s: world.traffic.avg_commute_s,
+        avg_speed: world.traffic.avg_speed,
+        waiting_departures: world.traffic.pending.len() as u32,
+        ..Stats::default()
+    };
+    for b in world.buildings.values() {
+        match b.kind {
+            Zone::Residential => {
+                s.buildings_by_kind[0] += 1;
+                s.residential_capacity += b.capacity;
+            }
+            Zone::Commercial => {
+                s.buildings_by_kind[1] += 1;
+                s.commercial_jobs += b.capacity;
+            }
+            Zone::Industrial => {
+                s.buildings_by_kind[2] += 1;
+                s.industrial_jobs += b.capacity;
+            }
+        }
+    }
+    s.jobs = s.commercial_jobs + s.industrial_jobs;
+    for h in world.households.values() {
+        s.population += h.members as u32;
+        if h.job.is_some() {
+            s.employed += 1;
+        }
+    }
+    s.unemployed = s.households - s.employed;
+    s.unemployment = if s.households > 0 {
+        s.unemployed as f32 / s.households as f32
+    } else {
+        0.0
+    };
+    s.congested_segments = world
+        .roads
+        .segments
+        .values()
+        .filter(|seg| seg.congestion() > 0.8)
+        .count() as u32;
+    world.stats = s;
 }

@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Chart the CSVs written by the `headless` example.
+
+    python3 crates/sim/examples/plot_headless.py target/headless out.png
+
+Small multiples (one measure per panel, shared x = real minutes at 2.5x):
+population, cars on the road, average car commute, money. One line per
+scenario, legend plus direct labels at the line ends.
+"""
+import csv
+import os
+import sys
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+SURFACE = "#fcfcfb"
+TEXT = "#0b0b0b"
+TEXT2 = "#52514e"
+GRID = "#e4e3df"
+# Validated categorical order (fixed, never cycled).
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
+SCENARIOS = [
+    ("grid", "Grid player", "grid player"),
+    ("res_only", "Residential only", "res only"),
+    ("two_grid", "Two districts, grid streets", "good layout"),
+    ("artery", "Two districts, one junction", "bad layout"),
+    ("artery_fixed", "Bad layout, fixed on day 4", "fixed"),
+    ("overbuilt", "Overbuilt roads", "overbuilt"),
+]
+PANELS = [
+    ("population", "Population", 1.0, "{:,.0f}"),
+    ("vehicles", "Cars on the road", 1.0, "{:,.0f}"),
+    ("avg_commute_s", "Average car commute (s)", 1.0, "{:.0f}"),
+    ("money", "Money ($ thousands)", 0.001, "{:,.0f}k"),
+]
+
+
+def load(path):
+    with open(path) as f:
+        return list(csv.DictReader(f))
+
+
+def main():
+    src = sys.argv[1] if len(sys.argv) > 1 else "target/headless"
+    out = sys.argv[2] if len(sys.argv) > 2 else "headless.png"
+    title = sys.argv[3] if len(sys.argv) > 3 else "CitySim headless runs"
+    data = {}
+    for key, _, _ in SCENARIOS:
+        p = os.path.join(src, key + ".csv")
+        if os.path.exists(p):
+            data[key] = load(p)
+    plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "text.color": TEXT})
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9), facecolor=SURFACE)
+    for ax, (col, label, scale, fmt) in zip(axes.flat, PANELS):
+        ax.set_facecolor(SURFACE)
+        ax.grid(True, color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.tick_params(colors=TEXT2)
+        ax.set_title(label, loc="left", color=TEXT, fontsize=12, fontweight="bold")
+        ends = []
+        for i, (key, name, short) in enumerate(SCENARIOS):
+            rows = data.get(key)
+            if not rows:
+                continue
+            x = [float(r["minutes"]) for r in rows]
+            y = [float(r[col]) * scale for r in rows]
+            if col == "avg_commute_s":
+                # Hourly samples are noisy; smooth over ~half a day.
+                k = 12
+                y = [sum(y[max(0, j - k) : j + 1]) / len(y[max(0, j - k) : j + 1]) for j in range(len(y))]
+            ax.plot(x, y, color=SERIES[i], linewidth=2, label=name, solid_capstyle="round")
+            ends.append((y[-1], x[-1], short, SERIES[i]))
+        # Direct labels at line ends, nudged apart.
+        ends.sort()
+        lo, hi = ax.get_ylim()
+        gap = (hi - lo) * 0.045
+        last = None
+        for y, x, name, color in ends:
+            yy = y if last is None or y - last >= gap else last + gap
+            last = yy
+            ax.plot([x], [y], "o", color=color, markersize=5, markeredgecolor=SURFACE, markeredgewidth=1.5)
+            ax.annotate(
+                f"{name}  {fmt.format(y)}",
+                (x, yy),
+                xytext=(6, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=8,
+                color=TEXT2,
+            )
+        ax.set_xlabel("real minutes at 2.5x", color=TEXT2)
+        ax.margins(x=0.02)
+        ax.set_xlim(right=max(ax.get_xlim()[1], 1) * 1.28)
+        if col == "money":
+            ax.axhline(0, color=TEXT2, linewidth=1)
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=6, frameon=False, bbox_to_anchor=(0.5, 0.965))
+    fig.suptitle(title, x=0.01, ha="left", fontsize=15, fontweight="bold", color=TEXT)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(out, dpi=110, facecolor=SURFACE)
+    print("wrote", out)
+
+
+if __name__ == "__main__":
+    main()

@@ -4,9 +4,12 @@ use crate::IdMap;
 use serde::{Deserialize, Serialize};
 
 use crate::command::{self, Command, CommandError, Outcome, Preview};
+use crate::derived::Derived;
 use crate::geom::Cell;
 use crate::grid::Occupant;
+use crate::growth::GrowthState;
 use crate::roads::RoadKind;
+use crate::traffic::TrafficState;
 use crate::{
     Building, BuildingId, Demand, Economy, Grid, Household, HouseholdId, MAP_CELLS, Rng, RoadNetwork, SimTime, Stats,
     Vehicle, VehicleId, balance, demand, economy, growth, households, save, stats, traffic,
@@ -50,6 +53,15 @@ pub struct World {
     pub demand: Demand,
     pub stats: Stats,
     pub versions: Versions,
+    /// Trips, junction state, re-plan queue (everything traffic needs
+    /// besides `vehicles`).
+    pub traffic: TrafficState,
+    /// Growth accumulators and per-building bookkeeping.
+    pub growth: GrowthState,
+    /// Lazily rebuilt indices derived from the state above. Not saved,
+    /// ignored by `==`.
+    #[serde(skip)]
+    pub(crate) cache: Derived,
 }
 
 impl World {
@@ -70,6 +82,9 @@ impl World {
             demand: Demand::default(),
             stats: Stats::default(),
             versions: Versions::default(),
+            traffic: TrafficState::default(),
+            growth: GrowthState::default(),
+            cache: Derived::default(),
         };
         let start = World::highway_entry_cell();
         let end = start.offset(balance::HIGHWAY_STUB_CELLS - 1, 0);
@@ -99,6 +114,11 @@ impl World {
     pub fn apply(&mut self, cmd: Command) -> Result<Outcome, CommandError> {
         let plan = command::plan(self, &cmd)?;
         let outcome = command::execute(self, plan);
+        let mut ended = Vec::new();
+        traffic::sync_network(self, &mut ended);
+        for e in ended {
+            households::trip_ended(self, e);
+        }
         stats::update(self);
         Ok(outcome)
     }

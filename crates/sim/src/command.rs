@@ -311,8 +311,10 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
                         }
                     }
                 }
+                world.growth.meta.remove(*id);
             }
-            // PHASE2: households whose home/job disappeared must react.
+            // Residents of removed buildings leave, their workers lose the job.
+            crate::households::buildings_removed(world, &buildings);
             world.economy.money -= cost;
             if !pieces.is_empty() {
                 world.versions.roads += 1;

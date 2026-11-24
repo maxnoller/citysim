@@ -46,7 +46,18 @@ fn split_key<K: Key>(k: K) -> (usize, u32) {
     ((ffi & 0xffff_ffff) as usize, (ffi >> 32) as u32)
 }
 
+/// Dense index of the slot behind `k` (stable while the entry lives; reused
+/// after removal). Lets side tables be plain vectors.
+pub fn key_index<K: Key>(k: K) -> usize {
+    split_key(k).0
+}
+
 impl<K: Key, V> IdMap<K, V> {
+    /// Number of slots (occupied or not); every key's `key_index` is below it.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
