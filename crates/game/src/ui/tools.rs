@@ -166,9 +166,6 @@ fn use_tool(
     }
     let pressed = mouse.just_pressed(MouseButton::Left);
     let cell = hovered.0;
-    if pressed {
-        info!("TOURDBG press at {cell:?} action {:?}", state.action);
-    }
     match *tool {
         ActiveTool::Inspect => {}
         ActiveTool::Road => match state.action {

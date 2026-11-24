@@ -169,8 +169,8 @@ fn find_new_road(world: &World) -> Option<(Cell, Cell)> {
     let sim = &world.resource::<SimWorld>().world;
     let focus = Cell::new(46, 126);
     let mut best: Option<(i32, Cell, Cell)> = None;
-    for y in focus.y - 24..focus.y + 24 {
-        for x in focus.x - 24..focus.x + 24 {
+    for y in focus.y - 60..focus.y + 60 {
+        for x in focus.x - 60..focus.x + 60 {
             let start = Cell::new(x, y);
             if !sim.grid.is_road(start) {
                 continue;
@@ -497,7 +497,10 @@ impl Plugin for TourPlugin {
             smooth: true,
             ..default()
         })
-        .add_systems(Update, run_tour.in_set(GameSet::Input).before(super::widgets::button_clicks))
+        .add_systems(
+            Update,
+            run_tour.in_set(GameSet::Input).before(super::widgets::button_clicks),
+        )
         .add_systems(
             Update,
             drive_pointer
@@ -523,7 +526,6 @@ fn tour_setup(w: &mut World) {
     // Frame the new road with the town behind it.
     let mid = Cell::new((a.x + b.x) / 2, (a.y + b.y) / 2);
     let toward = Cell::new(mid.x + (46 - mid.x).signum() * 12, mid.y + (128 - mid.y).signum() * 12);
-    info!("TOURDBG cells {cells:?}");
     let mut data = w.resource_mut::<TourData>();
     data.cells = cells;
     data.focus = Some((cell_center(mid, 0.0) + cell_center(toward, 0.0)) * 0.5);
@@ -531,7 +533,9 @@ fn tour_setup(w: &mut World) {
 
 /// Bulldoze / inspect targets, chosen once the town has grown in.
 fn tour_targets(w: &mut World) {
-    let Some(focus) = w.resource::<TourData>().focus else { return };
+    let Some(focus) = w.resource::<TourData>().focus else {
+        return;
+    };
     let fc = crate::shared::world_to_cell(focus);
     let bld = find_building_near(w, fc).unwrap_or(fc);
     let road = busiest_road_near(w, fc).unwrap_or(fc);
@@ -546,7 +550,11 @@ fn busiest_road_near(world: &World, focus: Cell) -> Option<Cell> {
     for y in focus.y - 12..focus.y + 12 {
         for x in focus.x - 12..focus.x + 12 {
             let c = Cell::new(x, y);
-            if let Some(s) = sim.roads.segment_through(c.center()).and_then(|s| sim.roads.segments.get(s)) {
+            if let Some(s) = sim
+                .roads
+                .segment_through(c.center())
+                .and_then(|s| sim.roads.segments.get(s))
+            {
                 let score = s.congestion() - c.chebyshev(focus) as f32 * 0.01;
                 if best.is_none_or(|(b, _)| score > b) {
                     best = Some((score, c));
@@ -654,7 +662,9 @@ fn run_tour(world: &mut World) {
         }
     }
     if std::mem::take(&mut tour.release_right) {
-        world.resource_mut::<ButtonInput<MouseButton>>().release(MouseButton::Right);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Right);
     }
     tour.t += dt;
     let mut guard = 0;
@@ -688,7 +698,9 @@ fn run_tour(world: &mut World) {
                 true
             }
             Op::RightClick => {
-                world.resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+                world
+                    .resource_mut::<ButtonInput<MouseButton>>()
+                    .press(MouseButton::Right);
                 tour.release_right = true;
                 true
             }
@@ -703,7 +715,8 @@ fn run_tour(world: &mut World) {
         }
         tour.index += 1;
         tour.t = 0.0;
-        if guard > 1 && !matches!(op, Op::Run(_) | Op::Up) {
+        // One input event per frame; a release never shares a frame with a move.
+        if matches!(op, Op::Up) || guard > 1 && !matches!(op, Op::Run(_)) {
             break;
         }
     }
