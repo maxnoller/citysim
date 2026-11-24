@@ -71,7 +71,7 @@ pub fn lane_offset(kind: RoadKind, seed: u32) -> f32 {
     match kind {
         RoadKind::Street => 1.35,
         RoadKind::Highway => {
-            if seed % 3 == 0 {
+            if seed.is_multiple_of(3) {
                 3.6
             } else {
                 1.3

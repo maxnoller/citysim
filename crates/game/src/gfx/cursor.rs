@@ -211,6 +211,7 @@ fn move_grid(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rect_ring(m: &mut MeshBuilder, x0: f32, z0: f32, x1: f32, z1: f32, y: f32, w: f32, c: [f32; 4]) {
     let q = |a: f32, b: f32, cc: f32, d: f32| {
         [

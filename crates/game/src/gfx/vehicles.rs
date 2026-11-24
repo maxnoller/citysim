@@ -203,7 +203,7 @@ fn turn_control(p0: Vec2, d0: Vec2, p2: Vec2, d2: Vec2) -> Vec2 {
     }
     let t = (p2 - p0).perp_dot(d2) / denom;
     let p1 = p0 + d0 * t;
-    if t < 0.0 || t > 25.0 || (p1 - p2).dot(d2) > 0.0 {
+    if !(0.0..=25.0).contains(&t) || (p1 - p2).dot(d2) > 0.0 {
         mid
     } else {
         p1

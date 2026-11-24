@@ -106,6 +106,7 @@ impl Face {
     }
 
     /// Rectangle on the face (outward facing).
+    #[allow(clippy::too_many_arguments)]
     fn rect(&self, m: &mut MeshBuilder, a0: f32, a1: f32, b0: f32, b1: f32, off: f32, color: Color) {
         m.quad(
             self.at(a0, b0, off),
@@ -117,6 +118,7 @@ impl Face {
     }
 
     /// Framed window centred at `a`, sill at `b`.
+    #[allow(clippy::too_many_arguments)]
     fn window(&self, m: &mut MeshBuilder, a: f32, b: f32, w: f32, h: f32, frame: Color, glass: Color) {
         let f = 0.1;
         if m.lod {

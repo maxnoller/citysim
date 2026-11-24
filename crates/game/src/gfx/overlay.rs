@@ -119,6 +119,8 @@ fn strips(roads: &RoadNetwork, layout: &RoadLayout) -> MeshBuilder {
     m
 }
 
+type StripsQuery = (Entity, &'static mut Visibility);
+
 #[allow(clippy::too_many_arguments)]
 fn draw_traffic(
     mut commands: Commands,
@@ -127,7 +129,7 @@ fn draw_traffic(
     time: Res<Time<Real>>,
     mut state: Local<OverlayState>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut strips_q: Query<(Entity, &mut Visibility), (With<TrafficStrips>, Without<Veil>)>,
+    mut strips_q: Query<StripsQuery, (With<TrafficStrips>, Without<Veil>)>,
     mut veil: Query<&mut Visibility, (With<Veil>, Without<TrafficStrips>)>,
 ) {
     let on = *mode == OverlayMode::Traffic;
