@@ -125,6 +125,15 @@ pub const CAR_BODIES: [Color; 8] = [
     c(0x8E3B34),
 ];
 pub const CAR_GLASS: Color = c(0x3E5566);
+/// Delivery trucks: (cab, cargo box, livery stripe).
+pub const TRUCK_LIVERIES: [(Color, Color, Color); 6] = [
+    (c(0xF7F1E5), c(0xF7F1E5), c(0xE0564A)),
+    (c(0x2F8FCB), c(0xE9EEF2), c(0x2F8FCB)),
+    (c(0xE0564A), c(0xF3EFE6), c(0xE0564A)),
+    (c(0x3FA66B), c(0xF7F1E5), c(0xF2B33D)),
+    (c(0xF2B33D), c(0xEBD9A0), c(0x3F4A55)),
+    (c(0x3F4A55), c(0xE9EEF2), c(0x3FA66B)),
+];
 pub const TYRE: Color = c(0x26282B);
 
 // ------------------------------------------------------------ overlays & tools

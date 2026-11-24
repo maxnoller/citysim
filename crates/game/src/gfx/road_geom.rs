@@ -604,10 +604,11 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
                 rect(m, s.a, dir, n, ta.min(tb), ta.max(tb), o, o + zebra_w, MARK_Y, white);
                 o += zebra_w * 2.0;
             }
-            // Stop line across the lane arriving at this junction (right of
-            // travel, i.e. -n when arriving at b, +n at a).
+            // Stop line across the lane arriving at this junction: right of
+            // travel, which is `perp(dir)` (+n) when arriving at b and -n
+            // when arriving at a (`lane_offset` / vehicles use the same).
             let (ta, tb) = (along(3.0), along(3.35));
-            let side = if at_a { 1.0 } else { -1.0 };
+            let side = if at_a { -1.0 } else { 1.0 };
             let (oa, ob) = (side * 0.15, side * (h - 0.25));
             rect(
                 m,
