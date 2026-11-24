@@ -27,8 +27,8 @@ const CHUNK: i32 = 32;
 const OUTSIDE_REACH: f32 = 1100.0;
 /// Camera distance ranges for detailed and distant tree chunks (measured
 /// to the chunk centre, so generous).
-const TREE_LOD_NEAR: (std::ops::Range<f32>, std::ops::Range<f32>) = (0.0..0.0, 800.0..860.0);
-const TREE_LOD_FAR: (std::ops::Range<f32>, std::ops::Range<f32>) = (800.0..860.0, 1e6..1e6);
+const TREE_LOD_NEAR: (std::ops::Range<f32>, std::ops::Range<f32>) = (0.0..0.0, 600.0..650.0);
+const TREE_LOD_FAR: (std::ops::Range<f32>, std::ops::Range<f32>) = (600.0..650.0, 1e6..1e6);
 /// Countryside chunk size, metres.
 const OUT_CHUNK: f32 = 512.0;
 
@@ -58,8 +58,8 @@ impl Plugin for TreesPlugin {
 fn density(x: f32, z: f32) -> f32 {
     let n = noise::fbm(x / 260.0, z / 260.0, 4, 77);
     let woods = ((n - 0.5) / 0.2).clamp(0.0, 1.0);
-    let sparse = 0.04 + 0.08 * noise::value(x / 60.0, z / 60.0, 91);
-    woods * woods * 3.6 + sparse
+    let sparse = 0.02 + 0.04 * noise::value(x / 60.0, z / 60.0, 91);
+    woods * woods * 2.6 + sparse
 }
 
 #[derive(Clone, Copy)]
