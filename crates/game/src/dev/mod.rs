@@ -4,8 +4,6 @@
 //! Environment variables:
 //! * `CITYSIM_DEMO=town|city|jam` — a real town built by the sim's scripted
 //!   players and fast-forwarded before the first frame (see `scenario`).
-//! * `CITYSIM_DEMO=script` (alias `1`) — scripted ~15 s tool demo for videos;
-//!   `CITYSIM_DEMO_DELAY=secs` holds still first.
 //! * `CITYSIM_AUTOSHOT=out.png` (or `--autoshot out.png`) — screenshot and
 //!   exit; `CITYSIM_SHOT_VIEW=wide|street|close`, `CITYSIM_SHOT_DELAY=secs`,
 //!   `CITYSIM_SHOT_OVERLAY=none|zones|traffic`.
@@ -16,14 +14,11 @@
 mod autoshot;
 mod control;
 mod scenario;
-mod script;
 
 use bevy::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DemoKind {
-    /// Scripted tool demo (drives the real ui through synthetic input).
-    Script,
     /// Real town of ~1,500 residents (scripted grid player).
     Town,
     /// Real city of ~5,000 residents (scripted grid player).
@@ -53,8 +48,6 @@ pub struct ShotConfig {
 pub struct DevConfig {
     pub demo: Option<DemoKind>,
     pub shot: Option<ShotConfig>,
-    /// Seconds the script demo holds still before starting.
-    pub script_delay: f32,
     /// Control channel directory (`CITYSIM_CONTROL`).
     pub control: Option<std::path::PathBuf>,
 }
@@ -76,13 +69,12 @@ impl DevConfig {
             .or_else(|| std::env::var("CITYSIM_DEMO").ok())
             .as_deref()
         {
-            Some("script" | "1") => Some(DemoKind::Script),
             Some("town") => Some(DemoKind::Town),
             Some("city") => Some(DemoKind::City),
             Some("jam") => Some(DemoKind::Jam),
             Some("" | "0") | None => None,
             Some(other) => {
-                eprintln!("unknown CITYSIM_DEMO={other:?} (use script, town, city or jam)");
+                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city or jam)");
                 None
             }
         };
@@ -108,7 +100,6 @@ impl DevConfig {
         DevConfig {
             demo,
             shot,
-            script_delay: env_f32("CITYSIM_DEMO_DELAY").unwrap_or(0.0),
             control: std::env::var_os("CITYSIM_CONTROL")
                 .filter(|d| !d.is_empty())
                 .map(Into::into),
@@ -123,14 +114,8 @@ pub struct DevPlugin {
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         let c = &self.config;
-        match c.demo {
-            Some(kind @ (DemoKind::Town | DemoKind::City | DemoKind::Jam)) => {
-                app.add_plugins(scenario::ScenarioPlugin { kind });
-            }
-            Some(DemoKind::Script) => {
-                app.add_plugins(script::ScriptPlugin { delay: c.script_delay });
-            }
-            None => {}
+        if let Some(kind) = c.demo {
+            app.add_plugins(scenario::ScenarioPlugin { kind });
         }
         if std::env::var("CITYSIM_LOG_FPS").is_ok_and(|v| !v.is_empty() && v != "0") {
             app.add_plugins((

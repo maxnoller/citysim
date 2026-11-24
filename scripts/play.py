@@ -218,6 +218,10 @@ def clear_way(a, b):
 def build_road(a, b):
     if not clear_way(a, b):
         return stats()
+    # Frame both ends: the clicks must land on visible cells.
+    if any(cmd(f"screen {c[0]} {c[1]}").split()[2] != "inside" for c in (a, b)):
+        span = max(abs(a[0] - b[0]), abs(a[1] - b[1])) * 8.0
+        look((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0.0, 1.15, max(260.0, span * 1.5))
     select_tool("road")
     move_to(*a)
     click()

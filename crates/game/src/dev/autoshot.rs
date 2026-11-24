@@ -88,7 +88,7 @@ pub fn sample_city() -> Vec<Command> {
 pub fn view_pose(view: ShotView, demo: Option<DemoKind>) -> CameraPose {
     // (focus cell, wide distance, street-level focus cell)
     let (focus, wide, street) = match demo {
-        Some(kind @ (DemoKind::Town | DemoKind::City | DemoKind::Jam)) => {
+        Some(kind) => {
             let (focus, wide) = super::scenario::focus(kind);
             (focus, wide, super::scenario::street(kind))
         }
@@ -137,13 +137,11 @@ fn run_autoshot(
             out.write(SimCommand(cmd));
         }
     }
-    if state.demo != Some(DemoKind::Script) {
-        camera.0 = Some(view_pose(state.shot.view, state.demo));
-        overlay.set_if_neq(state.shot.overlay);
-        // Ignore wherever the real mouse is, for reproducible shots.
-        if let Ok(mut w) = window.single_mut() {
-            w.set_cursor_position(None);
-        }
+    camera.0 = Some(view_pose(state.shot.view, state.demo));
+    overlay.set_if_neq(state.shot.overlay);
+    // Ignore wherever the real mouse is, for reproducible shots.
+    if let Ok(mut w) = window.single_mut() {
+        w.set_cursor_position(None);
     }
     if state.t > state.shot.delay + 60.0 {
         error!("autoshot timed out");
