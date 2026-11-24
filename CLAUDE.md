@@ -42,8 +42,19 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - Segment ids can vanish on road edits (split keeps the id for the `a` half): always re-check.
 - Time: vehicles move in real time (1 tick = 1/20 s), the calendar is compressed: a day = 4 min at 1x (`balance`).
 - Trip kind per car: `world.traffic.trips.get(vehicle_id).map(|t| t.purpose)` (`TripPurpose::Goods` = draw a truck).
-- HUD data: `stats` (unemployment, avg_commute_s, avg_speed m/s, congestion_share, buildings_by_kind), `economy.last_day`
-  (`Budget` by category), `economy.history` (one `DaySummary` per day), `demand` (-1..=1).
+- HUD data: `stats` (population, households, `workforce`, employed, unemployed, `unemployment` = unemployed / workforce,
+  `vacant_jobs`, jobs, avg_commute_s, avg_speed m/s, congestion_share, buildings_by_kind); `employed + unemployed ==
+  workforce` (use these for the jobless figure). `demand` (-1..=1 per zone).
+- Budget: `economy.last_day` = yesterday's `Budget { residential_tax, commercial_tax, industrial_tax, road_upkeep,
+  services }` with `income()`, `expenses()` (upkeep + services), `net()`; `economy::budget_now(world)` = today so far;
+  `economy.history[i].budget` per finished day (`DaySummary`). City services cost 0.75 per resident per day.
+- Money: start 30,000, road 65 per cell (`balance::ROAD_COST_PER_CELL`; ui prices follow it), upkeep 1 per road cell per
+  day. Bulldozing is never refused for lack of money. Money may go negative.
+- Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
+  (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
+- Saves: format version 3 plus an extension block; `World::load` rejects structurally damaged saves.
+- Scenarios: `scenarios::{GridPlayer, two_districts, add_connections, overbuilt}`; `scenarios::prebuilt(w, f)` pays
+  for a static layout (they cost more than a new game's money).
 - Sim balance runs: `cargo run -p citysim_sim --release --example headless` (scripted cities in `citysim_sim::scenarios`).
 - `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep). `// PHASE2:` marks sim stubs.
 

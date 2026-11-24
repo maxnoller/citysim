@@ -63,7 +63,7 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
     let started = Instant::now();
     match kind {
         DemoKind::Jam => {
-            scenarios::two_districts(&mut w, false);
+            scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false));
             while w.time.day < 3 {
                 w.step();
             }
