@@ -36,7 +36,7 @@ fn main() {
         w.economy.money = 50_000;
     }
     let t0 = Instant::now();
-    run_to(&mut w, &mut p, 3 * DAY + 1 * HOUR);
+    run_to(&mut w, &mut p, 3 * DAY + HOUR);
     eprintln!(
         "grown in {:?}: {} buildings {} households {} cars {} segs pending {} replan {}",
         t0.elapsed(),
@@ -55,9 +55,9 @@ fn main() {
     let mut max_replan = 0;
     let mut edits = 0;
     while w.time.tick < end {
-        if mode == "edit" && w.time.tick % 20 == 0 {
+        if mode == "edit" && w.time.tick.is_multiple_of(20) {
             // toggle a tiny spur road far from traffic flow
-            let x = 150 + (k % 50) as i32;
+            let x = 150 + (k % 50);
             k += 1;
             let _ = w.apply(Command::BuildRoad {
                 from: Cell::new(x, 60),
@@ -69,7 +69,7 @@ fn main() {
         w.step();
         max_pending = max_pending.max(w.traffic.pending.len());
         max_replan = max_replan.max(w.traffic.replan.len());
-        if w.time.tick % HOUR == 0 {
+        if w.time.tick.is_multiple_of(HOUR) {
             let hopeless: u32 = w.households.values().map(|h| h.hopeless_commutes as u32).sum();
             eprintln!(
                 "{:5.1}h cars {} pending {} replan {} hopeless {} trips_today {} households {}",

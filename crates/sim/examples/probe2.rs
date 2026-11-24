@@ -38,7 +38,7 @@ fn main() {
             }
         }
         if edit && t % 20 == 0 && t > 200 {
-            let x = 13 + (k % 200) as i32;
+            let x = 13 + (k % 200);
             k += 1;
             let _ = w.apply(Command::BuildRoad {
                 from: Cell::new(x, 2),
