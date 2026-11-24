@@ -24,6 +24,7 @@ pub enum UiAction {
     TogglePause,
     Speed(usize),
     ToggleBudget,
+    CloseBudget,
     /// Change the tax rate by this many tenths of a percent.
     TaxStep(i32),
     OpenMenu,
@@ -132,12 +133,26 @@ pub fn layout(node: Node) -> impl Bundle {
     (node, Pickable::IGNORE)
 }
 
+/// Single-line text (never wraps, so its box always fits the glyphs).
 pub fn label(fonts: &UiFonts, s: impl Into<String>, size: f32, weight: u16, color: Color) -> impl Bundle {
     (
         Text::new(s),
         fonts.text(size, weight),
         TextColor(color),
         LineHeight::RelativeToFont(1.25),
+        TextLayout::no_wrap(),
+        Pickable::IGNORE,
+    )
+}
+
+/// Wrapping text; give it (or its parent) a definite width.
+pub fn paragraph(fonts: &UiFonts, s: impl Into<String>, size: f32, weight: u16, color: Color) -> impl Bundle {
+    (
+        Text::new(s),
+        fonts.text(size, weight),
+        TextColor(color),
+        LineHeight::RelativeToFont(1.35),
+        TextLayout::default(),
         Pickable::IGNORE,
     )
 }

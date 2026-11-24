@@ -7,7 +7,7 @@ use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 
 use super::theme::{self as t, UiFonts};
-use super::widgets::{Tooltip, approach, label, layout};
+use super::widgets::{Tooltip, approach, label, layout, paragraph};
 use crate::shared::GameSet;
 
 pub struct TooltipPlugin;
@@ -112,7 +112,7 @@ fn spawn_tooltip(mut commands: Commands, fonts: Res<UiFonts>) {
             // Fixed width: wrapped text inside an auto-width box is measured
             // as one line by the layout, which clipped the price row.
             tip.spawn((
-                label(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED),
+                paragraph(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED),
                 TipPart::Desc,
                 Node {
                     width: px(TIP_TEXT_W),

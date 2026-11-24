@@ -79,7 +79,6 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
             layout(Node {
                 position_type: PositionType::Absolute,
                 min_width: px(170),
-                max_width: px(300),
                 padding: UiRect::new(px(t::S3 + 2.0), px(t::S4 + 2.0), px(t::S3 + 1.0), px(t::S3 + 2.0)),
                 column_gap: px(t::S3 + 2.0),
                 align_items: AlignItems::Start,

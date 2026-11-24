@@ -134,6 +134,7 @@ fn handle_actions(
                 clock.paused = false;
             }
             UiAction::ToggleBudget => ui.budget_open = !ui.budget_open,
+            UiAction::CloseBudget => ui.budget_open = false,
             UiAction::TaxStep(n) => {
                 let r = sim.world.economy.tax_rate + n as f32 * TAX_STEP / 5.0;
                 let r = ((r / TAX_STEP).round() * TAX_STEP).clamp(0.0, balance::MAX_TAX_RATE);

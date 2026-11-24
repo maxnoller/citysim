@@ -165,18 +165,19 @@ fn use_tool(
         return;
     }
     let pressed = mouse.just_pressed(MouseButton::Left);
-    let released = mouse.just_released(MouseButton::Left);
     let cell = hovered.0;
     match *tool {
         ActiveTool::Inspect => {}
         ActiveTool::Road => match state.action {
             Action::Idle => {
                 if pressed && let Some(c) = cell {
-                    state.action = Action::Road { start: c, held: true };
+                    // A click can press and release within one frame.
+                    let held = mouse.pressed(MouseButton::Left);
+                    state.action = Action::Road { start: c, held };
                 }
             }
             Action::Road { start, held: true } => {
-                if released {
+                if !mouse.pressed(MouseButton::Left) {
                     let end = state.last_cell.map(|c| road_end(start, c));
                     match end {
                         Some(end) if end != start => {
@@ -218,19 +219,23 @@ fn use_tool(
         t => match state.action {
             Action::Idle => {
                 if pressed && let Some(c) = cell {
-                    state.action = Action::Rect { start: c };
+                    if mouse.pressed(MouseButton::Left) {
+                        state.action = Action::Rect { start: c };
+                    } else if let Some(cmd) = rect_command(t, c, c) {
+                        // Pressed and released within one frame: a click.
+                        state.sent = Some(cmd);
+                        out.write(SimCommand(cmd));
+                    }
                 }
             }
             Action::Rect { start } => {
-                if released {
+                if !mouse.pressed(MouseButton::Left) {
                     if let Some(end) = state.last_cell
                         && let Some(cmd) = rect_command(t, start, end)
                     {
                         state.sent = Some(cmd);
                         out.write(SimCommand(cmd));
                     }
-                    state.action = Action::Idle;
-                } else if !mouse.pressed(MouseButton::Left) {
                     state.action = Action::Idle;
                 }
             }

@@ -130,7 +130,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>) {
                     l.spawn(super::widgets::icon(fonts, icon::LANDMARK, t::ICON_MD, t::ACCENT));
                     l.spawn(label(fonts, "Budget", t::FONT_TITLE, t::W_SEMIBOLD, t::TEXT));
                 });
-                close_button(h, fonts, UiAction::ToggleBudget);
+                close_button(h, fonts, UiAction::CloseBudget);
             });
             section_title(p, fonts, "BALANCE");
             p.spawn((
@@ -249,7 +249,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>) {
                 small_button(r, fonts, UiAction::TaxStep(5), icon::PLUS, "Raise taxes");
             });
             p.spawn((
-                label(
+                super::widgets::paragraph(
                     fonts,
                     "Higher taxes bring in more money but slow the city's growth.",
                     t::FONT_SMALL,
@@ -367,6 +367,14 @@ fn tax_slider_input(
     }
 }
 
+fn signed_color(v: i64) -> Color {
+    match v.signum() {
+        1 => t::POSITIVE,
+        -1 => t::NEGATIVE,
+        _ => t::TEXT_MUTED,
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_budget(
     time: Res<Time<Real>>,
@@ -403,13 +411,13 @@ fn update_budget(
     for (which, mut text, mut color) in &mut texts {
         let (s, c) = match which {
             BudgetText::Balance => (format::money(e.money), if e.money < 0 { t::NEGATIVE } else { t::TEXT }),
-            BudgetText::Income => (format::signed_money(e.last_day_income), t::POSITIVE),
-            BudgetText::Upkeep => (format::signed_money(-e.last_day_expenses), t::NEGATIVE),
-            BudgetText::UpkeepCaption => (format!("{} cells", format::group(road_cells as u64)), t::TEXT_MUTED),
-            BudgetText::Net => (
-                format::signed_money(net),
-                if net >= 0 { t::POSITIVE } else { t::NEGATIVE },
+            BudgetText::Income => (format::signed_money(e.last_day_income), signed_color(e.last_day_income)),
+            BudgetText::Upkeep => (
+                format::signed_money(-e.last_day_expenses),
+                signed_color(-e.last_day_expenses),
             ),
+            BudgetText::UpkeepCaption => (format!("{} cells", format::group(road_cells as u64)), t::TEXT_MUTED),
+            BudgetText::Net => (format::signed_money(net), signed_color(net)),
             BudgetText::TaxValue => (format::percent(e.tax_rate), t::ACCENT),
         };
         if text.0 != s {

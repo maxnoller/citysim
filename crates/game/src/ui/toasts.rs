@@ -74,7 +74,6 @@ fn spawn_stack(mut commands: Commands) {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::End,
             row_gap: px(t::S3),
-            max_width: px(380),
             ..default()
         }),
         GlobalZIndex(300),
