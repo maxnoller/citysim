@@ -32,6 +32,10 @@ pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
 pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 2;
 
+/// Daily cost of city services per resident (police, fire, schools...,
+/// abstracted), charged at midnight with road upkeep.
+pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 0.6;
+
 /// Tax rate of a new game.
 pub const DEFAULT_TAX_RATE: f32 = 0.09;
 /// Highest tax rate `SetTaxRate` accepts (lowest is 0.0).
@@ -253,9 +257,21 @@ pub const CAPACITY_PER_CELL: [[u32; 3]; 3] = [[4, 9, 18], [3, 6, 10], [4, 8, 8]]
 pub const BIG_FOOTPRINT_PERCENT: [u32; 3] = [0, 35, 60];
 /// A building empty at this many consecutive midnights is abandoned.
 pub const ABANDON_EMPTY_DAYS: u8 = 3;
-/// A building without road access to the highway at this many consecutive
-/// midnights is abandoned.
+/// No longer used by the sim (kept so existing code still compiles): it was
+/// "abandoned at this many consecutive midnights without road access",
+/// which killed a building whose road was cut at 23:59 for a rebuild.
+/// Abandonment for lost road access now uses
+/// [`ABANDON_UNREACHABLE_GRACE_TICKS`]. `BuildingMeta::unreachable_days`
+/// still counts those midnights for display.
 pub const ABANDON_UNREACHABLE_DAYS: u8 = 1;
+/// A building that has been continuously without road access to the
+/// highway for this long (sim ticks, one in-game day: 4 real minutes at
+/// 1x, 80 s at 3x) is abandoned. Reconnecting it at any point before that
+/// resets the clock, so a player can cut a road and rebuild it.
+pub const ABANDON_UNREACHABLE_GRACE_TICKS: u64 = TICKS_PER_DAY as u64;
+/// Road access of every building is checked this often (ticks; one in-game
+/// hour), so the grace period above ends within an hour of running out.
+pub const REACHABILITY_CHECK_INTERVAL_TICKS: u64 = TICKS_PER_HOUR as u64;
 
 // ------------------------------------------------------------------ map ----
 

@@ -110,9 +110,13 @@ fn enormous_dead_end_tree() {
     bulldoze(&mut w, (13, 127), (13, 129));
     let cut_off = |b: &Building| b.footprint.min.x > 16;
     assert!(w.buildings.values().any(cut_off));
+    // Abandoned one in-game day (the grace period) after the cut.
     run(&mut w, DAY + 2 * HOUR);
     // Only the few buildings next to the highway stub are still reachable.
     assert!(!w.buildings.values().any(cut_off), "cut-off buildings are abandoned");
+    // Cars already on the tree finish their drives (vehicle time is real
+    // time: a cross-tree drive takes several in-game hours).
+    run(&mut w, DAY / 2);
     let far = w.vehicles.values().filter(|v| v.pos[0] > 16.0 * CELL_SIZE).count();
     assert_eq!(far, 0, "cars left on the cut-off tree");
     check_roads(&w);
@@ -189,9 +193,12 @@ fn disconnected_islands() {
     );
     // Cut it again under traffic.
     bulldoze(&mut w, (20, 127), (21, 129));
+    // Abandoned one in-game day (the grace period) after the cut; cars
+    // already on the island then finish their drives.
     run(&mut w, DAY + 2 * HOUR);
     assert_eq!(w.buildings.len(), 0);
     assert_eq!(w.households.len(), 0);
+    run(&mut w, DAY / 2);
     assert!(w.vehicles.is_empty() && w.traffic.pending.is_empty());
 }
 
