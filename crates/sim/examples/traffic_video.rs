@@ -53,11 +53,20 @@ fn congestion_color(x: f32) -> [u8; 3] {
     let free = [120, 124, 130];
     let busy = [235, 180, 40];
     let jam = [220, 45, 40];
-    if x < 0.5 { mix(free, busy, x / 0.5) } else { mix(busy, jam, (x - 0.5) / 0.4) }
+    if x < 0.5 {
+        mix(free, busy, x / 0.5)
+    } else {
+        mix(busy, jam, (x - 0.5) / 0.4)
+    }
 }
 
 fn draw(c: &mut Canvas, w: &World, ox: f32) {
-    let to_px = |p: [f32; 2]| (ox + (p[0] - X0 * CELL_SIZE) * SCALE, TOP as f32 + (p[1] - Y0 * CELL_SIZE) * SCALE);
+    let to_px = |p: [f32; 2]| {
+        (
+            ox + (p[0] - X0 * CELL_SIZE) * SCALE,
+            TOP as f32 + (p[1] - Y0 * CELL_SIZE) * SCALE,
+        )
+    };
     let cell = CELL_SIZE * SCALE;
     // Zones and buildings.
     for y in Y0 as i32..(Y0 + 80.0) as i32 {
@@ -118,7 +127,11 @@ fn draw(c: &mut Canvas, w: &World, ox: f32) {
         if y < TOP as f32 || y >= H as f32 - 2.0 {
             continue;
         }
-        let col = if v.speed < 1.0 { [255, 120, 120] } else { [250, 250, 250] };
+        let col = if v.speed < 1.0 {
+            [255, 120, 120]
+        } else {
+            [250, 250, 250]
+        };
         c.rect(x - 1.5, y - 1.5, 3.0, 3.0, col);
     }
 }
@@ -143,9 +156,7 @@ fn main() {
             good.step();
             bad.step();
         }
-        let mut c = Canvas {
-            px: vec![0; W * H * 3],
-        };
+        let mut c = Canvas { px: vec![0; W * H * 3] };
         c.rect(0.0, 0.0, W as f32, H as f32, [24, 27, 31]);
         draw(&mut c, &good, 8.0);
         draw(&mut c, &bad, W as f32 / 2.0 + 8.0);
