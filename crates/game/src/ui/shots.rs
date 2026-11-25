@@ -2,9 +2,13 @@
 //! every interface state and saves `dir/NN-name.png` for each, then exits.
 //! States: idle HUD, inspect a home, a shop, an empty building and the
 //! busiest road, a tooltip, road preview (valid, blocked, and while broke),
-//! zone drag with the flyout, bulldoze drag, traffic overlay with its
+//! zone drag, bulldoze drag, round-2 tools (multi-point road path with
+//! snapping, T-junction snap, avenue upgrade, block tool, frontage and fill
+//! zoning, road bulldozer, junction tool), a pinned inspect card, the
+//! deficit and debt-crisis states, settings, traffic overlay with its
 //! legend, budget (with history and on day 1), toasts from real rejected
-//! commands, pause menu, first-run hint, and the HUD at 2560x1440.
+//! commands, pause menu, first-run hint, and the HUD, a road path and the
+//! settings at 2560x1440.
 //! `CITYSIM_UI_SHOTS_ONLY=name,name` limits it to some states.
 //!
 //! Drives the real ui through synthetic cursor / mouse input and resources.
@@ -22,8 +26,8 @@ use super::toasts::{Toast, ToastKind};
 use super::tools::{Action, ToolState};
 use super::widgets::{UiAction, UiButton};
 use crate::shared::{
-    ActiveTool, CameraOverride, CameraPose, GameSet, OverlayMode, SimClock, SimCommand, SimWorld, WorldCamera,
-    cell_center,
+    ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, RoadChoice, RoadMode, SimClock,
+    SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, WorldTarget, ZoneMode, cell_center,
 };
 
 /// The scenario's world while a step shows a modified copy (broke, day 1);
@@ -141,10 +145,15 @@ fn reset(world: &mut World) {
     *world.resource_mut::<ActiveTool>() = ActiveTool::Inspect;
     *world.resource_mut::<OverlayMode>() = OverlayMode::None;
     world.resource_mut::<ToolState>().action = Action::Idle;
+    world.resource_mut::<ToolState>().path.clear();
+    *world.resource_mut::<ToolModes>() = ToolModes::default();
+    *world.resource_mut::<RoadChoice>() = RoadChoice::Street;
+    world.resource_mut::<WorldHighlight>().selected = None;
     let mut ui = world.resource_mut::<UiState>();
     ui.budget_open = false;
     ui.hint_visible = false;
     ui.menu_open = false;
+    ui.settings_open = false;
     world.resource_mut::<SimClock>().paused = false;
     *world.resource_mut::<Pointer>() = Pointer::default();
 }
@@ -249,6 +258,84 @@ fn find_new_road(world: &World) -> Option<(Cell, Cell)> {
         }
     }
     best.map(|(_, a, b)| (a, b))
+}
+
+/// Look at `c` from the default angle at `distance`.
+fn look_at(w: &mut World, c: Cell, distance: f32) {
+    let mut p = pose();
+    p.focus = cell_center(c, 0.0);
+    p.distance = distance;
+    w.resource_mut::<CameraOverride>().0 = Some(p);
+}
+
+/// Top-left cell of a `wdt` x `hgt` patch of empty, unzoned land (with a
+/// one-cell margin) near the town, if any.
+fn find_empty_area(world: &World, wdt: i32, hgt: i32) -> Option<Cell> {
+    let sim = &world.resource::<SimWorld>().world;
+    let focus = Cell::new(46, 126);
+    let free = |c: Cell| {
+        sim.grid
+            .get(c)
+            .is_some_and(|cd| cd.zone.is_none() && cd.occupant == Occupant::Empty)
+    };
+    let mut best: Option<(i32, Cell)> = None;
+    for y in (focus.y - 60..focus.y + 60).step_by(2) {
+        for x in (focus.x - 60..focus.x + 60).step_by(2) {
+            let min = Cell::new(x, y);
+            let d = min.chebyshev(focus);
+            if best.is_some_and(|(bd, _)| d >= bd) {
+                continue;
+            }
+            let ok = (-1..=hgt).all(|dy| (-1..=wdt).all(|dx| free(min.offset(dx, dy))));
+            if ok {
+                best = Some((d, min));
+            }
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+/// Keep the scenario's world for `reset`, then apply `cmds` to the live
+/// one (with money to spare), for states that need a fresh road.
+fn build_now(w: &mut World, cmds: &[Command]) {
+    stash_world(w);
+    let mut sim = w.resource_mut::<SimWorld>();
+    let money = sim.world.economy.money;
+    sim.world.economy.money = money.max(0) + 1_000_000;
+    for &c in cmds {
+        let _ = sim.world.apply(c);
+    }
+    sim.world.economy.money = money;
+}
+
+fn street(from: Cell, to: Cell) -> Command {
+    Command::BuildRoad {
+        from,
+        to,
+        kind: citysim_sim::RoadKind::Street,
+    }
+}
+
+/// A signalled junction near the town centre (else any junction).
+fn find_junction(world: &World) -> Option<Cell> {
+    let sim = &world.resource::<SimWorld>().world;
+    let focus = Cell::new(46, 126);
+    citysim_sim::junction::junction_nodes(sim)
+        .map(|n| {
+            let c = Cell::from_pos(sim.roads.node_pos(n));
+            let signal = citysim_sim::junction::junction_control(sim, n) == Some(citysim_sim::JunctionControl::Signal);
+            (!signal, c.chebyshev(focus), c)
+        })
+        .min_by_key(|&(ns, d, c)| (ns, d, c.x, c.y))
+        .map(|(.., c)| c)
+}
+
+/// The two ends of the straight street through road cell `c`.
+fn street_ends(world: &World, c: Cell) -> Option<(Cell, Cell)> {
+    let sim = &world.resource::<SimWorld>().world;
+    let s = sim.roads.segment_through(c.center())?;
+    let (a, b) = sim.roads.segment_ends(s);
+    Some((Cell::from_pos(a), Cell::from_pos(b)))
 }
 
 fn steps() -> Vec<Step> {
@@ -452,6 +539,171 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            name: "road-path",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                let Some((a, b)) = find_new_road(w) else { return };
+                let (dx, dy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
+                let third = Cell::new(b.x - dy * 7, b.y + dx * 7);
+                force_path(w, vec![a, b]);
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(third);
+                look_at(w, b, 240.0);
+            },
+        },
+        Step {
+            name: "road-t-junction",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                let Some((a, b)) = find_new_road(w) else { return };
+                force_path(w, vec![b]);
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(a);
+                look_at(w, b, 220.0);
+            },
+        },
+        Step {
+            name: "road-avenue-upgrade",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                *w.resource_mut::<RoadChoice>() = RoadChoice::Avenue;
+                let Some((a, b)) = find_road(w).and_then(|r| street_ends(w, r)) else {
+                    return;
+                };
+                force_path(w, vec![a]);
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(b);
+                look_at(w, Cell::new((a.x + b.x) / 2, (a.y + b.y) / 2), 240.0);
+            },
+        },
+        Step {
+            name: "block-tool",
+            wait: 1.4,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                w.resource_mut::<ToolModes>().road = RoadMode::Block;
+                let Some(min) = find_empty_area(w, 16, 12) else { return };
+                look_at(w, min.offset(8, 6), 280.0);
+                let mut p = w.resource_mut::<Pointer>();
+                p.action = Some(Action::Rect { start: min });
+                p.target = PointerTarget::Cell(min.offset(15, 10));
+                p.hold = true;
+            },
+        },
+        Step {
+            name: "zone-frontage",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some(min) = find_empty_area(w, 16, 8) else { return };
+                build_now(w, &[street(min.offset(0, 4), min.offset(15, 4))]);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
+                w.resource_mut::<ToolModes>().zone = ZoneMode::Frontage;
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(min.offset(7, 3));
+                look_at(w, min.offset(8, 4), 220.0);
+            },
+        },
+        Step {
+            name: "zone-fill",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some(min) = find_empty_area(w, 12, 12) else { return };
+                let cmds: Vec<Command> = super::plan::block_legs(min, min.offset(10, 10), None)
+                    .into_iter()
+                    .map(|(a, b)| street(a, b))
+                    .collect();
+                build_now(w, &cmds);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Commercial));
+                w.resource_mut::<ToolModes>().zone = ZoneMode::Fill;
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(min.offset(5, 6));
+                look_at(w, min.offset(5, 5), 230.0);
+            },
+        },
+        Step {
+            name: "bulldoze-road",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Bulldoze;
+                w.resource_mut::<ToolModes>().bulldoze = BulldozeMode::Road;
+                let Some(r) = find_road(w) else { return };
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(r);
+                look_at(w, r, 240.0);
+            },
+        },
+        Step {
+            name: "junction-tool",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                w.resource_mut::<ToolModes>().road = RoadMode::Junction;
+                let Some(j) = find_junction(w) else { return };
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(j);
+                look_at(w, j, 200.0);
+            },
+        },
+        Step {
+            name: "inspect-pinned",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                let Some(c) = find_building(w) else { return };
+                let id = match w.resource::<SimWorld>().world.grid.get(c).map(|cd| cd.occupant) {
+                    Some(Occupant::Building(id)) => id,
+                    _ => return,
+                };
+                w.resource_mut::<WorldHighlight>().selected = Some(WorldTarget::Building(id));
+                look_at(w, c, 200.0);
+            },
+        },
+        Step {
+            name: "fiscal-deficit",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                stash_world(w);
+                let mut sim = w.resource_mut::<SimWorld>();
+                let f = &mut sim.world.economy.fiscal;
+                f.state = citysim_sim::FiscalState::Deficit;
+                f.reason = citysim_sim::FiscalReason::RunningAtALoss;
+                f.days_in_deficit = 2;
+                w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::ToggleBudget);
+            },
+        },
+        Step {
+            name: "fiscal-crisis",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                stash_world(w);
+                let mut sim = w.resource_mut::<SimWorld>();
+                sim.world.economy.money = -2_400;
+                let f = &mut sim.world.economy.fiscal;
+                f.state = citysim_sim::FiscalState::Crisis;
+                f.reason = citysim_sim::FiscalReason::ResidentsLeaving;
+                f.service_level = 0.55;
+                f.days_in_debt = 4;
+                f.left_last_night = 23;
+                w.resource_mut::<UiState>().budget_open = true;
+            },
+        },
+        Step {
+            name: "settings",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::OpenMenu);
+                w.write_message(UiAction::OpenSettings);
+                w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::UiScale(1));
+            },
+        },
+        Step {
             name: "traffic-overlay",
             wait: 1.5,
             setup: |w| {
@@ -569,6 +821,28 @@ fn steps() -> Vec<Step> {
                 w.write_message(UiAction::OpenMenu);
                 w.write_message(Toast::new(ToastKind::Success, "City saved"));
                 w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::Load);
+            },
+        },
+        Step {
+            name: "1440p-road",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                let Some((a, b)) = find_new_road(w) else { return };
+                let (dx, dy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
+                force_path(w, vec![a, b]);
+                w.resource_mut::<Pointer>().target = PointerTarget::Cell(Cell::new(b.x - dy * 6, b.y + dx * 6));
+                look_at(w, b, 240.0);
+            },
+        },
+        Step {
+            name: "1440p-settings",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::OpenMenu);
+                w.write_message(UiAction::OpenSettings);
             },
         },
     ]

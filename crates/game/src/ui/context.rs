@@ -5,8 +5,10 @@
 use bevy::prelude::*;
 use bevy::ui::ComputedNode;
 use bevy::window::PrimaryWindow;
+use citysim_sim::junction;
 use citysim_sim::{
-    Building, BuildingId, Cell, CellRect, CommandError, Occupant, RoadKind, RoadSegment, World, Zone, balance,
+    Aspect, Building, BuildingId, Cell, CellRect, CommandError, JunctionControl, JunctionSetting, Occupant, RoadKind,
+    RoadSegment, SignalStage, World, Zone, balance,
 };
 
 use super::UiState;
@@ -17,7 +19,7 @@ use super::tools::{Action, Pending, ToolState};
 use super::widgets::{approach, label, layout, number, zone_icon, zone_name};
 use crate::shared::{
     ActiveTool, BulldozeMode, CONGESTION_BUSY, CONGESTION_JAM, GameSet, HoveredCell, PointerOverUi, RoadChoice,
-    RoadMode, SimWorld, SnapTarget, ToolModes, ToolPreview, ZoneMode,
+    RoadMode, SimWorld, SnapTarget, ToolModes, ToolPreview, WorldHighlight, WorldTarget, ZoneMode,
 };
 
 pub struct ContextPlugin;
@@ -25,12 +27,18 @@ pub struct ContextPlugin;
 impl Plugin for ContextPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_card)
-            .add_systems(Update, update_card.in_set(GameSet::Render));
+            .add_systems(Update, (update_card, update_pinned).chain().in_set(GameSet::Render));
     }
 }
 
-#[derive(Component)]
-struct CardRoot;
+/// Root of a card: 0 follows the cursor, 1 is pinned to the inspected
+/// object (`WorldHighlight::selected`).
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct CardRoot(u8);
+
+/// Which card a part belongs to.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct CardOwner(u8);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum CardPart {
@@ -47,7 +55,7 @@ enum CardPart {
 }
 
 /// Rows a card can show.
-pub const MAX_ROWS: usize = 5;
+pub const MAX_ROWS: usize = 8;
 
 /// One line of a card: a muted label on the left and a value on the right
 /// (an empty label lets the value read as a plain line).
@@ -124,10 +132,15 @@ pub fn error_text(e: &CommandError) -> String {
 
 fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
     let fonts = fonts.into_inner();
+    spawn_card_with(&mut commands, fonts, 0);
+    spawn_card_with(&mut commands, fonts, 1);
+}
+
+fn spawn_card_with(commands: &mut Commands, fonts: &UiFonts, which: u8) {
     commands
         .spawn((
             Name::new("Context card"),
-            CardRoot,
+            CardRoot(which),
             layout(Node {
                 position_type: PositionType::Absolute,
                 min_width: px(190),
@@ -147,13 +160,15 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                 spread_radius: px(0),
                 blur_radius: px(16),
             }]),
-            GlobalZIndex(90),
+            // The cursor card draws over the pinned one.
+            GlobalZIndex(if which == 0 { 90 } else { 85 }),
             UiTransform::default(),
             Visibility::Hidden,
         ))
         .with_children(|card| {
             card.spawn((
                 CardPart::IconBox,
+                CardOwner(which),
                 layout(Node {
                     width: px(28),
                     height: px(28),
@@ -169,6 +184,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
             .with_child((
                 super::widgets::icon(fonts, icon::ROAD, t::ICON_SM + 1.0, t::ACCENT),
                 CardPart::Icon,
+                CardOwner(which),
             ));
             card.spawn(layout(Node {
                 flex_direction: FlexDirection::Column,
@@ -180,6 +196,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                 col.spawn((
                     label(fonts, "", t::FONT_BODY, t::W_SEMIBOLD, t::TEXT),
                     CardPart::Title,
+                    CardOwner(which),
                     Node {
                         margin: UiRect::bottom(px(1)),
                         ..default()
@@ -188,6 +205,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                 for i in 0..MAX_ROWS {
                     col.spawn((
                         CardPart::Row(i),
+                        CardOwner(which),
                         layout(Node {
                             justify_content: JustifyContent::SpaceBetween,
                             align_items: AlignItems::Baseline,
@@ -200,15 +218,18 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                         r.spawn((
                             label(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED),
                             CardPart::RowLabel(i),
+                            CardOwner(which),
                         ));
                         r.spawn((
                             number(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT),
                             CardPart::RowValue(i),
+                            CardOwner(which),
                         ));
                     });
                     if i == 0 {
                         col.spawn((
                             CardPart::Bar,
+                            CardOwner(which),
                             layout(Node {
                                 height: px(4),
                                 width: percent(100),
@@ -221,6 +242,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                         ))
                         .with_child((
                             CardPart::BarFill,
+                            CardOwner(which),
                             layout(Node {
                                 height: percent(100),
                                 width: percent(0),
@@ -234,6 +256,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                 col.spawn((
                     label(fonts, "", t::FONT_CAPTION + 0.5, t::W_REGULAR, t::TEXT_MUTED),
                     CardPart::Hint,
+                    CardOwner(which),
                     Node {
                         margin: UiRect::top(px(t::S1)),
                         ..default()
@@ -374,8 +397,20 @@ pub fn tool_card(
         ActiveTool::Inspect => return inspect_card(world, hovered?),
         ActiveTool::Road if modes.road == RoadMode::Junction => {
             let c = hovered?;
-            let mut card = inspect_card(world, c).filter(|_| state.road_cells.is_junction(c))?;
-            card.hint = "Junction control arrives with traffic lights".into();
+            let Some(n) = junction::junction_at(world, c) else {
+                card.glyph = icon::WAYPOINTS;
+                card.title = "Junctions".into();
+                card.rows
+                    .push(Row::line("Point at a junction of three or more roads", t::TEXT_MUTED));
+                card.hint = "Lights or priority signs are chosen automatically".into();
+                return Some(card);
+            };
+            let mut card = junction_card(world, n)?;
+            let setting = junction::junction(world, n).map(|j| j.setting).unwrap_or_default();
+            card.hint = format!(
+                "Click: switch to {}",
+                setting_name(next_setting(setting)).to_lowercase()
+            );
             return Some(card);
         }
         ActiveTool::Road => {
@@ -428,6 +463,32 @@ pub fn tool_card(
             } else if legs.is_empty() {
                 card.title = format!("Build {}", name.to_lowercase());
                 card.rows.push(Row::line("Move to the next corner", t::TEXT));
+            } else if plan.eval.new_pieces == 0 && plan.eval.upgraded > 0 {
+                card.title = format!("Upgrade to {}", name.to_lowercase());
+                card.rows.push(Row::line(
+                    format!(
+                        "{} · {} (the difference)",
+                        plural(plan.eval.upgraded as usize, "cell", "cells"),
+                        cost_text(plan.eval.cost)
+                    ),
+                    t::TEXT,
+                ));
+                card.rows.push(Row::line(
+                    format!(
+                        "Upkeep {}/day per cell",
+                        format::money(super::plan::road_kind(kind).upkeep_per_cell())
+                    ),
+                    t::TEXT_MUTED,
+                ));
+            } else if plan.eval.new_pieces == 0 && plan.eval.downgraded > 0 {
+                card.title = format!("Change to {}", name.to_lowercase());
+                card.rows.push(Row::line(
+                    format!(
+                        "{} · free, no refund",
+                        plural(plan.eval.downgraded as usize, "cell", "cells")
+                    ),
+                    t::TEXT,
+                ));
             } else if plan.eval.cost == 0 {
                 card.title = "Road already built".into();
                 card.rows.push(Row::line(plural(cells, "cell", "cells"), t::TEXT_MUTED));
@@ -445,9 +506,21 @@ pub fn tool_card(
                     ),
                     t::TEXT,
                 ));
+                if plan.eval.upgraded > 0 {
+                    card.rows.push(Row::line(
+                        format!(
+                            "Upgrades {} of street",
+                            plural(plan.eval.upgraded as usize, "cell", "cells")
+                        ),
+                        t::ACCENT,
+                    ));
+                }
                 if let Some(r) = block {
                     card.rows.push(Row::line(
-                        format!("{} x {} cells", r.width(), r.height()),
+                        match state.block_spacing() {
+                            Some(b) => format!("{} x {} cells · blocks of {b}", r.width(), r.height()),
+                            None => format!("{} x {} cells · outline only", r.width(), r.height()),
+                        },
                         t::TEXT_MUTED,
                     ));
                 }
@@ -757,6 +830,11 @@ fn building_card(world: &World, id: BuildingId, b: &Building) -> Option<Card> {
 }
 
 fn road_card(world: &World, cell: Cell) -> Option<Card> {
+    if let Some(n) = junction::junction_at(world, cell)
+        && let Some(card) = junction_card(world, n)
+    {
+        return Some(card);
+    }
     let roads = &world.roads;
     let pos = cell.center();
     let ids: Vec<_> = if let Some(s) = roads.segment_through(pos) {
@@ -774,10 +852,12 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
     let worst = segs.iter().map(|s| s.congestion()).fold(0.0f32, f32::max);
     let band = Band::of(worst);
     let mut card = Card::new(icon::ROAD, band.color());
-    card.title = match (highway, segs.len()) {
-        (true, _) => "Highway".into(),
-        (false, n) if n >= 3 => format!("Intersection · {n} ways"),
-        _ => "Street".into(),
+    let avenue = segs.iter().any(|s| s.kind == RoadKind::Avenue);
+    card.title = match (highway, avenue, segs.len()) {
+        (true, ..) => "Highway".into(),
+        (false, _, n) if n >= 3 => format!("Intersection · {n} ways"),
+        (false, true, _) => "Avenue · 2 lanes each way".into(),
+        _ => "Street · 1 lane each way".into(),
     };
     let verdict = match band {
         Band::Free => "Free flow",
@@ -786,20 +866,33 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
     };
     card.rows.push(Row::new("Traffic", verdict, band.color()));
     card.bar = Some((worst, band.color()));
+    // Cars per lane right now, per segment and direction (kerb lane first).
+    let mut lane_cars: std::collections::HashMap<(citysim_sim::SegmentId, bool), [u32; 4]> = Default::default();
+    for v in world.vehicles.values() {
+        if let Some(sid) = v.segment.filter(|s| ids.contains(s)) {
+            lane_cars.entry((sid, v.forward)).or_default()[(v.lane as usize).min(3)] += 1;
+        }
+    }
     let dir_row = |name: &str, s: &RoadSegment, forward: bool| {
         let d = RoadSegment::dir(forward);
         let c = s.congestion_in(forward);
         let b = Band::of(c);
-        Row::new(
-            name,
-            format!(
-                "{} / {} · {}",
-                format::group(s.load[d].round() as u64),
-                plural(s.capacity[d].floor().max(1.0) as usize, "car", "cars"),
-                b.word()
-            ),
-            b.color(),
-        )
+        let mut value = format!(
+            "{} / {} · {}",
+            format::group(s.load[d].round() as u64),
+            plural(s.capacity[d].floor().max(1.0) as usize, "car", "cars"),
+            b.word()
+        );
+        let lanes = s.lane_count() as usize;
+        if lanes > 1 {
+            let id = ids.iter().copied().find(|&i| roads.segments.get(i) == Some(s));
+            let per = id
+                .and_then(|i| lane_cars.get(&(i, forward)).copied())
+                .unwrap_or_default();
+            let parts: Vec<String> = (0..lanes.min(4)).map(|l| per[l].to_string()).collect();
+            value = format!("lanes {} · {value}", parts.join("|"));
+        }
+        Row::new(name, value, b.color())
     };
     if let [s] = segs[..] {
         let (pa, pb) = (roads.node_pos(s.a), roads.node_pos(s.b));
@@ -844,6 +937,11 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
     ));
     let limit = segs.iter().map(|s| s.speed_limit).fold(0.0f32, f32::max);
     card.hint = match band {
+        Band::Free if avenue => format!(
+            "Speed limit {} · upkeep {}/cell a day",
+            kmh(limit),
+            format::money(RoadKind::Avenue.upkeep_per_cell())
+        ),
         Band::Free => format!("Speed limit {}", kmh(limit)),
         Band::Busy => format!("Cars slow down here · limit {}", kmh(limit)),
         Band::Jammed => format!(
@@ -851,6 +949,158 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
             pct(CONGESTION_JAM),
             kmh(JAM_CRAWL_MPS)
         ),
+    };
+    card.rows.truncate(MAX_ROWS);
+    Some(card)
+}
+
+/// Compass name of a direction in sim space (-y is north).
+pub fn compass(d: [f32; 2]) -> &'static str {
+    let bearing = d[0].atan2(-d[1]).to_degrees().rem_euclid(360.0);
+    const NAMES: [&str; 8] = [
+        "north",
+        "north-east",
+        "east",
+        "south-east",
+        "south",
+        "south-west",
+        "west",
+        "north-west",
+    ];
+    NAMES[((bearing + 22.5) / 45.0) as usize % 8]
+}
+
+fn compass_letter(d: [f32; 2]) -> &'static str {
+    match compass(d) {
+        "north" => "N",
+        "north-east" => "NE",
+        "east" => "E",
+        "south-east" => "SE",
+        "south" => "S",
+        "south-west" => "SW",
+        "west" => "W",
+        _ => "NW",
+    }
+}
+
+pub fn aspect_color(a: Aspect) -> Color {
+    match a {
+        Aspect::Green => t::POSITIVE,
+        Aspect::Yellow => t::WARNING,
+        Aspect::Red => t::NEGATIVE,
+    }
+}
+
+fn aspect_word(a: Aspect) -> &'static str {
+    match a {
+        Aspect::Green => "Green",
+        Aspect::Yellow => "Yellow",
+        Aspect::Red => "Red",
+    }
+}
+
+/// "Traffic lights" / "Priority".
+pub fn control_name(c: JunctionControl) -> &'static str {
+    match c {
+        JunctionControl::Signal => "Traffic lights",
+        JunctionControl::Priority => "Priority (give way)",
+    }
+}
+
+/// The setting a click on the junction tool switches to.
+pub fn next_setting(s: JunctionSetting) -> JunctionSetting {
+    match s {
+        JunctionSetting::Auto => JunctionSetting::Signal,
+        JunctionSetting::Signal => JunctionSetting::Priority,
+        JunctionSetting::Priority => JunctionSetting::Auto,
+    }
+}
+
+pub fn setting_name(s: JunctionSetting) -> &'static str {
+    match s {
+        JunctionSetting::Auto => "Automatic",
+        JunctionSetting::Signal => "Traffic lights",
+        JunctionSetting::Priority => "Priority",
+    }
+}
+
+/// Card for the junction at node `n`: control, signal phases, and the
+/// aspect and queue of every approach.
+pub fn junction_card(world: &World, n: citysim_sim::NodeId) -> Option<Card> {
+    let view = junction::junction_view(world, n)?;
+    let state = junction::junction(world, n)?;
+    let signal = view.control == JunctionControl::Signal;
+    let mut card = Card::new(icon::WAYPOINTS, if signal { t::WARNING } else { t::ACCENT });
+    card.title = format!(
+        "{} · {} ways",
+        if signal { "Traffic lights" } else { "Priority junction" },
+        view.approaches.len()
+    );
+    card.rows.push(Row::new(
+        "Control",
+        match view.setting {
+            JunctionSetting::Auto => format!("{} · automatic", control_name(view.control)),
+            _ => format!("{} · set by you", control_name(view.control)),
+        },
+        t::TEXT,
+    ));
+    if let (Some(plan), Some((cur, stage))) = (&state.plan, view.phase) {
+        let names: Vec<String> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                let arms: Vec<&str> = p
+                    .arms
+                    .iter()
+                    .filter_map(|&a| state.arms.get(a as usize).map(|arm| compass_letter(arm.dir)))
+                    .collect();
+                format!("{}{}", arms.join("+"), if p.left_only { " left" } else { "" })
+            })
+            .collect();
+        let now = names.get(cur as usize).cloned().unwrap_or_default();
+        let stage = match stage {
+            SignalStage::Green => "green",
+            SignalStage::Yellow => "yellow",
+            SignalStage::AllRed => "all red",
+        };
+        card.rows.push(Row::new(
+            format!("Phase {} of {}", cur as usize + 1, names.len()),
+            format!("{now} {stage}"),
+            t::TEXT,
+        ));
+        card.rows.push(Row::new("Cycle", names.join(" → "), t::TEXT_MUTED));
+    }
+    for (i, a) in view.approaches.iter().enumerate() {
+        let from = state.arms.get(i).map(|arm| compass(arm.dir)).unwrap_or("?");
+        let queue = if a.queue > 0 {
+            format!("{} waiting", a.queue)
+        } else {
+            "none waiting".into()
+        };
+        let (value, color) = match a.aspect {
+            Some(asp) => {
+                let mut v = aspect_word(asp).to_string();
+                if let Some(l) = a.left_aspect
+                    && l != asp
+                {
+                    v += &format!(", left {}", aspect_word(l).to_lowercase());
+                } else if a.left_protected {
+                    v += ", left protected";
+                }
+                if let Some(s) = a.time_to_change_s.filter(|&s| asp != Aspect::Yellow && s >= 0.5) {
+                    v += &format!(" {}s", s.ceil() as i64);
+                }
+                (format!("{v} · {queue}"), aspect_color(asp))
+            }
+            None if a.major => (format!("Main road · {queue}"), t::TEXT),
+            None => (format!("Gives way · {queue}"), t::TEXT_MUTED),
+        };
+        card.rows.push(Row::new(format!("From {from}"), value, color));
+    }
+    card.hint = if view.peak_per_minute > 0 {
+        format!("Busiest minute yesterday: {} cars", view.peak_per_minute)
+    } else {
+        "J: junction tool to change control".into()
     };
     card.rows.truncate(MAX_ROWS);
     Some(card)
@@ -878,8 +1128,7 @@ pub const JAM_CRAWL_MPS: f32 = 12.0 / 3.6;
 fn update_card(
     time: Res<Time<Real>>,
     tool: Res<ActiveTool>,
-    modes: Res<ToolModes>,
-    kind: Res<RoadChoice>,
+    (modes, kind): (Res<ToolModes>, Res<RoadChoice>),
     state: Res<ToolState>,
     preview: Res<ToolPreview>,
     hovered: Res<HoveredCell>,
@@ -895,14 +1144,17 @@ fn update_card(
             &ComputedNode,
             &mut UiTransform,
             &mut BorderColor,
+            &CardRoot,
         ),
-        (With<CardRoot>, Without<CardPart>),
+        Without<CardPart>,
     >,
     mut parts: CardParts,
+    highlight: Res<WorldHighlight>,
     mut slide: Local<f32>,
     mut cache: Local<CardCache>,
 ) {
-    let Ok((mut node, mut vis, computed, mut tf, mut border)) = root.single_mut() else {
+    let Some((mut node, mut vis, computed, mut tf, mut border, _)) = root.iter_mut().find(|r| *r.5 == CardRoot(0))
+    else {
         return;
     };
     let cursor = window
@@ -911,7 +1163,12 @@ fn update_card(
         .and_then(|w| w.cursor_position().map(|c| (c, Vec2::new(w.width(), w.height()))));
     // Rebuild the card only when what it describes changed, and a few
     // times a second for live numbers; texts are touched only on change.
-    let hidden = ui.menu_open || over_ui.0 && !state.busy();
+    // The pinned card already shows the inspected thing under the cursor.
+    let on_pinned = *tool == ActiveTool::Inspect
+        && highlight.selected.is_some()
+        && highlight.hovered.is_some()
+        && highlight.selected == highlight.hovered;
+    let hidden = ui.menu_open || over_ui.0 && !state.busy() || on_pinned;
     let key = (*tool, *modes, *kind, state.action, hovered.0, hidden, sim.generation);
     cache.age += time.delta_secs();
     if cache.key != Some(key) || preview.is_changed() || state.is_changed() || cache.age >= CARD_REFRESH_S {
@@ -930,7 +1187,7 @@ fn update_card(
         return;
     };
     if cache.shown.as_ref() != Some(&card) {
-        apply_card(&card, &mut parts);
+        apply_card(&card, &mut parts, 0);
         cache.shown = Some(card.clone());
     }
     let invalid = card.title_color == t::NEGATIVE;
@@ -972,6 +1229,96 @@ fn update_card(
 
 type CardKey = (ActiveTool, ToolModes, RoadChoice, Action, Option<Cell>, bool, u64);
 
+/// Card for a pinned target and the world point it hangs from (sim m).
+fn pinned_card(world: &World, target: &WorldTarget) -> Option<(Card, [f32; 2])> {
+    match target {
+        WorldTarget::Building(id) => {
+            let b = world.buildings.get(*id)?;
+            let (lo, hi) = (b.footprint.min.center(), b.footprint.max.center());
+            Some((
+                building_card(world, *id, b)?,
+                [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5],
+            ))
+        }
+        WorldTarget::Junction { node, pos } => Some((junction_card(world, *node)?, *pos)),
+        WorldTarget::Road(stretch) => {
+            let mid = *stretch.cells.get(stretch.cells.len() / 2)?;
+            Some((road_card(world, mid)?, mid.center()))
+        }
+    }
+}
+
+/// The inspected (clicked) building, road or junction keeps a card next to
+/// it, following it on screen, until Escape or a click elsewhere.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_pinned(
+    time: Res<Time<Real>>,
+    highlight: Res<WorldHighlight>,
+    tool: Res<ActiveTool>,
+    ui: Res<UiState>,
+    sim: Res<SimWorld>,
+    ui_scale: Res<UiScale>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<crate::shared::WorldCamera>>,
+    mut root: Query<(&mut Node, &mut Visibility, &ComputedNode, &CardRoot), Without<CardPart>>,
+    mut parts: CardParts,
+    mut cache: Local<(f32, Option<Card>, Option<WorldTarget>)>,
+) {
+    let Some((mut node, mut vis, computed, _)) = root.iter_mut().find(|r| *r.3 == CardRoot(1)) else {
+        return;
+    };
+    let target = highlight
+        .selected
+        .clone()
+        .filter(|_| !ui.menu_open && *tool == ActiveTool::Inspect);
+    let Some(target) = target else {
+        vis.set_if_neq(Visibility::Hidden);
+        cache.1 = None;
+        return;
+    };
+    cache.0 += time.delta_secs();
+    let Some((mut card, at)) = pinned_card(&sim.world, &target) else {
+        vis.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    card.hint = "Pinned · Esc or click elsewhere to let go".into();
+    if cache.2.as_ref() != Some(&target) || cache.0 >= CARD_REFRESH_S || cache.1.is_none() {
+        cache.0 = 0.0;
+        cache.2 = Some(target);
+        if cache.1.as_ref() != Some(&card) {
+            apply_card(&card, &mut parts, 1);
+            cache.1 = Some(card);
+        }
+    }
+    let (Ok(win), Ok((cam, cam_tf))) = (window.single(), cameras.single()) else {
+        return;
+    };
+    let Ok(screen_pt) = cam.world_to_viewport(cam_tf, crate::shared::sim_to_world(at, 3.0)) else {
+        vis.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    let scale = ui_scale.0.max(0.01);
+    let p = screen_pt / scale;
+    let screen = Vec2::new(win.width(), win.height()) / scale;
+    let size = computed.size * computed.inverse_scale_factor;
+    let mut pos = Vec2::new(p.x + 18.0, p.y - size.y - 18.0);
+    if pos.x + size.x > screen.x - t::EDGE {
+        pos.x = p.x - 18.0 - size.x;
+    }
+    let top = t::BELOW_TOP_BAR;
+    let bottom = screen.y - t::EDGE - t::TOOL_BUTTON - 3.0 * t::EDGE;
+    pos.y = pos.y.clamp(top, (bottom - size.y).max(top));
+    pos.x = pos.x.clamp(t::EDGE, (screen.x - t::EDGE - size.x).max(t::EDGE));
+    let (left, topv) = (px(pos.x.round()), px(pos.y.round()));
+    if node.left != left || node.top != topv {
+        node.left = left;
+        node.top = topv;
+    }
+    if size.x > 0.0 {
+        vis.set_if_neq(Visibility::Inherited);
+    }
+}
+
 /// Last card built by `update_card` and what it was built from.
 #[derive(Default)]
 struct CardCache {
@@ -990,6 +1337,7 @@ type CardParts<'w, 's> = Query<
     's,
     (
         &'static CardPart,
+        &'static CardOwner,
         Option<&'static mut Text>,
         Option<&'static mut TextColor>,
         Option<&'static mut BackgroundColor>,
@@ -998,8 +1346,11 @@ type CardParts<'w, 's> = Query<
     Without<CardRoot>,
 >;
 
-fn apply_card(card: &Card, parts: &mut CardParts) {
-    for (part, text, color, bg, pnode) in parts.iter_mut() {
+fn apply_card(card: &Card, parts: &mut CardParts, owner: u8) {
+    for (part, of, text, color, bg, pnode) in parts.iter_mut() {
+        if of.0 != owner {
+            continue;
+        }
         match *part {
             CardPart::IconBox => {
                 if let Some(mut bg) = bg {
@@ -1103,7 +1454,7 @@ mod tests {
         })
         .unwrap();
         let card = inspect_card(&w, Cell::new(20, 128)).expect("road card");
-        assert_eq!(card.title, "Street");
+        assert_eq!(card.title, "Street · 1 lane each way");
         assert_eq!(card.rows[0].value, "Free flow");
         assert!(card.rows.iter().any(|r| r.label == "Eastbound"));
         assert!(card.rows.iter().any(|r| r.label == "Westbound"));

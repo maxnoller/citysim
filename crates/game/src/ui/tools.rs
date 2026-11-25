@@ -381,13 +381,9 @@ fn track_pointer(
                     let spacing = if enabled { state.block_spacing() } else { None };
                     let c = plan::block_corner(start, raw, spacing);
                     let mut s = snap::snap_point(&state.index, c.center(), 0.0, false);
+                    // Whole blocks: the card names the block size, no snap row.
                     s.cell = c;
-                    s.target = if spacing.is_some() {
-                        SnapTarget::Spacing
-                    } else {
-                        SnapTarget::Grid
-                    };
-                    s.spacing = spacing;
+                    s.target = SnapTarget::Grid;
                     s
                 }
                 _ => snap::snap_point(&state.index, cursor, radius, enabled),
@@ -793,7 +789,7 @@ fn use_tool(
                 if state.path.is_empty() {
                     state.reset();
                 }
-            } else if finish && !state.path.is_empty() {
+            } else if finish && !state.path.is_empty() && !pressed {
                 if state.path.len() >= 2 {
                     finish_path(state, &sim, *kind, &mut out, &mut toasts);
                 } else {
@@ -867,9 +863,45 @@ fn use_tool(
                     }
                     _ => state.reset(),
                 }
+                // A click and Enter within one slow frame: the click first.
+                if finish && pressed && state.path.len() >= 2 && state.busy() {
+                    finish_path(state, &sim, *kind, &mut out, &mut toasts);
+                }
             }
         }
-        (ActiveTool::Road, RoadMode::Junction) => {}
+        (ActiveTool::Road, RoadMode::Junction) => {
+            if pressed
+                && let Some(c) = hovered.0
+                && let Some(n) = citysim_sim::junction::junction_at(&sim.world, c)
+            {
+                let now = citysim_sim::junction::junction(&sim.world, n)
+                    .map(|j| j.setting)
+                    .unwrap_or_default();
+                let next = super::context::next_setting(now);
+                let cmd = Command::SetJunctionControl { cell: c, control: next };
+                match sim.world.preview(&cmd) {
+                    Ok(p) => {
+                        state.sent = Some(cmd);
+                        out.write(SimCommand(cmd));
+                        let now_control = p.junction.map(|j| j.control_after);
+                        let text = match (next, now_control) {
+                            (citysim_sim::JunctionSetting::Auto, Some(ctl)) => format!(
+                                "Junction back to automatic: {}",
+                                super::context::control_name(ctl).to_lowercase()
+                            ),
+                            (_, Some(ctl)) => {
+                                format!("Junction set to {}", super::context::control_name(ctl).to_lowercase())
+                            }
+                            _ => "Junction control changed".into(),
+                        };
+                        toasts.write(Toast::new(ToastKind::Info, text));
+                    }
+                    Err(e) => {
+                        toasts.write(Toast::new(ToastKind::Error, super::context::error_text(&e)));
+                    }
+                }
+            }
+        }
         // Rectangle modes: zoning, bulldozer, block.
         (t, _)
             if matches!(t, ActiveTool::Road)

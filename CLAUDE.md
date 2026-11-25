@@ -33,7 +33,12 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `PointerOverUi` (ui writes), `HoveredCell` (shared computes from the `WorldCamera` ray).
 - `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose).
 - Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`.
-- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B Esc/right-click, Space 1 2 3, O, G, F5/F9.
+- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B Esc/right-click, Space 1 2 3, O, G, F5/F9,
+  J, Tab, Alt, Enter, Backspace, [ ], Ctrl+Z.
+- Round 2 (ui writes, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`, `SnapFeedback` (snapped point,
+  `SnapTarget`, `Guide` lines in sim metres, spacing), `PathPreview` (corners, legs with per-leg error and
+  `upgrade_cells`, length, cost), `WorldHighlight` (hovered / pinned `WorldTarget`, doomed buildings and road cells),
+  `DisplaySettings { edge_scroll, lot_markers }`. `ToolPreview::line` is the leg under the cursor only.
 
 ## Sim facts for renderers
 - `MAP_CELLS = 256`, `CELL_SIZE = 8` m. Cell `(x, y)` centre = `((x+.5)*8, (y+.5)*8)` m; sim `(x, y)` → Bevy
@@ -73,6 +78,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `bulldoze`, `look`, `shot`, `stats`, `counts`, `cmd 'until-day N'`. The channel only reads numbers, frames the camera,
   fast-forwards (`turbo`, `until-*`; they fail while paused) and takes screenshots; all play goes through real input.
 - UI capture: `CITYSIM_UI_SHOTS=dir` (interface states; `CITYSIM_SAVE_DIR` for the save/load step), `CITYSIM_UI_TOUR=1`.
+  `CITYSIM_UI_SHOTS_ONLY=road-path,junction-tool,...` picks states (names in `ui/shots.rs`).
+- ui tools: every plan (path, block grid, frontage, fill, road bulldoze, undo) is a list of ordinary `Command`s checked
+  in order on a scratch copy of the world (`ui/plan.rs`) and sent only when all pass. Snapping is pure lattice maths in
+  `ui/snap.rs`. `scripts/play.py road` presses Enter to build its two-corner path.
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`).
