@@ -10,6 +10,7 @@ fn build(w: &mut World, a: (i32, i32), b: (i32, i32)) -> bool {
     w.apply(Command::BuildRoad {
         from: c(a.0, a.1),
         to: c(b.0, b.1),
+        kind: citysim_sim::RoadKind::Street,
     })
     .is_ok()
 }

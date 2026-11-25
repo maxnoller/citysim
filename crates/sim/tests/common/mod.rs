@@ -119,7 +119,14 @@ pub fn check_consistency(w: &World, after_step: bool) {
         assert!(w.grid.is_road(c(x, 128)), "tick {tick}: highway cell {x} lost");
     }
     if after_step {
-        assert!(w.traffic.junctions.len() >= w.roads.nodes.slot_count());
+        for (n, node) in w.roads.nodes.iter() {
+            let j = w.traffic.junction_states.get(n).expect("junction state for every node");
+            assert_eq!(
+                j.arms.iter().map(|a| a.segment).collect::<Vec<_>>(),
+                node.segments,
+                "tick {tick}: stale junction arms at {n:?}"
+            );
+        }
         let mut load: std::collections::BTreeMap<(SegmentId, usize), f32> = Default::default();
         for v in w.vehicles.values() {
             *load

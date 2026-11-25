@@ -41,6 +41,8 @@ pub(crate) struct Derived {
     candidates: [Vec<Cell>; 3],
     road_cells_key: Option<u64>,
     road_cells: u32,
+    avenue_key: Option<RoadsKey>,
+    avenue_cells: u32,
     pub path: PathScratch,
 }
 
@@ -207,7 +209,14 @@ impl Derived {
         best.map(|b| b.3)
     }
 
-    /// Growth candidates for zone `z`. Requires `ensure_roads`.
+    /// Is `c` a road cell (grid says road) connected to the entry?
+    pub fn connected_road_cell(&self, grid: &Grid, c: Cell) -> bool {
+        grid.is_road(c) && cell_index(c).is_some_and(|i| self.road_cell_connected.get(i).copied().unwrap_or(false))
+    }
+
+    /// Growth candidates for zone `z`: zoned, empty *frontage* cells (a
+    /// side touches a road cell connected to the entry). Requires
+    /// `ensure_roads`.
     pub fn candidates(&mut self, grid: &Grid, grid_version: u64, z: Zone) -> &[Cell] {
         let key = (grid_version, self.roads_key.unwrap_or_default());
         if self.cand_key != Some(key) {
@@ -215,7 +224,6 @@ impl Derived {
             for v in &mut self.candidates {
                 v.clear();
             }
-            let reach = balance::ZONE_ROAD_REACH;
             for y in 0..MAP_CELLS {
                 for x in 0..MAP_CELLS {
                     let cd = &grid.cells[(y * MAP_CELLS + x) as usize];
@@ -223,7 +231,10 @@ impl Derived {
                         && cd.occupant == Occupant::Empty
                     {
                         let c = Cell::new(x, y);
-                        if self.connected_near(CellRect::single(c), reach) {
+                        let front = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+                            .iter()
+                            .any(|&(dx, dy)| self.connected_road_cell(grid, c.offset(dx, dy)));
+                        if front {
                             self.candidates[zone_index(zone)].push(c);
                         }
                     }
@@ -231,6 +242,25 @@ impl Derived {
             }
         }
         &self.candidates[zone_index(z)]
+    }
+
+    /// Cell-to-cell pieces of avenue (cached per road version).
+    pub fn avenue_cells(&mut self, roads: &RoadNetwork, version: u64) -> u32 {
+        let key = Self::roads_key(roads, version);
+        if self.avenue_key != Some(key) {
+            self.avenue_key = Some(key);
+            self.avenue_cells = roads
+                .segments
+                .iter()
+                .filter(|(_, s)| s.kind == crate::RoadKind::Avenue)
+                .map(|(id, _)| {
+                    let (a, b) = roads.segment_ends(id);
+                    let d = geom::sub(b, a);
+                    (d[0].abs().max(d[1].abs()) / CELL_SIZE).round() as u32
+                })
+                .sum();
+        }
+        self.avenue_cells
     }
 
     /// Number of road cells (cached per grid version).

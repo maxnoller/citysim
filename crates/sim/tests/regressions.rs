@@ -13,6 +13,7 @@ fn road(w: &mut World, a: (i32, i32), b: (i32, i32)) {
     w.apply(Command::BuildRoad {
         from: c(a.0, a.1),
         to: c(b.0, b.1),
+        kind: citysim_sim::RoadKind::Street,
     })
     .unwrap();
 }
@@ -167,6 +168,7 @@ fn bulldoze_preview_and_apply_scale_on_a_dense_map() {
         let _ = w.apply(Command::BuildRoad {
             from: c(12 + k, 4),
             to: c(12 + k + 40, 44),
+            kind: citysim_sim::RoadKind::Street,
         });
     }
     check_roads(&w);

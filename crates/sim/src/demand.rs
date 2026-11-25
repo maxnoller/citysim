@@ -49,7 +49,16 @@ pub fn target(world: &World) -> (Demand, f32) {
     let employed = world.households.values().filter(|h| h.job.is_some()).count() as f32;
     let unemployed = households - employed;
     let small = balance::DEMAND_SMALL_CITY;
-    let tax = -balance::TAX_DEMAND_SLOPE * (world.economy.tax_rate - balance::DEFAULT_TAX_RATE);
+    let tax = tax_effect(world.economy.tax_rate);
+    let f = &world.economy.fiscal;
+    let service_gap = 1.0 - f.service_level;
+    let debt = if world.economy.money < 0 {
+        balance::DEBT_DEMAND_PENALTY
+    } else {
+        0.0
+    };
+    let res_fiscal = -balance::SERVICE_DEMAND_WEIGHT * service_gap - debt;
+    let job_fiscal = -0.5 * balance::SERVICE_DEMAND_WEIGHT * service_gap - debt;
 
     let free_jobs = (c_jobs + i_jobs - c_filled - i_filled).max(0.0);
     // Damped for tiny towns: one empty new house is not a housing glut.
@@ -57,7 +66,8 @@ pub fn target(world: &World) -> (Demand, f32) {
     let commute = world.traffic.avg_commute_s;
     let attract = balance::RES_BASE_DEMAND + balance::RES_JOBS_WEIGHT * (free_jobs - unemployed) / (households + small)
         - (commute - balance::COMMUTE_OK_S).max(0.0) / balance::COMMUTE_DEMAND_SCALE_S
-        + tax;
+        + tax
+        + res_fiscal;
     let r = attract - balance::RES_VACANCY_WEIGHT * (res_vacancy - balance::RES_VACANCY_OK).max(0.0);
 
     let unemployment = if households > 0.0 { unemployed / households } else { 0.0 };
@@ -66,6 +76,7 @@ pub fn target(world: &World) -> (Demand, f32) {
         balance::JOB_SHORTFALL_WEIGHT * (want - have) / (want + small) + balance::UNEMPLOYMENT_JOB_BOOST * unemployment
             - balance::JOB_VACANCY_WEIGHT * (vacancy - balance::JOB_VACANCY_OK).max(0.0)
             + tax
+            + job_fiscal
     };
     let want_c = pop * balance::SHOP_JOBS_PER_RESIDENT;
     let want_i = want_c * balance::INDUSTRY_PER_SHOP;
@@ -75,6 +86,25 @@ pub fn target(world: &World) -> (Demand, f32) {
         industrial: jobs_term(want_i, i_jobs, i_filled).clamp(-1.0, 1.0),
     };
     (demand, attract.clamp(-1.0, 1.0))
+}
+
+/// Demand change from the tax rate: steep above the default, gentle and
+/// capped below it.
+pub fn tax_effect(rate: f32) -> f32 {
+    let d = rate - balance::DEFAULT_TAX_RATE;
+    if d >= 0.0 {
+        -balance::TAX_DEMAND_SLOPE * d
+    } else {
+        (-d * balance::LOW_TAX_DEMAND_SLOPE).min(balance::LOW_TAX_DEMAND_MAX)
+    }
+}
+
+/// Set demand straight to its target (no smoothing): a new game, and
+/// commands applied before the clock ever ran, show valid demand at once.
+pub(crate) fn refresh(world: &mut World) {
+    let (t, attract) = target(world);
+    world.demand = t;
+    world.growth.attractiveness = attract;
 }
 
 pub(crate) fn tick(world: &mut World) {

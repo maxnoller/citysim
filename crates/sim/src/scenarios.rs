@@ -4,17 +4,28 @@
 //! The highway stub ends at cell `(11, 128)`. All layouts here grow east of
 //! it around the avenue `y = 128`.
 
-use crate::{Cell, Command, World, Zone};
+use crate::{Cell, Command, RoadKind, World, Zone};
 
 fn c(x: i32, y: i32) -> Cell {
     Cell::new(x, y)
 }
 
-/// Build a straight road; returns false if it failed (money, obstacles).
+/// Build a straight street; returns false if it failed (money, obstacles).
 pub fn road(w: &mut World, a: (i32, i32), b: (i32, i32)) -> bool {
+    road_of(w, a, b, RoadKind::Street)
+}
+
+/// Build (or upgrade to) a straight avenue.
+pub fn avenue(w: &mut World, a: (i32, i32), b: (i32, i32)) -> bool {
+    road_of(w, a, b, RoadKind::Avenue)
+}
+
+/// Build a straight road of `kind`.
+pub fn road_of(w: &mut World, a: (i32, i32), b: (i32, i32), kind: RoadKind) -> bool {
     w.apply(Command::BuildRoad {
         from: c(a.0, a.1),
         to: c(b.0, b.1),
+        kind,
     })
     .is_ok()
 }

@@ -85,6 +85,86 @@ pub struct DaySummary {
     pub budget: Budget,
 }
 
+/// How the city's finances stand, for the HUD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum FiscalState {
+    /// Money in hand and the last day paid for itself.
+    #[default]
+    Healthy,
+    /// Money in hand, but the last day ran at a loss.
+    Deficit,
+    /// Money below zero: city services are being cut (demand falls).
+    InDebt,
+    /// In debt for several days: services are badly cut and residents
+    /// leave every night until the books are back in the black.
+    Crisis,
+}
+
+/// Short reason behind the [`FiscalState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum FiscalReason {
+    #[default]
+    None,
+    /// Expenses (road upkeep and services) exceed tax income.
+    RunningAtALoss,
+    /// Taxes are so low they do not pay the running costs.
+    TaxTooLow,
+    /// Money is below zero.
+    InDebt,
+    /// Money is below zero and services have been cut.
+    ServicesCut,
+    /// Long debt: residents are moving away.
+    ResidentsLeaving,
+    /// Back in the black, services still recovering.
+    Recovering,
+}
+
+impl FiscalReason {
+    /// A short sentence for the HUD.
+    pub fn text(self) -> &'static str {
+        match self {
+            FiscalReason::None => "Budget is healthy",
+            FiscalReason::RunningAtALoss => "Running at a loss",
+            FiscalReason::TaxTooLow => "Taxes too low to pay the running costs",
+            FiscalReason::InDebt => "In debt: services will be cut",
+            FiscalReason::ServicesCut => "In debt: city services are cut",
+            FiscalReason::ResidentsLeaving => "Debt crisis: residents are leaving",
+            FiscalReason::Recovering => "Services recovering",
+        }
+    }
+}
+
+/// Fiscal health, updated at every midnight.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FiscalStatus {
+    pub state: FiscalState,
+    pub reason: FiscalReason,
+    /// Consecutive midnights with money below zero.
+    pub days_in_debt: u16,
+    /// Consecutive days that ran at a loss.
+    pub days_in_deficit: u16,
+    /// City services funded, `balance::SERVICE_LEVEL_MIN..=1.0`. Cut by
+    /// debt, restored when money is positive again; low service lowers all
+    /// demand and (in a crisis) makes residents leave. Services cost
+    /// scales with it.
+    pub service_level: f32,
+    /// Households that left last night because of the crisis.
+    pub left_last_night: u32,
+}
+
+impl Default for FiscalStatus {
+    fn default() -> Self {
+        FiscalStatus {
+            state: FiscalState::Healthy,
+            reason: FiscalReason::None,
+            days_in_debt: 0,
+            days_in_deficit: 0,
+            service_level: 1.0,
+            left_last_night: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Economy {
     /// Money in hand, dollars. Can go negative through daily costs; while
@@ -104,6 +184,8 @@ pub struct Economy {
     /// One entry per finished day, oldest first.
     #[serde(default)]
     pub history: Vec<DaySummary>,
+    /// Debt and service health (see [`FiscalStatus`]).
+    pub fiscal: FiscalStatus,
 }
 
 impl Default for Economy {
@@ -115,6 +197,7 @@ impl Default for Economy {
             last_day_expenses: 0,
             last_day: Budget::default(),
             history: Vec::new(),
+            fiscal: FiscalStatus::default(),
         }
     }
 }
@@ -131,12 +214,15 @@ pub fn budget_now(world: &World) -> Budget {
         }
     }
     let tax = |n: u64, base: f32| (n as f64 * base as f64 * rate as f64).round() as i64;
-    let services = (res as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64).round() as i64;
+    let level = world.economy.fiscal.service_level as f64;
+    let services = (res as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64 * level).round() as i64;
     Budget {
         residential_tax: tax(res, balance::RESIDENT_TAX_BASE_PER_DAY),
         commercial_tax: tax(com, balance::COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY),
         industrial_tax: tax(ind, balance::INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY),
-        road_upkeep: world.stats.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY,
+        road_upkeep: world.stats.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
+            + world.stats.avenue_cells as i64
+                * (balance::AVENUE_UPKEEP_PER_CELL_PER_DAY - balance::ROAD_UPKEEP_PER_CELL_PER_DAY),
         services,
     }
 }
@@ -172,4 +258,59 @@ pub(crate) fn end_of_day(world: &mut World) {
         budget: b,
     };
     e.history.push(summary);
+    update_fiscal(world, b);
+}
+
+/// Midnight: debt cuts services, a long debt makes residents leave; money
+/// back above zero restores services.
+fn update_fiscal(world: &mut World, b: Budget) {
+    let money = world.economy.money;
+    let f = &mut world.economy.fiscal;
+    f.days_in_deficit = if b.net() < 0 {
+        f.days_in_deficit.saturating_add(1)
+    } else {
+        0
+    };
+    if money < 0 {
+        f.days_in_debt = f.days_in_debt.saturating_add(1);
+        f.service_level = (f.service_level - balance::SERVICE_CUT_PER_DAY).max(balance::SERVICE_LEVEL_MIN);
+    } else {
+        f.days_in_debt = 0;
+        f.service_level = (f.service_level + balance::SERVICE_RECOVER_PER_DAY).min(1.0);
+    }
+    let crisis = money < 0 && f.days_in_debt >= balance::DEBT_CRISIS_DAYS;
+    f.state = if crisis {
+        FiscalState::Crisis
+    } else if money < 0 {
+        FiscalState::InDebt
+    } else if f.days_in_deficit > 0 {
+        FiscalState::Deficit
+    } else {
+        FiscalState::Healthy
+    };
+    let low_tax = world.economy.tax_rate < balance::DEFAULT_TAX_RATE * 0.5;
+    f.reason = match f.state {
+        FiscalState::Crisis => FiscalReason::ResidentsLeaving,
+        FiscalState::InDebt if f.service_level < 1.0 => FiscalReason::ServicesCut,
+        FiscalState::InDebt => FiscalReason::InDebt,
+        FiscalState::Deficit if low_tax => FiscalReason::TaxTooLow,
+        FiscalState::Deficit => FiscalReason::RunningAtALoss,
+        FiscalState::Healthy if f.service_level < 1.0 => FiscalReason::Recovering,
+        FiscalState::Healthy => FiscalReason::None,
+    };
+    f.left_last_night = 0;
+    if crisis {
+        let share = (1.0 - f.service_level) * balance::CRISIS_LEAVE_SHARE_PER_DAY;
+        let ids: Vec<crate::HouseholdId> = world.households.keys().collect();
+        let mut leaving = Vec::new();
+        for id in ids {
+            if world.rng.next_f32() < share {
+                leaving.push(id);
+            }
+        }
+        world.economy.fiscal.left_last_night = leaving.len() as u32;
+        for id in leaving {
+            crate::households::leave(world, id, balance::MOVE_OUT_DRIVES);
+        }
+    }
 }

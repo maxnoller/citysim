@@ -12,13 +12,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::geom::{Cell, CellRect};
 use crate::grid::{Occupant, Zone};
+use crate::junction::{JunctionControl, JunctionSetting};
 use crate::roads::{NodeId, RoadKind, RoadNetwork, SegmentId};
 use crate::{BuildingId, World, balance, geom};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    /// Straight road between two cell centres (horizontal, vertical or 45°).
-    BuildRoad { from: Cell, to: Cell },
+    /// Straight road of `kind` between two cell centres (horizontal,
+    /// vertical or 45°). Pieces already built as another kind are changed
+    /// in place: a street becomes an avenue for the price difference, an
+    /// avenue becomes a street for free (no refund). The highway stub never
+    /// changes. `kind` must be buildable (`RoadKind::BUILDABLE`).
+    BuildRoad { from: Cell, to: Cell, kind: RoadKind },
     /// Remove road pieces touching cells in the rectangle, and buildings
     /// overlapping it. The highway stub is not removable. Allowed without
     /// the money for it (the cost then pushes money negative), so a city in
@@ -28,6 +33,9 @@ pub enum Command {
     SetZone { min: Cell, max: Cell, zone: Option<Zone> },
     /// Fraction in `0.0..=balance::MAX_TAX_RATE`.
     SetTaxRate(f32),
+    /// Choose how the junction at this cell's centre (a node with three or
+    /// more arms) is controlled. `Auto` lets the sim decide.
+    SetJunctionControl { cell: Cell, control: JunctionSetting },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,6 +56,10 @@ pub enum CommandError {
         money: i64,
     },
     InvalidTaxRate(f32),
+    /// The road kind cannot be built by the player (the highway).
+    InvalidRoadKind(RoadKind),
+    /// No junction (node with three or more arms) at this cell.
+    NotAJunction(Cell),
 }
 
 impl fmt::Display for CommandError {
@@ -60,6 +72,8 @@ impl fmt::Display for CommandError {
             CommandError::DiagonalCrossing(c) => write!(f, "diagonal roads cannot cross near ({}, {})", c.x, c.y),
             CommandError::InsufficientFunds { cost, money } => write!(f, "costs ${cost}, you have ${money}"),
             CommandError::InvalidTaxRate(r) => write!(f, "tax rate {r} out of range"),
+            CommandError::InvalidRoadKind(k) => write!(f, "{k:?} roads cannot be built"),
+            CommandError::NotAJunction(c) => write!(f, "no junction at ({}, {})", c.x, c.y),
         }
     }
 }
@@ -72,8 +86,27 @@ pub struct Preview {
     /// Money that will be spent.
     pub cost: i64,
     /// Cells the command affects: for roads every cell of the line, for
-    /// zoning the cells that get (un)zoned, for bulldoze the cells cleared.
+    /// zoning the cells that get (un)zoned, for bulldoze the cells cleared,
+    /// for junction control the junction's cell.
     pub cells: Vec<Cell>,
+    /// Roads: cell-to-cell pieces built new.
+    pub new_pieces: u32,
+    /// Roads: existing pieces changed to a pricier kind (street -> avenue).
+    pub upgraded: u32,
+    /// Roads: existing pieces changed to a cheaper kind (no refund).
+    pub downgraded: u32,
+    /// Junction control: what changes.
+    pub junction: Option<JunctionChange>,
+}
+
+/// Effect of `Command::SetJunctionControl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JunctionChange {
+    pub node: NodeId,
+    pub setting_before: JunctionSetting,
+    pub setting_after: JunctionSetting,
+    pub control_before: JunctionControl,
+    pub control_after: JunctionControl,
 }
 
 /// What a command did. Returned by `World::apply`; equals the preview.
@@ -81,14 +114,23 @@ pub struct Preview {
 pub struct Outcome {
     pub cost: i64,
     pub cells: Vec<Cell>,
+    pub new_pieces: u32,
+    pub upgraded: u32,
+    pub downgraded: u32,
+    pub junction: Option<JunctionChange>,
 }
 
 /// A validated command, ready to execute.
 pub(crate) enum Plan {
     Road {
         cells: Vec<Cell>,
+        kind: RoadKind,
         /// Unit pieces (adjacent cell pairs) not yet built.
         new_pieces: Vec<(Cell, Cell)>,
+        /// Built pieces of another (changeable) kind.
+        changed: Vec<(Cell, Cell)>,
+        upgraded: u32,
+        downgraded: u32,
         cost: i64,
     },
     Bulldoze {
@@ -102,20 +144,46 @@ pub(crate) enum Plan {
         zone: Option<Zone>,
     },
     Tax(f32),
+    Junction {
+        cell: Cell,
+        change: JunctionChange,
+    },
 }
 
 impl Plan {
     pub(crate) fn preview(&self) -> Preview {
         match self {
-            Plan::Road { cells, cost, .. } | Plan::Bulldoze { cells, cost, .. } => Preview {
+            Plan::Road {
+                cells,
+                cost,
+                new_pieces,
+                upgraded,
+                downgraded,
+                ..
+            } => Preview {
                 cost: *cost,
                 cells: cells.clone(),
+                new_pieces: new_pieces.len() as u32,
+                upgraded: *upgraded,
+                downgraded: *downgraded,
+                ..Preview::default()
+            },
+            Plan::Bulldoze { cells, cost, .. } => Preview {
+                cost: *cost,
+                cells: cells.clone(),
+                ..Preview::default()
             },
             Plan::Zone { cells, .. } => Preview {
                 cost: 0,
                 cells: cells.clone(),
+                ..Preview::default()
             },
             Plan::Tax(_) => Preview::default(),
+            Plan::Junction { cell, change } => Preview {
+                cells: vec![*cell],
+                junction: Some(*change),
+                ..Preview::default()
+            },
         }
     }
 }
@@ -139,7 +207,7 @@ fn afford(world: &World, cost: i64) -> Result<(), CommandError> {
 
 pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
     match *cmd {
-        Command::BuildRoad { from, to } => plan_road(world, from, to),
+        Command::BuildRoad { from, to, kind } => plan_road(world, from, to, kind),
         Command::Bulldoze { min, max } => plan_bulldoze(world, CellRect::from_corners(min, max)),
         Command::SetZone { min, max, zone } => plan_zone(world, CellRect::from_corners(min, max), zone),
         Command::SetTaxRate(r) => {
@@ -149,10 +217,39 @@ pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
                 Err(CommandError::InvalidTaxRate(r))
             }
         }
+        Command::SetJunctionControl { cell, control } => plan_junction(world, cell, control),
     }
 }
 
-fn plan_road(world: &World, from: Cell, to: Cell) -> Result<Plan, CommandError> {
+fn plan_junction(world: &World, cell: Cell, setting: JunctionSetting) -> Result<Plan, CommandError> {
+    if !cell.in_bounds() {
+        return Err(CommandError::OutOfBounds);
+    }
+    let node = crate::junction::junction_at(world, cell).ok_or(CommandError::NotAJunction(cell))?;
+    let fresh;
+    let state = match world.traffic.junction_states.get(node) {
+        Some(j) if j.arms.len() == world.roads.nodes[node].segments.len() => j,
+        old => {
+            fresh = crate::junction::build_state(&world.roads, node, old);
+            &fresh
+        }
+    };
+    Ok(Plan::Junction {
+        cell,
+        change: JunctionChange {
+            node,
+            setting_before: state.setting,
+            setting_after: setting,
+            control_before: state.control,
+            control_after: crate::junction::control_under(state, setting),
+        },
+    })
+}
+
+fn plan_road(world: &World, from: Cell, to: Cell, kind: RoadKind) -> Result<Plan, CommandError> {
+    if !RoadKind::BUILDABLE.contains(&kind) {
+        return Err(CommandError::InvalidRoadKind(kind));
+    }
     if !from.in_bounds() || !to.in_bounds() {
         return Err(CommandError::OutOfBounds);
     }
@@ -168,9 +265,22 @@ fn plan_road(world: &World, from: Cell, to: Cell) -> Result<Plan, CommandError> 
         }
     }
     let mut new_pieces = Vec::new();
+    let mut changed = Vec::new();
+    let (mut upgraded, mut downgraded, mut change_cost) = (0u32, 0u32, 0i64);
     for w in cells.windows(2) {
         let (p, q) = (w[0], w[1]);
-        if world.roads.piece(p, q).is_some() {
+        if let Some(s) = world.roads.piece(p, q) {
+            let old = world.roads.segments[s].kind;
+            if old != kind && old != RoadKind::Highway {
+                changed.push((p, q));
+                let diff = kind.cost_per_cell() - old.cost_per_cell();
+                if diff > 0 {
+                    upgraded += 1;
+                    change_cost += diff;
+                } else {
+                    downgraded += 1;
+                }
+            }
             continue;
         }
         let (dx, dy) = (q.x - p.x, q.y - p.y);
@@ -183,11 +293,15 @@ fn plan_road(world: &World, from: Cell, to: Cell) -> Result<Plan, CommandError> 
         }
         new_pieces.push((p, q));
     }
-    let cost = new_pieces.len() as i64 * balance::ROAD_COST_PER_CELL;
+    let cost = new_pieces.len() as i64 * kind.cost_per_cell() + change_cost;
     afford(world, cost)?;
     Ok(Plan::Road {
         cells,
+        kind,
         new_pieces,
+        changed,
+        upgraded,
+        downgraded,
         cost,
     })
 }
@@ -293,14 +407,33 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
     match plan {
         Plan::Road {
             cells,
+            kind,
             new_pieces,
+            changed,
             cost,
+            ..
         } => {
             let roads = &mut world.roads;
             for &(p, q) in &new_pieces {
                 let a = roads.ensure_node(p.center());
                 let b = roads.ensure_node(q.center());
-                roads.add_segment(a, b, RoadKind::Street);
+                roads.add_segment(a, b, kind);
+            }
+            if !changed.is_empty() {
+                // Cut the road at both ends of the line, so every segment
+                // carrying a changed piece lies inside the line.
+                for c in [cells[0], cells[cells.len() - 1]] {
+                    if roads.covers(c.center()) {
+                        roads.ensure_node(c.center());
+                    }
+                }
+                for &(p, q) in &changed {
+                    if let Some(s) = roads.piece(p, q)
+                        && roads.segments[s].kind != RoadKind::Highway
+                    {
+                        roads.segments[s].set_kind(kind);
+                    }
+                }
             }
             for &c in &cells {
                 if let Some(n) = roads.node_at(c.center()) {
@@ -317,7 +450,7 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
                 }
             }
             world.economy.money -= cost;
-            if !new_pieces.is_empty() {
+            if !new_pieces.is_empty() || !changed.is_empty() {
                 world.versions.roads += 1;
             }
             if grid_changed {
@@ -362,10 +495,20 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             }
         }
         Plan::Tax(r) => world.economy.tax_rate = r,
+        Plan::Junction { change, .. } => {
+            crate::traffic::sync_junctions(world);
+            if let Some(j) = world.traffic.junction_states.get_mut(change.node) {
+                crate::junction::set_setting(j, change.setting_after);
+            }
+        }
     }
     Outcome {
         cost: preview.cost,
         cells: preview.cells,
+        new_pieces: preview.new_pieces,
+        upgraded: preview.upgraded,
+        downgraded: preview.downgraded,
+        junction: preview.junction,
     }
 }
 
