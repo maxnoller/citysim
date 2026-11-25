@@ -75,13 +75,99 @@ struct Spawned {
 pub struct Inset {
     pub scale: f32,
     pub shift: Vec2,
+    /// Extra squeeze along world x / z (lots stepping back from a wide
+    /// road beside them), 1 = none.
+    pub squeeze: Vec2,
 }
 
 impl Inset {
     const NONE: Inset = Inset {
         scale: 1.0,
         shift: Vec2::ZERO,
+        squeeze: Vec2::ONE,
     };
+
+    /// Scale for the model child, in the model's local frame (its x runs
+    /// along world z when the building faces +-x).
+    fn local_scale(&self, f: Facing) -> Vec3 {
+        let (sx, sz) = match f {
+            Facing::PlusY | Facing::MinusY => (self.squeeze.x, self.squeeze.y),
+            Facing::PlusX | Facing::MinusX => (self.squeeze.y, self.squeeze.x),
+        };
+        Vec3::new(sx, 1.0, sz) * self.scale
+    }
+}
+
+/// Axis-aligned roads drawn wider than their cell line (avenues), as
+/// (a, b, half-width incl. sidewalks).
+pub fn wide_roads(roads: &RoadNetwork) -> Vec<(Vec2, Vec2, f32)> {
+    roads
+        .segments
+        .iter()
+        .filter_map(|(_, seg)| {
+            let a = Vec2::from(roads.nodes.get(seg.a)?.pos);
+            let b = Vec2::from(roads.nodes.get(seg.b)?.pos);
+            let d = (b - a).normalize_or_zero();
+            let outer = road_geom::style(seg.kind).outer();
+            (outer > CELL_SIZE * 0.5 + 0.01 && (d.x.abs() < 0.02 || d.y.abs() < 0.02)).then_some((a, b, outer))
+        })
+        .collect()
+}
+
+/// Step a lot (`min..max`) back from wide roads running beside it: the
+/// lot shrinks on that side (never below `MIN_INSET_SCALE` of its size).
+pub fn wide_inset(min: Vec2, max: Vec2, roads: &[(Vec2, Vec2, f32)]) -> Inset {
+    let (mut lo, mut hi) = (min, max);
+    for &(a, b, outer) in roads {
+        let need = outer + ROAD_CLEARANCE;
+        if (a.y - b.y).abs() < 0.01 {
+            // Along x at z = a.y: must overlap the lot's x extent.
+            if a.x.max(b.x) <= min.x + 0.5 || a.x.min(b.x) >= max.x - 0.5 {
+                continue;
+            }
+            let z = a.y;
+            if z <= min.y {
+                lo.y = lo.y.max(z + need);
+            } else if z >= max.y {
+                hi.y = hi.y.min(z - need);
+            }
+        } else {
+            if a.y.max(b.y) <= min.y + 0.5 || a.y.min(b.y) >= max.y - 0.5 {
+                continue;
+            }
+            let x = a.x;
+            if x <= min.x {
+                lo.x = lo.x.max(x + need);
+            } else if x >= max.x {
+                hi.x = hi.x.min(x - need);
+            }
+        }
+    }
+    if lo == min && hi == max {
+        return Inset::NONE;
+    }
+    let size = max - min;
+    let floor = size * MIN_INSET_SCALE;
+    // Keep at least the floor, anchored at the side away from the road.
+    if hi.x - lo.x < floor.x {
+        if lo.x > min.x {
+            lo.x = hi.x - floor.x;
+        } else {
+            hi.x = lo.x + floor.x;
+        }
+    }
+    if hi.y - lo.y < floor.y {
+        if lo.y > min.y {
+            lo.y = hi.y - floor.y;
+        } else {
+            hi.y = lo.y + floor.y;
+        }
+    }
+    Inset {
+        scale: 1.0,
+        shift: (lo + hi) * 0.5 - (min + max) * 0.5,
+        squeeze: (hi - lo) / size,
+    }
 }
 
 /// Clearance kept between a building lot and a diagonal road's edge, m.
@@ -195,6 +281,7 @@ pub fn diagonal_inset(min: Vec2, max: Vec2, roads: &[(Vec2, Vec2, f32)]) -> Inse
             best = Inset {
                 scale: lo,
                 shift: (anchor + (centre - anchor) * lo) - centre,
+                squeeze: Vec2::ONE,
             };
         }
     }
@@ -268,13 +355,24 @@ fn sync_buildings(
     let world = &sim.world;
     let buildings = &world.buildings;
     let diagonals = diagonal_roads(&world.roads);
+    let wides = wide_roads(&world.roads);
     let inset_of = |b: &Building| {
-        if diagonals.is_empty() {
+        if diagonals.is_empty() && wides.is_empty() {
             return Inset::NONE;
         }
         let (w, d) = b.size();
         let min = Vec2::new(b.footprint.min.x as f32, b.footprint.min.y as f32) * CELL_SIZE;
-        diagonal_inset(min, min + Vec2::new(w as f32, d as f32) * CELL_SIZE, &diagonals)
+        let max = min + Vec2::new(w as f32, d as f32) * CELL_SIZE;
+        let wide = wide_inset(min, max, &wides);
+        // Diagonal clearance is measured on the stepped-back lot.
+        let c = (min + max) * 0.5 + wide.shift;
+        let half = (max - min) * 0.5 * wide.squeeze;
+        let diag = diagonal_inset(c - half, c + half, &diagonals);
+        Inset {
+            scale: diag.scale,
+            shift: wide.shift + diag.shift,
+            squeeze: wide.squeeze,
+        }
     };
     spawned.entities.retain(|id, (e, k, f, i)| {
         let keep = buildings
@@ -297,7 +395,7 @@ fn sync_buildings(
         // The inset lives on the model children, so the grow animation can
         // scale the parent freely.
         let model_tf = Transform::from_translation(rot.inverse() * Vec3::new(inset.shift.x, 0.0, inset.shift.y))
-            .with_scale(Vec3::splat(inset.scale));
+            .with_scale(inset.local_scale(b.facing));
         let (detail, far) = models.get(mk, &mut meshes);
         let mut ec = commands.spawn((BuildingVisual, Visibility::default()));
         ec.with_children(|p| {

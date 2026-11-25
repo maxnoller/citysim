@@ -23,10 +23,10 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use citysim_sim::{RoadKind, SegmentId, TripPurpose, Vehicle, VehicleId, World, balance};
 
+use super::city_material::CityMaterial;
 use super::noise::hash;
 use super::palette;
 use super::road_geom::{self, ROAD_Y, lane_offset};
-use super::city_material::CityMaterial;
 use super::scene::WorldMaterials;
 use super::vehicle_gen::{self, SHAPES};
 use crate::shared::{GameSet, SimWorld, WorldCamera};

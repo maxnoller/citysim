@@ -76,6 +76,9 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
                 player.act(&mut w);
                 w.step();
             }
+            if env::<u32>("CITYSIM_DEMO_AVENUES") == Some(1) {
+                upgrade_main_road(&mut w);
+            }
             run_to_hour(&mut w, hour, |w| player.act(w));
         }
     }
@@ -89,6 +92,27 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
         started.elapsed().as_secs_f32()
     );
     w
+}
+
+/// `CITYSIM_DEMO_AVENUES=1`: upgrade the main road (`y = 128`, east of the
+/// highway stub) to an avenue (paid for; dev aid for looking at avenues).
+fn upgrade_main_road(w: &mut World) {
+    let mut x = 12;
+    while w
+        .grid
+        .get(Cell::new(x + 1, 128))
+        .is_some_and(|c| c.occupant == citysim_sim::Occupant::Road)
+    {
+        x += 1;
+    }
+    w.economy.money += 1_000_000;
+    let r = w.apply(citysim_sim::Command::BuildRoad {
+        from: Cell::new(12, 128),
+        to: Cell::new(x, 128),
+        kind: citysim_sim::RoadKind::Avenue,
+    });
+    w.economy.money -= 1_000_000;
+    info!("dev scenario: main road to avenue (12..{x}, 128): {r:?}");
 }
 
 pub struct ScenarioPlugin {

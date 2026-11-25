@@ -147,17 +147,28 @@ fn housing(m: &mut MeshBuilder, c: Vec3, face: Vec2) {
 
 /// Transform of a head entity at `c` facing `face`.
 fn head_transform(c: Vec3, face: Vec2) -> Transform {
-    Transform::from_translation(c).with_rotation(Quat::from_rotation_y(-face.y.atan2(face.x) + std::f32::consts::FRAC_PI_2))
+    Transform::from_translation(c).with_rotation(Quat::from_rotation_y(
+        -face.y.atan2(face.x) + std::f32::consts::FRAC_PI_2,
+    ))
 }
 
 /// Upward triangle helper in the xz plane.
 fn tri2(m: &mut MeshBuilder, a: Vec2, b: Vec2, c: Vec2, y: f32, col: [f32; 4]) {
-    m.tri_up(Vec3::new(a.x, y, a.y), Vec3::new(b.x, y, b.y), Vec3::new(c.x, y, c.y), col);
+    m.tri_up(
+        Vec3::new(a.x, y, a.y),
+        Vec3::new(b.x, y, b.y),
+        Vec3::new(c.x, y, c.y),
+        col,
+    );
 }
 
 /// Static furniture of one junction, and where its heads go:
 /// (segment, centre, facing).
-fn furniture(node: &NodeLayout, control: JunctionControl, major: &HashMap<SegmentId, bool>) -> (MeshBuilder, Vec<(SegmentId, Vec3, Vec2)>) {
+fn furniture(
+    node: &NodeLayout,
+    control: JunctionControl,
+    major: &HashMap<SegmentId, bool>,
+) -> (MeshBuilder, Vec<(SegmentId, Vec3, Vec2)>) {
     let mut m = MeshBuilder::new();
     let mut heads = Vec::new();
     let pole = palette::LAMP;
@@ -227,7 +238,11 @@ fn furniture(node: &NodeLayout, control: JunctionControl, major: &HashMap<Segmen
                 let (r, w) = (0.42, 0.28);
                 let red = Color::srgb_u32(0xC8322B);
                 // Front (towards the driver) and back faces.
-                let (p0, p1, p2) = (c + Vec3::Y * 0.24 + side * r, c + Vec3::Y * 0.24 - side * r, c - Vec3::Y * 0.48);
+                let (p0, p1, p2) = (
+                    c + Vec3::Y * 0.24 + side * r,
+                    c + Vec3::Y * 0.24 - side * r,
+                    c - Vec3::Y * 0.48,
+                );
                 m.glow(Glow::Sign, 0.0, |m| {
                     m.tri_facing(p0, p1, p2, face, red);
                 });
@@ -272,7 +287,9 @@ fn sync_junctions(
     }
     let mut seen: Vec<NodeId> = Vec::new();
     for n in junction::junction_nodes(world) {
-        let Some(j) = junction::junction(world, n) else { continue };
+        let Some(j) = junction::junction(world, n) else {
+            continue;
+        };
         let Some(node) = state.layout.get(&n) else { continue };
         let spawned = &mut state.spawned;
         let major: HashMap<SegmentId, bool> = j.arms.iter().map(|a| (a.segment, a.major)).collect();
