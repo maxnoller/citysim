@@ -8,6 +8,7 @@ mod city_material;
 mod cursor;
 mod daynight;
 mod guides;
+mod lot_props;
 mod lots;
 mod mesh_util;
 mod noise;
