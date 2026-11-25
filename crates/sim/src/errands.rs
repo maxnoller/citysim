@@ -70,7 +70,7 @@ fn deliveries(world: &mut World) {
         let f = world.cache.factories.len();
         let mut best: Option<(f32, [f32; 2])> = None;
         if f > 0 && world.rng.next_f32() >= balance::GOODS_IMPORT_SHARE {
-            for _ in 0..balance::ERRAND_SAMPLES {
+            for _ in 0..balance::DELIVERY_SAMPLES {
                 let b = world.cache.factories[world.rng.below(f as u32) as usize];
                 let Some(fb) = world.buildings.get(b) else { continue };
                 if fb.occupied == 0 || !households::connected(world, fb.footprint) {

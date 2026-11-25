@@ -414,8 +414,8 @@ pub struct Citizen {
     pub job: Option<Job>,
     /// Retired (seniors).
     pub retired: bool,
-    /// Stays at home to look after young children instead of working (not
-    /// in the workforce).
+    /// Stays at home (looks after the children, the household) instead of
+    /// working: not in the workforce.
     pub homemaker: bool,
     pub activity: Activity,
     pub location: Location,
@@ -457,10 +457,19 @@ impl Citizen {
     /// teens who have a part-time job. `Stats::workforce` counts these.
     pub fn in_workforce(&self) -> bool {
         match self.stage {
-            LifeStage::Adult => !self.homemaker,
+            LifeStage::Adult => !self.homemaker && !self.student(),
             LifeStage::Teen => self.job.is_some(),
             _ => false,
         }
+    }
+
+    /// A grown-up child still at home and younger than
+    /// `balance::STUDENT_UNTIL_YEARS`: studying, not in the workforce
+    /// (schools and universities come in stage 2).
+    pub fn student(&self) -> bool {
+        self.stage == LifeStage::Adult
+            && self.role == HouseholdRole::Dependant
+            && self.age_years() < balance::STUDENT_UNTIL_YEARS
     }
 
     /// Looks for a job when it has none: workforce adults, and teens old
@@ -468,7 +477,7 @@ impl Citizen {
     pub fn job_seeker(&self) -> bool {
         self.job.is_none()
             && match self.stage {
-                LifeStage::Adult => !self.homemaker,
+                LifeStage::Adult => !self.homemaker && !self.student(),
                 LifeStage::Teen => self.age_years() >= balance::TEEN_JOB_AGE_YEARS,
                 _ => false,
             }

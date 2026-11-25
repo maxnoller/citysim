@@ -391,7 +391,12 @@ pub(crate) fn settle_household(world: &mut World, hid: HouseholdId) {
         }
         young_kids |= c.stage == LifeStage::Child;
     }
-    let stay = young_kids && heads.len() >= 2 && habit(seed, 0x40AE) < balance::HOMEMAKER_SHARE;
+    let share = if young_kids {
+        balance::HOMEMAKER_SHARE
+    } else {
+        balance::STAY_AT_HOME_SHARE
+    };
+    let stay = heads.len() >= 2 && habit(seed, 0x40AE) < share;
     for (k, &m) in heads.iter().enumerate() {
         let want = stay && k == 1;
         if world.citizens[m].homemaker != want {
@@ -516,6 +521,35 @@ fn cheaper_home(world: &mut World, hid: HouseholdId, n: u32, rent: i64) -> Optio
     best.map(|b| b.1)
 }
 
+/// A home with room for `n` whose rent stays within
+/// `balance::ROOMIER_HOME_RENT_FACTOR` of `rent`.
+fn roomier_home(world: &mut World, hid: HouseholdId, n: u32, rent: i64) -> Option<BuildingId> {
+    world.cache.ensure_places(&world.buildings, world.versions.buildings);
+    let homes = world.cache.homes.len();
+    if homes == 0 {
+        return None;
+    }
+    let cur = world.households[hid].home;
+    let near = home_pos(world, cur);
+    let mut best: Option<(f32, BuildingId)> = None;
+    for _ in 0..balance::HOME_SEARCH_SAMPLES {
+        let b = world.cache.homes[world.rng.below(homes as u32) as usize];
+        let Some(bb) = world.buildings.get(b) else { continue };
+        if b == cur || bb.capacity < bb.occupied + n || !households::connected(world, bb.footprint) {
+            continue;
+        }
+        let r = rent_for(world, b, n - 1);
+        if r as f32 > (rent as f32 * balance::ROOMIER_HOME_RENT_FACTOR).max(rent as f32 + 1.0) {
+            continue;
+        }
+        let d = geom::dist(near, rect_center(bb.footprint));
+        if best.is_none_or(|x| d < x.0) {
+            best = Some((d, b));
+        }
+    }
+    best.map(|b| b.1)
+}
+
 /// A free home with room for one more, near `near`.
 fn free_home(world: &mut World, near: [f32; 2], exclude: BuildingId) -> Option<BuildingId> {
     world.cache.ensure_places(&world.buildings, world.versions.buildings);
@@ -557,12 +591,11 @@ fn transfer(world: &mut World, id: CitizenId, to: HouseholdId) {
     world.buildings[new_home].occupied += 1;
     world.households[to].citizens.push(id);
     let loc = world.citizens[id].location;
-    {
-        let c = &mut world.citizens[id];
+    people::update(world, id, |c| {
         c.household = to;
         c.role = HouseholdRole::Head;
         c.has_car = false;
-    }
+    });
     let now = world.time.tick;
     if loc == Location::In(old_home) {
         let a = world.citizens[id].activity;
@@ -589,9 +622,7 @@ fn events(world: &mut World, hid: HouseholdId) {
     let day = world.time.day;
     let h = &world.households[hid];
     let home = h.home;
-    if !all_home(world, hid) {
-        return;
-    }
+    let everyone_home = all_home(world, hid);
     let members: Vec<CitizenId> = h.citizens.clone();
     let heads: Vec<CitizenId> = members
         .iter()
@@ -606,13 +637,27 @@ fn events(world: &mut World, hid: HouseholdId) {
         world.citizens[m].stage == LifeStage::Adult
             && (balance::BIRTH_MIN_YEARS..=balance::BIRTH_MAX_YEARS).contains(&y)
     });
-    if heads.len() >= 2
+    let wants_child = heads.len() >= 2
         && parents_age
-        && room
         && children < balance::MAX_CHILDREN as usize
         && world.households[hid].money >= 0
-        && world.rng.next_f32() < balance::BIRTH_CHANCE_PER_DAY
-    {
+        && world.rng.next_f32() < balance::BIRTH_CHANCE_PER_DAY;
+    if wants_child && !room && everyone_home {
+        // No room for a baby: move to a home with room for one more (rent
+        // not much higher), if there is one.
+        let n = members.len() as u32;
+        let rent = world.households[hid].rent;
+        if let Some(bigger) = roomier_home(world, hid, n + 1, rent) {
+            households::relocate(world, hid, bigger);
+            world.households[hid].rent = rent_for(world, bigger, n);
+            for &m in &members {
+                world.citizens[m].log(day, LifeEvent::MovedHome);
+            }
+            world.people.events_today.moved_home += 1;
+        }
+        return;
+    }
+    if wants_child && room {
         let mut c = households::new_citizen(world, hid, 0, HouseholdRole::Dependant);
         c.log(day, LifeEvent::Born);
         c.activity = Activity::Sleeping;
@@ -622,6 +667,9 @@ fn events(world: &mut World, hid: HouseholdId) {
         }
         world.people.events_today.births += 1;
         settle_household(world, hid);
+        return;
+    }
+    if !everyone_home {
         return;
     }
     // A grown-up child moves out (only when a home is free).

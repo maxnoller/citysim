@@ -581,6 +581,13 @@ fn arrival_ages(world: &mut World, kind: HouseholdKind, room: u32) -> Vec<(u32, 
     v
 }
 
+/// Places newcomers leave free in a home (for births and moves within the
+/// city): one in buildings of `balance::RESERVE_FROM_CAPACITY` places or
+/// more.
+pub(crate) fn reserve(b: &crate::Building) -> u32 {
+    u32::from(b.capacity >= balance::RESERVE_FROM_CAPACITY)
+}
+
 /// Daily costs a household of `n` expects (rent at level 1, goods), for
 /// arrival savings and austerity.
 pub(crate) fn expected_daily_costs(n: u32, rent: i64) -> i64 {
@@ -615,7 +622,7 @@ pub(crate) fn arrivals(world: &mut World) {
     let homes: Vec<BuildingId> = world
         .buildings
         .iter()
-        .filter(|(_, b)| b.kind == Zone::Residential && b.occupied < b.capacity)
+        .filter(|(_, b)| b.kind == Zone::Residential && b.occupied + reserve(b) < b.capacity)
         .filter(|(_, b)| connected(world, b.footprint))
         .map(|(id, _)| id)
         .collect();
@@ -632,7 +639,8 @@ pub(crate) fn arrivals(world: &mut World) {
         let mut best: Option<(u32, BuildingId)> = None;
         for _ in 0..balance::HOME_SEARCH_SAMPLES {
             let h = homes[world.rng.below(homes.len() as u32) as usize];
-            let room = world.buildings[h].capacity.saturating_sub(world.buildings[h].occupied);
+            let b = &world.buildings[h];
+            let room = b.capacity.saturating_sub(b.occupied + reserve(b));
             if room >= ages.len() as u32 {
                 best = Some((room, h));
                 break;

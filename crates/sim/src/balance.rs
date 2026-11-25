@@ -88,9 +88,9 @@ pub const MAX_TAX_RATE: f32 = 0.30;
 /// At the default 9 % a resident pays about $1.26 per day.
 pub const RESIDENT_TAX_BASE_PER_DAY: f32 = 14.0;
 /// Daily taxable value of one filled commercial job.
-pub const COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 17.0;
+pub const COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 20.0;
 /// Daily taxable value of one filled industrial job.
-pub const INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 14.0;
+pub const INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 16.0;
 
 // --------------------------------------------------------------- zoning ----
 
@@ -332,10 +332,11 @@ pub const RES_BASE_DEMAND: f32 = 0.35;
 /// Weight of (free jobs - unemployed) / households on residential demand.
 pub const RES_JOBS_WEIGHT: f32 = 2.0;
 /// Residential demand falls by this per unit of housing vacancy above
-/// [`RES_VACANCY_OK`] (vacancy = empty places / (capacity + 2 *
+/// [`RES_VACANCY_OK`] (round 3: 0.14 instead of 0.10, as newcomers leave
+/// a place free in bigger homes for births, [`RESERVE_FROM_CAPACITY`]) (vacancy = empty places / (capacity + 2 *
 /// `DEMAND_SMALL_CITY`)).
 pub const RES_VACANCY_WEIGHT: f32 = 2.5;
-pub const RES_VACANCY_OK: f32 = 0.10;
+pub const RES_VACANCY_OK: f32 = 0.14;
 /// Commercial jobs (shops) wanted per resident. No longer used by the sim
 /// (round 3 wants jobs per member of the workforce,
 /// [`SHOP_JOBS_PER_WORKER`]).
@@ -462,8 +463,13 @@ pub const SENIOR_COUPLE_SHARE: f32 = 0.5;
 /// Households with two drivers owning two cars (the rest share one).
 pub const TWO_CAR_SHARE: f32 = 0.55;
 /// Families with young children (under 13) where one parent stays at home
-/// (out of the workforce, does the shopping) until the youngest is 13.
-pub const HOMEMAKER_SHARE: f32 = 0.3;
+/// (out of the workforce, does the shopping) until the youngest is 13 ...
+pub const HOMEMAKER_SHARE: f32 = 0.35;
+/// ... and couples without young children where one partner does.
+pub const STAY_AT_HOME_SHARE: f32 = 0.15;
+/// Grown-up children living with their parents study (not in the
+/// workforce) until this age.
+pub const STUDENT_UNTIL_YEARS: u32 = 22;
 /// Old saves: share of 1-2 member households without a job that become
 /// seniors.
 pub const LEGACY_SENIOR_SHARE: f32 = 0.25;
@@ -481,7 +487,7 @@ pub const ARRIVAL_HAPPINESS_WEIGHT: f32 = 1.5;
 // round 2's flat per-resident tax was (~$14 of taxable value per resident).
 
 /// Daily wage by job tier `[basic, skilled, professional]`.
-pub const WAGE_BY_TIER: [u32; 3] = [22, 29, 40];
+pub const WAGE_BY_TIER: [u32; 3] = [26, 31, 37];
 /// Daily wage of a teen's part-time job.
 pub const PART_TIME_WAGE: u32 = 9;
 /// Daily pension of a retiree (not taxed).
@@ -512,6 +518,9 @@ pub const CHEAPER_HOME_FACTOR: f32 = 0.85;
 /// or below a day's costs with no income) leaves; on the first it looks for
 /// a cheaper home.
 pub const BROKE_LEAVE_DAYS: u8 = 2;
+/// Newcomers leave one place free in homes of at least this many places,
+/// for births and moves within the city.
+pub const RESERVE_FROM_CAPACITY: u32 = 8;
 /// Homes compared when looking for a home.
 pub const HOME_SEARCH_SAMPLES: usize = 12;
 /// A grown-up child moving out takes this share of the household's money.
@@ -521,7 +530,7 @@ pub const MOVE_OUT_MONEY_SHARE: f32 = 0.25;
 
 /// Job search: a vacancy's score is its wage times `1 - min(distance /
 /// this, 0.9)` (nearby and better paid wins).
-pub const JOB_DIST_SCALE_M: f32 = 1500.0;
+pub const JOB_DIST_SCALE_M: f32 = 1000.0;
 /// Shift starts (hours) per workplace: industry, offices (commercial level
 /// 3) and shops (early shift; the late shift starts
 /// [`LATE_SHIFT_OFFSET_H`] later).
@@ -594,13 +603,13 @@ pub const LEISURE_DURATION_SPREAD_H: f32 = 1.5;
 /// Venues compared when choosing one; a venue's score is its restoration
 /// rate over `1 + distance / this`.
 pub const LEISURE_SAMPLES: usize = 6;
-pub const LEISURE_DIST_SCALE_M: f32 = 800.0;
+pub const LEISURE_DIST_SCALE_M: f32 = 400.0;
 /// Share of trips by car that are drawn on the road, per purpose (the rest
 /// happen off screen with the estimated drive time). Keeps the number of
 /// cars proportional to, but much smaller than, the number of trips
 /// ([`COMMUTE_DRIVE_SHARE`] for commutes).
-pub const SHOP_DRIVE_SHARE: f32 = 0.15;
-pub const LEISURE_DRIVE_SHARE: f32 = 0.1;
+pub const SHOP_DRIVE_SHARE: f32 = 0.11;
+pub const LEISURE_DRIVE_SHARE: f32 = 0.05;
 /// Off-screen trips: straight-line distance times this, at this speed
 /// (m/s), plus a fixed time (s).
 pub const OFFSCREEN_ROUTE_FACTOR: f32 = 1.3;
@@ -625,12 +634,14 @@ pub const CARSHARE_RADIUS_M: f32 = 600.0;
 /// Shelf space per shop job, units.
 pub const SHOP_STOCK_PER_JOB: f32 = 30.0;
 /// A shop orders a delivery when its stock falls below this share ...
-pub const RESTOCK_BELOW: f32 = 0.6;
+pub const RESTOCK_BELOW: f32 = 0.5;
 /// ... and a truck brings this many units.
-pub const TRUCK_LOAD: f32 = 35.0;
+pub const TRUCK_LOAD: f32 = 50.0;
 /// Deliveries come from outside the city (through the highway) this often,
 /// otherwise from the nearest of a few factories with workers.
-pub const GOODS_IMPORT_SHARE: f32 = 0.15;
+pub const GOODS_IMPORT_SHARE: f32 = 0.1;
+/// A delivery comes from the nearest of this many random factories.
+pub const DELIVERY_SAMPLES: usize = 8;
 /// Delivery trucks sent per errand round at most.
 pub const DELIVERIES_PER_ROUND: usize = 8;
 /// Industry ships goods out of the city: trucks per filled industrial job
@@ -642,8 +653,11 @@ pub const EXPORT_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY: f32 = 0.03;
 /// Births: a household with two adults, one of them aged
 /// [`BIRTH_MIN_YEARS`]..=[`BIRTH_MAX_YEARS`], fewer than [`MAX_CHILDREN`]
 /// children, room at home and money has a child with this chance per day.
-pub const BIRTH_CHANCE_PER_DAY: f32 = 0.03;
+pub const BIRTH_CHANCE_PER_DAY: f32 = 0.15;
 pub const BIRTH_MIN_YEARS: u32 = 20;
+/// A couple wanting a child in a full home moves to one with room whose
+/// rent is at most this factor of its current one.
+pub const ROOMIER_HOME_RENT_FACTOR: f32 = 1.3;
 pub const BIRTH_MAX_YEARS: u32 = 42;
 pub const MAX_CHILDREN: u32 = 4;
 /// Grown-up children from this age move out with this chance per day when
@@ -662,8 +676,8 @@ pub const COUPLE_SAMPLES: usize = 12;
 /// `DEATH_RATE_AT_START * DEATH_RATE_GROWTH^(age - DEATH_FROM_YEARS)`; nobody
 /// lives past [`MAX_AGE_YEARS`].
 pub const DEATH_FROM_YEARS: u32 = 70;
-pub const DEATH_RATE_AT_START: f32 = 0.025;
-pub const DEATH_RATE_GROWTH: f32 = 1.1;
+pub const DEATH_RATE_AT_START: f32 = 0.015;
+pub const DEATH_RATE_GROWTH: f32 = 1.11;
 pub const MAX_AGE_YEARS: u32 = 104;
 
 // ---------------------------------------------------------- happiness ----
