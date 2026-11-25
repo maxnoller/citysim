@@ -32,6 +32,7 @@ pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
 #[derive(Resource, Default)]
 pub struct BuildingModels {
     meshes: HashMap<ModelKey, (Handle<Mesh>, Handle<Mesh>)>,
+    emitters: HashMap<ModelKey, Vec<Vec3>>,
     sites: HashMap<(ModelKey, u8), Handle<Mesh>>,
 }
 
@@ -54,15 +55,23 @@ impl BuildingModels {
     }
 
     pub fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
+        let emitters = &mut self.emitters;
         self.meshes
             .entry(key)
             .or_insert_with(|| {
+                let mut detail = building_gen::generate(key, false);
+                emitters.insert(key, std::mem::take(&mut detail.emitters));
                 (
-                    meshes.add(building_gen::generate(key, false).build()),
+                    meshes.add(detail.build()),
                     meshes.add(building_gen::generate(key, true).build()),
                 )
             })
             .clone()
+    }
+
+    /// Chimney tops that smoke, in model space (after `get`).
+    pub fn emitters(&self, key: ModelKey) -> &[Vec3] {
+        self.emitters.get(&key).map_or(&[], Vec::as_slice)
     }
 }
 

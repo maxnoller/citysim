@@ -53,6 +53,8 @@ pub struct MeshBuilder {
     pub ground_ao: f32,
     /// Building the distant level of detail: generators skip small things.
     pub lod: bool,
+    /// Smoke emitters (chimney tops) in model space, for `smoke`.
+    pub emitters: Vec<Vec3>,
 }
 
 impl MeshBuilder {

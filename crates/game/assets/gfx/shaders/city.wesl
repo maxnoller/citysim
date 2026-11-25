@@ -95,7 +95,7 @@ fn ground_color(base: vec3<f32>, wp: vec3<f32>) -> vec3<f32> {
     }
     // Wildflowers: tiny specks, only near the camera.
     let dist = distance(view.world_position, wp);
-    if dist < 220.0 && farm < 0.5 {
+    if dist < 150.0 && farm < 0.5 {
         let cell = floor(p / 1.1);
         let h = hash21(cell);
         let meadow = smoothstep(0.45, 0.7, vnoise(p / 31.0 + vec2<f32>(5.0, 9.0)));
@@ -112,7 +112,7 @@ fn ground_color(base: vec3<f32>, wp: vec3<f32>) -> vec3<f32> {
                 } else if k < 0.7 {
                     fl = vec3<f32>(0.85, 0.25, 0.3);
                 }
-                c = mix(c, fl, 1.0 - smoothstep(160.0, 220.0, dist));
+                c = mix(c, fl, 1.0 - smoothstep(80.0, 150.0, dist));
             }
         }
     }

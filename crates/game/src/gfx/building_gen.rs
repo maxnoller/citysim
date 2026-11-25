@@ -808,6 +808,36 @@ fn terrace(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
             palette::PATH,
         );
     }
+    // Back gardens per unit: patio, sometimes a shed, fences between.
+    let back = lot.z1 - front_yard - depth;
+    if back - lot.z0 > 3.0 {
+        for u in 0..units {
+            let x0 = lot.x0 + 0.4 + uw * u as f32;
+            let x1 = x0 + uw;
+            lot_props::patch(
+                m,
+                x0 + 0.3,
+                back - 1.8,
+                x1 - 0.3,
+                back - 0.05,
+                0.05,
+                mix(palette::PAVING, palette::PATH, 0.5),
+            );
+            if back - lot.z0 > 6.0 && rng.chance(0.4) {
+                lot_props::shed(m, rng, Vec2::new((x0 + x1) * 0.5, lot.z0 + 1.4), 1.0);
+            } else if rng.chance(0.4) {
+                lot_props::washing_line(
+                    m,
+                    rng,
+                    Vec2::new(x0 + 0.5, (lot.z0 + back) * 0.5),
+                    Vec2::new(x1 - 0.5, (lot.z0 + back) * 0.5 + 0.4),
+                );
+            }
+            if u > 0 {
+                fence(m, Vec2::new(x0, back), Vec2::new(x0, lot.z0 + 0.3));
+            }
+        }
+    }
     let e = 0.3;
     hedge(
         m,
@@ -828,12 +858,55 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     let base_col = mix(shade(wall, 0.82), palette::BRICK, rng.range(0.0, 0.5));
     let big = lot.w() > 12.0;
     let side = if big { 1.0 } else { 0.4 };
+    // Deep lots: a block of normal depth with residents' parking behind.
+    let deep = lot.d() > 12.0;
     let body = Rect {
         x0: lot.x0 + side,
         x1: lot.x1 - side,
-        z0: lot.z0 + side,
+        z0: if deep {
+            lot.z1 - 1.6 - rng.range(9.5, 11.0)
+        } else {
+            lot.z0 + side
+        },
         z1: lot.z1 - 1.6,
     };
+    if deep {
+        let park = Rect {
+            x0: lot.x0 + 0.4,
+            x1: lot.x1 - 0.4,
+            z0: lot.z0 + 0.4,
+            z1: body.z0 - 0.6,
+        };
+        lot_props::patch(
+            m,
+            park.x0,
+            park.z0,
+            park.x1,
+            park.z1,
+            0.04,
+            mix(palette::ASPHALT, palette::PAVING, 0.3),
+        );
+        let white = lin(palette::MARKING);
+        let bays = ((park.w() - 0.4) / 2.6).floor() as usize;
+        for k in 0..=bays {
+            let x = park.x0 + 0.2 + k as f32 * 2.6;
+            m.quad_up(
+                [
+                    Vec3::new(x - 0.05, 0.05, park.z0 + 0.2),
+                    Vec3::new(x + 0.05, 0.05, park.z0 + 0.2),
+                    Vec3::new(x + 0.05, 0.05, park.z0 + 4.8),
+                    Vec3::new(x - 0.05, 0.05, park.z0 + 4.8),
+                ],
+                white,
+            );
+        }
+        for k in 0..bays {
+            if rng.chance(0.6) {
+                let x = park.x0 + 0.2 + (k as f32 + 0.5) * 2.6;
+                lot_props::parked_car(m, rng, Vec3::new(x, 0.04, park.z0 + 2.5), std::f32::consts::FRAC_PI_2);
+            }
+        }
+    }
     let sh = 3.0;
     let ground = 3.4;
     let attic = storeys >= 5 && rng.chance(0.6);
@@ -882,7 +955,10 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
                         shade(wall, 0.85),
                         wall,
                     );
-                    f.slab(m, a - 0.95, a + 0.95, base - 0.75, base - 0.15, 1.0, accent, accent);
+                    // Glass parapet with a rail in the accent colour.
+                    let glass = mix(palette::GLASS, Color::WHITE, 0.45);
+                    f.slab(m, a - 0.95, a + 0.95, base - 0.75, base - 0.25, 1.0, glass, glass);
+                    f.slab(m, a - 0.97, a + 0.97, base - 0.25, base - 0.17, 1.02, accent, accent);
                 }
             }
             // Floor band.
@@ -1244,8 +1320,16 @@ fn supermarket(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
 
 fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
     lot_ground(m, lot, mix(palette::YARD_CONCRETE, palette::EARTH, rng.range(0.0, 0.5)));
-    let wall = mix(palette::INDUSTRY_WALLS, palette::SHOP_WALLS[1], rng.range(0.0, 0.4));
-    let roof = palette::INDUSTRY_ROOF;
+    let cladding = [
+        palette::INDUSTRY_WALLS,
+        Color::srgb_u32(0x9DB0BC),
+        Color::srgb_u32(0xA9B9A4),
+        Color::srgb_u32(0xD8CBA6),
+        Color::srgb_u32(0xB8C0C6),
+        Color::srgb_u32(0xC2A58A),
+    ];
+    let wall = mix(rng.pick(&cladding), palette::SHOP_WALLS[1], rng.range(0.0, 0.25));
+    let roof = mix(palette::INDUSTRY_ROOF, wall, rng.range(0.0, 0.25));
     let big = lot.w() > 12.0;
     let margin = 0.6;
     let body = Rect {
@@ -1266,9 +1350,23 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
         wall,
     );
     let faces = Face::of(body, 0.0);
-    // Accent stripe right round the building.
+    let stripe = rng.pick(&[
+        palette::INDUSTRY_STRIPE,
+        Color::srgb_u32(0x2F6FB5),
+        Color::srgb_u32(0x3FA66B),
+        Color::srgb_u32(0xC8322B),
+    ]);
+    // Accent stripe right round the building, cladding ribs below it.
     for f in &faces {
-        f.rect(m, 0.0, f.width, h - 0.9, h - 0.55, 0.02, palette::INDUSTRY_STRIPE);
+        f.rect(m, 0.0, f.width, h - 0.9, h - 0.55, 0.02, stripe);
+        m.detail_only(|m| {
+            let rib = shade(wall, 0.88);
+            let mut a = 0.4;
+            while a < f.width - 0.2 {
+                f.rect(m, a - 0.05, a + 0.05, 0.3, h - 0.95, 0.015, rib);
+                a += 0.9;
+            }
+        });
         let per = ((f.width / 3.0).floor() as usize).max(1);
         for a in spread(f.width, per) {
             f.lit_rect(
@@ -1290,18 +1388,15 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
         if i == doors {
             // Small office door.
             f.rect(m, a - 0.45, a + 0.45, 0.0, 2.2, 0.04, palette::DOOR);
+            // Company sign over the office door.
+            f.slab(m, a - 1.3, a + 1.3, 2.6, 3.3, 0.12, stripe, shade(stripe, 1.1));
+            m.glow(Glow::Sign, 0.0, |m| {
+                f.rect(m, a - 1.0, a + 1.0, 2.85, 3.05, 0.13, palette::WINDOW_FRAME)
+            });
             continue;
         }
         let dw = 1.6;
-        f.rect(
-            m,
-            a - dw - 0.12,
-            a + dw + 0.12,
-            0.0,
-            3.5,
-            0.03,
-            palette::INDUSTRY_STRIPE,
-        );
+        f.rect(m, a - dw - 0.12, a + dw + 0.12, 0.0, 3.5, 0.03, stripe);
         f.rect(m, a - dw, a + dw, 0.0, 3.35, 0.05, shade(palette::INDUSTRY_ROOF, 1.1));
         for k in 0..7 {
             let y = 0.4 + k as f32 * 0.42;
@@ -1348,6 +1443,9 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
             rng.range(2.2, 3.6)
         };
         m.cylinder(c, 0.5, ch, 8, palette::BRICK, shade(palette::BRICK, 0.45));
+        if level >= 2 {
+            m.emitters.push(c + Vec3::Y * ch);
+        }
         m.cylinder(
             c + Vec3::Y * (ch - 0.8),
             0.58,

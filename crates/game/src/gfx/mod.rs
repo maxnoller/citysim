@@ -20,6 +20,7 @@ mod road_ghost;
 mod roads;
 mod scene;
 mod signals;
+mod smoke;
 mod stats;
 mod trees;
 mod vehicle_gen;
@@ -52,9 +53,12 @@ impl Plugin for GfxPlugin {
             overlay::OverlayPlugin,
             trees::TreesPlugin,
             stats::StatsPlugin,
+        ));
+        app.add_plugins((
             signals::SignalsPlugin,
             lots::LotsPlugin,
             guides::GuidesPlugin,
+            smoke::SmokePlugin,
         ));
     }
 }
