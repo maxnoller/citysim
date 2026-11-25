@@ -400,3 +400,119 @@ fn car_bodies_never_overlap_on_curves_and_odd_angles() {
     assert!(max_cars > 40, "{max_cars}");
     let _ = worst;
 }
+
+/// Zoning survives road edits: splitting a road with a crossing keeps the
+/// zone of every cell the new road does not cover; removing a road keeps
+/// its zoning as uncovered cells that come back when it is rebuilt.
+#[test]
+fn zoning_survives_splits_and_rebuilding() {
+    let mut w = W::new(5);
+    w.economy.money = 10_000_000;
+    let a = [200.0, 1100.0];
+    let b = [440.0, 1060.0];
+    // A road at an odd angle (its own lattice), zoned on both sides.
+    w.apply(Command::BuildCurve {
+        curve: Curve::straight(a, b),
+        kind: RoadKind::Street,
+    })
+    .unwrap();
+    let quad = [[180.0, 1030.0], [460.0, 1030.0], [460.0, 1130.0], [180.0, 1130.0]];
+    let out = w
+        .apply(Command::ZoneArea {
+            quad,
+            zone: Some(Zone::Residential),
+        })
+        .unwrap();
+    let zoned = out.zone_cells.len();
+    assert!(zoned > 40, "{zoned}");
+    let count = |w: &W| {
+        w.zoning
+            .cells()
+            .filter(|(_, c)| c.zone == Some(Zone::Residential) && c.usable())
+            .count()
+    };
+    // A crossing street splits it: only cells under the new road (and
+    // its reserve) lose their zone.
+    w.apply(Command::BuildCurve {
+        curve: Curve::straight([320.0, 980.0], [330.0, 1180.0]),
+        kind: RoadKind::Street,
+    })
+    .unwrap();
+    let after_split = count(&w);
+    assert!(after_split + 12 >= zoned, "{zoned} -> {after_split}");
+    assert!(after_split < zoned);
+    w.check_invariants().unwrap();
+    // Remove the whole first road and build it again: the zoning returns.
+    let segs: Vec<_> = w
+        .roads
+        .segments
+        .iter()
+        .filter(|(_, s)| (s.curve.start()[1] - s.curve.end()[1]).abs() > 1.0 && s.length < 200.0)
+        .map(|(id, s)| (id, s.length))
+        .collect();
+    assert!(!segs.is_empty());
+    for (s, l) in segs {
+        let _ = w.apply(Command::RemoveRoad {
+            segment: s,
+            from_m: 0.0,
+            to_m: l,
+        });
+    }
+    w.check_invariants().unwrap();
+    w.apply(Command::BuildCurve {
+        curve: Curve::straight(a, b),
+        kind: RoadKind::Street,
+    })
+    .unwrap();
+    let rebuilt = count(&w);
+    assert!(rebuilt + 12 >= after_split, "{after_split} -> {rebuilt}");
+    w.check_invariants().unwrap();
+}
+
+/// The tool queries: the cell under a point, a fill area bounded by roads,
+/// a road side's frontage between junctions.
+#[test]
+fn zoning_queries_for_tools() {
+    let mut w = W::new(6);
+    w.economy.money = 10_000_000;
+    let c = |x: i32, y: i32| citysim_sim::Cell::new(x, y).center();
+    // A closed 10 x 5 block on the world lattice.
+    for (p, q) in [
+        ((40, 40), (50, 40)),
+        ((40, 45), (50, 45)),
+        ((40, 40), (40, 45)),
+        ((50, 40), (50, 45)),
+    ] {
+        w.apply(Command::BuildCurve {
+            curve: Curve::straight(c(p.0, p.1), c(q.0, q.1)),
+            kind: RoadKind::Street,
+        })
+        .unwrap();
+    }
+    let inside = c(45, 42);
+    let cell = citysim_sim::zoning::cell_at(&w, inside).expect("a cell inside the block");
+    assert_eq!(cell, citysim_sim::CellRef::world(citysim_sim::Cell::new(45, 42)));
+    let fill = citysim_sim::zoning::fill_area(&w, inside, 1000);
+    // The block's inside is 9 x 4 cells, bounded by the roads.
+    assert_eq!(fill.len(), 36, "{}", fill.len());
+    // The north road's south side, one deep: its 9 front cells.
+    let north = w
+        .roads
+        .segments
+        .iter()
+        .find(|(_, s)| s.curve.start()[1] == c(0, 40)[1] && s.curve.end()[1] == c(0, 40)[1])
+        .map(|(id, _)| id)
+        .unwrap();
+    let seg = &w.roads.segments[north];
+    // South of a road running +x is its right side.
+    let side = if seg.curve.end()[0] > seg.curve.start()[0] {
+        citysim_sim::Side::Right
+    } else {
+        citysim_sim::Side::Left
+    };
+    let front = citysim_sim::zoning::frontage(&w, north, side, 1);
+    assert_eq!(front.len(), 9, "{front:?}");
+    assert!(front.iter().all(|c| c.j == 41));
+    let corners = w.zoning.cell_corners(cell).unwrap();
+    assert_eq!(corners[0], [45.0 * 8.0, 42.0 * 8.0]);
+}

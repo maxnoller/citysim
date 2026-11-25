@@ -811,6 +811,8 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
         }
     }
     let _ = emptied;
+    // Zones or usability may have changed: growth's lists follow.
+    zm.zones_version += 1;
     doomed.sort();
     doomed.dedup();
     doomed
