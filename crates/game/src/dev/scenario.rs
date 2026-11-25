@@ -125,13 +125,11 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
 /// highway stub) to an avenue (paid for; dev aid for looking at avenues).
 fn upgrade_main_road(w: &mut World) {
     let mut x = 12;
-    while w
-        .grid
-        .get(Cell::new(x + 1, 128))
-        .is_some_and(|c| c.occupant == citysim_sim::Occupant::Road)
-    {
+    let view = w.grid_view();
+    while view.is_road(Cell::new(x + 1, 128)) {
         x += 1;
     }
+    drop(view);
     w.economy.money += 1_000_000;
     let r = w.apply(citysim_sim::Command::BuildRoad {
         from: Cell::new(12, 128),

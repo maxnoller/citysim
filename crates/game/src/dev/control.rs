@@ -171,9 +171,9 @@ fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: Overl
     let e = &w.economy;
     // Zoned, still empty cells per zone (what a player sees as free land).
     let mut free = [0u32; 3];
-    for cd in &w.grid.cells {
-        if cd.occupant == citysim_sim::Occupant::Empty
-            && let Some(z) = cd.zone
+    for (_, zc) in w.zoning.cells() {
+        if zc.free()
+            && let Some(z) = zc.zone
         {
             free[z as usize] += 1;
         }
