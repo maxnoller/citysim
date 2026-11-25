@@ -180,7 +180,7 @@ fn record(
         let path = rec.dir.join(format!("frame_{:05}.png", rec.saved));
         rec.saved += 1;
         commands.spawn(Screenshot::image(image)).observe(save_to_disk(path));
-        if rec.saved % 150 == 0 {
+        if rec.saved.is_multiple_of(150) {
             info!("record: {} frames ({t:.1} s of {end:.1} s)", rec.saved);
         }
     }
