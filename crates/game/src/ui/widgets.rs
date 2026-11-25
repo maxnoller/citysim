@@ -11,8 +11,8 @@ use citysim_sim::Zone;
 use super::UiState;
 use super::theme::{self as t, UiFonts};
 use crate::shared::{
-    ActiveTool, BulldozeMode, GameSet, GraphicsQuality, OverlayMode, RoadChoice, RoadMode, SimClock, ToolModes,
-    ZoneMode,
+    ActiveTool, BulldozeMode, DisplaySettings, GameSet, GraphicsQuality, OverlayMode, RoadChoice, RoadMode, SimClock,
+    ToolModes, ZoneMode,
 };
 
 /// Everything a click on the interface can ask for. Handled in `actions.rs`.
@@ -46,6 +46,12 @@ pub enum UiAction {
     RoadKind(RoadChoice),
     /// Step the block tool's block size by this many options.
     BlockSize(i32),
+    OpenSettings,
+    CloseSettings,
+    /// Index into `settings::UI_SCALES`.
+    UiScale(usize),
+    EdgeScroll(bool),
+    LotMarkers(bool),
 }
 
 /// Visual family of a button.
@@ -285,6 +291,7 @@ pub struct ActiveCtx<'a> {
     pub state: &'a UiState,
     pub modes: &'a ToolModes,
     pub kind: &'a RoadChoice,
+    pub display: &'a DisplaySettings,
 }
 
 pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
@@ -301,6 +308,9 @@ pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
         UiAction::ZoneMode(m) => matches!(cx.tool, ActiveTool::Zone(_)) && cx.modes.zone == m,
         UiAction::BulldozeMode(m) => *cx.tool == ActiveTool::Bulldoze && cx.modes.bulldoze == m,
         UiAction::RoadKind(k) => *cx.kind == k,
+        UiAction::UiScale(i) => cx.state.ui_scale == i,
+        UiAction::EdgeScroll(on) => cx.display.edge_scroll == on,
+        UiAction::LotMarkers(on) => cx.display.lot_markers == on,
         _ => false,
     }
 }
@@ -342,6 +352,7 @@ fn button_visuals(
     state: Res<UiState>,
     modes: Res<ToolModes>,
     kind: Res<RoadChoice>,
+    display: Res<DisplaySettings>,
     mut buttons: Query<(
         Entity,
         &UiButton,
@@ -362,6 +373,7 @@ fn button_visuals(
         state: &state,
         modes: &modes,
         kind: &kind,
+        display: &display,
     };
     let k = approach(time.delta_secs(), 0.06);
     for (e, b, hovered, mut anim, mut bg, mut border, mut tf) in &mut buttons {

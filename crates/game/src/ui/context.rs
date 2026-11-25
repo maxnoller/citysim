@@ -19,7 +19,7 @@ use super::tools::{Action, Pending, ToolState};
 use super::widgets::{approach, label, layout, number, zone_icon, zone_name};
 use crate::shared::{
     ActiveTool, BulldozeMode, CONGESTION_BUSY, CONGESTION_JAM, GameSet, HoveredCell, PointerOverUi, RoadChoice,
-    RoadMode, SimWorld, SnapTarget, ToolModes, ToolPreview, ZoneMode,
+    RoadMode, SimWorld, SnapTarget, ToolModes, ToolPreview, WorldHighlight, WorldTarget, ZoneMode,
 };
 
 pub struct ContextPlugin;
@@ -27,12 +27,18 @@ pub struct ContextPlugin;
 impl Plugin for ContextPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_card)
-            .add_systems(Update, update_card.in_set(GameSet::Render));
+            .add_systems(Update, (update_card, update_pinned).chain().in_set(GameSet::Render));
     }
 }
 
-#[derive(Component)]
-struct CardRoot;
+/// Root of a card: 0 follows the cursor, 1 is pinned to the inspected
+/// object (`WorldHighlight::selected`).
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct CardRoot(u8);
+
+/// Which card a part belongs to.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct CardOwner(u8);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum CardPart {
@@ -126,10 +132,15 @@ pub fn error_text(e: &CommandError) -> String {
 
 fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
     let fonts = fonts.into_inner();
+    spawn_card_with(&mut commands, fonts, 0);
+    spawn_card_with(&mut commands, fonts, 1);
+}
+
+fn spawn_card_with(commands: &mut Commands, fonts: &UiFonts, which: u8) {
     commands
         .spawn((
             Name::new("Context card"),
-            CardRoot,
+            CardRoot(which),
             layout(Node {
                 position_type: PositionType::Absolute,
                 min_width: px(190),
@@ -156,6 +167,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
         .with_children(|card| {
             card.spawn((
                 CardPart::IconBox,
+                CardOwner(which),
                 layout(Node {
                     width: px(28),
                     height: px(28),
@@ -171,6 +183,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
             .with_child((
                 super::widgets::icon(fonts, icon::ROAD, t::ICON_SM + 1.0, t::ACCENT),
                 CardPart::Icon,
+                CardOwner(which),
             ));
             card.spawn(layout(Node {
                 flex_direction: FlexDirection::Column,
@@ -182,6 +195,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                 col.spawn((
                     label(fonts, "", t::FONT_BODY, t::W_SEMIBOLD, t::TEXT),
                     CardPart::Title,
+                    CardOwner(which),
                     Node {
                         margin: UiRect::bottom(px(1)),
                         ..default()
@@ -190,6 +204,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                 for i in 0..MAX_ROWS {
                     col.spawn((
                         CardPart::Row(i),
+                        CardOwner(which),
                         layout(Node {
                             justify_content: JustifyContent::SpaceBetween,
                             align_items: AlignItems::Baseline,
@@ -202,15 +217,18 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                         r.spawn((
                             label(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED),
                             CardPart::RowLabel(i),
+                            CardOwner(which),
                         ));
                         r.spawn((
                             number(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT),
                             CardPart::RowValue(i),
+                            CardOwner(which),
                         ));
                     });
                     if i == 0 {
                         col.spawn((
                             CardPart::Bar,
+                            CardOwner(which),
                             layout(Node {
                                 height: px(4),
                                 width: percent(100),
@@ -223,6 +241,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                         ))
                         .with_child((
                             CardPart::BarFill,
+                            CardOwner(which),
                             layout(Node {
                                 height: percent(100),
                                 width: percent(0),
@@ -236,6 +255,7 @@ fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
                 col.spawn((
                     label(fonts, "", t::FONT_CAPTION + 0.5, t::W_REGULAR, t::TEXT_MUTED),
                     CardPart::Hint,
+                    CardOwner(which),
                     Node {
                         margin: UiRect::top(px(t::S1)),
                         ..default()
@@ -1104,8 +1124,7 @@ pub const JAM_CRAWL_MPS: f32 = 12.0 / 3.6;
 fn update_card(
     time: Res<Time<Real>>,
     tool: Res<ActiveTool>,
-    modes: Res<ToolModes>,
-    kind: Res<RoadChoice>,
+    (modes, kind): (Res<ToolModes>, Res<RoadChoice>),
     state: Res<ToolState>,
     preview: Res<ToolPreview>,
     hovered: Res<HoveredCell>,
@@ -1121,14 +1140,17 @@ fn update_card(
             &ComputedNode,
             &mut UiTransform,
             &mut BorderColor,
+            &CardRoot,
         ),
-        (With<CardRoot>, Without<CardPart>),
+        Without<CardPart>,
     >,
     mut parts: CardParts,
+    highlight: Res<WorldHighlight>,
     mut slide: Local<f32>,
     mut cache: Local<CardCache>,
 ) {
-    let Ok((mut node, mut vis, computed, mut tf, mut border)) = root.single_mut() else {
+    let Some((mut node, mut vis, computed, mut tf, mut border, _)) = root.iter_mut().find(|r| *r.5 == CardRoot(0))
+    else {
         return;
     };
     let cursor = window
@@ -1137,7 +1159,12 @@ fn update_card(
         .and_then(|w| w.cursor_position().map(|c| (c, Vec2::new(w.width(), w.height()))));
     // Rebuild the card only when what it describes changed, and a few
     // times a second for live numbers; texts are touched only on change.
-    let hidden = ui.menu_open || over_ui.0 && !state.busy();
+    // The pinned card already shows the inspected thing under the cursor.
+    let on_pinned = *tool == ActiveTool::Inspect
+        && highlight.selected.is_some()
+        && highlight.hovered.is_some()
+        && highlight.selected == highlight.hovered;
+    let hidden = ui.menu_open || over_ui.0 && !state.busy() || on_pinned;
     let key = (*tool, *modes, *kind, state.action, hovered.0, hidden, sim.generation);
     cache.age += time.delta_secs();
     if cache.key != Some(key) || preview.is_changed() || state.is_changed() || cache.age >= CARD_REFRESH_S {
@@ -1156,7 +1183,7 @@ fn update_card(
         return;
     };
     if cache.shown.as_ref() != Some(&card) {
-        apply_card(&card, &mut parts);
+        apply_card(&card, &mut parts, 0);
         cache.shown = Some(card.clone());
     }
     let invalid = card.title_color == t::NEGATIVE;
@@ -1198,6 +1225,96 @@ fn update_card(
 
 type CardKey = (ActiveTool, ToolModes, RoadChoice, Action, Option<Cell>, bool, u64);
 
+/// Card for a pinned target and the world point it hangs from (sim m).
+fn pinned_card(world: &World, target: &WorldTarget) -> Option<(Card, [f32; 2])> {
+    match target {
+        WorldTarget::Building(id) => {
+            let b = world.buildings.get(*id)?;
+            let (lo, hi) = (b.footprint.min.center(), b.footprint.max.center());
+            Some((
+                building_card(world, *id, b)?,
+                [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5],
+            ))
+        }
+        WorldTarget::Junction { node, pos } => Some((junction_card(world, *node)?, *pos)),
+        WorldTarget::Road(stretch) => {
+            let mid = *stretch.cells.get(stretch.cells.len() / 2)?;
+            Some((road_card(world, mid)?, mid.center()))
+        }
+    }
+}
+
+/// The inspected (clicked) building, road or junction keeps a card next to
+/// it, following it on screen, until Escape or a click elsewhere.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_pinned(
+    time: Res<Time<Real>>,
+    highlight: Res<WorldHighlight>,
+    tool: Res<ActiveTool>,
+    ui: Res<UiState>,
+    sim: Res<SimWorld>,
+    ui_scale: Res<UiScale>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<crate::shared::WorldCamera>>,
+    mut root: Query<(&mut Node, &mut Visibility, &ComputedNode, &CardRoot), Without<CardPart>>,
+    mut parts: CardParts,
+    mut cache: Local<(f32, Option<Card>, Option<WorldTarget>)>,
+) {
+    let Some((mut node, mut vis, computed, _)) = root.iter_mut().find(|r| *r.3 == CardRoot(1)) else {
+        return;
+    };
+    let target = highlight
+        .selected
+        .clone()
+        .filter(|_| !ui.menu_open && *tool == ActiveTool::Inspect);
+    let Some(target) = target else {
+        vis.set_if_neq(Visibility::Hidden);
+        cache.1 = None;
+        return;
+    };
+    cache.0 += time.delta_secs();
+    let Some((mut card, at)) = pinned_card(&sim.world, &target) else {
+        vis.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    card.hint = "Pinned · Esc or click elsewhere to let go".into();
+    if cache.2.as_ref() != Some(&target) || cache.0 >= CARD_REFRESH_S || cache.1.is_none() {
+        cache.0 = 0.0;
+        cache.2 = Some(target);
+        if cache.1.as_ref() != Some(&card) {
+            apply_card(&card, &mut parts, 1);
+            cache.1 = Some(card);
+        }
+    }
+    let (Ok(win), Ok((cam, cam_tf))) = (window.single(), cameras.single()) else {
+        return;
+    };
+    let Ok(screen_pt) = cam.world_to_viewport(cam_tf, crate::shared::sim_to_world(at, 3.0)) else {
+        vis.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    let scale = ui_scale.0.max(0.01);
+    let p = screen_pt / scale;
+    let screen = Vec2::new(win.width(), win.height()) / scale;
+    let size = computed.size * computed.inverse_scale_factor;
+    let mut pos = Vec2::new(p.x + 18.0, p.y - size.y - 18.0);
+    if pos.x + size.x > screen.x - t::EDGE {
+        pos.x = p.x - 18.0 - size.x;
+    }
+    let top = t::BELOW_TOP_BAR;
+    let bottom = screen.y - t::EDGE - t::TOOL_BUTTON - 3.0 * t::EDGE;
+    pos.y = pos.y.clamp(top, (bottom - size.y).max(top));
+    pos.x = pos.x.clamp(t::EDGE, (screen.x - t::EDGE - size.x).max(t::EDGE));
+    let (left, topv) = (px(pos.x.round()), px(pos.y.round()));
+    if node.left != left || node.top != topv {
+        node.left = left;
+        node.top = topv;
+    }
+    if size.x > 0.0 {
+        vis.set_if_neq(Visibility::Inherited);
+    }
+}
+
 /// Last card built by `update_card` and what it was built from.
 #[derive(Default)]
 struct CardCache {
@@ -1216,6 +1333,7 @@ type CardParts<'w, 's> = Query<
     's,
     (
         &'static CardPart,
+        &'static CardOwner,
         Option<&'static mut Text>,
         Option<&'static mut TextColor>,
         Option<&'static mut BackgroundColor>,
@@ -1224,8 +1342,11 @@ type CardParts<'w, 's> = Query<
     Without<CardRoot>,
 >;
 
-fn apply_card(card: &Card, parts: &mut CardParts) {
-    for (part, text, color, bg, pnode) in parts.iter_mut() {
+fn apply_card(card: &Card, parts: &mut CardParts, owner: u8) {
+    for (part, of, text, color, bg, pnode) in parts.iter_mut() {
+        if of.0 != owner {
+            continue;
+        }
         match *part {
             CardPart::IconBox => {
                 if let Some(mut bg) = bg {

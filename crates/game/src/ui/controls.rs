@@ -13,8 +13,8 @@ use super::budget::TAX_STEP;
 use super::tools::ToolState;
 use super::widgets::{UiAction, button_clicks};
 use crate::shared::{
-    ActiveTool, CameraInputBlocked, GameSet, GraphicsQuality, OverlayMode, PointerOverUi, RoadChoice, RoadMode,
-    SimClock, SimCommand, SimWorld, ToolModes,
+    ActiveTool, CameraInputBlocked, DisplaySettings, GameSet, GraphicsQuality, OverlayMode, PointerOverUi, RoadChoice,
+    RoadMode, SimClock, SimCommand, SimWorld, ToolModes,
 };
 use citysim_sim::{Command, balance};
 
@@ -56,7 +56,9 @@ fn control_keys(
     mut out: MessageWriter<UiAction>,
 ) {
     if keys.just_pressed(KeyCode::Escape) && !tools.busy() {
-        if ui.menu_open {
+        if ui.menu_open && ui.settings_open {
+            out.write(UiAction::CloseSettings);
+        } else if ui.menu_open {
             out.write(UiAction::CloseMenu);
         } else if ui.budget_open {
             ui.budget_open = false;
@@ -114,6 +116,7 @@ fn handle_actions(
     mut modes: ResMut<ToolModes>,
     mut kind: ResMut<RoadChoice>,
     mut tools: ResMut<ToolState>,
+    mut display: ResMut<DisplaySettings>,
     sim: Res<SimWorld>,
     mut cmds: MessageWriter<SimCommand>,
     mut exit: MessageWriter<AppExit>,
@@ -173,6 +176,7 @@ fn handle_actions(
             UiAction::CloseMenu => {
                 if ui.menu_open {
                     ui.menu_open = false;
+                    ui.settings_open = false;
                     clock.paused = ui.paused_before_menu;
                 }
             }
@@ -199,6 +203,11 @@ fn handle_actions(
                 }
             }
             UiAction::BlockSize(d) => tools.block_size.step(d),
+            UiAction::OpenSettings => ui.settings_open = true,
+            UiAction::CloseSettings => ui.settings_open = false,
+            UiAction::UiScale(i) => ui.ui_scale = i,
+            UiAction::EdgeScroll(on) => display.edge_scroll = on,
+            UiAction::LotMarkers(on) => display.lot_markers = on,
             // Handled in tools.rs.
             UiAction::Undo => {}
             // Handled in save_load.rs.

@@ -168,6 +168,9 @@ pub mod icon {
     pub const ROUTE: char = '\u{e53e}';
     pub const PAINT_BUCKET: char = '\u{e2e6}';
     pub const UNDO: char = '\u{e2a1}'; // undo-2
+    pub const SETTINGS: char = '\u{e154}';
+    pub const SCALING: char = '\u{e2ec}';
+    pub const MOVE: char = '\u{e121}';
 }
 
 // ---------------------------------------------------------------- fonts
