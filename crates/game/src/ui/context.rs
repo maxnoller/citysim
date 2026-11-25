@@ -1185,7 +1185,9 @@ fn update_card(
         && highlight.selected.is_some()
         && highlight.hovered.is_some()
         && highlight.selected == highlight.hovered;
-    let hidden = ui.menu_open || over_ui.0 && !state.busy() || on_pinned;
+    // Over the interface the buttons' own tooltips speak (a path in
+    // progress keeps its corners; the card comes back over the map).
+    let hidden = ui.menu_open || over_ui.0 || on_pinned;
     let key = (*tool, *modes, *kind, state.action, hovered.0, hidden, sim.generation);
     cache.age += time.delta_secs();
     if cache.key != Some(key) || preview.is_changed() || state.is_changed() || cache.age >= CARD_REFRESH_S {

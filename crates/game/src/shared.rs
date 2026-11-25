@@ -422,7 +422,9 @@ pub struct DisplaySettings {
 impl Default for DisplaySettings {
     fn default() -> Self {
         DisplaySettings {
-            edge_scroll: true,
+            // Off by default: in a window the cursor crosses the border
+            // whenever it leaves the game.
+            edge_scroll: false,
             lot_markers: true,
         }
     }
@@ -501,6 +503,11 @@ pub fn cell_corners(c: Cell, inset: f32, height: f32) -> [Vec3; 4] {
 
 // ---------------------------------------------------------------- plugin
 
+/// True once the 3D scene's shaders are built and it really draws (written
+/// by gfx; ui shows a loading card until then). Starts false.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SceneReady(pub bool);
+
 pub struct SharedPlugin;
 
 impl Plugin for SharedPlugin {
@@ -530,6 +537,8 @@ impl Plugin for SharedPlugin {
         .init_resource::<PathPreview>()
         .init_resource::<WorldHighlight>()
         .init_resource::<DisplaySettings>()
+        // Without gfx there is nothing to wait for.
+        .insert_resource(SceneReady(!cfg!(feature = "gfx")))
         .add_message::<SimCommand>()
         .configure_sets(
             Update,

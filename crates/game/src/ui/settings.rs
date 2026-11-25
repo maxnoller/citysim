@@ -1,6 +1,11 @@
 //! Settings card (from the pause menu): graphics quality, interface scale,
 //! edge scrolling, lot markers for zoned-but-empty land, and a key
 //! reference. Display settings gfx honours live in `shared::DisplaySettings`.
+//!
+//! The choices persist between sessions in `settings.cfg` in the platform
+//! config directory (`$XDG_CONFIG_HOME/citysim`, default `~/.config/citysim`
+//! on Linux, `~/Library/Application Support/CitySim` on macOS,
+//! `%APPDATA%\CitySim` on Windows; `CITYSIM_CONFIG_DIR` overrides it).
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
@@ -11,14 +16,158 @@ use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
     ButtonFg, ButtonKind, UiAction, UiButton, approach, label, layout, panel, spawn_button, spawn_key_badge,
 };
-use crate::shared::{GameSet, GraphicsQuality};
+use crate::shared::{DisplaySettings, GameSet, GraphicsQuality};
 
 pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_settings)
-            .add_systems(Update, show_settings.in_set(GameSet::Render));
+        app.add_systems(Startup, (load_settings, spawn_settings))
+            .add_systems(Update, (show_settings, save_settings).in_set(GameSet::Render));
+    }
+}
+
+// ---------------------------------------------------------------- persistence
+
+/// What is remembered between sessions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Saved {
+    pub quality: GraphicsQuality,
+    pub ui_scale: usize,
+    pub edge_scroll: bool,
+    pub lot_markers: bool,
+}
+
+/// Directory of the settings file.
+pub fn config_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(dir) = std::env::var_os("CITYSIM_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    if cfg!(target_os = "windows") {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("CitySim");
+        }
+    } else if cfg!(target_os = "macos") {
+        if let Some(h) = home() {
+            return h.join("Library/Application Support/CitySim");
+        }
+    } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
+        return PathBuf::from(xdg).join("citysim");
+    } else if let Some(h) = home() {
+        return h.join(".config/citysim");
+    }
+    PathBuf::from(".")
+}
+
+const SETTINGS_FILE: &str = "settings.cfg";
+
+impl Saved {
+    pub fn to_text(self) -> String {
+        let q = match self.quality {
+            GraphicsQuality::Low => "low",
+            GraphicsQuality::Medium => "medium",
+            GraphicsQuality::High => "high",
+        };
+        format!(
+            "# CitySim settings\nquality={q}\ninterface_size={}\nedge_scroll={}\nlot_markers={}\n",
+            self.ui_scale, self.edge_scroll, self.lot_markers
+        )
+    }
+
+    /// Read `key=value` lines over `self`; unknown or broken lines are
+    /// ignored.
+    pub fn read(mut self, text: &str) -> Self {
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let (k, v) = (k.trim(), v.trim());
+            match k {
+                "quality" => {
+                    self.quality = match v {
+                        "low" => GraphicsQuality::Low,
+                        "medium" => GraphicsQuality::Medium,
+                        "high" => GraphicsQuality::High,
+                        _ => self.quality,
+                    }
+                }
+                "interface_size" => {
+                    if let Ok(i) = v.parse::<usize>()
+                        && i < UI_SCALES.len()
+                    {
+                        self.ui_scale = i;
+                    }
+                }
+                "edge_scroll" => self.edge_scroll = v.parse().unwrap_or(self.edge_scroll),
+                "lot_markers" => self.lot_markers = v.parse().unwrap_or(self.lot_markers),
+                _ => {}
+            }
+        }
+        self
+    }
+}
+
+/// Dev captures drive the settings themselves: never write the player's file.
+fn persistence_enabled() -> bool {
+    ["CITYSIM_UI_SHOTS", "CITYSIM_UI_TOUR", "CITYSIM_AUTOSHOT"]
+        .iter()
+        .all(|k| std::env::var_os(k).is_none_or(|v| v.is_empty()))
+}
+
+fn current(quality: GraphicsQuality, state: &UiState, display: &DisplaySettings) -> Saved {
+    Saved {
+        quality,
+        ui_scale: state.ui_scale,
+        edge_scroll: display.edge_scroll,
+        lot_markers: display.lot_markers,
+    }
+}
+
+fn load_settings(
+    mut quality: ResMut<GraphicsQuality>,
+    mut state: ResMut<UiState>,
+    mut display: ResMut<DisplaySettings>,
+) {
+    if !persistence_enabled() {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(config_dir().join(SETTINGS_FILE)) else {
+        return;
+    };
+    let s = current(*quality, &state, &display).read(&text);
+    // A quality forced for development wins over the saved one.
+    if std::env::var_os("CITYSIM_GFX_QUALITY").is_none() {
+        *quality = s.quality;
+    }
+    state.ui_scale = s.ui_scale;
+    display.edge_scroll = s.edge_scroll;
+    display.lot_markers = s.lot_markers;
+    info!("settings loaded from {}", config_dir().display());
+}
+
+/// Write the file whenever a remembered choice changes (not at startup).
+fn save_settings(
+    quality: Res<GraphicsQuality>,
+    state: Res<UiState>,
+    display: Res<DisplaySettings>,
+    mut last: Local<Option<Saved>>,
+) {
+    let now = current(*quality, &state, &display);
+    match *last {
+        None => *last = Some(now),
+        Some(prev) if prev == now => {}
+        Some(_) => {
+            *last = Some(now);
+            if !persistence_enabled() {
+                return;
+            }
+            let dir = config_dir();
+            let res =
+                std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(SETTINGS_FILE), now.to_text()));
+            if let Err(e) = res {
+                warn!("cannot save settings to {}: {e}", dir.display());
+            }
+        }
     }
 }
 
@@ -325,5 +474,31 @@ fn show_settings(
             tf.scale = Vec2::splat(0.96 + 0.04 * *anim);
             tf.translation = Val2::px(0.0, (1.0 - *anim) * 8.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_round_trip_and_ignore_junk() {
+        let s = Saved {
+            quality: GraphicsQuality::Medium,
+            ui_scale: 2,
+            edge_scroll: true,
+            lot_markers: false,
+        };
+        let base = Saved {
+            quality: GraphicsQuality::High,
+            ui_scale: 1,
+            edge_scroll: false,
+            lot_markers: true,
+        };
+        assert_eq!(base.read(&s.to_text()), s);
+        assert_eq!(
+            base.read("quality=ultra\ninterface_size=9\nedge_scroll=maybe\nnonsense"),
+            base
+        );
     }
 }

@@ -8,7 +8,7 @@ use citysim_sim::{Cell, Command, RoadKind, Zone};
 use super::{DemoKind, ShotConfig, ShotView};
 use bevy::window::PrimaryWindow;
 
-use crate::shared::{CameraOverride, CameraPose, GameSet, OverlayMode, SimCommand, cell_center};
+use crate::shared::{CameraOverride, CameraPose, GameSet, OverlayMode, SceneReady, SimCommand, cell_center};
 
 pub struct AutoshotPlugin {
     pub shot: ShotConfig,
@@ -131,10 +131,12 @@ fn run_autoshot(
     mut window: Query<&mut Window, With<PrimaryWindow>>,
     mut out: MessageWriter<SimCommand>,
     mut exit: MessageWriter<AppExit>,
+    ready: Res<SceneReady>,
 ) {
     let first = state.frames == 0;
     state.frames += 1;
-    if !first {
+    // The delay counts from when the scene really draws (shaders built).
+    if !first && ready.0 {
         state.t += time.delta_secs().min(0.25);
     }
     if first && state.demo.is_none() {

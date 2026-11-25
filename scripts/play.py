@@ -449,6 +449,12 @@ def launch(release, quality, demo, extra_env):
         except (TimeoutError, FileNotFoundError):
             if p.poll() is not None:
                 raise RuntimeError("game exited during start")
+    for _ in range(600):
+        try:
+            cmd("ready", timeout=2.0)
+            break
+        except RuntimeError:
+            time.sleep(0.2)
     log("control channel up:", cmd("stats"))
 
 

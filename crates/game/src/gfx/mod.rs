@@ -8,6 +8,7 @@ mod city_material;
 mod cursor;
 mod daynight;
 mod guides;
+mod loading;
 mod lot_props;
 mod lots;
 mod mesh_util;
@@ -59,6 +60,7 @@ impl Plugin for GfxPlugin {
             lots::LotsPlugin,
             guides::GuidesPlugin,
             smoke::SmokePlugin,
+            loading::LoadingPlugin,
         ));
     }
 }
