@@ -177,7 +177,16 @@ fn fragment(
             glow = vec3<f32>(1.0, 0.62, 0.3) * (2.0 * city.night * far);
         }
         } else if kind == 7u {
-        glow = vec3<f32>(1.0, 0.8, 0.55) * (2.0 * city.night);
+        // Shop fronts: a warm interior glow, kept low so a whole glazed
+        // ground floor does not bloom into a white panel.
+        // Panes along the facade (whichever way it faces) with mullions
+        // between them, each lit a little differently.
+        let along = (wp.x + wp.z) * select(1.0, -1.0, abs(in.world_normal.x - in.world_normal.z) < 0.2) + wp.x - wp.z;
+        let pane = along / 2.4;
+        let mullion = smoothstep(0.03, 0.09, fract(pane)) * (1.0 - smoothstep(0.91, 0.97, fract(pane)));
+        let h = hash21(vec2<f32>(floor(pane), floor(wp.y / 3.0) + 5.0));
+        let lit = select(0.12, 0.35 + 0.65 * h, h > 0.22);
+        glow = vec3<f32>(1.0, 0.72, 0.44) * (0.42 * city.night * lit * mullion);
         pbr_input.material.base_color = vec4<f32>(base * (1.0 - 0.6 * city.night), 1.0);
     }
 }
