@@ -20,6 +20,14 @@
 //! commuters drives on any given day ([`COMMUTE_DRIVE_SHARE`]), which keeps
 //! the number of cars proportional to, but much smaller than, the number of
 //! workers.
+//!
+//! **Citizens live on the calendar** (round 3). Their trips take calendar
+//! time (a drive of `s` vehicle seconds takes `s` times
+//! [`OFFSCREEN_CALENDAR_FACTOR`] calendar seconds), so a commute is a few
+//! in-game minutes to an hour. A trip drawn on the road still moves in real
+//! time: its people ride it until it arrives or their calendar arrival
+//! passes ([`MAX_TRIP_H`] at most), then the car finishes its drive on
+//! screen without them. Ages run on [`DAYS_PER_YEAR`].
 
 // ---------------------------------------------------------------- money ----
 //
@@ -84,13 +92,14 @@ pub const CRISIS_LEAVE_SHARE_PER_DAY: f32 = 0.12;
 pub const DEFAULT_TAX_RATE: f32 = 0.09;
 /// Highest tax rate `SetTaxRate` accepts (lowest is 0.0).
 pub const MAX_TAX_RATE: f32 = 0.30;
+/// Round 3: no longer used by the sim (the residential tax is taken from wages, [`WAGE_BY_TIER`]); kept for compatibility.
 /// Daily taxable value of one resident; income = value * tax rate.
 /// At the default 9 % a resident pays about $1.26 per day.
 pub const RESIDENT_TAX_BASE_PER_DAY: f32 = 14.0;
 /// Daily taxable value of one filled commercial job.
-pub const COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 22.0;
+pub const COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 17.0;
 /// Daily taxable value of one filled industrial job.
-pub const INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 18.0;
+pub const INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 14.0;
 
 // --------------------------------------------------------------- zoning ----
 
@@ -107,21 +116,26 @@ pub const TICKS_PER_HOUR: u32 = TICKS_PER_DAY / 24;
 /// new city opens on a bright morning).
 pub const START_TICK_OF_DAY: u32 = TICKS_PER_DAY * 3 / 8;
 
+/// Round 3: no longer used by the sim (departures follow each worker's shift, [`INDUSTRY_START_H`] and below); kept for compatibility.
 /// Morning departures to work are spread from this hour ...
 pub const MORNING_DEPART_START_H: f32 = 3.5;
+/// Round 3: no longer used by the sim (departures follow each worker's shift); kept for compatibility.
 /// ... over this many hours (trapezoid distribution: the middle third of
 /// the window, about 06:30-09:30, gets 1.5x the average rate).
 pub const MORNING_DEPART_SPREAD_H: f32 = 9.0;
+/// Round 3: no longer used by the sim (a shift is skipped when less than [`MIN_WORK_H`] would be left); kept for compatibility.
 /// Households that have not left for work by this hour skip the day.
 pub const MORNING_DEPART_LATEST_H: f32 = 13.0;
+/// Round 3: no longer used by the sim (workers go home when their shift ends); kept for compatibility.
 /// Evening departures home, same idea (rush centred on 18:00).
 pub const EVENING_DEPART_START_H: f32 = 14.0;
+/// Round 3: no longer used by the sim (workers go home when their shift ends); kept for compatibility.
 pub const EVENING_DEPART_SPREAD_H: f32 = 9.0;
 /// Fraction of working households that take the car on a given day (decided
 /// per household per day, deterministic). The rest commute "off screen" and
 /// switch between home and work instantly. Keeps traffic proportional to
 /// the city without every worker being on the road at once.
-pub const COMMUTE_DRIVE_SHARE: f32 = 0.2;
+pub const COMMUTE_DRIVE_SHARE: f32 = 0.17;
 
 // ------------------------------------------------------------- vehicles ----
 
@@ -294,18 +308,23 @@ pub const ACCESS_SEARCH_CELLS: i32 = 4;
 
 /// Errand traffic is generated every this many ticks.
 pub const ERRAND_INTERVAL_TICKS: u64 = 10;
+/// Round 3: no longer used by the sim (shopping trips come from households' goods, [`SHOP_BELOW_DAYS`]); kept for compatibility.
 /// One-way shopping runs per household per day (half home -> shop, half
 /// back), mostly 10:00-20:00.
 pub const SHOP_TRIPS_PER_HOUSEHOLD_PER_DAY: f32 = 0.15;
+/// Round 3: no longer used by the sim (deliveries follow shop sales, [`TRUCK_LOAD`]; exports: [`EXPORT_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY`]); kept for compatibility.
 /// Goods trips per filled industrial job per day, mostly 05:00-19:00.
 pub const GOODS_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY: f32 = 0.15;
+/// Round 3: no longer used by the sim (see [`GOODS_IMPORT_SHARE`]); kept for compatibility.
 /// Share of goods trips that leave for / come from the highway.
 pub const GOODS_VIA_HIGHWAY_SHARE: f32 = 0.2;
+/// Round 3: no longer used by the sim (see [`SHOP_SAMPLES`], [`DELIVERY_SAMPLES`]); kept for compatibility.
 /// Errand destinations: nearest of this many random candidates.
 pub const ERRAND_SAMPLES: usize = 3;
 
 // ----------------------------------------------------------- households ----
 
+/// Round 3: no longer used by the sim (households arrive by type, [`ARRIVAL_WEIGHTS`]); kept for compatibility.
 /// Household sizes 1..=4 are drawn with these weights (mean ~2.6).
 pub const HOUSEHOLD_SIZE_WEIGHTS: [u32; 4] = [20, 30, 25, 25];
 /// Every this many ticks unemployed households look for jobs ...
@@ -322,6 +341,7 @@ pub const MOVE_IN_MAX_PER_HOUR: f32 = 120.0;
 /// ... and only while the city's attractiveness (residential demand
 /// ignoring empty housing) is above this.
 pub const MOVE_IN_MIN_DEMAND: f32 = -0.25;
+/// Round 3: no longer used by the sim (jobless households leave when their money runs out, [`BROKE_LEAVE_DAYS`]); kept for compatibility.
 /// A household unemployed at this many consecutive midnights leaves town.
 pub const UNEMPLOYED_LEAVE_DAYS: u8 = 2;
 /// A car commute longer than this (vehicle seconds) is hopeless ...
@@ -343,12 +363,18 @@ pub const RES_BASE_DEMAND: f32 = 0.35;
 /// Weight of (free jobs - unemployed) / households on residential demand.
 pub const RES_JOBS_WEIGHT: f32 = 2.0;
 /// Residential demand falls by this per unit of housing vacancy above
-/// [`RES_VACANCY_OK`] (vacancy = empty places / (capacity + 2 *
+/// [`RES_VACANCY_OK`] (round 3: 0.14 instead of 0.10, as newcomers leave
+/// a place free in bigger homes for births, [`RESERVE_FROM_CAPACITY`]) (vacancy = empty places / (capacity + 2 *
 /// `DEMAND_SMALL_CITY`)).
 pub const RES_VACANCY_WEIGHT: f32 = 2.5;
-pub const RES_VACANCY_OK: f32 = 0.10;
-/// Commercial jobs (shops) wanted per resident.
+pub const RES_VACANCY_OK: f32 = 0.14;
+/// Commercial jobs (shops) wanted per resident. No longer used by the sim
+/// (round 3 wants jobs per member of the workforce,
+/// [`SHOP_JOBS_PER_WORKER`]).
 pub const SHOP_JOBS_PER_RESIDENT: f32 = 0.2;
+/// Commercial jobs (shops) wanted per member of the workforce (industry
+/// wants [`INDUSTRY_PER_SHOP`] times as many): ~1.1 jobs per worker.
+pub const SHOP_JOBS_PER_WORKER: f32 = 0.44;
 /// Industrial jobs wanted per commercial job.
 pub const INDUSTRY_PER_SHOP: f32 = 1.5;
 /// Weight of the relative job shortfall on C / I demand.
@@ -392,7 +418,10 @@ pub const UPGRADE_MIN_AGE_TICKS: u64 = TICKS_PER_DAY as u64 / 2;
 /// Highest level per zone `[R, C, I]`.
 pub const MAX_LEVEL: [u8; 3] = [3, 3, 2];
 /// Residents (R) or jobs (C, I) per footprint cell at levels 1, 2, 3.
-pub const CAPACITY_PER_CELL: [[u32; 3]; 3] = [[4, 9, 18], [3, 6, 10], [4, 8, 8]];
+/// (Round 3: every adult has a job of their own, ~0.6 workers per resident
+/// instead of round 2's ~0.45, so job buildings hold about a quarter more
+/// jobs and the city needs the same land for its jobs as before.)
+pub const CAPACITY_PER_CELL: [[u32; 3]; 3] = [[4, 9, 18], [4, 8, 13], [5, 10, 10]];
 /// Chance (percent) that a new C / I building tries a 2x2 footprint.
 pub const BIG_FOOTPRINT_PERCENT: [u32; 3] = [0, 35, 60];
 /// A building empty at this many consecutive midnights is abandoned.
@@ -417,3 +446,330 @@ pub const REACHABILITY_CHECK_INTERVAL_TICKS: u64 = TICKS_PER_HOUR as u64;
 
 /// Length of the highway stub in cells, entering from the west map edge.
 pub const HIGHWAY_STUB_CELLS: i32 = 12;
+
+// =============================================================== people ====
+//
+// Round 3: every resident is a citizen (see `citizens`, `day`, `life`).
+//
+// # The calendar
+//
+// A day is still 4 real minutes at 1x. Ages run on a compressed calendar:
+// [`DAYS_PER_YEAR`] in-game days make a year, so a 30-minute session at
+// 2.5x (~19 days) spans about ten years of life: babies are born, teens
+// grow up and move out, couples form, adults retire and the old die, but a
+// typical resident still lives in the city for many sessions (a lifetime
+// of 80 years is ~160 days, 11 hours of play at 1x).
+
+/// In-game days per year of age.
+pub const DAYS_PER_YEAR: u32 = 2;
+/// Days in a week (shifts have two days off a week, staggered).
+pub const DAYS_PER_WEEK: u32 = 7;
+/// Ages (years) at which life stages start.
+pub const TEEN_AGE_YEARS: u32 = 13;
+pub const ADULT_AGE_YEARS: u32 = 18;
+/// Retirement age.
+pub const SENIOR_AGE_YEARS: u32 = 65;
+/// Teens from this age may take a part-time job in a shop.
+pub const TEEN_JOB_AGE_YEARS: u32 = 16;
+/// Journal lines kept per citizen.
+pub const JOURNAL_CAP: usize = 8;
+
+// --------------------------------------------------------- households ----
+
+/// Household types arriving `[single, couple, family, seniors]` (relative
+/// weights before the city's own pull; see `households::arrivals`). A new
+/// town draws people of working age and young families; seniors are about
+/// a tenth of newcomers, and their share grows as the town ages in place.
+pub const ARRIVAL_WEIGHTS: [f32; 4] = [30.0, 24.0, 38.0, 8.0];
+/// Free jobs per member of the workforce scale the working types by
+/// `0.6 + this * free share` (0.6..1.4).
+pub const ARRIVAL_JOBS_PULL: f32 = 4.0;
+/// Age ranges (years) of arriving heads of household, skewed to the young
+/// end: singles, couples, parents (their children are 0-17, mostly young),
+/// seniors.
+pub const ARRIVAL_SINGLE_YEARS: [u32; 2] = [19, 45];
+pub const ARRIVAL_COUPLE_YEARS: [u32; 2] = [21, 50];
+pub const ARRIVAL_PARENT_YEARS: [u32; 2] = [23, 45];
+pub const ARRIVAL_SENIOR_YEARS: [u32; 2] = [63, 82];
+/// Average size of an arriving household (sets the arrival rate per free
+/// home place, like round 2's 2.6 people per household).
+pub const ARRIVAL_AVG_SIZE: f32 = 2.6;
+/// Families arriving with one parent.
+pub const SINGLE_PARENT_SHARE: f32 = 0.15;
+/// Children of arriving families: 1, 2, 3 with these weights.
+pub const FAMILY_CHILDREN_WEIGHTS: [f32; 3] = [30.0, 40.0, 30.0];
+/// Senior households that are couples.
+pub const SENIOR_COUPLE_SHARE: f32 = 0.5;
+/// Households with two drivers owning two cars (the rest share one).
+pub const TWO_CAR_SHARE: f32 = 0.55;
+/// Families with young children (under 13) where one parent stays at home
+/// (out of the workforce, does the shopping) until the youngest is 13 ...
+pub const HOMEMAKER_SHARE: f32 = 0.35;
+/// ... and couples without young children where one partner does.
+pub const STAY_AT_HOME_SHARE: f32 = 0.15;
+/// Grown-up children living with their parents study (not in the
+/// workforce) until this age.
+pub const STUDENT_UNTIL_YEARS: u32 = 22;
+/// Old saves: share of 1-2 member households without a job that become
+/// seniors.
+pub const LEGACY_SENIOR_SHARE: f32 = 0.25;
+/// Old saves: savings of generated households, days of costs.
+pub const LEGACY_SAVINGS_DAYS: f32 = 6.0;
+/// The arrival rate scales with `1 + (avg happiness - neutral) * this`.
+pub const ARRIVAL_HAPPINESS_WEIGHT: f32 = 1.5;
+
+// -------------------------------------------------------------- money ----
+//
+// Per day, whole dollars. A household's money is real: wages (and
+// pensions) come in at midnight, the city's residential tax is taken from
+// the wages, rent goes out at midnight, goods are paid for in the shop.
+// The wages are set so that the residential tax per resident is about what
+// round 2's flat per-resident tax was (~$14 of taxable value per resident).
+
+/// Daily wage by job tier `[basic, skilled, professional]`.
+pub const WAGE_BY_TIER: [u32; 3] = [23, 28, 33];
+/// Daily wage of a teen's part-time job.
+pub const PART_TIME_WAGE: u32 = 9;
+/// Daily pension of a retiree (not taxed).
+pub const PENSION_PER_DAY: i64 = 15;
+/// Daily rent per resident place by the home's level `[1, 2, 3]`.
+pub const RENT_PER_PLACE: [f32; 3] = [3.0, 3.6, 4.2];
+/// Rents rise with residential demand: `* (1 + this * demand)`.
+pub const RENT_MARKET_WEIGHT: f32 = 0.2;
+/// Goods used per day by a person / a child, units.
+pub const GOODS_PER_PERSON_PER_DAY: f32 = 1.0;
+pub const GOODS_PER_CHILD_PER_DAY: f32 = 0.6;
+/// Price of one unit of goods, dollars.
+pub const GOODS_PRICE: f32 = 2.0;
+/// A night out costs each adult this much.
+pub const LEISURE_COST: i64 = 3;
+/// Savings of an arriving household: this many days of rent and goods,
+/// plus up to one more (random). Without income they last about two days.
+pub const ARRIVAL_SAVINGS_DAYS: f32 = 1.0;
+/// Goods an arriving household brings along, days.
+pub const ARRIVAL_GOODS_DAYS: f32 = 2.0;
+/// Money below this many days of costs: spending is cut (essentials only,
+/// no nights out).
+pub const AUSTERITY_BELOW_DAYS: f32 = 2.0;
+/// A broke household moves to a home whose rent is below this share of
+/// its current one; finding none, it leaves.
+pub const CHEAPER_HOME_FACTOR: f32 = 0.85;
+/// A household broke at this many midnights in a row (money below zero,
+/// or below a day's costs with no income) leaves; on the first it looks for
+/// a cheaper home.
+pub const BROKE_LEAVE_DAYS: u8 = 2;
+/// Newcomers leave one place free in homes of at least this many places,
+/// for births and moves within the city.
+pub const RESERVE_FROM_CAPACITY: u32 = 8;
+/// Homes compared when looking for a home.
+pub const HOME_SEARCH_SAMPLES: usize = 12;
+/// A grown-up child moving out takes this share of the household's money.
+pub const MOVE_OUT_MONEY_SHARE: f32 = 0.25;
+
+// --------------------------------------------------------------- jobs ----
+
+/// Job search: a vacancy's score is its wage times `1 - min(distance /
+/// this, 0.9)` (nearby and better paid wins).
+pub const JOB_DIST_SCALE_M: f32 = 1000.0;
+/// Shift starts (hours) per workplace: industry, offices (commercial level
+/// 3) and shops (early shift; the late shift starts
+/// [`LATE_SHIFT_OFFSET_H`] later).
+pub const INDUSTRY_START_H: [f32; 2] = [5.5, 8.0];
+pub const OFFICE_START_H: [f32; 2] = [8.0, 9.5];
+pub const SHOP_START_H: [f32; 2] = [7.0, 9.0];
+pub const LATE_SHIFT_OFFSET_H: f32 = 6.0;
+/// Shop workers on the late shift (shops stay staffed into the evening).
+pub const LATE_SHIFT_SHARE: f32 = 0.35;
+/// Industrial workers on the night shift (from ~21:00).
+pub const NIGHT_SHIFT_SHARE: f32 = 0.08;
+/// Shift lengths, hours.
+pub const SHIFT_H: f32 = 8.5;
+pub const PART_TIME_SHIFT_H: f32 = 4.0;
+/// Personal offset from the workplace's start, +- hours (triangular).
+pub const SHIFT_PERSONAL_SPREAD_H: f32 = 1.5;
+/// Day-to-day wobble of a shift start, +- hours.
+pub const SHIFT_DAILY_WOBBLE_H: f32 = 0.4;
+/// Workers leave home this long before their shift starts, plus up to
+/// [`COMMUTE_LEAD_SPREAD_H`] (personal).
+pub const COMMUTE_LEAD_H: f32 = 0.5;
+pub const COMMUTE_LEAD_SPREAD_H: f32 = 1.0;
+/// A shift is skipped when less than this would be left of it.
+pub const MIN_WORK_H: f32 = 1.0;
+
+// ---------------------------------------------------------- the day ----
+
+/// Citizens think in this many rotating buckets: each tick one bucket
+/// checks whether its citizens' activities are over (a decision comes at
+/// most this many ticks late).
+pub const THINK_BUCKETS: u64 = 10;
+/// Waking and bedtime (hours), +- [`SLEEP_SPREAD_H`] personal.
+pub const WAKE_H: f32 = 6.5;
+pub const BED_H: f32 = 22.5;
+pub const SLEEP_SPREAD_H: f32 = 1.0;
+/// Someone staying in at home looks again after this long.
+pub const HOME_RECHECK_H: f32 = 1.0;
+/// Shops are visited between these hours ...
+pub const SHOP_OPEN_H: f32 = 8.0;
+pub const SHOP_CLOSE_H: f32 = 21.0;
+/// ... when the household has less than this many days of goods; the
+/// shopper buys up to [`BUY_UP_TO_DAYS`] (essentials only in austerity).
+pub const SHOP_BELOW_DAYS: f32 = 1.0;
+/// (Each adult has a usual shopping time between [`SHOP_OPEN_H`] and an
+/// hour before [`SHOP_CLOSE_H`].)
+pub const BUY_UP_TO_DAYS: f32 = 3.0;
+pub const AUSTERITY_BUY_DAYS: f32 = 1.2;
+/// Shopping needs this much free time before the next shift, hours, and
+/// takes this long in the shop.
+pub const SHOP_FREE_H: f32 = 2.0;
+pub const SHOP_DURATION_H: f32 = 0.75;
+/// Shops compared when choosing one; a shop without all that is wanted
+/// counts as this much farther, metres.
+pub const SHOP_SAMPLES: usize = 6;
+pub const SHOP_SHORT_STOCK_M: f32 = 600.0;
+/// Leisure need grows by this per hour awake (1.5x at work) and falls by
+/// [`LEISURE_HOME_RESTORE_PER_HOUR`] less at home; a night out restores
+/// [`LEISURE_RESTORE_PER_HOUR`] by venue level `[1, 2, 3]`.
+pub const LEISURE_NEED_PER_HOUR: f32 = 0.016;
+pub const LEISURE_NEED_WORK_FACTOR: f32 = 1.5;
+pub const LEISURE_HOME_RESTORE_PER_HOUR: f32 = 0.01;
+pub const LEISURE_RESTORE_PER_HOUR: [f32; 3] = [0.2, 0.3, 0.4];
+/// Citizens go out when their need is above this, between these hours,
+/// with at least [`LEISURE_FREE_H`] before their next shift.
+pub const LEISURE_GO_NEED: f32 = 0.55;
+/// Each citizen has a usual time to go out between [`LEISURE_OPEN_H`] and
+/// two hours before [`LEISURE_CLOSE_H`]; above this need they go earlier.
+pub const LEISURE_URGENT_NEED: f32 = 0.85;
+pub const LEISURE_OPEN_H: f32 = 10.0;
+pub const LEISURE_CLOSE_H: f32 = 21.0;
+pub const LEISURE_FREE_H: f32 = 4.0;
+/// A night out lasts this long plus up to the spread (personal), hours.
+pub const LEISURE_DURATION_H: f32 = 1.5;
+pub const LEISURE_DURATION_SPREAD_H: f32 = 1.5;
+/// Venues compared when choosing one; a venue's score is its restoration
+/// rate over `1 + distance / this`.
+pub const LEISURE_SAMPLES: usize = 6;
+pub const LEISURE_DIST_SCALE_M: f32 = 400.0;
+/// Share of trips by car that are drawn on the road, per purpose (the rest
+/// happen off screen with the estimated drive time). Keeps the number of
+/// cars proportional to, but much smaller than, the number of trips
+/// ([`COMMUTE_DRIVE_SHARE`] for commutes).
+pub const SHOP_DRIVE_SHARE: f32 = 0.11;
+pub const LEISURE_DRIVE_SHARE: f32 = 0.05;
+/// Off-screen trips: straight-line distance times this, at this speed
+/// (m/s), plus a fixed time (s).
+pub const OFFSCREEN_ROUTE_FACTOR: f32 = 1.3;
+pub const OFFSCREEN_SPEED: f32 = 10.0;
+pub const OFFSCREEN_BASE_S: f32 = 6.0;
+/// Off-screen trips take their estimated drive time times this in
+/// calendar time (parking, walking to the door): a 2-minute drive is a
+/// 10-minute trip. Cars on the road are different: they move in real time,
+/// so a drive drawn on screen takes far longer in calendar terms.
+pub const OFFSCREEN_CALENDAR_FACTOR: f32 = 5.0;
+/// Every trip ends on the calendar by its estimated time times
+/// [`TRIP_DUE_FACTOR`], at least [`MIN_TRIP_H`] and at most [`MAX_TRIP_H`]
+/// hours after it started. A car drawn on the road moves in real time (a
+/// one-minute drive is six calendar hours), so its people get out then and
+/// the car finishes its drive on screen without them; a car that has not
+/// started by then is dropped (a hopeless commute).
+pub const TRIP_DUE_FACTOR: f32 = 3.0;
+pub const MIN_TRIP_H: f32 = 0.5;
+pub const MAX_TRIP_H: f32 = 2.0;
+/// Without a free car a trip takes this many times as long (stands in for
+/// lifts, buses and walking until stage 3).
+pub const CARLESS_TIME_FACTOR: f32 = 1.8;
+/// Car-sharing: a member taking the household's last car gives a lift to a
+/// member leaving for work within this many hours to a workplace within
+/// this distance of theirs.
+pub const CARSHARE_WINDOW_H: f32 = 1.5;
+pub const CARSHARE_RADIUS_M: f32 = 600.0;
+
+// -------------------------------------------------------------- goods ----
+
+/// Shelf space per shop job, units.
+pub const SHOP_STOCK_PER_JOB: f32 = 30.0;
+/// A shop orders a delivery when its stock falls below this share ...
+pub const RESTOCK_BELOW: f32 = 0.5;
+/// ... and a truck brings this many units.
+pub const TRUCK_LOAD: f32 = 50.0;
+/// Deliveries come from outside the city (through the highway) this often,
+/// otherwise from the nearest of a few factories with workers.
+pub const GOODS_IMPORT_SHARE: f32 = 0.1;
+/// A delivery comes from the nearest of this many random factories.
+pub const DELIVERY_SAMPLES: usize = 8;
+/// Delivery trucks sent per errand round at most.
+pub const DELIVERIES_PER_ROUND: usize = 8;
+/// Industry ships goods out of the city: trucks per filled industrial job
+/// per day (mostly 05:00-19:00).
+pub const EXPORT_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY: f32 = 0.03;
+
+// ------------------------------------------------------- life events ----
+
+/// Births: a household with two adults, one of them aged
+/// [`BIRTH_MIN_YEARS`]..=[`BIRTH_MAX_YEARS`], fewer than [`MAX_CHILDREN`]
+/// children, room at home and money has a child with this chance per day.
+pub const BIRTH_CHANCE_PER_DAY: f32 = 0.15;
+pub const BIRTH_MIN_YEARS: u32 = 20;
+/// A couple wanting a child in a full home moves to one with room whose
+/// rent is at most this factor of its current one.
+pub const ROOMIER_HOME_RENT_FACTOR: f32 = 1.3;
+pub const BIRTH_MAX_YEARS: u32 = 42;
+pub const MAX_CHILDREN: u32 = 4;
+/// Couples put off having a child while city services are cut below this
+/// level (debt).
+pub const BIRTH_MIN_SERVICE_LEVEL: f32 = 0.8;
+/// Grown-up children from this age move out with this chance per day when
+/// a home is free (otherwise they stay and are unhappy about it).
+pub const MOVE_OUT_MIN_YEARS: u32 = 19;
+pub const MOVE_OUT_CHANCE_PER_DAY: f32 = 0.15;
+/// Singles of these ages find a partner (a single within
+/// [`COUPLE_MAX_AGE_GAP_YEARS`], among [`COUPLE_SAMPLES`] random
+/// households) with this chance per day and move in together.
+pub const COUPLE_CHANCE_PER_DAY: f32 = 0.03;
+pub const COUPLE_MIN_YEARS: u32 = 20;
+pub const COUPLE_MAX_YEARS: u32 = 50;
+pub const COUPLE_MAX_AGE_GAP_YEARS: u32 = 12;
+pub const COUPLE_SAMPLES: usize = 12;
+/// Old age: from this age the yearly chance of dying is
+/// `DEATH_RATE_AT_START * DEATH_RATE_GROWTH^(age - DEATH_FROM_YEARS)`; nobody
+/// lives past [`MAX_AGE_YEARS`].
+pub const DEATH_FROM_YEARS: u32 = 70;
+pub const DEATH_RATE_AT_START: f32 = 0.015;
+pub const DEATH_RATE_GROWTH: f32 = 1.11;
+pub const MAX_AGE_YEARS: u32 = 104;
+
+// ---------------------------------------------------------- happiness ----
+
+/// Weights of the happiness components `[employment, commute,
+/// affordability, access, taxes, finances, housing]`.
+pub const HAPPINESS_WEIGHTS: [f32; 7] = [0.25, 0.15, 0.2, 0.15, 0.1, 0.1, 0.05];
+/// Happiness of a newcomer (and of every component before the first
+/// midnight).
+pub const HAPPINESS_START: f32 = 0.88;
+/// City average at which demand and arrivals are neither pushed nor pulled.
+pub const HAPPINESS_NEUTRAL: f32 = 0.88;
+/// Residential demand per unit of average happiness above neutral.
+pub const HAPPINESS_DEMAND_WEIGHT: f32 = 0.5;
+/// A citizen below this counts as unhappy (city statistics).
+pub const UNHAPPY_BELOW: f32 = 0.65;
+/// A household whose average stays below this for this many midnights
+/// leaves the city.
+pub const UNHAPPY_LEAVE_BELOW: f32 = 0.45;
+pub const UNHAPPY_LEAVE_DAYS: u8 = 3;
+/// Rent burden (rent / income) that is fine / unbearable.
+pub const RENT_BURDEN_OK: f32 = 0.25;
+pub const RENT_BURDEN_BAD: f32 = 0.8;
+/// Savings (days of costs) that feel safe.
+pub const RESERVE_GOOD_DAYS: f32 = 5.0;
+/// Distance to the nearest shop / venue that is fine / too far, metres.
+pub const ACCESS_GOOD_M: f32 = 300.0;
+pub const ACCESS_BAD_M: f32 = 1800.0;
+/// A small (level-1) venue counts as this much farther for leisure access.
+pub const ACCESS_SMALL_VENUE_M: f32 = 250.0;
+
+/// City statistics (`people.stats`) are recomputed this often (ticks),
+/// gathered over the first [`PEOPLE_STATS_CHUNKS`] ticks of each interval.
+pub const PEOPLE_STATS_INTERVAL_TICKS: u64 = 100;
+pub const PEOPLE_STATS_CHUNKS: u64 = 20;
+/// The nightly household review is spread over this many ticks after
+/// midnight (~14 in-game minutes).
+pub const NIGHT_CHUNKS: u32 = 48;

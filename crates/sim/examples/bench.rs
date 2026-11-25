@@ -1,7 +1,8 @@
-//! Step timing over a full day in a ~10,000-resident city (the hierarchy
-//! player), with extra trips through the rush so about 2,000 cars are on
-//! the road at the peak. Each slow step is re-timed on clones (best of 5)
-//! to separate real cost from OS noise (other processes on the machine).
+//! Step timing over a full day in a big city (default 20,000 citizens, the
+//! hierarchy player's blocks all laid out and grown with demand held high),
+//! with extra trips through the rush so about 2,500 cars are on the road at
+//! the peak. Each slow step is re-timed on clones (best of 5) to separate
+//! real cost from OS noise (other processes on the machine).
 //!
 //! cargo run -p citysim_sim --release --example bench [population] [cars]
 use std::time::Instant;
@@ -11,20 +12,51 @@ use citysim_sim::*;
 
 fn main() {
     let args: Vec<u32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
-    let pop = args.first().copied().unwrap_or(10_000);
-    let cars = args.get(1).copied().unwrap_or(2_000) as usize;
-    let mut w = World::new(7);
+    let pop = args.first().copied().unwrap_or(20_000);
+    let cars = args.get(1).copied().unwrap_or(2_500) as usize;
+    // `CITYSIM_BENCH_CITY=file`: reuse a grown city (written on the first
+    // run).
+    let cache = std::env::var("CITYSIM_BENCH_CITY").ok();
+    let mut w = match cache.as_ref().and_then(|f| std::fs::read(f).ok()) {
+        Some(bytes) => World::load(&bytes).expect("bench city loads"),
+        None => World::new(7),
+    };
     let mut p = GridPlayer::hierarchy();
-    while w.stats.population < pop && w.time.day < 80 {
-        p.act(&mut w);
+    // Lay out every block at once, then grow the city with demand held
+    // high (a benchmark shortcut: written to public fields, not played).
+    if w.time.tick == 0 {
+        scenarios::prebuilt(&mut w, |w| {
+            p.build_ahead(w, [100, 100, 100]);
+        });
+    }
+    let t0 = Instant::now();
+    while w.stats.population < pop && w.time.day < 120 {
+        w.demand = Demand {
+            residential: 1.0,
+            commercial: 1.0,
+            industrial: 1.0,
+        };
+        w.growth.attractiveness = 1.0;
+        w.economy.money = w.economy.money.max(100_000);
         w.step();
     }
+    println!(
+        "grew to {} citizens in {} days ({:.0} s)",
+        w.stats.population,
+        w.time.day,
+        t0.elapsed().as_secs_f64()
+    );
     // Advance to 06:00 of the next day, then time a full day.
     while w.time.tick_of_day != 6 * balance::TICKS_PER_HOUR {
-        p.act(&mut w);
         w.step();
     }
-    println!("pop {} at day {}", w.stats.population, w.time.day);
+    if let Some(f) = &cache {
+        let _ = std::fs::write(f, w.save());
+    }
+    println!(
+        "pop {} ({} households, {} jobs filled) at day {}",
+        w.stats.population, w.stats.households, w.stats.employed, w.time.day
+    );
     let mut times = Vec::new();
     let mut worst: Vec<(u128, World)> = Vec::new();
     let mut peak = 0;
@@ -35,7 +67,6 @@ fn main() {
         .collect();
     let mut r = Rng::new(9);
     for _ in 0..balance::TICKS_PER_DAY {
-        p.act(&mut w);
         // Top up the rush (06:30-10:00 and 16:00-19:30) towards `cars`.
         let h = w.time.hour();
         if ((6.5..10.0).contains(&h) || (16.0..19.5).contains(&h)) && w.vehicles.len() + w.traffic.pending.len() < cars
@@ -46,13 +77,16 @@ fn main() {
                 traffic::debug_request(&mut w, a, b);
             }
         }
-        let before = w.clone();
+        let keep = w.time.tick_of_day + 1 == balance::TICKS_PER_DAY || w.time.tick.is_multiple_of(37);
+        let before = keep.then(|| w.clone());
         let t = Instant::now();
         w.step();
         let dt = t.elapsed().as_nanos();
         peak = peak.max(w.vehicles.len());
         times.push(dt);
-        if worst.len() < 5 || dt > worst.last().unwrap().0 {
+        if let Some(before) = before
+            && (worst.len() < 5 || dt > worst.last().unwrap().0)
+        {
             worst.push((dt, before));
             worst.sort_by_key(|w| std::cmp::Reverse(w.0));
             worst.truncate(5);

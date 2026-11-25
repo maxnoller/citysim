@@ -3,16 +3,18 @@
 use crate::IdMap;
 use serde::{Deserialize, Serialize};
 
+use crate::citizens::{Citizen, CitizenId, Location};
 use crate::command::{self, Command, CommandError, Outcome, Preview};
 use crate::derived::Derived;
 use crate::geom::Cell;
 use crate::grid::Occupant;
 use crate::growth::GrowthState;
+use crate::people::People;
 use crate::roads::RoadKind;
 use crate::traffic::TrafficState;
 use crate::{
     Building, BuildingId, Demand, Economy, Grid, Household, HouseholdId, MAP_CELLS, Rng, RoadNetwork, SimTime, Stats,
-    Vehicle, VehicleId, balance, demand, economy, growth, households, save, stats, traffic,
+    Vehicle, VehicleId, Zone, balance, demand, economy, growth, households, save, stats, traffic,
 };
 
 /// Change counters. Each is bumped whenever that part of the state changes,
@@ -58,6 +60,11 @@ pub struct World {
     pub traffic: TrafficState,
     /// Growth accumulators and per-building bookkeeping.
     pub growth: GrowthState,
+    /// Every resident (round 3). Each belongs to one of `households`.
+    pub citizens: IdMap<CitizenId, Citizen>,
+    /// Population bookkeeping: who lives and works where, counters, daily
+    /// trip and life-event counts, city statistics (`people.stats`).
+    pub people: People,
     /// Lazily rebuilt indices derived from the state above. Not saved,
     /// ignored by `==`.
     #[serde(skip)]
@@ -84,6 +91,8 @@ impl World {
             versions: Versions::default(),
             traffic: TrafficState::default(),
             growth: GrowthState::default(),
+            citizens: IdMap::new(),
+            people: People::default(),
             cache: Derived::default(),
         };
         let start = World::highway_entry_cell();
@@ -135,12 +144,13 @@ impl World {
         let new_day = self.time.advance();
         demand::tick(self);
         growth::tick(self);
+        if new_day {
+            // Payday and the day's budget, before the night's life events.
+            economy::end_of_day(self);
+        }
         households::tick(self);
         crate::errands::tick(self);
         traffic::tick(self);
-        if new_day {
-            economy::end_of_day(self);
-        }
         stats::update(self);
     }
 
@@ -153,26 +163,78 @@ impl World {
     }
 
     /// Check the simulation's own invariants (cheap enough for big worlds):
-    /// households point at existing buildings, building occupancy equals
-    /// what the households say, vehicles sit on existing segments within
-    /// their length, every car of a household is known to it.
+    /// households point at existing buildings and list their citizens, every
+    /// citizen is in exactly one place, building occupancy equals what the
+    /// citizens say, the population counters match a recount, household
+    /// money matches its ledger, vehicles sit on existing segments within
+    /// their length and point back at their household and driver.
     pub fn check_sim_invariants(&self) -> Result<(), String> {
         let mut occ: std::collections::BTreeMap<BuildingId, u32> = Default::default();
         for (hid, h) in self.households.iter() {
             if !self.buildings.contains_key(h.home) {
                 return Err(format!("{hid:?} has missing home"));
             }
-            *occ.entry(h.home).or_default() += h.members as u32;
-            if let Some(j) = h.job {
-                if !self.buildings.contains_key(j) {
-                    return Err(format!("{hid:?} has missing job"));
+            if h.citizens.is_empty() {
+                // Legacy household not adopted yet (counts as before).
+                *occ.entry(h.home).or_default() += h.members as u32;
+                if let Some(j) = h.job {
+                    *occ.entry(j).or_default() += 1;
                 }
-                *occ.entry(j).or_default() += 1;
+                continue;
+            }
+            if h.members as usize != h.citizens.len() {
+                return Err(format!(
+                    "{hid:?} members {} but {} citizens",
+                    h.members,
+                    h.citizens.len()
+                ));
+            }
+            *occ.entry(h.home).or_default() += h.citizens.len() as u32;
+            for &c in &h.citizens {
+                match self.citizens.get(c) {
+                    Some(ci) if ci.household == hid => {}
+                    _ => return Err(format!("{hid:?} lists {c:?} which is not its member")),
+                }
+                if let Some(j) = self.citizens[c].job {
+                    *occ.entry(j.workplace).or_default() += 1;
+                }
+            }
+            if h.money != h.ledger.net() {
+                return Err(format!("{hid:?} money {} but ledger says {}", h.money, h.ledger.net()));
+            }
+            let want_job = h
+                .citizens
+                .iter()
+                .find_map(|&c| self.citizens[c].job.map(|j| j.workplace));
+            if h.job != want_job {
+                return Err(format!("{hid:?} job {:?} but members say {want_job:?}", h.job));
             }
             if let Some(v) = h.vehicle
                 && self.vehicles.get(v).and_then(|v| v.household) != Some(hid)
             {
                 return Err(format!("{hid:?} vehicle {v:?} does not point back"));
+            }
+            let out = h.citizens.iter().filter(|&&c| self.citizens[c].has_car).count();
+            if out > h.cars as usize {
+                return Err(format!("{hid:?} has {out} cars out of {}", h.cars));
+            }
+        }
+        if self.households.len() != self.people.known_households {
+            return Err("households changed behind the population model".into());
+        }
+        crate::people::check(self)?;
+        for (cid, c) in self.citizens.iter() {
+            if let Location::Travelling(j) = &c.location
+                && j.mode == crate::citizens::TravelMode::Passenger
+                && j.arrive_tick.is_none()
+            {
+                let ok = j.driver.and_then(|d| self.citizens.get(d)).is_some_and(|d| {
+                    d.household == c.household
+                        && matches!(d.location, Location::Travelling(dj) if dj.arrive_tick.is_none())
+                });
+                if !ok {
+                    return Err(format!("{cid:?} rides with a driver who is not on the road"));
+                }
             }
         }
         for (bid, b) in self.buildings.iter() {
@@ -183,6 +245,12 @@ impl World {
             if b.occupied > b.capacity {
                 return Err(format!("{bid:?} over capacity"));
             }
+            if b.kind == Zone::Commercial
+                && let Some(p) = self.people.places.get(bid)
+                && !(p.stock.is_finite() && p.stock >= 0.0)
+            {
+                return Err(format!("{bid:?} stock {}", p.stock));
+            }
         }
         for (vid, v) in self.vehicles.iter() {
             let Some(seg) = v.segment.and_then(|s| self.roads.segments.get(s)) else {
@@ -192,9 +260,18 @@ impl World {
                 return Err(format!("{vid:?} progress {} outside 0..{}", v.progress, seg.length));
             }
             if let Some(h) = v.household
-                && self.households.get(h).and_then(|h| h.vehicle) != Some(vid)
+                && !self.households.contains_key(h)
             {
-                return Err(format!("{vid:?} household {h:?} does not point back"));
+                return Err(format!("{vid:?} household {h:?} is gone"));
+            }
+            if let Some(c) = self.traffic.trips.get(vid).and_then(|t| t.citizen) {
+                let Some(ci) = self.citizens.get(c) else {
+                    return Err(format!("{vid:?} driver {c:?} is gone"));
+                };
+                match &ci.location {
+                    Location::Travelling(j) if j.vehicle == Some(vid) => {}
+                    _ => return Err(format!("{vid:?} driver {c:?} is not in it")),
+                }
             }
         }
         Ok(())

@@ -673,18 +673,7 @@ fn round1_saves_load_and_second_row_buildings_are_merged() {
     };
     let f = mk(front, &mut w);
     let b = mk(back, &mut w);
-    let hh = w.households.insert(Household {
-        home: b,
-        job: None,
-        members: 2,
-        state: HouseholdState::AtHome,
-        vehicle: None,
-        seed: 3,
-        unemployed_days: 0,
-        hopeless_commutes: 0,
-        last_commute_s: 0.0,
-        last_work_day: 0,
-    });
+    let hh = w.households.insert(Household::without_citizens(b, 2, 3));
     w.buildings[b].occupied = 2;
     w.versions.buildings += 1;
     w.versions.grid += 1;
@@ -758,4 +747,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0x201c68bb56aa9737;
+const PINNED_CHECKSUM: u64 = 0x1851f76eeb515a56;

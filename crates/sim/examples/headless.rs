@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use citysim_sim::scenarios::{self, GridPlayer};
-use citysim_sim::{TICKS_PER_SECOND, World, Zone, balance};
+use citysim_sim::{TICKS_PER_SECOND, TripPurpose, World, Zone, balance};
 
 /// Blocks `[R, C, I]` the "upfront" player lays out on day one (~290 road
 /// cells, ~60 % of the start money).
@@ -134,7 +134,9 @@ fn run(sc: &Scenario, out_dir: &str) {
         "d/100c"
     );
     let mut csv = String::from(
-        "tick,day,hour,minutes,population,households,jobs,employed,unemployment,buildings,vehicles,avg_commute_s,avg_speed,congested,money,dem_r,dem_c,dem_i,waiting\n",
+        "tick,day,hour,minutes,population,households,jobs,employed,unemployment,buildings,vehicles,avg_commute_s,avg_speed,congested,money,dem_r,dem_c,dem_i,waiting,\
+         v_towork,v_tohome,v_movein,v_moveout,v_shopping,v_goods,v_leisure,\
+         a_sleeping,a_home,a_working,a_shopping,a_leisure,a_travelling,happiness\n",
     );
     let total = sc.days as u64 * balance::TICKS_PER_DAY as u64;
     let (mut sum_ns, mut max_ns, mut n, mut max_at) = (0u128, 0u128, 0u64, 0u64);
@@ -201,6 +203,30 @@ fn run(sc: &Scenario, out_dir: &str) {
                 d.industrial,
                 s.waiting_departures
             );
+            let mut vp = [0u32; TripPurpose::COUNT];
+            for t in w.traffic.trips.values() {
+                vp[t.purpose.index()] += 1;
+            }
+            let a = citysim_sim::inspect::activity_shares(&w);
+            csv.pop();
+            let _ = writeln!(
+                csv,
+                ",{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.3}",
+                vp[0],
+                vp[1],
+                vp[2],
+                vp[3],
+                vp[4],
+                vp[5],
+                vp[6],
+                a[0],
+                a[1],
+                a[2],
+                a[3],
+                a[4],
+                a[5],
+                w.people.stats.avg_happiness
+            );
         }
         if w.time.tick_of_day == 0 {
             let h = w.economy.history.last().copied().unwrap_or_default();
@@ -238,15 +264,24 @@ fn run(sc: &Scenario, out_dir: &str) {
                 h.demand[1],
                 h.demand[2],
             );
-            let dn = citysim_sim::traffic::debug_denials(&w);
+            let ps = &w.people.stats;
+            let ev = &w.people.events_yesterday;
             println!(
-                "  stuck {} dl {} deny c{}k r{}k s{}k y{}k {:?}",
-                w.traffic.stuck_removed,
-                w.traffic.deadlocks_resolved,
-                dn[0] / 1000,
-                dn[1] / 1000,
-                dn[2] / 1000,
-                dn[3] / 1000,
+                "  wf {} hap {:.2} kids/ad/sen {}/{}/{} hhk {:?} $hh {:.0} burd {:.2} broke {} left {} +{} b{} d{} trips {:?} {:?}",
+                w.stats.workforce,
+                ps.avg_happiness,
+                ps.by_stage[0] + ps.by_stage[1],
+                ps.by_stage[2],
+                ps.by_stage[3],
+                ps.by_kind,
+                ps.avg_money,
+                ps.avg_rent_burden,
+                ps.broke,
+                ev.households_left,
+                ev.households_arrived,
+                ev.births,
+                ev.deaths,
+                w.people.trips_yesterday,
                 w.economy.fiscal.state
             );
             speed_acc = (0.0, 0);

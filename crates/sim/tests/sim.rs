@@ -112,17 +112,47 @@ fn growth_is_gradual() {
 
 #[test]
 fn no_jobs_means_unemployment_and_people_leave() {
+    // No jobs -> unemployment -> money runs out -> the household cuts
+    // spending, finds no cheaper home and leaves. Pensioners can stay.
     let mut w = World::new(5);
     let mut p = Some(GridPlayer::new(&[Zone::Residential]));
     run_to(&mut w, &mut p, DAY / 2);
-    let first: Vec<HouseholdId> = w.households.keys().collect();
-    assert!(!first.is_empty());
+    let workers: Vec<HouseholdId> = w
+        .households
+        .iter()
+        .filter(|(_, h)| {
+            // Households that need a job: someone in the workforce and no
+            // pension coming in.
+            h.citizens.iter().any(|&c| w.citizens[c].in_workforce())
+                && h.citizens.iter().all(|&c| !w.citizens[c].retired)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    assert!(workers.len() > 5, "{}", workers.len());
     assert!(w.stats.unemployment > 0.99);
-    run_to(&mut w, &mut p, 3 * DAY);
+    let mut austerity = std::collections::BTreeSet::new();
+    let mut broke = std::collections::BTreeSet::new();
+    while w.time.tick < 3 * DAY {
+        let t = w.time.tick + 1;
+        run_to(&mut w, &mut p, t);
+        for &h in &workers {
+            if let Some(hh) = w.households.get(h) {
+                if hh.austerity {
+                    austerity.insert(h);
+                }
+                // Money running out: less than two days of rent left.
+                if hh.money < 2 * hh.rent.max(1) {
+                    broke.insert(h);
+                }
+            }
+        }
+    }
     assert!(
-        first.iter().all(|h| !w.households.contains_key(*h)),
-        "unemployed households left within two midnights"
+        workers.iter().all(|h| !w.households.contains_key(*h)),
+        "jobless households left within three midnights"
     );
+    assert_eq!(austerity.len(), workers.len(), "every one of them cut spending first");
+    assert_eq!(broke.len(), workers.len(), "their money ran out");
     w.check_sim_invariants().unwrap();
 }
 

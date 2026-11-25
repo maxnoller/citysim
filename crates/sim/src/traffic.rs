@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 
+use crate::citizens::{CitizenId, Location, TravelMode};
 use crate::derived::{Access, access_pos};
 use crate::idmap::key_index;
 use crate::junction::{self, JunctionState, Turn};
@@ -115,11 +116,31 @@ pub enum TripPurpose {
     MoveIn,
     /// Household that left town driving out to the highway.
     MoveOut,
-    /// Shopping run between a home and a shop (no household attached).
+    /// Shopping run between a home (or workplace) and a shop, both ways.
     Shopping,
     /// Goods delivery: industry to shop, or to / from the highway. Renderers
     /// may draw these as trucks (look up `world.traffic.trips`).
     Goods,
+    /// A night out: to a leisure venue (any commercial building) and back.
+    Leisure,
+}
+
+impl TripPurpose {
+    pub const ALL: [TripPurpose; 7] = [
+        TripPurpose::ToWork,
+        TripPurpose::ToHome,
+        TripPurpose::MoveIn,
+        TripPurpose::MoveOut,
+        TripPurpose::Shopping,
+        TripPurpose::Goods,
+        TripPurpose::Leisure,
+    ];
+    pub const COUNT: usize = 7;
+
+    /// Index into per-purpose arrays (`ALL` order).
+    pub fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /// Where a trip starts or ends.
@@ -146,12 +167,23 @@ pub struct Trip {
     pub needs_route: bool,
     /// In the re-plan queue.
     pub queued: bool,
+    /// The citizen driving (none for trucks, cars of households that left,
+    /// and cars whose people already arrived on the calendar). Passengers:
+    /// `inspect::occupants`.
+    pub citizen: Option<CitizenId>,
+    /// The citizen whose trip this car draws (stays set after they got out
+    /// at their calendar arrival; their commute statistics come from it).
+    pub owner: Option<CitizenId>,
+    /// Where the trip started.
+    pub from: Place,
 }
 
 /// A trip waiting for its car to be put on the road.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Departure {
     pub household: Option<HouseholdId>,
+    /// The citizen who will drive.
+    pub citizen: Option<CitizenId>,
     pub purpose: TripPurpose,
     pub from: Place,
     pub to: Place,
@@ -173,7 +205,16 @@ pub(crate) enum TripEnd {
     Cancelled,
 }
 
-pub(crate) type Ended = (Option<HouseholdId>, TripPurpose, TripEnd);
+/// A finished trip, reported to the population model.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Ended {
+    pub household: Option<HouseholdId>,
+    pub citizen: Option<CitizenId>,
+    pub owner: Option<CitizenId>,
+    pub purpose: TripPurpose,
+    pub end: TripEnd,
+    pub to: Place,
+}
 
 /// All traffic state that is not on the vehicles themselves.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -238,8 +279,21 @@ pub fn shortest_path(roads: &RoadNetwork, from: NodeId, to: NodeId) -> Option<Ve
 /// Queue a trip. The car appears once a route is found and the driveway is
 /// clear.
 pub(crate) fn request(world: &mut World, household: Option<HouseholdId>, purpose: TripPurpose, from: Place, to: Place) {
+    request_for(world, household, None, purpose, from, to);
+}
+
+/// Queue a trip driven by `citizen`.
+pub(crate) fn request_for(
+    world: &mut World,
+    household: Option<HouseholdId>,
+    citizen: Option<CitizenId>,
+    purpose: TripPurpose,
+    from: Place,
+    to: Place,
+) {
     world.traffic.pending.push_back(Departure {
         household,
+        citizen,
         purpose,
         from,
         to,
@@ -325,7 +379,14 @@ pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, end
                 };
             }
         }
-        ended.push((household, trip.purpose, end));
+        ended.push(Ended {
+            household,
+            citizen: trip.citizen,
+            owner: trip.owner,
+            purpose: trip.purpose,
+            end,
+            to: trip.to,
+        });
     }
 }
 
@@ -564,13 +625,21 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         {
             continue;
         }
+        let gone = |end| Ended {
+            household: dep.household,
+            citizen: dep.citizen,
+            owner: dep.citizen,
+            purpose: dep.purpose,
+            end,
+            to: dep.to,
+        };
         let waited = world.time.tick.saturating_sub(dep.requested_tick);
         if waited > secs_to_ticks(balance::MAX_DEPARTURE_WAIT_S) {
-            ended.push((dep.household, dep.purpose, TripEnd::Cancelled));
+            ended.push(gone(TripEnd::Cancelled));
             continue;
         }
         let (Some(from), Some(to)) = (resolve(world, dep.from), resolve(world, dep.to)) else {
-            ended.push((dep.household, dep.purpose, TripEnd::NoRoute));
+            ended.push(gone(TripEnd::NoRoute));
             continue;
         };
         let from_seg = world.roads.segments[from.segment].clone();
@@ -626,7 +695,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             {
                 Some(found) => (found.first == from_seg.b, found.segments, Some(found.last_node)),
                 None => {
-                    ended.push((dep.household, dep.purpose, TripEnd::NoRoute));
+                    ended.push(gone(TripEnd::NoRoute));
                     continue;
                 }
             }
@@ -649,7 +718,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             progress
         };
         if from.segment == to.segment && (to.from_a - from.from_a).abs() < 2.0 {
-            ended.push((dep.household, dep.purpose, TripEnd::Arrived(0.0)));
+            ended.push(gone(TripEnd::Arrived(0.0)));
             continue;
         }
         // Driveway clear in the chosen direction?
@@ -686,12 +755,46 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 wait_ticks: 0,
                 needs_route: false,
                 queued: false,
+                citizen: dep.citizen,
+                owner: dep.citizen,
+                from: dep.from,
             },
         );
-        if let Some(h) = dep.household.and_then(|h| world.households.get_mut(h)) {
+        if let Some(c) = dep.citizen {
+            board(world, c, id);
+        } else if let Some(h) = dep.household.and_then(|h| world.households.get_mut(h))
+            && h.citizens.is_empty()
+        {
             h.vehicle = Some(id);
         }
     }
+}
+
+/// The car of `driver` started: they and their passengers are in it.
+fn board(world: &mut World, driver: CitizenId, v: VehicleId) {
+    let Some(c) = world.citizens.get_mut(driver) else {
+        return;
+    };
+    let Location::Travelling(j) = &mut c.location else {
+        return;
+    };
+    j.vehicle = Some(v);
+    let hid = c.household;
+    let members = world
+        .households
+        .get(hid)
+        .map(|h| h.citizens.clone())
+        .unwrap_or_default();
+    for m in members {
+        if let Some(mc) = world.citizens.get_mut(m)
+            && let Location::Travelling(j) = &mut mc.location
+            && j.mode == TravelMode::Passenger
+            && j.driver == Some(driver)
+        {
+            j.vehicle = Some(v);
+        }
+    }
+    crate::people::refresh_household(world, hid);
 }
 
 fn update_loads(world: &mut World) {
@@ -771,6 +874,7 @@ pub fn debug_turns(world: &World) -> [u64; 4] {
 
 /// Queue a household-less trip between two positions (tests, tools).
 pub fn debug_request(world: &mut World, from: [f32; 2], to: [f32; 2]) {
+    crate::people::count_trip(world, TripPurpose::ToWork);
     request(world, None, TripPurpose::ToWork, Place::At(from), Place::At(to));
 }
 
