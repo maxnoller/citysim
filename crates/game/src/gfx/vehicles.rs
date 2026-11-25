@@ -132,7 +132,6 @@ impl VehicleVisual {
 
 /// Centre and heading of a vehicle's body whose front is at the sim's point.
 fn place(world: &World, v: &Vehicle, half: f32) -> (Vec2, f32) {
-    let right = |d: Vec2| Vec2::new(-d.y, d.x);
     if let Some(jm) = &v.junction
         && let Some(m) = world
             .traffic
@@ -155,11 +154,13 @@ fn place(world: &World, v: &Vehicle, half: f32) -> (Vec2, f32) {
     if let Some(s) = v.segment
         && let Some(seg) = world.roads.segments.get(s)
     {
-        let (pa, pb) = world.roads.segment_ends(s);
-        let (from, to) = if v.forward { (pa, pb) } else { (pb, pa) };
-        let (from, to) = (Vec2::from(from), Vec2::from(to));
-        let dir = (to - from).normalize_or(Vec2::X);
-        let p = from + dir * (v.progress - half) + right(dir) * vehicle_offset(seg.kind, v);
+        // Along the segment's curve, in the sim's lane; the rear of a car
+        // that has only just left a junction continues straight back.
+        let off = vehicle_offset(seg.kind, v);
+        let d = v.progress - half;
+        let pose = seg.pose_dir(v.forward, d.clamp(0.0, seg.length), off);
+        let dir = Vec2::from(pose.dir);
+        let p = Vec2::from(pose.pos) + dir * (d - d.clamp(0.0, seg.length));
         return (p, dir.y.atan2(dir.x));
     }
     let dir = Vec2::from_angle(v.heading);

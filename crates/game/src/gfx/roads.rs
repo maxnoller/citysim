@@ -77,7 +77,7 @@ fn rebuild_roads(
         GraphicsQuality::Medium => 0.5,
         GraphicsQuality::High => 1.0,
     };
-    let layout = road_geom::layout(&sim.world.roads);
+    let layout = road_geom::layout(&sim.world);
     // Bucket pieces and hash each chunk's content.
     let mut nodes: HashMap<IVec2, Vec<usize>> = HashMap::new();
     let mut segs: HashMap<IVec2, Vec<usize>> = HashMap::new();
@@ -91,7 +91,7 @@ fn rebuild_roads(
     }
     for (i, s) in layout.segs.iter().enumerate() {
         // The off-map highway goes in the chunk of its map end.
-        let c = chunk_of(if s.id.is_none() { s.b } else { s.mid() }, CHUNK);
+        let c = chunk_of(if s.id.is_none() { s.b() } else { s.mid() }, CHUNK);
         segs.entry(c).or_default().push(i);
         let h = hashers.entry(c).or_default();
         h.write_u8(2);

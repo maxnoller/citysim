@@ -1,9 +1,10 @@
 //! Trees and small props scattered deterministically over open land.
 //!
 //! * Inside the map: woods and copses from a noise field, cleared from
-//!   cells that are zoned, built on, roads, or next to a road. Merged into
-//!   one mesh per 32x32-cell chunk; a chunk is re-meshed only when its
-//!   cells change. Density follows `GraphicsQuality`.
+//!   zoned or built land (zoning cells of any lattice) and from the drawn
+//!   roads and their verges. Merged into one mesh per 256 m chunk; a chunk
+//!   is re-meshed only when the zoning or the roads in it change. Density
+//!   follows `GraphicsQuality`.
 //! * Around the map: cheaper trees in the countryside out to the fog, kept
 //!   clear of the highway corridor.
 
@@ -13,12 +14,14 @@ use std::hash::{Hash, Hasher};
 
 use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
-use citysim_sim::{CELL_SIZE, Cell, Grid, MAP_CELLS, MAP_SIZE_M, Occupant, World};
+use citysim_sim::{CELL_SIZE, Cell, MAP_CELLS, MAP_SIZE_M, World};
 
+use super::land::RoadEdges;
 use super::mesh_util::MeshBuilder;
 use super::noise::{self, Stream};
 use super::palette::{self, mix, shade};
 use super::props;
+use super::road_geom::chunk_of;
 use super::scene::{WorldMaterials, quality_settings};
 use crate::shared::{GameSet, GraphicsQuality, SimWorld};
 
@@ -34,7 +37,7 @@ const OUT_CHUNK: f32 = 512.0;
 
 #[derive(Default)]
 struct TreeChunks {
-    key: Option<((u64, u64), GraphicsQuality)>,
+    key: Option<(((u64, u64), (u64, u64)), GraphicsQuality)>,
     /// Chunk -> (cells hash, [near, far] entities, trees placed).
     chunks: HashMap<IVec2, (u64, [Entity; 2], usize)>,
     outside: Vec<Entity>,
@@ -49,8 +52,12 @@ pub struct TreesPlugin;
 
 impl Plugin for TreesPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TreeCount>()
-            .add_systems(Update, (rebuild_trees, rebuild_outside).in_set(GameSet::Render));
+        app.init_resource::<TreeCount>().add_systems(
+            Update,
+            (rebuild_trees, rebuild_outside)
+                .in_set(GameSet::Render)
+                .after(super::land::LandUpdate),
+        );
     }
 }
 
@@ -155,30 +162,54 @@ fn draw_tree(m: &mut MeshBuilder, t: &Tree, cheap: bool) {
     }
 }
 
-/// Cells where trees may stand: open land away from roads.
-fn open(grid: &Grid, c: Cell) -> bool {
-    let Some(cd) = grid.get(c) else { return true };
-    if cd.zone.is_some() || cd.occupant != Occupant::Empty {
+/// Whether a tree may stand at `p`: away from the drawn roads, and not on
+/// zoned or built land.
+fn open(world: &World, edges: &RoadEdges, p: Vec2) -> bool {
+    if let Some(c) = world.zoning.cell_at(p.into())
+        && let Some(zc) = world.zoning.cell(c)
+        && (zc.zone.is_some() || zc.building.is_some())
+    {
         return false;
     }
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            if grid.get(c.offset(dx, dy)).is_some_and(|n| n.occupant == Occupant::Road) {
-                return false;
-            }
-        }
-    }
-    true
+    edges.clearance(p) > 2.5
 }
 
-fn chunk_hash(grid: &Grid, cx: i32, cy: i32) -> u64 {
-    let mut h = DefaultHasher::new();
-    for y in cy * CHUNK..(cy + 1) * CHUNK {
-        for x in cx * CHUNK..(cx + 1) * CHUNK {
-            open(grid, Cell::new(x, y)).hash(&mut h);
+/// What a tree chunk depends on: zoning cells with a zone or building whose
+/// centre is in it (or near), and the roads near it (by their geometry).
+fn chunk_hashes(world: &World) -> HashMap<IVec2, u64> {
+    let size = CHUNK as f32 * CELL_SIZE;
+    let mut hashers: HashMap<IVec2, DefaultHasher> = HashMap::new();
+    let mut add = |lo: Vec2, hi: Vec2, f: &dyn Fn(&mut DefaultHasher)| {
+        let (c0, c1) = (chunk_of(lo, size), chunk_of(hi, size));
+        for y in c0.y..=c1.y {
+            for x in c0.x..=c1.x {
+                f(hashers.entry(IVec2::new(x, y)).or_default());
+            }
         }
+    };
+    for (c, zc) in world.zoning.cells() {
+        if zc.zone.is_none() && zc.building.is_none() {
+            continue;
+        }
+        let Some(p) = world.zoning.cell_center(c) else { continue };
+        let p = Vec2::from(p);
+        add(p - 6.0, p + 6.0, &|h| {
+            c.hash(h);
+            (zc.zone, zc.building.is_some()).hash(h);
+        });
     }
-    h.finish()
+    for (_, seg) in world.roads.segments.iter() {
+        let (lo, hi) = seg.curve.bounds();
+        let pad = 16.0;
+        add(Vec2::from(lo) - pad, Vec2::from(hi) + pad, &|h| {
+            for p in seg.curve.p {
+                p[0].to_bits().hash(h);
+                p[1].to_bits().hash(h);
+            }
+            (seg.kind as u8).hash(h);
+        });
+    }
+    hashers.into_iter().map(|(c, h)| (c, h.finish())).collect()
 }
 
 fn rebuild_trees(
@@ -189,21 +220,26 @@ fn rebuild_trees(
     mut state: Local<TreeChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut count: ResMut<TreeCount>,
+    edges: Res<RoadEdges>,
 ) {
-    let key = (sim.key(sim.world.versions.grid), *quality);
+    let key = (
+        (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads)),
+        *quality,
+    );
     if state.key == Some(key) {
         return;
     }
     let quality_changed = state.key.is_some_and(|(_, q)| q != *quality);
     state.key = Some(key);
-    let grid = &sim.world.grid;
+    let world = &sim.world;
+    let hashes = chunk_hashes(world);
     let dens = quality_settings(*quality).tree_density;
     let n = MAP_CELLS / CHUNK;
     let mut trees = Vec::new();
     for cy in 0..n {
         for cx in 0..n {
             let c = IVec2::new(cx, cy);
-            let hash = chunk_hash(grid, cx, cy);
+            let hash = hashes.get(&c).copied().unwrap_or(0);
             if !quality_changed && state.chunks.get(&c).is_some_and(|(h, _, _)| *h == hash) {
                 continue;
             }
@@ -212,12 +248,12 @@ fn rebuild_trees(
             let mut placed = 0;
             for y in cy * CHUNK..(cy + 1) * CHUNK {
                 for x in cx * CHUNK..(cx + 1) * CHUNK {
-                    if !open(grid, Cell::new(x, y)) {
-                        continue;
-                    }
                     trees.clear();
                     cell_trees(x, y, &mut trees);
-                    for t in trees.iter().filter(|t| keep(t, dens)) {
+                    for t in trees
+                        .iter()
+                        .filter(|t| keep(t, dens) && open(world, &edges, Vec2::new(t.pos.x, t.pos.z)))
+                    {
                         draw_tree(&mut m, t, false);
                         draw_tree(&mut far, t, true);
                         placed += usize::from(t.small == 0);

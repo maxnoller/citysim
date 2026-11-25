@@ -2,7 +2,7 @@
 //! `crate::shared`, Bevy input and the sim.
 //!
 //! Environment variables:
-//! * `CITYSIM_DEMO=town|city|jam` — a real town built by the sim's scripted
+//! * `CITYSIM_DEMO=town|city|hierarchy|organic|jam` — a real town built by the sim's scripted
 //!   players and fast-forwarded before the first frame (see `scenario`).
 //! * `CITYSIM_AUTOSHOT=out.png` (or `--autoshot out.png`) — screenshot and
 //!   exit; `CITYSIM_SHOT_VIEW=wide|street|close`, `CITYSIM_SHOT_DELAY=secs`,
@@ -13,6 +13,7 @@
 
 mod autoshot;
 mod control;
+mod organic;
 mod scenario;
 
 use bevy::prelude::*;
@@ -28,6 +29,9 @@ pub enum DemoKind {
     /// Round-2 hierarchy city: avenues as arterials, streets inside the
     /// blocks (`GridPlayer::hierarchy`), ~10,000 residents.
     Hierarchy,
+    /// Free-form town: curved avenue, rotated grid, ring, curved
+    /// cul-de-sacs (`organic`), ~3,000 residents.
+    Organic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,9 +80,10 @@ impl DevConfig {
             Some("city") => Some(DemoKind::City),
             Some("jam") => Some(DemoKind::Jam),
             Some("hierarchy") => Some(DemoKind::Hierarchy),
+            Some("organic") => Some(DemoKind::Organic),
             Some("" | "0") | None => None,
             Some(other) => {
-                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy or jam)");
+                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy, organic or jam)");
                 None
             }
         };

@@ -9,6 +9,7 @@ mod city_material;
 mod cursor;
 mod daynight;
 mod guides;
+mod land;
 mod loading;
 mod lot_props;
 mod lots;
@@ -62,6 +63,7 @@ impl Plugin for GfxPlugin {
             guides::GuidesPlugin,
             smoke::SmokePlugin,
             loading::LoadingPlugin,
+            land::LandPlugin,
             bench::BenchPlugin,
         ));
     }
@@ -114,6 +116,7 @@ mod reload_tests {
             .insert_resource(OverlayMode::Zones)
             .insert_resource(ActiveTool::Inspect)
             .add_plugins((
+                super::land::LandPlugin,
                 super::roads::RoadsPlugin,
                 super::zones::ZonesPlugin,
                 super::buildings::BuildingsPlugin,

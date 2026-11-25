@@ -1,22 +1,28 @@
-//! Road geometry from the road graph alone (never the grid).
+//! Road geometry from the road graph alone: every segment is a curve
+//! (`RoadSegment::curve`), every junction the surface the sim publishes
+//! (`junction::junction_shape`: the cut line of each arm and the kerbs
+//! between them).
 //!
-//! Every node gets a junction surface computed from the directions of the
-//! segments that meet there: for each pair of neighbouring arms (sorted by
-//! angle) the inner corner gets a rounded kerb (a fillet tangent to both
-//! kerb lines), the outer side of a bend gets an arc around the node, and a
-//! dead end gets a round cap. Each arm is pulled back from the node by a
-//! "setback" so the straight segment pieces start exactly where the junction
-//! surface ends: no gaps, no overlaps. Markings stop before junctions, which
-//! get crosswalks and stop lines.
+//! * A segment is meshed between the cuts at its two ends along a
+//!   [`Frame`]: centre-line samples from the curve's flattening (two for a
+//!   straight road, more where it bends), so the carriageway, kerbs,
+//!   sidewalks, lane lines, medians, arrows, wear and furniture all follow
+//!   the curve. Everything that runs along the road is a ribbon over the
+//!   frame at some offset to the right of travel (`a -> b`).
+//! * A junction is the polygon of its arm cuts joined by rounded kerb
+//!   corners (quadratic fillets towards where the two kerb lines meet,
+//!   finely sampled), with the sidewalk following the same corners; each
+//!   arm gets a zebra crossing square to it just inside its cut.
+//! * Dead ends get a round cap; the highway entry continues off the map.
 //!
 //! Everything here is pure (no ECS) so it is unit-tested.
 
-use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 use std::hash::{Hash, Hasher};
 
 use bevy::prelude::*;
-use citysim_sim::{NodeId, RoadKind, RoadNetwork, SegmentId};
+use citysim_sim::junction::{ArmCut, junction_shape};
+use citysim_sim::{Curve, NodeId, RoadKind, SegmentId, World};
 
 use super::mesh_util::{Glow, MeshBuilder};
 use super::palette::{self, lin, shade};
@@ -29,10 +35,10 @@ pub const WALK_Y: f32 = 0.19;
 pub const MARK_Y: f32 = ROAD_Y + 0.016;
 /// Width of the darker kerb stone along the sidewalk edge.
 const KERB_W: f32 = 0.22;
-/// Preferred kerb corner radius at junctions.
-const FILLET_R: f32 = 3.2;
-/// Distance from the junction edge to the end of the centre line.
-const JUNCTION_MARGIN: f32 = 3.6;
+/// Flattening tolerance of road centre lines, metres.
+const FLAT_TOL: f32 = 0.04;
+/// Samples of a kerb corner.
+const CORNER_STEPS: usize = 10;
 
 /// Cross-section of a road kind.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,8 +71,7 @@ pub fn style(kind: RoadKind) -> Style {
             lanes: 1,
         },
         // 13 m carriageway (two 3 m lanes each way either side of a narrow
-        // planted median), wider sidewalks: 16 m overall, so it reaches
-        // into the cells beside its own (buildings there step back).
+        // planted median), wider sidewalks: 16 m overall.
         RoadKind::Avenue => Style {
             h: RoadKind::Avenue.half_width_m(),
             walk: 1.5,
@@ -90,103 +95,171 @@ pub fn lane_offset(kind: RoadKind, lane: u8) -> f32 {
     kind.lane_offset_m(lane)
 }
 
-fn perp(v: Vec2) -> Vec2 {
+/// Right of a direction (the sim's `right_of`: traffic drives on the right).
+pub fn perp(v: Vec2) -> Vec2 {
     Vec2::new(-v.y, v.x)
 }
 
-fn lift(p: Vec2, y: f32) -> Vec3 {
+pub fn lift(p: Vec2, y: f32) -> Vec3 {
     Vec3::new(p.x, y, p.y)
 }
 
-/// One segment as seen from a node.
+// ---------------------------------------------------------------- frames
+
+/// Centre-line samples of a curve: `(distance along, point, unit
+/// direction)`, dense where it bends, two points when it is straight.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Frame {
+    pub pts: Vec<(f32, Vec2, Vec2)>,
+}
+
+impl Frame {
+    pub fn new(curve: &Curve) -> Frame {
+        Self::with_tol(curve, FLAT_TOL)
+    }
+
+    pub fn with_tol(curve: &Curve, tol: f32) -> Frame {
+        let pts = curve
+            .flatten_offset(0.0, tol)
+            .into_iter()
+            .map(|(d, p)| (d, Vec2::from(p), Vec2::from(curve.pose_at(d, 0.0).dir)))
+            .collect();
+        Frame { pts }
+    }
+
+    /// Frame of a straight line.
+    pub fn line(a: Vec2, b: Vec2) -> Frame {
+        let d = (b - a).normalize_or(Vec2::X);
+        Frame {
+            pts: vec![(0.0, a, d), ((b - a).length(), b, d)],
+        }
+    }
+
+    pub fn len(&self) -> f32 {
+        self.pts.last().map_or(0.0, |p| p.0)
+    }
+
+    #[cfg(test)]
+    pub fn is_straight(&self) -> bool {
+        self.pts.len() <= 2
+    }
+
+    /// Point and unit direction `t` metres along (clamped to the ends,
+    /// extrapolated straight beyond them).
+    pub fn pose(&self, t: f32) -> (Vec2, Vec2) {
+        let n = self.pts.len();
+        if n == 0 {
+            return (Vec2::ZERO, Vec2::X);
+        }
+        if t <= self.pts[0].0 {
+            let (d, p, dir) = self.pts[0];
+            return (p + dir * (t - d), dir);
+        }
+        if t >= self.pts[n - 1].0 {
+            let (d, p, dir) = self.pts[n - 1];
+            return (p + dir * (t - d), dir);
+        }
+        let k = self.pts.partition_point(|p| p.0 <= t).clamp(1, n - 1);
+        let (d0, p0, r0) = self.pts[k - 1];
+        let (d1, p1, r1) = self.pts[k];
+        let u = ((t - d0) / (d1 - d0).max(1e-6)).clamp(0.0, 1.0);
+        (p0.lerp(p1, u), r0.lerp(r1, u).normalize_or(r0))
+    }
+
+    /// The point `t` along and `o` to the right.
+    pub fn at(&self, t: f32, o: f32) -> Vec2 {
+        let (p, d) = self.pose(t);
+        p + perp(d) * o
+    }
+
+    /// Distances of the samples strictly inside `t0..t1`, with both ends.
+    pub fn steps(&self, t0: f32, t1: f32) -> Vec<f32> {
+        let mut v = vec![t0];
+        v.extend(self.pts.iter().map(|p| p.0).filter(|&d| d > t0 + 1e-3 && d < t1 - 1e-3));
+        v.push(t1);
+        v
+    }
+
+    /// The line `o` to the right between `t0` and `t1`.
+    pub fn line_at(&self, t0: f32, t1: f32, o: f32) -> Vec<Vec2> {
+        self.steps(t0, t1).into_iter().map(|t| self.at(t, o)).collect()
+    }
+}
+
+/// Upward ribbon along `f` from `t0` to `t1`, between offsets `o0` and `o1`.
+#[allow(clippy::too_many_arguments)]
+pub fn strip(m: &mut MeshBuilder, f: &Frame, t0: f32, t1: f32, o0: f32, o1: f32, y: f32, c: [f32; 4]) {
+    if t1 - t0 < 1e-4 {
+        return;
+    }
+    let steps = f.steps(t0, t1);
+    for w in steps.windows(2) {
+        let q = [f.at(w[0], o0), f.at(w[1], o0), f.at(w[1], o1), f.at(w[0], o1)];
+        m.quad_up(q.map(|p| lift(p, y)), c);
+    }
+}
+
+/// Vertical face along `f` at offset `o` from `y0` to `y1`, facing towards
+/// increasing offset when `out` is positive.
+#[allow(clippy::too_many_arguments)]
+fn side_face(m: &mut MeshBuilder, f: &Frame, t0: f32, t1: f32, o: f32, y0: f32, y1: f32, out: f32, color: Color) {
+    let line = f.line_at(t0, t1, o);
+    for (k, w) in line.windows(2).enumerate() {
+        let (_, d) = f.pose(t0 + (t1 - t0) * (k as f32 + 0.5) / (line.len() - 1) as f32);
+        vface(m, w[0], w[1], y0, y1, perp(d) * out, color);
+    }
+}
+
+// ---------------------------------------------------------------- layout
+
+/// One arm of a junction: where its road surface is cut.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arm {
     pub seg: SegmentId,
-    /// Unit direction from the node along the segment.
+    /// Unit direction away from the node at the cut.
     pub dir: Vec2,
+    /// Centre-line point of the cut.
+    pub center: Vec2,
     pub style: Style,
-    pub len: f32,
-    /// Where the straight segment geometry starts, metres from the node.
+    /// Metres from the node along the curve to the cut (the sim's stop
+    /// line).
     pub setback: f32,
-    /// Where the sim's stop line is, metres from the node (junctions with
-    /// three or more arms; 0 otherwise).
+    /// Same as `setback` (kept for the furniture code: where the sim's
+    /// stop line is).
     pub stop: f32,
 }
 
-/// Stop line distances for the arms of one node, exactly as the sim lays
-/// out its junction boxes (`citysim_sim::junction`): clear of the other
-/// arms' carriageways plus the sim's margin, capped for short segments.
-fn sim_stops(arms: &[Arm], kinds: &[RoadKind]) -> Vec<f32> {
-    let n = arms.len();
-    if n < 3 {
-        return vec![0.0; n];
+impl Arm {
+    /// Point `along` metres further out from the cut (straight along the
+    /// cut direction) and `o` to the right of `dir`.
+    pub fn at(&self, along: f32, o: f32) -> Vec2 {
+        self.center + self.dir * along + perp(self.dir) * o
     }
-    // Opposite pairs, greedily by straightness (as the sim pairs them).
-    let mut opposite: Vec<Option<usize>> = vec![None; n];
-    let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
-    for i in 0..n {
-        for j in i + 1..n {
-            let d = arms[i].dir.dot(arms[j].dir);
-            if d < -0.85 {
-                pairs.push((d, i, j));
-            }
-        }
-    }
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for (_, i, j) in pairs {
-        if opposite[i].is_none() && opposite[j].is_none() {
-            opposite[i] = Some(j);
-            opposite[j] = Some(i);
-        }
-    }
-    let widest = kinds.iter().map(|k| k.half_width_m()).fold(0.0, f32::max);
-    (0..n)
-        .map(|i| {
-            let mut sb: f32 = 0.0;
-            for j in 0..n {
-                if i == j || opposite[i] == Some(j) {
-                    continue;
-                }
-                let (di, dj) = (arms[i].dir, arms[j].dir);
-                let sin = di.perp_dot(dj).abs().max(0.3);
-                let cos = di.dot(dj).abs();
-                let need = (kinds[j].half_width_m() + kinds[i].half_width_m() * cos) / sin;
-                sb = sb.max(need + citysim_sim::balance::JUNCTION_MARGIN_M);
-            }
-            sb.min(3.0 * widest + 2.0).min(arms[i].len * 0.4)
-        })
-        .collect()
 }
 
-/// Rounded inner corner between two arms.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Fillet {
-    /// Centre relative to the node.
-    pub center: Vec2,
-    pub r: f32,
-    /// Tangent point parameters along each arm.
-    pub ti: f32,
-    pub tj: f32,
-}
-
-/// The gap between arm `i` and the next arm counter-clockwise.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Wedge {
-    pub i: usize,
-    pub j: usize,
-    /// Angle from arm `i` to arm `j`, in `(0, 2 pi]`.
-    pub alpha: f32,
-    pub fillet: Option<Fillet>,
+/// What a node needs drawn.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeKind {
+    /// A junction surface (three or more arms, or a bend / merge box).
+    Junction,
+    /// A dead end: round cap beyond the node, towards `-dir` of its arm.
+    End,
+    /// A smooth continuation of two segments: nothing but a filler where
+    /// the two ends meet at a slight angle.
+    Through,
+    /// The highway entry at the map edge: the road continues off the map.
+    Entry,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeLayout {
     pub id: NodeId,
     pub pos: Vec2,
+    pub kind: NodeKind,
+    /// Arms in counter-clockwise order (sim axes).
     pub arms: Vec<Arm>,
-    pub wedges: Vec<Wedge>,
-    /// The highway entry: drawn as a road running off the map instead.
-    pub entry: bool,
+    /// Number of segments meeting here.
+    pub degree: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,33 +267,58 @@ pub struct SegLayout {
     /// `None` for the decorative highway beyond the map edge.
     pub id: Option<SegmentId>,
     pub kind: RoadKind,
-    pub a: Vec2,
-    pub b: Vec2,
     pub style: Style,
+    /// Centre line `a -> b`.
+    pub frame: Frame,
+    /// Where the road surface starts / ends (metres from `a` / `b`).
     pub s_a: f32,
     pub s_b: f32,
-    /// Stop line distance from each end node (0 where no junction).
-    pub stop_a: f32,
-    pub stop_b: f32,
     /// Number of segments at each end node.
     pub deg_a: usize,
     pub deg_b: usize,
-    /// Straight continuation at a degree-2 node (markings run through).
-    pub straight_a: bool,
-    pub straight_b: bool,
+    /// The end has a junction box (markings stop at the cut; arrows).
+    pub box_a: bool,
+    pub box_b: bool,
 }
 
 impl SegLayout {
-    pub fn len(&self) -> f32 {
-        (self.b - self.a).length()
+    /// A segment alone (no junctions): tool ghosts.
+    pub fn bare(curve: &Curve, kind: RoadKind) -> SegLayout {
+        SegLayout {
+            id: None,
+            kind,
+            style: style(kind),
+            frame: Frame::new(curve),
+            s_a: 0.0,
+            s_b: 0.0,
+            deg_a: 1,
+            deg_b: 1,
+            box_a: false,
+            box_b: false,
+        }
     }
 
-    pub fn dir(&self) -> Vec2 {
-        (self.b - self.a).normalize_or(Vec2::X)
+    pub fn len(&self) -> f32 {
+        self.frame.len()
+    }
+
+    /// Start point of the centre line.
+    pub fn a(&self) -> Vec2 {
+        self.frame.pts.first().map_or(Vec2::ZERO, |p| p.1)
+    }
+
+    /// End point of the centre line.
+    pub fn b(&self) -> Vec2 {
+        self.frame.pts.last().map_or(Vec2::ZERO, |p| p.1)
     }
 
     pub fn mid(&self) -> Vec2 {
-        (self.a + self.b) * 0.5
+        self.frame.pose(self.len() * 0.5).0
+    }
+
+    /// Drawn part: from `t0` to `t1` along the centre line.
+    pub fn span(&self) -> (f32, f32) {
+        (self.s_a, self.len() - self.s_b)
     }
 }
 
@@ -230,141 +328,115 @@ pub struct RoadLayout {
     pub segs: Vec<SegLayout>,
 }
 
-/// Fillet between arm `i`'s left kerb and arm `j`'s right kerb, with the
-/// radius reduced so the tangent points stay within `lim_i` / `lim_j`.
-fn fillet(ai: &Arm, aj: &Arm, alpha: f32, lim_i: f32, lim_j: f32) -> Fillet {
-    let (s, c) = alpha.sin_cos();
-    let (hi, hj) = (ai.style.h, aj.style.h);
-    // Tangent parameters are linear in R with slope cot(alpha / 2).
-    let k = (1.0 + c) / s;
-    let x0 = (hi * c + hj) / s;
-    let tj0 = x0 * c + hi * s;
-    let r_max = ((lim_i - x0) / k).min((lim_j - tj0) / k);
-    let r = FILLET_R.min(r_max).max(0.0);
-    let y = hi + r;
-    let x = (y * c + hj + r) / s;
-    let center = ai.dir * x + perp(ai.dir) * y;
-    Fillet {
-        center,
-        r,
-        ti: x,
-        tj: x * c + y * s,
-    }
-}
-
 /// Lay out junctions and segment pieces for the whole network.
-pub fn layout(roads: &RoadNetwork) -> RoadLayout {
+pub fn layout(world: &World) -> RoadLayout {
+    let roads = &world.roads;
     let mut out = RoadLayout::default();
-    let mut setbacks: HashMap<(SegmentId, NodeId), f32> = HashMap::new();
-    let mut straight: HashMap<(SegmentId, NodeId), bool> = HashMap::new();
-    let mut stop_at: HashMap<(SegmentId, NodeId), f32> = HashMap::new();
+    let mut cut: std::collections::HashMap<(SegmentId, NodeId), f32> = std::collections::HashMap::new();
+    let mut boxed: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     for (nid, node) in roads.nodes.iter() {
         let pos = Vec2::from(node.pos);
+        let degree = node.segments.len();
+        let kind_of = |s: SegmentId| roads.segments.get(s).map_or(RoadKind::Street, |s| s.kind);
+        if let Some(shape) = junction_shape(world, nid, 0.0) {
+            let arms: Vec<Arm> = shape
+                .arms
+                .iter()
+                .map(|a: &ArmCut| arm_of(a, kind_of(a.segment)))
+                .collect();
+            for a in &arms {
+                cut.insert((a.seg, nid), a.setback);
+            }
+            boxed.insert(nid);
+            out.nodes.push(NodeLayout {
+                id: nid,
+                pos,
+                kind: NodeKind::Junction,
+                arms,
+                degree,
+            });
+            continue;
+        }
+        // No box: dead end, entry or smooth continuation. Arms at the node.
         let mut arms: Vec<Arm> = node
             .segments
             .iter()
-            .filter_map(|&sid| {
-                let seg = roads.segments.get(sid)?;
-                let other = roads.nodes.get(seg.other(nid))?;
-                let d = Vec2::from(other.pos) - pos;
-                let len = d.length();
-                (len > 1e-3).then(|| Arm {
-                    seg: sid,
-                    dir: d / len,
+            .filter_map(|&s| {
+                let seg = roads.segments.get(s)?;
+                Some(Arm {
+                    seg: s,
+                    dir: Vec2::from(seg.dir_from(nid)).normalize_or(Vec2::X),
+                    center: pos,
                     style: style(seg.kind),
-                    len,
                     setback: 0.0,
                     stop: 0.0,
                 })
             })
             .collect();
-        let kinds: Vec<RoadKind> = arms
-            .iter()
-            .map(|a| roads.segments.get(a.seg).map_or(RoadKind::Street, |s| s.kind))
-            .collect();
-        let stops = sim_stops(&arms, &kinds);
-        for (a, st) in arms.iter_mut().zip(stops) {
-            a.stop = st;
-            stop_at.insert((a.seg, nid), st);
-        }
-        if arms.is_empty() {
-            continue;
-        }
-        arms.sort_by(|a, b| a.dir.y.atan2(a.dir.x).total_cmp(&b.dir.y.atan2(b.dir.x)));
-        let n = arms.len();
-        let mut wedges = Vec::with_capacity(n);
-        for i in 0..n {
-            let j = (i + 1) % n;
-            let (ai, aj) = (&arms[i], &arms[j]);
-            let mut alpha = aj.dir.y.atan2(aj.dir.x) - ai.dir.y.atan2(ai.dir.x);
-            if alpha <= 1e-4 {
-                alpha += TAU;
-            }
-            let fillet = (alpha < PI - 0.02).then(|| fillet(ai, aj, alpha, ai.len * 0.48, aj.len * 0.48));
-            wedges.push(Wedge { i, j, alpha, fillet });
-        }
-        for w in &wedges {
-            if let Some(f) = w.fillet {
-                arms[w.i].setback = arms[w.i].setback.max(f.ti);
-                arms[w.j].setback = arms[w.j].setback.max(f.tj);
-            }
-        }
-        for a in &arms {
-            setbacks.insert((a.seg, nid), a.setback);
-            let is_straight = n == 2 && wedges.iter().all(|w| (w.alpha - PI).abs() < 0.02);
-            straight.insert((a.seg, nid), is_straight);
-        }
+        arms.sort_by(|a, b| angle(a.dir).total_cmp(&angle(b.dir)));
+        let kind = match degree {
+            0 => continue,
+            1 if roads.entry == Some(nid) => NodeKind::Entry,
+            1 => NodeKind::End,
+            _ => NodeKind::Through,
+        };
         out.nodes.push(NodeLayout {
             id: nid,
             pos,
-            entry: roads.entry == Some(nid) && n == 1,
+            kind,
             arms,
-            wedges,
+            degree,
         });
     }
     let degree = |n: NodeId| roads.nodes.get(n).map_or(0, |n| n.segments.len());
     for (sid, seg) in roads.segments.iter() {
-        let (Some(na), Some(nb)) = (roads.nodes.get(seg.a), roads.nodes.get(seg.b)) else {
-            continue;
-        };
         out.segs.push(SegLayout {
             id: Some(sid),
             kind: seg.kind,
-            a: Vec2::from(na.pos),
-            b: Vec2::from(nb.pos),
             style: style(seg.kind),
-            s_a: setbacks.get(&(sid, seg.a)).copied().unwrap_or(0.0),
-            s_b: setbacks.get(&(sid, seg.b)).copied().unwrap_or(0.0),
-            stop_a: stop_at.get(&(sid, seg.a)).copied().unwrap_or(0.0),
-            stop_b: stop_at.get(&(sid, seg.b)).copied().unwrap_or(0.0),
+            frame: Frame::new(&seg.curve),
+            s_a: cut.get(&(sid, seg.a)).copied().unwrap_or(0.0),
+            s_b: cut.get(&(sid, seg.b)).copied().unwrap_or(0.0),
             deg_a: degree(seg.a),
             deg_b: degree(seg.b),
-            straight_a: straight.get(&(sid, seg.a)).copied().unwrap_or(false),
-            straight_b: straight.get(&(sid, seg.b)).copied().unwrap_or(false),
+            box_a: boxed.contains(&seg.a),
+            box_b: boxed.contains(&seg.b),
         });
     }
     // The highway continues off the map into the fog.
     for node in &out.nodes {
-        if node.entry {
+        if node.kind == NodeKind::Entry {
             let arm = &node.arms[0];
             out.segs.push(SegLayout {
                 id: None,
                 kind: RoadKind::Highway,
-                a: node.pos - arm.dir * super::scene::OUTSIDE,
-                b: node.pos,
                 style: arm.style,
+                frame: Frame::line(node.pos - arm.dir * super::scene::OUTSIDE, node.pos),
                 s_a: 0.0,
                 s_b: 0.0,
-                stop_a: 0.0,
-                stop_b: 0.0,
                 deg_a: 2,
                 deg_b: 2,
-                straight_a: true,
-                straight_b: true,
+                box_a: false,
+                box_b: false,
             });
         }
     }
     out
+}
+
+fn arm_of(a: &ArmCut, kind: RoadKind) -> Arm {
+    Arm {
+        seg: a.segment,
+        dir: Vec2::from(a.dir).normalize_or(Vec2::X),
+        center: Vec2::from(a.center),
+        style: style(kind),
+        setback: a.setback,
+        stop: a.setback,
+    }
+}
+
+fn angle(v: Vec2) -> f32 {
+    v.y.atan2(v.x)
 }
 
 // ---------------------------------------------------------------- hashing
@@ -377,26 +449,38 @@ fn hf<H: Hasher>(h: &mut H, v: f32) {
 pub fn hash_node<H: Hasher>(n: &NodeLayout, h: &mut H) {
     hf(h, n.pos.x);
     hf(h, n.pos.y);
-    n.entry.hash(h);
+    (n.degree, n.kind == NodeKind::Junction, n.kind == NodeKind::Entry).hash(h);
     for a in &n.arms {
-        hf(h, a.dir.x);
-        hf(h, a.dir.y);
-        hf(h, a.setback);
-        a.style.highway.hash(h);
+        for v in [
+            a.dir.x,
+            a.dir.y,
+            a.center.x,
+            a.center.y,
+            a.setback,
+            a.style.h,
+            a.style.walk,
+        ] {
+            hf(h, v);
+        }
     }
 }
 
 pub fn hash_seg<H: Hasher>(s: &SegLayout, h: &mut H) {
-    for v in [s.a.x, s.a.y, s.b.x, s.b.y, s.s_a, s.s_b, s.stop_a, s.stop_b] {
+    for (d, p, _) in &s.frame.pts {
+        for v in [*d, p.x, p.y] {
+            hf(h, v);
+        }
+    }
+    for v in [s.s_a, s.s_b] {
         hf(h, v);
     }
-    (s.deg_a, s.deg_b, s.straight_a, s.straight_b, s.style.highway).hash(h);
+    (s.deg_a, s.deg_b, s.box_a, s.box_b, s.style.highway, s.style.lanes).hash(h);
 }
 
 // ---------------------------------------------------------------- meshing
 
 /// Vertical face along `a -> b` (2D), from `y0` to `y1`, facing `toward`.
-fn vface(m: &mut MeshBuilder, a: Vec2, b: Vec2, y0: f32, y1: f32, toward: Vec2, color: Color) {
+pub fn vface(m: &mut MeshBuilder, a: Vec2, b: Vec2, y0: f32, y1: f32, toward: Vec2, color: Color) {
     if (b - a).length_squared() < 1e-8 {
         return;
     }
@@ -409,12 +493,11 @@ fn vface(m: &mut MeshBuilder, a: Vec2, b: Vec2, y0: f32, y1: f32, toward: Vec2, 
     }
 }
 
-/// A sidewalk following paired kerb / outer points. `road_side` points from
-/// the walk towards the road at each pair.
+/// A sidewalk following paired kerb / outer points.
 fn walk_strip(m: &mut MeshBuilder, kerb: &[Vec2], outer: &[Vec2]) {
     let walk = lin(palette::SIDEWALK);
     let kerb_col = lin(palette::KERB);
-    for k in 0..kerb.len().saturating_sub(1) {
+    for k in 0..kerb.len().min(outer.len()).saturating_sub(1) {
         let (k0, k1, o0, o1) = (kerb[k], kerb[k + 1], outer[k], outer[k + 1]);
         let w0 = (o0 - k0).length().max(1e-4);
         let w1 = (o1 - k1).length().max(1e-4);
@@ -434,7 +517,7 @@ fn walk_end(m: &mut MeshBuilder, kerb: Vec2, outer: Vec2, toward: Vec2) {
 }
 
 fn arc(center: Vec2, r: f32, a0: f32, sweep: f32) -> Vec<Vec2> {
-    let steps = ((sweep.abs() / (PI / 12.0)).ceil() as usize).max(1);
+    let steps = ((sweep.abs() / (PI / 16.0)).ceil() as usize).max(1);
     (0..=steps)
         .map(|k| {
             let a = a0 + sweep * k as f32 / steps as f32;
@@ -443,160 +526,233 @@ fn arc(center: Vec2, r: f32, a0: f32, sweep: f32) -> Vec<Vec2> {
         .collect()
 }
 
-fn angle(v: Vec2) -> f32 {
-    v.y.atan2(v.x)
+/// Where the lines `p + s d` and `q + u e` meet: `(s, u)`.
+fn meet(p: Vec2, d: Vec2, q: Vec2, e: Vec2) -> Option<(f32, f32)> {
+    let den = d.perp_dot(e);
+    if den.abs() < 1e-5 {
+        return None;
+    }
+    let w = q - p;
+    Some((w.perp_dot(e) / den, w.perp_dot(d) / den))
 }
 
-/// Junction surface, kerb corners and end caps of one node.
-pub fn mesh_node(m: &mut MeshBuilder, node: &NodeLayout) {
-    if node.entry {
-        return;
+/// The kerb corner from arm `a`'s counter-clockwise kerb to arm `b`'s
+/// clockwise kerb, `extra` metres outside each carriageway (0 = the
+/// asphalt edge): a quadratic towards where the two kerb lines meet (the
+/// sim's outline uses the same construction), sampled finely; a straight
+/// edge when they do not meet near the node.
+fn corner(node: Vec2, a: &Arm, b: &Arm, extra_a: f32, extra_b: f32) -> Vec<Vec2> {
+    let (ha, hb) = (a.style.h + extra_a, b.style.h + extra_b);
+    let start = a.center + perp(a.dir) * ha;
+    let end = b.center - perp(b.dir) * hb;
+    let near = 3.0 * (a.style.h + b.style.h) + a.setback + b.setback + extra_a + extra_b;
+    let ctrl = meet(start, a.dir, end, b.dir)
+        .map(|(s, _)| start + a.dir * s)
+        .filter(|c| c.distance(node) < near);
+    match ctrl {
+        Some(c) => (0..=CORNER_STEPS)
+            .map(|k| {
+                let t = k as f32 / CORNER_STEPS as f32;
+                let u = 1.0 - t;
+                start * (u * u) + c * (2.0 * u * t) + end * (t * t)
+            })
+            .collect(),
+        None => vec![start, end],
     }
-    let p = node.pos;
-    let asphalt = lin(if node.arms.iter().any(|a| a.style.highway) {
+}
+
+/// Junction surface, kerb corners, sidewalks and crossings of one node.
+pub fn mesh_node(m: &mut MeshBuilder, node: &NodeLayout) {
+    match node.kind {
+        NodeKind::Entry => {}
+        NodeKind::End => mesh_end(m, node),
+        NodeKind::Through => mesh_through(m, node),
+        NodeKind::Junction => mesh_junction(m, node),
+    }
+}
+
+fn asphalt_of(arms: &[Arm]) -> [f32; 4] {
+    lin(if arms.iter().any(|a| a.style.highway) {
         palette::ASPHALT_HIGHWAY
     } else {
         palette::ASPHALT
-    });
+    })
+}
+
+fn mesh_junction(m: &mut MeshBuilder, node: &NodeLayout) {
+    let arms = &node.arms;
+    let k = arms.len();
+    if k == 0 {
+        return;
+    }
     let mut ring: Vec<Vec2> = Vec::new();
-    for w in &node.wedges {
-        let (ai, aj) = (&node.arms[w.i], &node.arms[w.j]);
-        let (ni, nj) = (perp(ai.dir), perp(aj.dir));
-        let (hi, hj) = (ai.style.h, aj.style.h);
-        ring.push(p + ai.dir * ai.setback - ni * hi);
-        ring.push(p + ai.dir * ai.setback + ni * hi);
-        let both_walk = ai.style.walk > 0.0 && aj.style.walk > 0.0;
-        match w.fillet {
-            Some(f) => {
-                let o = p + f.center;
-                let pts = arc(o, f.r, angle(-ni), -(PI - w.alpha));
-                ring.extend(&pts);
-                // Sidewalks: bands from the tangent points out to the
-                // setbacks, and the rounded corner between them.
-                if ai.style.walk > 0.0 {
-                    let (k0, k1) = (p + ai.dir * f.ti + ni * hi, p + ai.dir * ai.setback + ni * hi);
-                    let off = ni * ai.style.walk;
-                    walk_strip(m, &[k0, k1], &[k0 + off, k1 + off]);
-                    if !both_walk {
-                        walk_end(m, k0, k0 + off, -ai.dir);
-                    }
-                }
-                if aj.style.walk > 0.0 {
-                    let (k0, k1) = (p + aj.dir * aj.setback - nj * hj, p + aj.dir * f.tj - nj * hj);
-                    let off = -nj * aj.style.walk;
-                    walk_strip(m, &[k0, k1], &[k0 + off, k1 + off]);
-                    if !both_walk {
-                        walk_end(m, k1, k1 + off, -aj.dir);
-                    }
-                }
-                if both_walk {
-                    let width = ai.style.walk.min(aj.style.walk);
-                    let outer: Vec<Vec2> = pts
-                        .iter()
-                        .map(|&q| o + (q - o).normalize_or_zero() * (f.r - width).max(0.0))
-                        .collect();
-                    walk_strip(m, &pts, &outer);
-                }
+    for i in 0..k {
+        let (a, b) = (&arms[i], &arms[(i + 1) % k]);
+        ring.push(a.center - perp(a.dir) * a.style.h);
+        let kerb = corner(node.pos, a, b, 0.0, 0.0);
+        ring.extend(&kerb);
+        // The sidewalk round the corner.
+        if a.style.walk > 0.0 && b.style.walk > 0.0 {
+            let outer = corner(node.pos, a, b, a.style.walk, b.style.walk);
+            if outer.len() == kerb.len() {
+                walk_strip(m, &kerb, &outer);
+            } else {
+                // One side curved, the other straight: pair them by share.
+                let n = kerb.len().max(outer.len());
+                let pick = |v: &Vec<Vec2>, j: usize| {
+                    let t = j as f32 / (n - 1) as f32 * (v.len() - 1) as f32;
+                    let i0 = t.floor() as usize;
+                    let i1 = (i0 + 1).min(v.len() - 1);
+                    v[i0].lerp(v[i1], t - i0 as f32)
+                };
+                let k2: Vec<Vec2> = (0..n).map(|j| pick(&kerb, j)).collect();
+                let o2: Vec<Vec2> = (0..n).map(|j| pick(&outer, j)).collect();
+                walk_strip(m, &k2, &o2);
             }
-            None => {
-                let sweep = w.alpha - PI;
-                let pts: Vec<Vec2> = arc(Vec2::ZERO, 1.0, angle(ni), sweep)
-                    .into_iter()
-                    .enumerate()
-                    .map(|(k, u)| {
-                        let t = k as f32 / (((sweep / (PI / 12.0)).ceil() as usize).max(1)) as f32;
-                        p + u * (hi + (hj - hi) * t)
-                    })
-                    .collect();
-                ring.extend(&pts);
-                if ai.style.walk > 0.0 {
-                    let (k0, k1) = (p + ni * hi, p + ai.dir * ai.setback + ni * hi);
-                    let off = ni * ai.style.walk;
-                    walk_strip(m, &[k0, k1], &[k0 + off, k1 + off]);
-                    if !both_walk {
-                        walk_end(m, k0, k0 + off, -ai.dir);
-                    }
-                }
-                if aj.style.walk > 0.0 {
-                    let (k0, k1) = (p + aj.dir * aj.setback - nj * hj, p - nj * hj);
-                    let off = -nj * aj.style.walk;
-                    walk_strip(m, &[k0, k1], &[k0 + off, k1 + off]);
-                    if !both_walk {
-                        walk_end(m, k1, k1 + off, -aj.dir);
-                    }
-                }
-                if both_walk && sweep > 1e-3 {
-                    let width = ai.style.walk.min(aj.style.walk);
-                    let outer: Vec<Vec2> = pts.iter().map(|&q| q + (q - p).normalize_or_zero() * width).collect();
-                    walk_strip(m, &pts, &outer);
-                }
-                if !node.arms.iter().any(|a| a.style.walk > 0.0) && sweep > 1e-3 {
-                    // Highway end: exposed slab edge.
-                    for k in 0..pts.len() - 1 {
-                        vface(m, pts[k], pts[k + 1], 0.0, ROAD_Y, pts[k] - p, palette::KERB);
-                    }
+        } else {
+            if a.style.walk > 0.0 {
+                let p = a.center + perp(a.dir) * a.style.h;
+                walk_end(m, p, p + perp(a.dir) * a.style.walk, -a.dir);
+            }
+            if b.style.walk > 0.0 {
+                let p = b.center - perp(b.dir) * b.style.h;
+                walk_end(m, p, p - perp(b.dir) * b.style.walk, -b.dir);
+            }
+            if !arms.iter().any(|x| x.style.walk > 0.0) {
+                // Highway pieces: exposed slab edge.
+                for w in kerb.windows(2) {
+                    vface(
+                        m,
+                        w[0],
+                        w[1],
+                        0.0,
+                        ROAD_Y,
+                        (w[0] + w[1]) * 0.5 - node.pos,
+                        palette::KERB,
+                    );
                 }
             }
         }
     }
-    let center = lift(p, ROAD_Y);
     let ring3: Vec<Vec3> = ring.iter().map(|&q| lift(q, ROAD_Y)).collect();
-    m.fan_up(center, &ring3, asphalt);
+    m.fan_up(lift(node.pos, ROAD_Y), &ring3, asphalt_of(arms));
+    // Zebra crossings just inside each arm's cut (the sim keeps its margin
+    // between the stop line and the crossing carriageways free for them).
+    if node.degree >= 3 {
+        let white = lin(palette::MARKING);
+        for a in arms {
+            if a.style.highway {
+                continue;
+            }
+            let width = (citysim_sim::balance::JUNCTION_MARGIN_M - 0.75).min(2.4);
+            if width < 1.2 || a.setback < width + 1.0 {
+                continue;
+            }
+            let zebra_w = 0.5;
+            let mut o = -a.style.h + 0.45;
+            while o + zebra_w <= a.style.h - 0.45 + 1e-3 {
+                let q = [
+                    a.at(-0.4, o),
+                    a.at(-0.4 - width, o),
+                    a.at(-0.4 - width, o + zebra_w),
+                    a.at(-0.4, o + zebra_w),
+                ];
+                m.quad_up(q.map(|p| lift(p, MARK_Y + 0.002)), white);
+                o += zebra_w * 2.0;
+            }
+        }
+    }
 }
 
-/// Dashed line along `dir` at lateral offset `off`, between params.
+/// Round cap at a dead end, with the sidewalk around it.
+fn mesh_end(m: &mut MeshBuilder, node: &NodeLayout) {
+    let Some(a) = node.arms.first() else { return };
+    let st = a.style;
+    let n = perp(a.dir);
+    // Half circle from the right kerb round the back to the left kerb.
+    let a0 = angle(n);
+    let pts = arc(node.pos, st.h, a0, PI);
+    let ring3: Vec<Vec3> = pts.iter().map(|&q| lift(q, ROAD_Y)).collect();
+    m.fan_up(lift(node.pos, ROAD_Y), &ring3, asphalt_of(&node.arms));
+    if st.walk > 0.0 {
+        let outer = arc(node.pos, st.outer(), a0, PI);
+        walk_strip(m, &pts, &outer);
+    } else {
+        for w in pts.windows(2) {
+            vface(
+                m,
+                w[0],
+                w[1],
+                0.0,
+                ROAD_Y,
+                (w[0] + w[1]) * 0.5 - node.pos,
+                palette::KERB,
+            );
+        }
+    }
+}
+
+/// Two segments meeting without a box: fill the wedge on the outside of
+/// the slight angle between their ends (asphalt and sidewalk).
+fn mesh_through(m: &mut MeshBuilder, node: &NodeLayout) {
+    if node.arms.len() != 2 {
+        return;
+    }
+    let (a, b) = (&node.arms[0], &node.arms[1]);
+    // Travel through: in along -a.dir, out along b.dir.
+    let (din, dout) = (-a.dir, b.dir);
+    let turn = din.perp_dot(dout);
+    if din.dot(dout) > 0.99995 {
+        return;
+    }
+    let st = if a.style.h >= b.style.h { a.style } else { b.style };
+    // The outside of the turn is to the left of travel for a right turn.
+    let side = if turn > 0.0 { -1.0 } else { 1.0 };
+    let (r_in, r_out) = (perp(din) * side, perp(dout) * side);
+    let sweep_a = angle(r_in);
+    let mut sweep = angle(r_out) - sweep_a;
+    if sweep > PI {
+        sweep -= TAU;
+    }
+    if sweep < -PI {
+        sweep += TAU;
+    }
+    let road = arc(node.pos, st.h, sweep_a, sweep);
+    let ring3: Vec<Vec3> = road.iter().map(|&q| lift(q, ROAD_Y)).collect();
+    m.fan_up(lift(node.pos, ROAD_Y), &ring3, asphalt_of(&node.arms));
+    if st.walk > 0.0 {
+        let outer = arc(node.pos, st.outer(), sweep_a, sweep);
+        walk_strip(m, &road, &outer);
+    }
+}
+
+/// Dashed line along `f` at offset `off`, between `t0` and `t1`.
 #[allow(clippy::too_many_arguments)]
-fn dashes(
-    m: &mut MeshBuilder,
-    a: Vec2,
-    dir: Vec2,
-    off: f32,
-    t0: f32,
-    t1: f32,
-    dash: f32,
-    gap: f32,
-    width: f32,
-    color: [f32; 4],
-) {
+fn dashes(m: &mut MeshBuilder, f: &Frame, off: f32, t0: f32, t1: f32, dash: f32, gap: f32, width: f32, c: [f32; 4]) {
     let span = t1 - t0;
     if span < dash * 0.5 {
         return;
     }
-    let n = perp(dir);
     // Centre the pattern within the span.
     let count = ((span + gap) / (dash + gap)).floor().max(1.0);
     let used = count * dash + (count - 1.0) * gap;
     let mut t = t0 + (span - used) * 0.5;
     for _ in 0..count as usize {
         let (s, e) = (t.max(t0), (t + dash).min(t1));
-        rect(m, a, dir, n, s, e, off - width * 0.5, off + width * 0.5, MARK_Y, color);
+        strip(m, f, s, e, off - width * 0.5, off + width * 0.5, MARK_Y, c);
         t += dash + gap;
     }
 }
 
-/// Upward rectangle in a segment's frame: along `t0..t1`, across `o0..o1`.
-#[allow(clippy::too_many_arguments)]
-fn rect(m: &mut MeshBuilder, a: Vec2, dir: Vec2, n: Vec2, t0: f32, t1: f32, o0: f32, o1: f32, y: f32, c: [f32; 4]) {
-    let q = [
-        a + dir * t0 + n * o0,
-        a + dir * t1 + n * o0,
-        a + dir * t1 + n * o1,
-        a + dir * t0 + n * o1,
-    ];
-    m.quad_up(q.map(|p| lift(p, y)), c);
-}
-
-/// Straight part of a segment between its two junction setbacks.
+/// The road surface of a segment between its two cuts.
 pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
     mesh_segment_with(m, s, true);
 }
 
 /// `mesh_segment`, optionally without lamps and gantries (tool ghosts).
 pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
-    let len = s.len();
-    let dir = s.dir();
-    let n = perp(dir);
-    let (t0, t1) = (s.s_a, len - s.s_b);
+    let f = &s.frame;
+    let (t0, t1) = s.span();
     if t1 - t0 < 1e-3 {
         return;
     }
@@ -607,146 +763,93 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
     } else {
         palette::ASPHALT
     });
-    rect(m, s.a, dir, n, t0, t1, -h, h, ROAD_Y, asphalt);
-    let at = |t: f32, o: f32| s.a + dir * t + n * o;
+    strip(m, f, t0, t1, -h, h, ROAD_Y, asphalt);
     if st.walk > 0.0 {
         for side in [1.0f32, -1.0] {
-            let k = [at(t0, side * h), at(t1, side * h)];
-            let o = [at(t0, side * st.outer()), at(t1, side * st.outer())];
-            walk_strip(m, &k, &o);
+            walk_strip(m, &f.line_at(t0, t1, side * h), &f.line_at(t0, t1, side * st.outer()));
         }
     } else {
         // Highway: gravel shoulders, exposed slab edges and guard rails.
         let gravel = lin(palette::GRAVEL);
         for side in [1.0f32, -1.0] {
-            rect(m, s.a, dir, n, t0, t1, side * h, side * (h + 1.4), 0.025, gravel);
-            vface(
-                m,
-                at(t0, side * h),
-                at(t1, side * h),
-                0.0,
-                ROAD_Y,
-                n * side,
-                palette::KERB,
-            );
-            guardrail(m, s.a, dir, n * side, h + 0.9, t0, t1);
+            strip(m, f, t0, t1, side * h, side * (h + 1.4), 0.025, gravel);
+            side_face(m, f, t0, t1, side * h, 0.0, ROAD_Y, side, palette::KERB);
+            guardrail(m, f, side, h + 0.9, t0, t1);
         }
     }
     if furniture && st.walk > 0.0 {
         street_lamps(m, s);
-    } else if furniture && s.id.is_none() {
+    } else if furniture && s.id.is_none() && s.len() > 60.0 {
         // The road out of town: a sign gantry just past the map edge.
-        sign_gantry(m, s.b - dir * 35.0, dir, h);
+        let (p, d) = f.pose(s.len() - 35.0);
+        sign_gantry(m, p, d, h);
     }
-    // Markings.
+    // Markings stop short of a junction's cut and of a dead end.
     let white = lin(palette::MARKING);
-    let margin = |deg: usize, straight: bool| match deg {
-        0 | 1 => 1.2,
-        2 if straight => 0.0,
-        2 => 1.0,
-        _ => JUNCTION_MARGIN,
+    let margin = |deg: usize, boxed: bool| {
+        if boxed {
+            0.3
+        } else if deg <= 1 {
+            1.2
+        } else {
+            0.0
+        }
     };
-    let (m0, m1) = (t0 + margin(s.deg_a, s.straight_a), t1 - margin(s.deg_b, s.straight_b));
+    let (m0, m1) = (t0 + margin(s.deg_a, s.box_a), t1 - margin(s.deg_b, s.box_b));
+    if m1 <= m0 {
+        return;
+    }
     if st.highway {
         let yellow = lin(palette::MARKING_YELLOW);
         for side in [1.0f32, -1.0] {
-            rect(m, s.a, dir, n, m0, m1, side * 0.1, side * 0.22, MARK_Y, yellow);
-            rect(
-                m,
-                s.a,
-                dir,
-                n,
-                m0,
-                m1,
-                side * (h - 0.45),
-                side * (h - 0.3),
-                MARK_Y,
-                white,
-            );
-            dashes(m, s.a, dir, side * h * 0.5, m0, m1, 4.0, 6.0, 0.15, white);
+            let (a, b) = (side * 0.1, side * 0.22);
+            strip(m, f, m0, m1, a.min(b), a.max(b), MARK_Y, yellow);
+            let (a, b) = (side * (h - 0.45), side * (h - 0.3));
+            strip(m, f, m0, m1, a.min(b), a.max(b), MARK_Y, white);
+            dashes(m, f, side * h * 0.5, m0, m1, 4.0, 6.0, 0.15, white);
         }
     } else if st.median > 0.0 {
         // Avenue: raised planted median, lane lines, turn arrows.
         let (q0, q1) = (m0 + 0.4, m1 - 0.4);
         if q1 - q0 > 1.0 {
-            median_strip(m, s.a, dir, st.median, q0, q1);
+            median_strip(m, f, st.median, q0, q1);
         }
         let lane_line = (lane_offset(s.kind, 0) + lane_offset(s.kind, 1)) * 0.5;
         for side in [1.0f32, -1.0] {
-            dashes(m, s.a, dir, side * lane_line, m0, m1, 3.0, 5.0, 0.14, white);
+            dashes(m, f, side * lane_line, m0, m1, 3.0, 5.0, 0.14, white);
         }
         for (at_a, deg) in [(true, s.deg_a), (false, s.deg_b)] {
             if deg < 3 || m1 - m0 < 16.0 {
                 continue;
             }
             // Arriving at this end: travel direction and the right of it.
-            let (e, back, travel) = if at_a { (m0, 1.0, -dir) } else { (m1, -1.0, dir) };
-            let right = Vec2::new(-travel.y, travel.x);
-            let t = e + back * 7.0;
+            let t = if at_a { m0 + 7.0 } else { m1 - 7.0 };
+            let (p, d) = f.pose(t);
+            let travel = if at_a { -d } else { d };
+            let right = perp(travel);
             for (lane, turn) in [(0u8, 1.0f32), (1, -1.0)] {
-                let p = s.a + dir * t + right * lane_offset(s.kind, lane);
-                turn_arrow(m, p, travel, turn, white);
+                turn_arrow(m, p + right * lane_offset(s.kind, lane), travel, turn, white);
             }
         }
     } else {
-        dashes(m, s.a, dir, 0.0, m0, m1, 2.6, 2.4, 0.16, white);
-    }
-    // A zebra crossing between the sim's stop line and the junction box
-    // where the box leaves room for one.
-    if !st.highway {
-        for (at_a, deg, stop) in [(true, s.deg_a, s.stop_a), (false, s.deg_b, s.stop_b)] {
-            if deg < 3 || stop <= 0.0 {
-                continue;
-            }
-            // Params along the segment from its `a` end; `out` points away
-            // from the junction.
-            let (base, out) = if at_a { (0.0, 1.0) } else { (len, -1.0) };
-            let along = |d: f32| base + out * d;
-            // (The stop line itself depends on the junction's control and
-            // is drawn with its furniture, `signals`.)
-            // Room for a crossing: from just outside the crossing roads'
-            // carriageways (the sim puts the stop line its junction margin
-            // beyond them) out to just before the stop line.
-            let inner = (stop - citysim_sim::balance::JUNCTION_MARGIN_M + 0.35).max(stop * 0.4);
-            let width = (stop - 0.4 - inner).min(2.4);
-            if width >= 1.6 {
-                let zebra_w = 0.5;
-                let mut o = -h + 0.45;
-                while o + zebra_w <= h - 0.45 + 1e-3 {
-                    let (za, zb) = (along(stop - 0.4), along(stop - 0.4 - width));
-                    rect(
-                        m,
-                        s.a,
-                        dir,
-                        n,
-                        za.min(zb),
-                        za.max(zb),
-                        o,
-                        o + zebra_w,
-                        MARK_Y + 0.002,
-                        white,
-                    );
-                    o += zebra_w * 2.0;
-                }
-            }
-        }
+        dashes(m, f, 0.0, m0, m1, 2.6, 2.4, 0.16, white);
     }
 }
 
 /// Stable hash of a segment's geometry (for its detail placement).
 fn seg_seed(s: &SegLayout) -> u32 {
-    super::noise::hash2((s.a.x * 3.0 + s.b.y) as i32, (s.a.y * 3.0 + s.b.x) as i32, 0x5EED)
+    let (a, b) = (s.a(), s.b());
+    super::noise::hash2((a.x * 3.0 + b.y) as i32, (a.y * 3.0 + b.x) as i32, 0x5EED)
 }
 
 /// Wear and street furniture along a segment: asphalt patches, manhole
 /// covers and drains (always), and on the sidewalks benches with bins,
 /// hydrants, bollards and, along avenues, street trees (`furniture` 0..1
-/// thins them out: graphics quality).
+/// thins them out: graphics quality). Kept clear of the junction cuts and
+/// of the lamps.
 pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
-    let len = s.len();
-    let dir = s.dir();
-    let n = perp(dir);
-    let (t0, t1) = (s.s_a + 1.5, len - s.s_b - 1.5);
+    let f = &s.frame;
+    let (t0, t1) = (s.s_a + 1.5, s.len() - s.s_b - 1.5);
     if t1 - t0 < 4.0 {
         return;
     }
@@ -766,7 +869,7 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
             let w = rng.range(1.0, 2.6).min(h * 0.9);
             let o = rng.range(-h + 0.3, h - 0.3 - w);
             let c = lin(shade(base, if rng.chance(0.5) { 0.86 } else { 1.12 }));
-            rect(m, s.a, dir, n, t, t + l, o, o + w, ROAD_Y + 0.004, c);
+            strip(m, f, t, t + l, o, o + w, ROAD_Y + 0.004, c);
         }
         t += rng.range(8.0, 16.0);
     }
@@ -776,34 +879,22 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
     let mut t = t0 + rng.range(4.0, 14.0);
     while t < t1 - 1.0 {
         let o = if rng.chance(0.5) { 1.4 } else { -1.4 } * if st.lanes > 1 { 2.4 } else { 1.0 };
-        let c = s.a + dir * t + n * o;
-        let ring = |r: f32| -> Vec<Vec3> {
+        let c = f.at(t, o);
+        let ring = |r: f32, y: f32| -> Vec<Vec3> {
             (0..8)
-                .map(|k| lift(c + Vec2::from_angle(k as f32 / 8.0 * TAU) * r, ROAD_Y + 0.008))
+                .map(|k| lift(c + Vec2::from_angle(k as f32 / 8.0 * TAU) * r, y))
                 .collect()
         };
-        m.fan_up(lift(c, ROAD_Y + 0.008), &ring(0.42), rim);
-        m.fan_up(lift(c, ROAD_Y + 0.009), &ring(0.34), lid);
+        m.fan_up(lift(c, ROAD_Y + 0.008), &ring(0.42, ROAD_Y + 0.008), rim);
+        m.fan_up(lift(c, ROAD_Y + 0.009), &ring(0.34, ROAD_Y + 0.009), lid);
         t += rng.range(22.0, 38.0);
     }
     if st.walk > 0.0 {
         let grate = lin(Color::srgb_u32(0x232528));
         let mut t = t0 + 6.0;
         while t < t1 - 1.0 {
-            for side in [1.0f32, -1.0] {
-                rect(
-                    m,
-                    s.a,
-                    dir,
-                    n,
-                    t,
-                    t + 0.7,
-                    side * (h - 0.5),
-                    side * (h - 0.08),
-                    ROAD_Y + 0.006,
-                    grate,
-                );
-            }
+            strip(m, f, t, t + 0.7, h - 0.5, h - 0.08, ROAD_Y + 0.006, grate);
+            strip(m, f, t, t + 0.7, -h + 0.08, -h + 0.5, ROAD_Y + 0.006, grate);
             t += 24.0;
         }
     }
@@ -818,7 +909,7 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
         let mut t = t0 + 6.0;
         while t < t1 - 5.0 {
             for side in [1.0f32, -1.0] {
-                let p = s.a + dir * t + n * side * (h + st.walk * 0.5);
+                let p = f.at(t, side * (h + st.walk * 0.5));
                 if clear(p) {
                     let canopy = rng.pick(&palette::CANOPIES);
                     m.cuboid(
@@ -835,7 +926,9 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
     let mut t = t0 + rng.range(6.0, 16.0);
     while t < t1 - 2.0 {
         let side = if rng.chance(0.5) { 1.0f32 } else { -1.0 };
-        let p = s.a + dir * t + n * side * off;
+        let (_, d) = f.pose(t);
+        let n = perp(d);
+        let p = f.at(t, side * off);
         let roll = rng.f();
         if rng.f() < furniture && clear(p) {
             // Facing the road: towards -side * n.
@@ -850,10 +943,10 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
                 m.box_yaw(lift(p, y + 0.42), Vec3::new(1.6, 0.06, 0.45), yaw, wood, wood);
                 m.box_yaw(lift(back, y + 0.48), Vec3::new(1.6, 0.4, 0.06), yaw, wood, wood);
                 for k in [-0.7f32, 0.7] {
-                    let q = p + dir * k;
+                    let q = p + d * k;
                     m.box_yaw(lift(q, y), Vec3::new(0.06, 0.44, 0.45), yaw, iron, iron);
                 }
-                let b = p + dir * 1.3;
+                let b = p + d * 1.3;
                 m.cylinder(lift(b, y), 0.22, 0.85, 6, iron, shade(iron, 1.3));
             } else if roll < 0.65 {
                 // Fire hydrant.
@@ -869,7 +962,7 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
                 // Bollards along the kerb.
                 let post = Color::srgb_u32(0x4A4E52);
                 for k in [-1.2f32, 0.0, 1.2] {
-                    let q = s.a + dir * (t + k) + n * side * (h + 0.35);
+                    let q = f.at(t + k, side * (h + 0.35));
                     m.cylinder(lift(q, y), 0.08, 0.85, 5, post, palette::GUARDRAIL);
                 }
             }
@@ -878,35 +971,37 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
     }
 }
 
-/// Raised median between `t0` and `t1`: kerbs and a grass top with
-/// rounded-off (pointed) ends.
-fn median_strip(m: &mut MeshBuilder, a: Vec2, dir: Vec2, hw: f32, t0: f32, t1: f32) {
-    let n = perp(dir);
+/// Raised median between `t0` and `t1`: kerbs and a grass top with pointed
+/// ends, following the frame.
+fn median_strip(m: &mut MeshBuilder, f: &Frame, hw: f32, t0: f32, t1: f32) {
     let y = ROAD_Y + 0.13;
     let nose = (hw * 2.5).min((t1 - t0) * 0.25);
-    let pts = [
-        a + dir * t0,
-        a + dir * (t0 + nose) + n * hw,
-        a + dir * (t1 - nose) + n * hw,
-        a + dir * t1,
-        a + dir * (t1 - nose) - n * hw,
-        a + dir * (t0 + nose) - n * hw,
-    ];
     let grass = lin(palette::MEDIAN_GRASS);
-    let c = lift(a + dir * (t0 + t1) * 0.5, y);
-    let ring: Vec<Vec3> = pts.iter().map(|&p| lift(p, y)).collect();
-    m.fan_up(c, &ring, grass);
-    for i in 0..pts.len() {
-        let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
-        let mid = (p + q) * 0.5 - (a + dir * (t0 + t1) * 0.5);
-        vface(m, p, q, ROAD_Y - 0.02, y, mid, palette::KERB);
+    // Width along the strip: pointed at both ends.
+    let width = |t: f32| hw * ((t - t0) / nose).min((t1 - t) / nose).clamp(0.0, 1.0);
+    let mut steps = f.steps(t0, t1);
+    for extra in [t0 + nose, t1 - nose] {
+        if extra > t0 && extra < t1 {
+            steps.push(extra);
+        }
+    }
+    steps.sort_by(f32::total_cmp);
+    steps.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+    let left: Vec<Vec2> = steps.iter().map(|&t| f.at(t, -width(t))).collect();
+    let right: Vec<Vec2> = steps.iter().map(|&t| f.at(t, width(t))).collect();
+    for k in 0..steps.len() - 1 {
+        let q = [left[k], left[k + 1], right[k + 1], right[k]];
+        m.quad_up(q.map(|p| lift(p, y)), grass);
+        let (_, d) = f.pose((steps[k] + steps[k + 1]) * 0.5);
+        vface(m, left[k], left[k + 1], ROAD_Y - 0.02, y, -perp(d), palette::KERB);
+        vface(m, right[k], right[k + 1], ROAD_Y - 0.02, y, perp(d), palette::KERB);
     }
 }
 
 /// Painted turn arrow at `p` pointing along `travel`; `turn` +1 adds a
 /// right-turn head, -1 a left-turn head (always with straight on).
 fn turn_arrow(m: &mut MeshBuilder, p: Vec2, travel: Vec2, turn: f32, c: [f32; 4]) {
-    let right = Vec2::new(-travel.y, travel.x);
+    let right = perp(travel);
     let y = MARK_Y;
     let q = |along: f32, side: f32| lift(p + travel * along + right * side, y);
     // Shaft.
@@ -920,7 +1015,7 @@ fn turn_arrow(m: &mut MeshBuilder, p: Vec2, travel: Vec2, turn: f32, c: [f32; 4]
 }
 
 /// Street lamp positions along a segment: (pole base, lamp head) on
-/// alternating sides, clear of the junction ends. Empty for roads without
+/// alternating sides, clear of the junction cuts. Empty for roads without
 /// sidewalks.
 pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
     if s.style.walk <= 0.0 {
@@ -929,10 +1024,9 @@ pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
     if s.style.median > 0.0 {
         return median_lamp_spots(s);
     }
-    let dir = s.dir();
-    let n = perp(dir);
+    let f = &s.frame;
     let off = s.style.h + s.style.walk * 0.62;
-    let (t0, t1) = (s.s_a, s.len() - s.s_b);
+    let (t0, t1) = s.span();
     let (a, b) = (t0 + 5.0, t1 - 5.0);
     if b <= a {
         return Vec::new();
@@ -945,13 +1039,15 @@ pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
             } else {
                 a + (b - a) * k as f32 / (count - 1) as f32
             };
+            let (p, d) = f.pose(t);
+            let n = perp(d);
             // Alternate sides, phase from the position so neighbours agree.
-            let side = if ((s.a + dir * t).dot(Vec2::ONE) / 26.0).round() as i32 % 2 == 0 {
+            let side = if (p.dot(Vec2::ONE) / 26.0).round() as i32 % 2 == 0 {
                 1.0
             } else {
                 -1.0
             };
-            let base = s.a + dir * t + n * side * off;
+            let base = p + n * side * off;
             (base, base - n * side * 1.1)
         })
         .collect()
@@ -960,9 +1056,8 @@ pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
 /// Avenue lamps: double-armed poles on the median, one head over each
 /// carriageway.
 fn median_lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
-    let dir = s.dir();
-    let n = perp(dir);
-    let (t0, t1) = (s.s_a + JUNCTION_MARGIN + 3.0, s.len() - s.s_b - JUNCTION_MARGIN - 3.0);
+    let f = &s.frame;
+    let (t0, t1) = (s.s_a + 6.0, s.len() - s.s_b - 6.0);
     if t1 <= t0 {
         return Vec::new();
     }
@@ -974,7 +1069,8 @@ fn median_lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
         } else {
             t0 + (t1 - t0) * k as f32 / (count - 1) as f32
         };
-        let base = s.a + dir * t;
+        let (base, d) = f.pose(t);
+        let n = perp(d);
         out.push((base, base + n * 2.6));
         out.push((base, base - n * 2.6));
     }
@@ -1076,7 +1172,7 @@ fn sign_gantry(m: &mut MeshBuilder, p: Vec2, dir: Vec2, h: f32) {
             palette::SIGN_GREEN,
             palette::SIGN_GREEN,
         );
-        // White text bars and an arrow-ish bar.
+        // White text bars.
         let face = c + dir * side * 0.07 * -1.0;
         for (k, len) in [(0, 0.55f32), (1, 0.4)] {
             m.box_yaw(
@@ -1090,23 +1186,32 @@ fn sign_gantry(m: &mut MeshBuilder, p: Vec2, dir: Vec2, h: f32) {
     }
 }
 
-/// Low guard rail with posts along a segment side.
-fn guardrail(m: &mut MeshBuilder, a: Vec2, dir: Vec2, n: Vec2, off: f32, t0: f32, t1: f32) {
+/// Low guard rail with posts along one side (`side` +1 right, -1 left) of
+/// a frame, `off` metres from the centre line.
+fn guardrail(m: &mut MeshBuilder, f: &Frame, side: f32, off: f32, t0: f32, t1: f32) {
     let rail = palette::GUARDRAIL;
     let post = shade(palette::GUARDRAIL, 0.7);
-    let p0 = a + dir * t0 + n * off;
-    let p1 = a + dir * t1 + n * off;
-    let th = n * 0.06;
-    // Rail band (both faces) and top.
-    vface(m, p0 + th, p1 + th, 0.45, 0.78, n, rail);
-    vface(m, p0 - th, p1 - th, 0.45, 0.78, -n, shade(rail, 0.9));
-    m.quad_up([p0 + th, p1 + th, p1 - th, p0 - th].map(|p| lift(p, 0.78)), lin(rail));
+    for th in [0.06f32, -0.06] {
+        let o = side * (off + th);
+        side_face(
+            m,
+            f,
+            t0,
+            t1,
+            o,
+            0.45,
+            0.78,
+            side * th.signum(),
+            if th > 0.0 { rail } else { shade(rail, 0.9) },
+        );
+    }
+    let (a, b) = (side * (off - 0.06), side * (off + 0.06));
+    strip(m, f, t0, t1, a.min(b), a.max(b), 0.78, lin(rail));
     // Posts only where they can be seen.
     let mut t = t0 + 1.0;
-    let near_end = |t: f32| (a + dir * t).x > -1500.0;
     while t < t1 {
-        if near_end(t) {
-            let c = a + dir * t + n * (off + 0.12);
+        let c = f.at(t, side * (off + 0.12));
+        if c.x > -1500.0 {
             m.box_yaw(lift(c, 0.0), Vec3::new(0.12, 0.7, 0.12), 0.0, post, post);
         }
         t += 4.0;
@@ -1121,13 +1226,13 @@ pub fn chunk_of(p: Vec2, size: f32) -> IVec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use citysim_sim::{Cell, Command, World};
+    use citysim_sim::{Cell, Command};
 
     fn world_with(cmds: &[Command]) -> World {
         let mut w = World::new(1);
         w.economy.money = 1_000_000;
         for c in cmds {
-            w.apply(*c).expect("command");
+            w.apply(c.clone()).expect("command");
         }
         w
     }
@@ -1136,97 +1241,107 @@ mod tests {
         Command::BuildRoad {
             from: Cell::new(a.0, a.1),
             to: Cell::new(b.0, b.1),
-            kind: citysim_sim::RoadKind::Street,
+            kind: RoadKind::Street,
+        }
+    }
+
+    fn curve(p: [[f32; 2]; 4], kind: RoadKind) -> Command {
+        Command::BuildCurve {
+            curve: Curve::new(p[0], p[1], p[2], p[3]),
+            kind,
+        }
+    }
+
+    fn mesh_all(l: &RoadLayout) -> MeshBuilder {
+        let mut m = MeshBuilder::new();
+        for n in &l.nodes {
+            mesh_node(&mut m, n);
+        }
+        for s in &l.segs {
+            mesh_segment(&mut m, s);
+            road_detail(&mut m, s, 1.0);
+        }
+        m
+    }
+
+    #[test]
+    fn frames_follow_the_curve_and_stay_cheap_when_straight() {
+        let straight = Frame::new(&Curve::straight([0.0, 0.0], [100.0, 0.0]));
+        assert_eq!(straight.pts.len(), 2);
+        let c = Curve::new([0.0, 0.0], [60.0, 0.0], [100.0, 40.0], [100.0, 100.0]);
+        let f = Frame::new(&c);
+        assert!(f.pts.len() > 8, "{}", f.pts.len());
+        for k in 0..=20 {
+            let t = f.len() * k as f32 / 20.0;
+            let want = Vec2::from(c.point_at(t, 0.0));
+            assert!(f.at(t, 0.0).distance(want) < 0.1, "{t}");
+            let want = Vec2::from(c.point_at(t, 3.0));
+            assert!(f.at(t, 3.0).distance(want) < 0.15, "{t} offset");
         }
     }
 
     #[test]
-    fn crossing_has_symmetric_setbacks_and_fillets() {
+    fn segments_end_at_the_sims_cuts() {
         let w = world_with(&[road((30, 120), (30, 140)), road((20, 130), (40, 130))]);
-        let l = layout(&w.roads);
-        let centre = Vec2::from(Cell::new(30, 130).center());
+        let l = layout(&w);
         let node = l
             .nodes
             .iter()
-            .find(|n| n.pos.distance(centre) < 0.01)
+            .find(|n| n.kind == NodeKind::Junction)
             .expect("junction node");
         assert_eq!(node.arms.len(), 4);
         for a in &node.arms {
-            assert!((a.setback - (2.75 + FILLET_R)).abs() < 1e-3, "setback {}", a.setback);
-        }
-        for w in &node.wedges {
-            let f = w.fillet.expect("90 degree corners get fillets");
-            assert!((f.r - FILLET_R).abs() < 1e-4);
-        }
-    }
-
-    #[test]
-    fn setbacks_never_exceed_half_a_short_segment() {
-        // One-cell segments between junctions.
-        let w = world_with(&[
-            road((20, 130), (40, 130)),
-            road((20, 131), (40, 131)),
-            road((30, 120), (30, 140)),
-            road((25, 110), (25, 140)),
-        ]);
-        let l = layout(&w.roads);
-        for s in &l.segs {
-            if s.id.is_none() {
-                continue;
-            }
-            assert!(s.s_a + s.s_b <= s.len() * 0.96 + 1e-3, "{s:?}");
+            let s = l.segs.iter().find(|s| s.id == Some(a.seg)).expect("arm segment");
+            let cut_end = if s.a().distance(node.pos) < 0.01 { s.s_a } else { s.s_b };
+            assert!((cut_end - a.setback).abs() < 1e-4);
+            assert!(a.setback > 3.0, "{}", a.setback);
         }
     }
 
     #[test]
-    fn crowded_diagonal_junctions_still_mesh() {
-        // Six arms within one cell of another junction cannot fit their
-        // corners; the pieces may overlap but must stay finite.
-        let w = world_with(&[
-            road((20, 130), (40, 130)),
-            road((20, 131), (40, 131)),
-            road((30, 120), (30, 140)),
-            road((25, 125), (35, 135)),
-        ]);
-        let l = layout(&w.roads);
-        let mut m = MeshBuilder::new();
-        for n in &l.nodes {
-            mesh_node(&mut m, n);
-        }
-        for s in &l.segs {
-            mesh_segment(&mut m, s);
-        }
-        assert!(m.pos.iter().flatten().all(|v| v.is_finite()));
-    }
-
-    #[test]
-    fn every_node_and_segment_meshes_without_nan() {
+    fn curved_roads_and_odd_angle_junctions_mesh_without_nan() {
         let w = world_with(&[
             road((11, 128), (40, 128)),
             road((30, 120), (30, 140)),
-            road((20, 110), (38, 128)),
-            road((40, 128), (40, 100)),
+            curve(
+                [[320.0, 1028.0], [400.0, 1028.0], [430.0, 980.0], [470.0, 900.0]],
+                RoadKind::Avenue,
+            ),
+            curve(
+                [[330.0, 1000.0], [360.0, 1060.0], [380.0, 1080.0], [420.0, 1100.0]],
+                RoadKind::Street,
+            ),
         ]);
-        let l = layout(&w.roads);
-        assert!(l.nodes.iter().any(|n| n.entry), "highway entry is marked");
-        let mut m = MeshBuilder::new();
-        for n in &l.nodes {
-            mesh_node(&mut m, n);
-        }
-        for s in &l.segs {
-            mesh_segment(&mut m, s);
-        }
+        let l = layout(&w);
+        assert!(
+            l.nodes.iter().any(|n| n.kind == NodeKind::Entry),
+            "highway entry is marked"
+        );
+        assert!(l.segs.iter().any(|s| !s.frame.is_straight()));
+        let m = mesh_all(&l);
         assert!(m.triangle_count() > 100);
         assert!(m.pos.iter().flatten().all(|v| v.is_finite()));
         // Every upward face of the road surface lies on a known level.
         for (p, nrm) in m.pos.iter().zip(&m.nrm) {
-            // Road surfaces (props such as lamps and rails stand higher).
             if nrm[1] > 0.99 && p[1] < 0.5 {
                 let y = p[1];
                 assert!(
-                    [ROAD_Y, WALK_Y, MARK_Y, MARK_Y + 0.002, ROAD_Y + 0.13, 0.025]
-                        .iter()
-                        .any(|l| (y - l).abs() < 1e-4),
+                    [
+                        ROAD_Y,
+                        WALK_Y,
+                        MARK_Y,
+                        MARK_Y + 0.002,
+                        ROAD_Y + 0.13,
+                        0.025,
+                        ROAD_Y + 0.004,
+                        ROAD_Y + 0.006,
+                        ROAD_Y + 0.008,
+                        ROAD_Y + 0.009,
+                        WALK_Y + 0.005,
+                        WALK_Y + 0.02,
+                    ]
+                    .iter()
+                    .any(|l| (y - l).abs() < 1e-4),
                     "unexpected level {y}"
                 );
             }

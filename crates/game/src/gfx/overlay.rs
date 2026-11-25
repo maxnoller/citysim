@@ -113,30 +113,22 @@ fn strips(roads: &RoadNetwork, layout: &RoadLayout) -> MeshBuilder {
         let Some(seg) = s.id.and_then(|id| roads.segments.get(id)) else {
             continue;
         };
-        let dir = s.dir();
-        let n = Vec2::new(-dir.y, dir.x);
-        let (t0, t1) = (s.s_a, s.len() - s.s_b);
+        let (t0, t1) = s.span();
         if t1 - t0 < 0.1 {
             continue;
         }
         let h = s.style.h;
-        // Forward travel (a -> b) drives on the +n side.
+        // Forward travel (a -> b) drives on the right (+offset) side.
         for (forward, side) in [(true, 1.0f32), (false, -1.0)] {
             let c = lin(congestion_color(seg.congestion_in(forward)));
             let (o0, o1) = (side * 0.2, side * (h - 0.15));
-            let q = [
-                s.a + dir * t0 + n * o0,
-                s.a + dir * t1 + n * o0,
-                s.a + dir * t1 + n * o1,
-                s.a + dir * t0 + n * o1,
-            ];
-            m.quad_up(q.map(|p| Vec3::new(p.x, STRIP_Y, p.y)), c);
+            road_geom::strip(&mut m, &s.frame, t0, t1, o0.min(o1), o0.max(o1), STRIP_Y, c);
         }
     }
     // Junction surfaces take the colour of their worst approach, so an
     // overloaded junction reads as one red patch.
     for node in &layout.nodes {
-        if node.entry || node.arms.len() < 2 {
+        if node.kind != road_geom::NodeKind::Junction {
             continue;
         }
         let mut worst = 0.0f32;
@@ -146,10 +138,9 @@ fn strips(roads: &RoadNetwork, layout: &RoadLayout) -> MeshBuilder {
                 // Travel towards this node is `a -> b` when it is `b`.
                 worst = worst.max(seg.congestion_in(seg.b == node.id));
             }
-            let n = Vec2::new(-arm.dir.y, arm.dir.x);
-            let (s, h) = (arm.setback, arm.style.h - 0.15);
-            ring.push(node.pos + arm.dir * s - n * h);
-            ring.push(node.pos + arm.dir * s + n * h);
+            let h = arm.style.h - 0.15;
+            ring.push(arm.at(0.0, -h));
+            ring.push(arm.at(0.0, h));
         }
         let ring: Vec<Vec3> = ring.iter().map(|p| Vec3::new(p.x, STRIP_Y, p.y)).collect();
         m.fan_up(
@@ -190,7 +181,7 @@ fn draw_traffic(
     let key = sim.key(sim.world.versions.roads);
     let roads_changed = state.layout_key != Some(key);
     if roads_changed {
-        state.layout = road_geom::layout(&sim.world.roads);
+        state.layout = road_geom::layout(&sim.world);
         state.layout_key = Some(key);
     }
     let now = time.elapsed_secs();

@@ -6,6 +6,8 @@
 //! * `city` — `GridPlayer` until ~5,000 residents (streets only).
 //! * `hierarchy` — `GridPlayer::hierarchy` (avenues as arterials) until
 //!   ~10,000 residents (about 20 s of fast-forward in a release build).
+//! * `organic` — the free-form sample town of `organic` (curves, a rotated
+//!   grid, a ring) until ~3,000 residents.
 //! * `jam`  — the deliberately bad `two_districts(grid = false)` layout
 //!   (every commuter through one junction) on its third day.
 //!
@@ -31,6 +33,7 @@ pub fn focus(kind: DemoKind) -> (Cell, f32) {
         DemoKind::Jam => (Cell::new(48, 128), 560.0),
         DemoKind::City => (Cell::new(62, 128), 900.0),
         DemoKind::Hierarchy => (Cell::new(70, 128), 1100.0),
+        DemoKind::Organic => (Cell::new(80, 125), 1000.0),
         _ => (Cell::new(45, 128), 560.0),
     }
 }
@@ -39,6 +42,7 @@ pub fn focus(kind: DemoKind) -> (Cell, f32) {
 pub fn street(kind: DemoKind) -> Cell {
     match kind {
         DemoKind::Jam => Cell::new(22, 126),
+        DemoKind::Organic => Cell::new(52, 115),
         _ => Cell::new(30, 128),
     }
 }
@@ -68,6 +72,18 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
         DemoKind::Jam => {
             scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false));
             while w.time.day < 3 {
+                w.step();
+            }
+            run_to_hour(&mut w, hour, |_| {});
+        }
+        DemoKind::Organic => {
+            let target = env::<u32>("CITYSIM_DEMO_POP").unwrap_or(3_000);
+            let mut refused = Vec::new();
+            scenarios::prebuilt(&mut w, |w| refused = super::organic::organic(w));
+            for r in refused {
+                warn!("organic demo: refused {r}");
+            }
+            while w.stats.population < target && w.time.day <= MAX_DAYS {
                 w.step();
             }
             run_to_hour(&mut w, hour, |_| {});
