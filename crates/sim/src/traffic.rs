@@ -234,7 +234,9 @@ pub struct TrafficState {
     pub roads_version: u64,
     /// Moving average of completed car commutes, vehicle seconds.
     pub avg_commute_s: f32,
-    /// Mean speed of the cars on the road this tick, m/s.
+    /// Mean speed of the cars on the road that are moving this tick
+    /// (faster than `balance::WAIT_SPEED`), m/s. Cars standing at a red
+    /// light or in a queue are counted by `stopped_share` instead.
     pub avg_speed: f32,
     /// Most cars on the road at once today / yesterday.
     pub peak_today: u32,
@@ -254,6 +256,9 @@ pub struct TrafficState {
     pub deadlocks_resolved: u32,
     /// Bumped whenever a junction's control changes (routing costs follow).
     pub control_version: u64,
+    /// Share of the cars on the road standing (at a red light, in a queue,
+    /// giving way) this tick.
+    pub stopped_share: f32,
 }
 
 pub(crate) const DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
@@ -792,8 +797,12 @@ fn update_loads(world: &mut World) {
         seg.load = [0.0; 2];
     }
     let mut speed_sum = 0.0;
+    let mut moving = 0u32;
     for v in world.vehicles.values() {
-        speed_sum += v.speed;
+        if !v.stopped() {
+            speed_sum += v.speed;
+            moving += 1;
+        }
         if let Some(seg) = v.segment.and_then(|s| world.roads.segments.get_mut(s)) {
             seg.load[RoadSegment::dir(v.forward)] += 1.0;
         }
@@ -844,7 +853,8 @@ fn update_loads(world: &mut World) {
     let nseg = world.roads.segments.len();
     let jammed = world.roads.segments.values().filter(|s| s.congestion() > 0.8).count();
     let t = &mut world.traffic;
-    t.avg_speed = if n > 0 { speed_sum / n as f32 } else { 0.0 };
+    t.avg_speed = if moving > 0 { speed_sum / moving as f32 } else { 0.0 };
+    t.stopped_share = if n > 0 { 1.0 - moving as f32 / n as f32 } else { 0.0 };
     t.peak_today = t.peak_today.max(n as u32);
     t.congestion_share = if nseg > 0 { jammed as f32 / nseg as f32 } else { 0.0 };
     t.peak_congestion_today = t.peak_congestion_today.max(t.congestion_share);
@@ -854,6 +864,24 @@ fn update_loads(world: &mut World) {
 /// `[conflict in box, no room beyond, signal, yielding]` (not saved).
 pub fn debug_denials(world: &World) -> [u64; 4] {
     world.cache.denials
+}
+
+/// Debug: denials at the stop line of node `n` by reason `[conflict in box,
+/// no room beyond, signal, yielding]` (not saved).
+pub fn debug_node_denials(world: &World, n: NodeId) -> [u32; 4] {
+    world.cache.node_denials.get(key_index(n)).copied().unwrap_or([0; 4])
+}
+
+/// Debug: cars that gave up waiting, `(tick, segment, forward, metres
+/// before the stop line, lane)` (not saved).
+pub fn debug_gave_up(world: &World) -> &[(u64, SegmentId, bool, f32, u8)] {
+    &world.cache.gave_up
+}
+
+/// Debug: why the cars that gave up were last refused at a stop line
+/// `[conflict in box, no room beyond, signal, yielding, never refused]`.
+pub fn debug_gave_up_reasons(world: &World) -> [u32; 5] {
+    world.cache.gave_up_reasons
 }
 
 /// Debug counters: junction entries by turn `[straight, right, left,

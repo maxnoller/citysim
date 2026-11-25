@@ -54,3 +54,29 @@ fn round3_saves_load_and_keep_running() {
     assert_eq!(&new[4..8], &save::FORMAT_VERSION.to_le_bytes());
     assert!(World::load(&new).unwrap() == l);
 }
+
+/// The organic town is laid out with world-space commands only, none
+/// refused, on more than one lattice, and keeps all invariants while it
+/// grows.
+#[test]
+fn organic_town_builds_and_grows() {
+    let mut w = World::new(11);
+    let mut refused = Vec::new();
+    citysim_sim::scenarios::prebuilt(&mut w, |w| refused = citysim_sim::scenarios::organic(w));
+    assert!(refused.is_empty(), "{refused:?}");
+    assert!(w.zoning.lattices().count() > 20);
+    assert!(w.roads.segments.values().any(|s| !s.curve.is_straight()));
+    w.check_invariants().unwrap();
+    for _ in 0..DAY / 2 {
+        w.step();
+    }
+    assert!(w.buildings.len() > 20, "{}", w.buildings.len());
+    // Buildings stand at their road's angle: some are turned off the axes.
+    let turned = w.buildings.values().filter(|b| {
+        let r = b.rotation().to_degrees().rem_euclid(90.0);
+        r > 1.0 && r < 89.0
+    });
+    assert!(turned.count() > 5);
+    w.check_invariants().unwrap();
+    w.check_sim_invariants().unwrap();
+}

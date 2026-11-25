@@ -573,6 +573,7 @@ impl TrafficStateV5 {
             stuck_removed: self.stuck_removed,
             deadlocks_resolved: self.deadlocks_resolved,
             control_version: self.control_version,
+            stopped_share: 0.0,
         }
     }
 

@@ -30,7 +30,7 @@ use crate::idmap::key_index;
 use crate::junction::{Aspect, JunctionControl, JunctionState, Turn};
 use crate::roads::{NodeId, RoadNetwork, RoadSegment, SegmentId};
 use crate::traffic::{self, DT, Ended, JunctionMove, TrafficState, TripEnd, VehicleId, secs_to_ticks};
-use crate::{World, balance, path};
+use crate::{World, balance};
 
 /// Lanes per direction the lane index space allows.
 const LANE_SLOTS: usize = 2;
@@ -211,6 +211,9 @@ struct Front {
     permit: bool,
     /// Reaches the stop line this tick.
     reaches: bool,
+    /// Its out-lane has room for it now (signals ignore cars that could
+    /// not use a green).
+    exit_ok: bool,
 }
 
 /// Precedence class of a front (higher goes first, lower yields).
@@ -388,6 +391,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             exit_stop,
             permit: false,
             reaches: d_line <= reach,
+            exit_ok: true,
         });
     }
     fronts.sort_by_key(|f| (key_index(f.node), f.idx));
@@ -396,8 +400,16 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         front_of[f.idx] = p;
     }
 
+    for f in fronts.iter_mut() {
+        let ok = exit_room(roads, f, &rear, &rear_speed, &on_lane, &inbox);
+        f.exit_ok = ok;
+    }
     // Signals.
     tick_signals(traffic, roads, &fronts, &boxed, now);
+    // Lanes whose front car waits at a red light: waiting there is normal
+    // (a red can last a whole cycle), so it does not count towards giving
+    // up.
+    let mut held_by_red = vec![false; nkeys];
 
     // Entry decisions per junction.
     let mut b0 = 0;
@@ -461,21 +473,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             let mut ok = !occupied.iter().any(|&o| clash(j, f.movement, my_lane, o));
             // Room beyond the box.
             if ok {
-                // Room for this car behind the last one on the out-lane
-                // (and those still in the box heading there).
-                let room = rear[f.exit_key] - f.exit_start;
-                let ahead = balance::VEHICLE_SPACING_M * inbox[f.exit_key] as f32;
-                let empty = rear[f.exit_key].is_infinite();
-                ok = if empty {
-                    inbox[f.exit_key] == 0 || roads.segments[f.to].length > ahead + balance::MIN_GAP_M
-                } else {
-                    room >= ahead + balance::MIN_GAP_M
-                        || (rear_speed[f.exit_key] > balance::EXIT_MOVING_SPEED
-                            && room >= ahead + 2.0
-                            && f.exit_stop - f.exit_start
-                                > (on_lane[f.exit_key] as f32 + inbox[f.exit_key] as f32 + 2.0)
-                                    * balance::VEHICLE_SPACING_M)
-                };
+                ok = exit_room(roads, &f, &rear, &rear_speed, &on_lane, &inbox);
             }
             if ok {
                 ok = match j.control {
@@ -520,6 +518,15 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 }
             }
             fronts[fi].permit = ok;
+            if !ok && j.control == JunctionControl::Signal && j.movement_aspect(f.movement) != Some(Aspect::Green) {
+                held_by_red[my_lane] = true;
+            }
+            if ok {
+                let vs = key_index(cars[f.idx].2);
+                if let Some(x) = cache.last_denial.get_mut(vs) {
+                    *x = 255;
+                }
+            }
             if !ok && f.d_line < 1.0 {
                 let reason = if occupied.iter().any(|&o| clash(j, f.movement, my_lane, o)) {
                     0
@@ -536,6 +543,16 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     }
                 };
                 denials[reason] += 1;
+                let slot = key_index(node);
+                if cache.node_denials.len() <= slot {
+                    cache.node_denials.resize(slot + 1, [0; 4]);
+                }
+                cache.node_denials[slot][reason] += 1;
+                let vs = key_index(cars[f.idx].2);
+                if cache.last_denial.len() <= vs {
+                    cache.last_denial.resize(vs + 1, 255);
+                }
+                cache.last_denial[vs] = reason as u8;
             }
             if ok && f.reaches {
                 occupied.push((f.movement, my_lane));
@@ -624,7 +641,11 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             let seg = &roads.segments[s];
             let len = seg.length;
             let (_, stop) = lane_range(setbacks, s, v.forward, len);
-            let mut target = seg.speed_limit * driver(v.seed) * path::vdf(seg.congestion_in(v.forward));
+            // Congestion shows up through car following and the stop lines;
+            // the volume-delay curve is a routing estimate only (applied
+            // here too it slowed every car on a segment with a queue at its
+            // far end).
+            let mut target = seg.speed_limit * driver(v.seed);
             let trip = traffic.trips.get(id);
             let mut arrive_at: Option<f32> = None;
             if v.route.is_empty() {
@@ -778,10 +799,17 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             continue;
         }
         let Some(t) = traffic.trips.get_mut(id) else { continue };
-        if v.speed < balance::WAIT_SPEED {
-            t.wait_ticks += 1;
-        } else {
+        let at_red = v.junction.is_none()
+            && v.segment.is_some_and(|s| {
+                held_by_red
+                    .get(lane_key(s, v.forward, v.lane))
+                    .copied()
+                    .unwrap_or(false)
+            });
+        if v.speed >= balance::WAIT_SPEED {
             t.wait_ticks = 0;
+        } else if !at_red {
+            t.wait_ticks += 1;
         }
         if v.junction.is_some() && t.wait_ticks >= box_stuck_ticks {
             unbox.push(id);
@@ -789,6 +817,16 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             let secs = (now - t.requested_tick.min(now)) as f32 * DT;
             done.push((id, TripEnd::GaveUp(secs)));
             traffic.stuck_removed += 1;
+            if let Some(s) = v.segment
+                && let Some(seg) = roads.segments.get(s)
+            {
+                let (_, stop) = lane_range(setbacks, s, v.forward, seg.length);
+                if cache.gave_up.len() < 100_000 {
+                    cache.gave_up.push((now, s, v.forward, stop - v.progress, v.lane));
+                }
+                let r = cache.last_denial.get(key_index(id)).copied().unwrap_or(255);
+                cache.gave_up_reasons[(r as usize).min(4)] += 1;
+            }
         } else if t.wait_ticks > 0 && t.wait_ticks.is_multiple_of(replan_ticks) && !t.queued && v.junction.is_none() {
             t.queued = true;
             traffic.replan.push_back(id);
@@ -805,6 +843,23 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
     world.cache.setbacks = setbacks_vec;
     for (id, f) in done {
         traffic::remove_vehicle(world, id, f, ended);
+    }
+}
+
+/// Is there room for the front car `f` beyond the box: behind the last
+/// car on its out-lane (and those still in the box heading there)?
+fn exit_room(roads: &RoadNetwork, f: &Front, rear: &[f32], rear_speed: &[f32], on_lane: &[u16], inbox: &[u8]) -> bool {
+    let room = rear[f.exit_key] - f.exit_start;
+    let ahead = balance::VEHICLE_SPACING_M * inbox[f.exit_key] as f32;
+    let empty = rear[f.exit_key].is_infinite();
+    if empty {
+        inbox[f.exit_key] == 0 || roads.segments[f.to].length > ahead + balance::MIN_GAP_M
+    } else {
+        room >= ahead + balance::MIN_GAP_M
+            || (rear_speed[f.exit_key] > balance::EXIT_MOVING_SPEED
+                && room >= ahead + 2.0
+                && f.exit_stop - f.exit_start
+                    > (on_lane[f.exit_key] as f32 + inbox[f.exit_key] as f32 + 2.0) * balance::VEHICLE_SPACING_M)
     }
 }
 
@@ -839,6 +894,7 @@ fn tick_signals(
         while kk < fronts.len() && fronts[kk].node == n {
             let f = &fronts[kk];
             if f.d_line <= balance::SIGNAL_DETECT_M
+                && f.exit_ok
                 && let Some(d) = per_arm.get_mut(f.arm as usize)
             {
                 if matches!(f.turn, Turn::Left | Turn::UTurn) {

@@ -440,7 +440,7 @@ pub fn organic(w: &mut World) -> Vec<(crate::Curve, crate::CommandError)> {
     // The turned grid north of the avenue: rows along u, columns along v.
     let th = 17.0f32;
     let (u, v) = (dir_deg(th), dir_deg(th + 90.0));
-    let o = [330.0, 560.0];
+    let o = [380.0, 560.0];
     let (cols, rows) = (5, 6);
     let (bw, bh) = (80.0, 40.0);
     for m in 0..rows {
@@ -458,8 +458,8 @@ pub fn organic(w: &mut World) -> Vec<(crate::Curve, crate::CommandError)> {
     }
 
     // The ring south-east of the avenue, with streets across it.
-    let rc = [760.0, 1270.0];
-    let r = 120.0;
+    let rc = [660.0, 1170.0];
+    let r = 110.0;
     let ring_pt = |deg: f32| add(rc, dir_deg(deg), r);
     for q in 0..4 {
         let (a0, a1) = (q as f32 * 90.0, (q + 1) as f32 * 90.0);
@@ -473,10 +473,20 @@ pub fn organic(w: &mut World) -> Vec<(crate::Curve, crate::CommandError)> {
     if let Some(q) = first_hit(w, ring_pt(270.0), [0.0, -1.0], 600.0) {
         road(w, Curve::straight(ring_pt(270.0), q), av);
     }
-    road(w, Curve::straight(ring_pt(0.0), [1060.0, 1270.0]), st);
-    if let Some(q) = first_hit(w, [1060.0, 1270.0], [0.0, -1.0], 600.0) {
-        road(w, Curve::straight([1060.0, 1270.0], q), st);
+    // East of the ring: a works quarter on two streets off the avenue.
+    let e0 = [ring_pt(0.0)[0] + 150.0, rc[1]];
+    road(w, Curve::straight(ring_pt(0.0), e0), st);
+    for x in [e0[0], e0[0] + 110.0] {
+        let b = [x, rc[1] + 60.0];
+        if let Some(q) = first_hit(w, b, [0.0, -1.0], 600.0) {
+            road(w, Curve::straight(b, q), st);
+        }
     }
+    road(
+        w,
+        Curve::straight([e0[0], rc[1] + 60.0], [e0[0] + 110.0, rc[1] + 60.0]),
+        st,
+    );
 
     // The cul-de-sac estate: a curved collector south off the avenue, with
     // curved dead-end closes either side.
@@ -486,44 +496,53 @@ pub fn organic(w: &mut World) -> Vec<(crate::Curve, crate::CommandError)> {
     road(w, collector, st);
     road(w, Curve::continuing(c1, [1.0, 0.0], [520.0, y0 + 300.0]), st);
     let len = collector.length();
-    for (k, &d) in [60.0f32, 120.0, 180.0, 240.0].iter().enumerate() {
+    for (k, &d) in [50.0f32, 130.0, 210.0].iter().enumerate() {
         let pose = collector.pose_at(d.min(len - 10.0), 0.0);
         let right = [-pose.dir[1], pose.dir[0]];
         for side in [1.0f32, -1.0] {
-            // A close: out sideways, bending back along the collector.
-            let out = add(pose.pos, right, side * 26.0);
-            let end = add(
-                add(out, right, side * 40.0),
-                pose.dir,
-                if k % 2 == 0 { 30.0 } else { -30.0 },
+            // A close: out sideways, bending gently, ending in a dead end.
+            let lean = if (k % 2 == 0) == (side > 0.0) { 20.0 } else { -20.0 };
+            let end = add(add(pose.pos, right, side * 64.0), pose.dir, lean);
+            road(
+                w,
+                Curve::continuing(pose.pos, [right[0] * side, right[1] * side], end),
+                st,
             );
-            let c = Curve::through_corner(pose.pos, add(out, right, side * 14.0), end);
-            road(w, c, st);
         }
     }
 
+    // The estate's end runs on to the ring: both get a second way out.
+    let est_end = [520.0, y0 + 300.0];
+    road(w, Curve::straight(est_end, ring_pt(135.0)), st);
+
     // Industry by the highway: straight streets on the world grid north of
     // the avenue.
-    let ix = [124.0, 156.0 + 40.0];
-    let _ = ix;
     let n0 = [140.0, y0 - 200.0];
     road(w, Curve::straight([140.0, y0], n0), st);
-    road(w, Curve::straight(n0, [292.0, y0 - 200.0]), st);
-    road(w, Curve::straight([140.0, y0 - 100.0], [292.0, y0 - 100.0]), st);
+    road(w, Curve::straight(n0, [268.0, y0 - 200.0]), st);
+    road(w, Curve::straight([140.0, y0 - 100.0], [244.0, y0 - 100.0]), st);
 
     // Zoning.
     let quad = |a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]| [a, b, c, d];
     let g = |k: f32, m: f32| add(add(o, u, k * bw), v, m * bh);
-    // The turned grid: housing, one row of shops near the avenue.
-    zone_quad(
-        w,
-        quad(g(-0.5, -0.5), g(4.5, -0.5), g(4.5, 3.5), g(-0.5, 3.5)),
+    // The turned grid: rows of housing with rows of shops and workshops
+    // between them, so most people work a few streets from home.
+    let rows_zone = [
         Zone::Residential,
-    );
+        Zone::Commercial,
+        Zone::Residential,
+        Zone::Industrial,
+        Zone::Residential,
+    ];
+    for (m, &z) in rows_zone.iter().enumerate() {
+        let (m0, m1) = (m as f32 - if m == 0 { 0.5 } else { 0.0 }, m as f32 + 1.0);
+        zone_quad(w, quad(g(-0.5, m0), g(4.5, m0), g(4.5, m1), g(-0.5, m1)), z);
+    }
+    // Housing on the long streets down to the avenue.
     zone_quad(
         w,
-        quad(g(-0.5, 3.5), g(4.5, 3.5), g(4.5, 5.6), g(-0.5, 5.6)),
-        Zone::Commercial,
+        quad(g(-0.5, 5.0), g(4.5, 5.0), g(4.5, 12.0), g(-0.5, 12.0)),
+        Zone::Residential,
     );
     // Shops along the avenue (both sides).
     zone_quad(
