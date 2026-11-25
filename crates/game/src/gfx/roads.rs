@@ -11,13 +11,14 @@ use bevy::prelude::*;
 use super::mesh_util::MeshBuilder;
 use super::road_geom::{self, chunk_of};
 use super::scene::WorldMaterials;
-use crate::shared::{GameSet, SimWorld};
+use crate::shared::{GameSet, GraphicsQuality, SimWorld};
 
 const CHUNK: f32 = 128.0;
 
 #[derive(Default)]
 struct RoadChunks {
     key: Option<(u64, u64)>,
+    quality: Option<GraphicsQuality>,
     /// Chunk -> (content hash, road entity, lamp light pools entity).
     chunks: HashMap<IVec2, (u64, Entity, Entity)>,
 }
@@ -63,12 +64,19 @@ fn rebuild_roads(
     mut meshes: ResMut<Assets<Mesh>>,
     mats: Res<WorldMaterials>,
     pools: Res<LampPools>,
+    quality: Res<GraphicsQuality>,
 ) {
     let key = sim.key(sim.world.versions.roads);
-    if state.key == Some(key) {
+    if state.key == Some(key) && state.quality == Some(*quality) {
         return;
     }
     state.key = Some(key);
+    state.quality = Some(*quality);
+    let furniture: f32 = match *quality {
+        GraphicsQuality::Low => 0.0,
+        GraphicsQuality::Medium => 0.5,
+        GraphicsQuality::High => 1.0,
+    };
     let layout = road_geom::layout(&sim.world.roads);
     // Bucket pieces and hash each chunk's content.
     let mut nodes: HashMap<IVec2, Vec<usize>> = HashMap::new();
@@ -89,7 +97,13 @@ fn rebuild_roads(
         h.write_u8(2);
         road_geom::hash_seg(s, h);
     }
-    let hashes: HashMap<IVec2, u64> = hashers.into_iter().map(|(c, h)| (c, h.finish())).collect();
+    let hashes: HashMap<IVec2, u64> = hashers
+        .into_iter()
+        .map(|(c, mut h)| {
+            h.write_u32(furniture.to_bits());
+            (c, h.finish())
+        })
+        .collect();
     let mut rebuilt = 0;
     // Drop chunks that no longer have roads.
     let gone: HashSet<IVec2> = state
@@ -115,6 +129,7 @@ fn rebuild_roads(
         }
         for &i in segs.get(&c).map(Vec::as_slice).unwrap_or(&[]) {
             road_geom::mesh_segment(&mut m, &layout.segs[i]);
+            road_geom::road_detail(&mut m, &layout.segs[i], furniture);
             for (_, tip) in road_geom::lamp_spots(&layout.segs[i]) {
                 road_geom::light_pool(&mut glow, tip, POOL_R, road_geom::WALK_Y + 0.025, Color::WHITE);
             }

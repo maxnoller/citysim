@@ -732,6 +732,151 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
     }
 }
 
+/// Stable hash of a segment's geometry (for its detail placement).
+fn seg_seed(s: &SegLayout) -> u32 {
+    super::noise::hash2((s.a.x * 3.0 + s.b.y) as i32, (s.a.y * 3.0 + s.b.x) as i32, 0x5EED)
+}
+
+/// Wear and street furniture along a segment: asphalt patches, manhole
+/// covers and drains (always), and on the sidewalks benches with bins,
+/// hydrants, bollards and, along avenues, street trees (`furniture` 0..1
+/// thins them out: graphics quality).
+pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
+    let len = s.len();
+    let dir = s.dir();
+    let n = perp(dir);
+    let (t0, t1) = (s.s_a + 1.5, len - s.s_b - 1.5);
+    if t1 - t0 < 4.0 {
+        return;
+    }
+    let st = s.style;
+    let h = st.h;
+    let mut rng = super::noise::Stream::new(seg_seed(s));
+    let base = if st.highway {
+        palette::ASPHALT_HIGHWAY
+    } else {
+        palette::ASPHALT
+    };
+    // Patches of newer / older asphalt.
+    let mut t = t0;
+    while t < t1 - 3.0 {
+        if rng.chance(0.3) {
+            let l = rng.range(2.0, 6.0).min(t1 - t);
+            let w = rng.range(1.0, 2.6).min(h * 0.9);
+            let o = rng.range(-h + 0.3, h - 0.3 - w);
+            let c = lin(shade(base, if rng.chance(0.5) { 0.86 } else { 1.12 }));
+            rect(m, s.a, dir, n, t, t + l, o, o + w, ROAD_Y + 0.004, c);
+        }
+        t += rng.range(8.0, 16.0);
+    }
+    // Manhole covers in the lanes, drains at the kerb.
+    let lid = lin(Color::srgb_u32(0x55585C));
+    let rim = lin(Color::srgb_u32(0x2E3033));
+    let mut t = t0 + rng.range(4.0, 14.0);
+    while t < t1 - 1.0 {
+        let o = if rng.chance(0.5) { 1.4 } else { -1.4 } * if st.lanes > 1 { 2.4 } else { 1.0 };
+        let c = s.a + dir * t + n * o;
+        let ring = |r: f32| -> Vec<Vec3> {
+            (0..8)
+                .map(|k| lift(c + Vec2::from_angle(k as f32 / 8.0 * TAU) * r, ROAD_Y + 0.008))
+                .collect()
+        };
+        m.fan_up(lift(c, ROAD_Y + 0.008), &ring(0.42), rim);
+        m.fan_up(lift(c, ROAD_Y + 0.009), &ring(0.34), lid);
+        t += rng.range(22.0, 38.0);
+    }
+    if st.walk > 0.0 {
+        let grate = lin(Color::srgb_u32(0x232528));
+        let mut t = t0 + 6.0;
+        while t < t1 - 1.0 {
+            for side in [1.0f32, -1.0] {
+                rect(
+                    m,
+                    s.a,
+                    dir,
+                    n,
+                    t,
+                    t + 0.7,
+                    side * (h - 0.5),
+                    side * (h - 0.08),
+                    ROAD_Y + 0.006,
+                    grate,
+                );
+            }
+            t += 24.0;
+        }
+    }
+    if furniture <= 0.0 || st.walk <= 0.0 {
+        return;
+    }
+    let lamps: Vec<Vec2> = lamp_spots(s).into_iter().map(|(b, _)| b).collect();
+    let clear = |p: Vec2| lamps.iter().all(|l| l.distance(p) > 2.5);
+    let off = h + st.walk * 0.55;
+    // Street trees along avenue sidewalks.
+    if st.median > 0.0 && furniture > 0.6 {
+        let mut t = t0 + 6.0;
+        while t < t1 - 5.0 {
+            for side in [1.0f32, -1.0] {
+                let p = s.a + dir * t + n * side * (h + st.walk * 0.5);
+                if clear(p) {
+                    let canopy = rng.pick(&palette::CANOPIES);
+                    m.cuboid(
+                        lift(p - Vec2::splat(0.5), WALK_Y + 0.005),
+                        lift(p + Vec2::splat(0.5), WALK_Y + 0.02),
+                        shade(palette::EARTH, 0.6),
+                    );
+                    super::props::round_tree(m, lift(p, WALK_Y), rng.range(0.55, 0.7), canopy, rng.range(0.0, 6.0));
+                }
+            }
+            t += 14.0;
+        }
+    }
+    let mut t = t0 + rng.range(6.0, 16.0);
+    while t < t1 - 2.0 {
+        let side = if rng.chance(0.5) { 1.0f32 } else { -1.0 };
+        let p = s.a + dir * t + n * side * off;
+        let roll = rng.f();
+        if rng.f() < furniture && clear(p) {
+            // Facing the road: towards -side * n.
+            let face = -n * side;
+            let yaw = -face.y.atan2(face.x) + std::f32::consts::FRAC_PI_2;
+            let y = WALK_Y;
+            if roll < 0.4 {
+                // Bench and a bin beside it.
+                let wood = Color::srgb_u32(0x9C7650);
+                let iron = Color::srgb_u32(0x33373B);
+                let back = p - face * 0.25;
+                m.box_yaw(lift(p, y + 0.42), Vec3::new(1.6, 0.06, 0.45), yaw, wood, wood);
+                m.box_yaw(lift(back, y + 0.48), Vec3::new(1.6, 0.4, 0.06), yaw, wood, wood);
+                for k in [-0.7f32, 0.7] {
+                    let q = p + dir * k;
+                    m.box_yaw(lift(q, y), Vec3::new(0.06, 0.44, 0.45), yaw, iron, iron);
+                }
+                let b = p + dir * 1.3;
+                m.cylinder(lift(b, y), 0.22, 0.85, 6, iron, shade(iron, 1.3));
+            } else if roll < 0.65 {
+                // Fire hydrant.
+                let red = Color::srgb_u32(0xC8322B);
+                m.cylinder(lift(p, y), 0.13, 0.6, 6, red, shade(red, 1.1));
+                m.cylinder(lift(p, y + 0.6), 0.09, 0.12, 6, red, shade(red, 1.2));
+                m.box_yaw(lift(p, y + 0.38), Vec3::new(0.42, 0.08, 0.08), yaw, red, red);
+            } else if roll < 0.8 {
+                // Litter bin.
+                let green = Color::srgb_u32(0x2F5D49);
+                m.cylinder(lift(p, y), 0.24, 0.9, 6, green, shade(green, 1.3));
+            } else {
+                // Bollards along the kerb.
+                let post = Color::srgb_u32(0x4A4E52);
+                for k in [-1.2f32, 0.0, 1.2] {
+                    let q = s.a + dir * (t + k) + n * side * (h + 0.35);
+                    m.cylinder(lift(q, y), 0.08, 0.85, 5, post, palette::GUARDRAIL);
+                }
+            }
+        }
+        t += rng.range(18.0, 34.0);
+    }
+}
+
 /// Raised median between `t0` and `t1`: kerbs and a grass top with
 /// rounded-off (pointed) ends.
 fn median_strip(m: &mut MeshBuilder, a: Vec2, dir: Vec2, hw: f32, t0: f32, t1: f32) {
