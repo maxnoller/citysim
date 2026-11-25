@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use super::v4::{DepartureV4, HouseholdV4};
+use super::v5::{BuildingV5, GridV5, upgrade_buildings};
 use crate::derived::Access;
 use crate::economy::{Budget, DaySummary, Economy};
 use crate::growth::{BuildingMeta, GrowthState};
@@ -19,7 +20,7 @@ use crate::roads::{NodeId, RoadKind, RoadNetwork, RoadNode, RoadSegment, Segment
 use crate::side::SideTable;
 use crate::stats::Stats;
 use crate::traffic::{TrafficState, Vehicle, VehicleId};
-use crate::{Building, BuildingId, Demand, Grid, HouseholdId, IdMap, Rng, SimTime, Versions, World, balance};
+use crate::{BuildingId, Demand, HouseholdId, IdMap, Rng, SimTime, Versions, World, balance};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorldV3 {
@@ -27,8 +28,8 @@ pub(crate) struct WorldV3 {
     rng: Rng,
     time: SimTime,
     roads: RoadNetworkV3,
-    grid: Grid,
-    buildings: IdMap<BuildingId, Building>,
+    grid: GridV5,
+    buildings: IdMap<BuildingId, BuildingV5>,
     households: IdMap<HouseholdId, HouseholdV4>,
     vehicles: IdMap<VehicleId, VehicleV3>,
     economy: EconomyV3,
@@ -214,13 +215,21 @@ impl WorldV3 {
             pos: n.pos,
             segments: n.segments,
         });
+        let mut serial = 0;
+        let nodes = &roads.nodes;
         roads.segments = self.roads.segments.map_values(|s| {
             let kind = match s.kind {
                 RoadKindV3::Street => RoadKind::Street,
                 RoadKindV3::Highway => RoadKind::Highway,
             };
-            RoadSegment::new(s.a, s.b, kind, s.length, s.load)
+            let (pa, pb) = (
+                nodes.get(s.a).map_or([0.0; 2], |n| n.pos),
+                nodes.get(s.b).map_or([0.0; 2], |n| n.pos),
+            );
+            serial += 1;
+            RoadSegment::with_curve(s.a, s.b, kind, crate::Curve::straight(pa, pb), serial - 1, s.load)
         });
+        roads.next_serial = serial;
         let vehicles = self.vehicles.map_values(|v| Vehicle {
             pos: v.pos,
             heading: v.heading,
@@ -354,8 +363,8 @@ impl WorldV3 {
         w.rng = self.rng;
         w.time = self.time;
         w.roads = roads;
-        w.grid = self.grid;
-        w.buildings = self.buildings;
+        w.grid = self.grid.upgrade();
+        w.buildings = upgrade_buildings(self.buildings);
         w.households = self.households.map_values(|h| h.upgrade(day));
         w.vehicles = vehicles;
         w.economy = economy;
@@ -519,7 +528,7 @@ pub fn save_as_v3(w: &World) -> Vec<u8> {
         rng: w.rng.clone(),
         time: w.time.clone(),
         roads,
-        grid: w.grid.clone(),
+        grid: GridV5::of(&w.grid),
         buildings: super::v4::legacy_buildings(w),
         households: w.households.clone().map_values(|h| HouseholdV4::of(&h)),
         vehicles,

@@ -129,6 +129,44 @@ impl PartialEq for Movement {
 }
 
 impl Movement {
+    /// A movement along the quadratic `p0`, `p1`, `p2` (as a cubic).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn quadratic(
+        from_arm: u8,
+        to_arm: u8,
+        from_lane: u8,
+        to_lane: u8,
+        turn: Turn,
+        p0: [f32; 2],
+        p1: [f32; 2],
+        p2: [f32; 2],
+    ) -> Movement {
+        let curve = Curve::new(
+            p0,
+            [
+                p0[0] + (p1[0] - p0[0]) * (2.0 / 3.0),
+                p0[1] + (p1[1] - p0[1]) * (2.0 / 3.0),
+            ],
+            [
+                p2[0] + (p1[0] - p2[0]) * (2.0 / 3.0),
+                p2[1] + (p1[1] - p2[1]) * (2.0 / 3.0),
+            ],
+            p2,
+        );
+        let arc = curve.arc_table();
+        let length = curve.length_with(&arc).max(0.5);
+        Movement {
+            from_arm,
+            to_arm,
+            from_lane,
+            to_lane,
+            turn,
+            curve,
+            length,
+            arc,
+        }
+    }
+
     /// Point and unit direction `d` metres along the curve (clamped).
     pub fn pose_at(&self, d: f32) -> ([f32; 2], [f32; 2]) {
         let p = self.curve.pose_at_with(&self.arc, d, 0.0);

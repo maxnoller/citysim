@@ -423,7 +423,7 @@ pub fn cells_in_quad(world: &World, quad: &[[f32; 2]; 4]) -> Vec<CellRef> {
         let (j0, j1) = (libm::floorf(lo[1]) as i32, libm::ceilf(hi[1]) as i32);
         let area = (i1 - i0 + 1) as i64 * (j1 - j0 + 1) as i64;
         if area > l.cells.len() as i64 * 4 {
-            for (&(i, j), _) in l.cells.iter() {
+            for &(i, j) in l.cells.keys() {
                 if in_quad(quad, l.cell_center(i, j)) {
                     out.push(CellRef::new(id, i, j));
                 }
