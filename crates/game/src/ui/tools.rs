@@ -816,6 +816,14 @@ fn use_tool(
                     state.reset();
                 }
             } else if finish && !state.path.is_empty() && !pressed {
+                // Build what the preview shows: the leg to the point under
+                // the cursor is part of it.
+                if hovered.0.is_some()
+                    && let Some(c) = snapped
+                    && state.path.last() != Some(&c)
+                {
+                    state.path.push(c);
+                }
                 if state.path.len() >= 2 {
                     finish_path(state, &sim, *kind, &mut out, &mut toasts);
                 } else {

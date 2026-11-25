@@ -689,7 +689,7 @@ fn tax_rate_validation() {
 fn step_advances_time_and_days() {
     let mut w = World::new(0);
     assert_eq!(w.time.day, 1);
-    assert_eq!(w.time.hour(), 6.0);
+    assert_eq!(w.time.hour(), 9.0);
     w.step();
     assert_eq!(w.time.tick, 1);
     for _ in 0..balance::TICKS_PER_DAY {

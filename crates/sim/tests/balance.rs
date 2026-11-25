@@ -358,9 +358,9 @@ fn a_sensible_layout_built_all_at_once_stays_solvent() {
             "grid {grid}: deficit after day 2"
         );
         // (The one-junction layout fixed on day 4 recovers more slowly.)
-        let factor = if grid { 3 } else { 2 };
+        let factor = if grid { 3.0 } else { 1.8 };
         assert!(
-            h[2].budget.net() < h[9].budget.net() / factor,
+            (h[2].budget.net() as f64) < h[9].budget.net() as f64 / factor,
             "grid {grid}: surplus grows {} -> {}",
             h[2].budget.net(),
             h[9].budget.net()

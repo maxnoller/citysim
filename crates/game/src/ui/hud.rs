@@ -329,7 +329,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                     info_tip(
                         "Average commute",
                         "Average door-to-door drive to work, in real seconds at normal speed (the game \
-                         clock runs faster). Over a minute and fewer people want to move in.",
+                         clock runs faster). Over 70 seconds and fewer people want to move in.",
                     ),
                 ))
                 .with_children(|c| {
@@ -703,9 +703,9 @@ mod tests {
 
     #[test]
     fn hud_texts_match_the_sim_clock() {
-        // The tooltips say "four minutes" and "over a minute".
+        // The tooltips say "four minutes" and "over 70 seconds".
         assert_eq!(balance::TICKS_PER_DAY, 4 * 60 * citysim_sim::TICKS_PER_SECOND);
-        assert_eq!(balance::COMMUTE_OK_S, 60.0);
+        assert_eq!(balance::COMMUTE_OK_S, 70.0);
     }
 
     #[test]

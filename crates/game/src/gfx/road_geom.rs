@@ -704,15 +704,17 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
             let along = |d: f32| base + out * d;
             // (The stop line itself depends on the junction's control and
             // is drawn with its furniture, `signals`.)
-            // Room for a crossing: from the kerb line of the junction box
-            // (the straight road's edge `edge`, or close to the crossing
-            // carriageway) out to just before the stop line.
-            let inner = (edge - 2.4).max(stop * 0.55);
-            if stop - 0.4 - inner >= 2.2 {
+            // Room for a crossing: from just outside the crossing roads'
+            // carriageways (the sim puts the stop line its junction margin
+            // beyond them) out to just before the stop line.
+            let _ = edge;
+            let inner = (stop - citysim_sim::balance::JUNCTION_MARGIN_M + 0.35).max(stop * 0.4);
+            let width = (stop - 0.4 - inner).min(2.4);
+            if width >= 1.6 {
                 let zebra_w = 0.5;
                 let mut o = -h + 0.45;
                 while o + zebra_w <= h - 0.45 + 1e-3 {
-                    let (za, zb) = (along(stop - 0.4), along(stop - 0.4 - 2.1));
+                    let (za, zb) = (along(stop - 0.4), along(stop - 0.4 - width));
                     rect(
                         m,
                         s.a,

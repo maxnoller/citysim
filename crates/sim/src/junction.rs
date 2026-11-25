@@ -450,11 +450,28 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             let sin = geom::cross(di, dj).abs().max(0.3);
             let cos = geom::dot(di, dj).abs();
             let need = (arms[j].kind.half_width_m() + arms[i].kind.half_width_m() * cos) / sin;
-            sb = sb.max(need + balance::JUNCTION_MARGIN_M);
+            // Junctions leave room for a pedestrian crossing; a bend only
+            // needs its kerb radius.
+            let margin = if deg >= 3 {
+                balance::JUNCTION_MARGIN_M
+            } else {
+                balance::BEND_MARGIN_M
+            };
+            sb = sb.max(need + margin);
         }
         let len = roads.segments[arms[i].segment].length;
         let cap = 3.0 * arms.iter().map(|a| a.kind.half_width_m()).fold(0.0, f32::max) + 2.0;
         arms[i].setback = sb.min(cap).min(len * 0.4);
+    }
+    // A road that changes width without a junction (a lane ends, e.g. the
+    // highway or an avenue continuing as a street): a short merge box, so
+    // cars waiting to merge stop clear of the stream they join and the
+    // merge runs along a curve instead of a sideways jump.
+    if deg == 2 && arms[0].lanes_in != arms[1].lanes_in {
+        for a in arms.iter_mut() {
+            let len = roads.segments[a.segment].length;
+            a.setback = (balance::LANE_MERGE_TAPER_M * 0.5).min(len * 0.4);
+        }
     }
     // Movements.
     let mut movements = Vec::new();
@@ -531,7 +548,7 @@ pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec
             } else {
                 let (a0, a1) = ends[i];
                 let (b0, b1) = ends[j];
-                on_arc(a0, a1, b0) != on_arc(a0, a1, b1)
+                on_arc(a0, a1, b0) != on_arc(a0, a1, b1) || paths_brush(a, b)
             };
             if c {
                 out[i] |= 1 << j;
@@ -540,6 +557,30 @@ pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec
         }
     }
     out
+}
+
+/// Do the paths of two movements come closer than a car's width (plus a
+/// margin) anywhere, so two cars on them would touch? Catches movements
+/// that do not cross topologically but pass side by side in a small box
+/// (opposite left turns, a turn sweeping past a neighbouring lane). Only
+/// products and sums of the curve points: the same on every machine.
+fn paths_brush(a: &Movement, b: &Movement) -> bool {
+    const SAMPLES: usize = 16;
+    let clear2 = balance::MOVEMENT_CLEARANCE_M * balance::MOVEMENT_CLEARANCE_M;
+    let pts = |m: &Movement| -> [[f32; 2]; SAMPLES + 1] {
+        let mut out = [[0.0; 2]; SAMPLES + 1];
+        for (k, p) in out.iter_mut().enumerate() {
+            *p = bezier_pose(m.p0, m.p1, m.p2, k as f32 / SAMPLES as f32).0;
+        }
+        out
+    };
+    let (pa, pb) = (pts(a), pts(b));
+    pa.iter().any(|p| {
+        pb.iter().any(|q| {
+            let d = geom::sub(*p, *q);
+            geom::dot(d, d) < clear2
+        })
+    })
 }
 
 /// Major arms of a priority junction: the highest-class opposite pair (the

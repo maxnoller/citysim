@@ -103,8 +103,9 @@ pub const ZONE_ROAD_REACH: i32 = 2;
 pub const TICKS_PER_DAY: u32 = 4 * 60 * crate::TICKS_PER_SECOND;
 /// Ticks in one in-game hour (10 real seconds at 1x).
 pub const TICKS_PER_HOUR: u32 = TICKS_PER_DAY / 24;
-/// Time of day a new game starts at, in ticks after midnight (06:00).
-pub const START_TICK_OF_DAY: u32 = TICKS_PER_DAY / 4;
+/// Time of day a new game starts at, in ticks after midnight (09:00: a
+/// new city opens on a bright morning).
+pub const START_TICK_OF_DAY: u32 = TICKS_PER_DAY * 3 / 8;
 
 /// Morning departures to work are spread from this hour ...
 pub const MORNING_DEPART_START_H: f32 = 3.5;
@@ -206,8 +207,18 @@ pub const LANE_CHANGE_S: f32 = 1.2;
 /// the stop line, metres.
 pub const LANE_PREPARE_M: f32 = 90.0;
 /// Extra stop-line distance beyond the carriageways of the crossing roads,
-/// metres (crossings, kerb radius).
-pub const JUNCTION_MARGIN_M: f32 = 0.5;
+/// metres: room for a pedestrian crossing and the kerb radius (junctions of
+/// three or more roads).
+pub const JUNCTION_MARGIN_M: f32 = 2.5;
+/// The same for a bend (two roads meeting at an angle): kerb radius only.
+pub const BEND_MARGIN_M: f32 = 0.5;
+/// Two movements through a junction whose paths come closer than this
+/// (centre lines, metres) conflict even when they do not cross: a car is
+/// about 1.9 m wide, plus room so the bodies never brush.
+pub const MOVEMENT_CLEARANCE_M: f32 = 2.6;
+/// Length of the merge box where a road changes its number of lanes
+/// without a junction (split between both sides of the node), metres.
+pub const LANE_MERGE_TAPER_M: f32 = 14.0;
 
 // -------------------------------------------------------------- signals ----
 
@@ -234,8 +245,8 @@ pub const SIGNAL_PROGRESSION_SPEED: f32 = 14.0;
 /// Auto control turns a priority junction into signals when its busiest
 /// minute of vehicle time yesterday let in at least this many vehicles,
 /// and back below the lower number.
-pub const AUTO_SIGNAL_PER_MINUTE: u16 = 40;
-pub const AUTO_PRIORITY_PER_MINUTE: u16 = 22;
+pub const AUTO_SIGNAL_PER_MINUTE: u16 = 16;
+pub const AUTO_PRIORITY_PER_MINUTE: u16 = 9;
 
 /// Route planning: fixed cost of passing a junction, seconds (prefers
 /// straighter routes with fewer junctions).
@@ -360,7 +371,7 @@ pub const LOW_TAX_DEMAND_SLOPE: f32 = 1.0;
 pub const LOW_TAX_DEMAND_MAX: f32 = 0.06;
 /// Average car commutes longer than this (vehicle seconds) cut residential
 /// demand ...
-pub const COMMUTE_OK_S: f32 = 60.0;
+pub const COMMUTE_OK_S: f32 = 70.0;
 /// ... by 1.0 per this many extra seconds.
 pub const COMMUTE_DEMAND_SCALE_S: f32 = 120.0;
 

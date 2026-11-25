@@ -142,8 +142,8 @@ fn keys() -> [Key; 5] {
             zenith: c(0x16214A),
             glow: c(0xB0707A),
             glow_strength: 0.5,
-            ambient: Color::srgb(0.6, 0.6, 0.95),
-            ambient_brightness: 520.0,
+            ambient: Color::srgb(0.62, 0.7, 0.95),
+            ambient_brightness: 560.0,
         },
         Key {
             elevation: -0.5,
@@ -152,8 +152,10 @@ fn keys() -> [Key; 5] {
             zenith: c(0x36508F),
             glow: c(0xFF8C4A),
             glow_strength: 0.85,
-            ambient: Color::srgb(0.95, 0.78, 0.8),
-            ambient_brightness: 720.0,
+            // Warmth goes to the sky; the ground light stays nearly neutral
+            // so grass reads green, not brown, at dawn and dusk.
+            ambient: Color::srgb(0.86, 0.87, 0.94),
+            ambient_brightness: 860.0,
         },
         Key {
             elevation: 7.0,
@@ -162,8 +164,8 @@ fn keys() -> [Key; 5] {
             zenith: c(0x4A7DCC),
             glow: c(0xFFC07A),
             glow_strength: 0.7,
-            ambient: Color::srgb(0.95, 0.86, 0.84),
-            ambient_brightness: 700.0,
+            ambient: Color::srgb(0.92, 0.92, 0.93),
+            ambient_brightness: 840.0,
         },
         Key {
             elevation: 22.0,
@@ -236,9 +238,11 @@ pub fn day_light(hour: f32) -> DayLight {
     let key = sample(elevation);
     // Sun light fades out a little below the horizon; the moon takes over.
     let (light_dir, light_color, light_lux) = if elevation > -4.0 {
-        let k = ((elevation + 4.0) / 18.0).clamp(0.0, 1.0);
-        let warm = smoothstep(2.0, 26.0, elevation);
-        let color = mix(Color::srgb_u32(0xFFA466), palette::SUN, warm);
+        // A low sun still lights the town well (from about 40 % just above
+        // the horizon), in a soft peach rather than deep orange.
+        let k = smoothstep(-4.0, 4.0, elevation) * 0.42 + smoothstep(4.0, 20.0, elevation) * 0.58;
+        let warm = smoothstep(2.0, 22.0, elevation);
+        let color = mix(Color::srgb_u32(0xFFC594), palette::SUN, warm);
         // Keep shadows from going infinitely long at the horizon.
         let d = dir(elevation.max(4.0), azimuth);
         (-d, color, 6_200.0 * k)
