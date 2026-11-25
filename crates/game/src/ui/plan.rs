@@ -1079,7 +1079,10 @@ mod perf {
         let t0 = std::time::Instant::now();
         let base = scratch(&w);
         let t1 = std::time::Instant::now();
-        let legs = [(Cell::new(100, 100), Cell::new(110, 100)), (Cell::new(110, 100), Cell::new(110, 110))];
+        let legs = [
+            (Cell::new(100, 100), Cell::new(110, 100)),
+            (Cell::new(110, 100), Cell::new(110, 110)),
+        ];
         let plan = plan_roads(&base, &legs, RoadChoice::Street);
         let t2 = std::time::Instant::now();
         let idx = RoadIndex::build(&w);
