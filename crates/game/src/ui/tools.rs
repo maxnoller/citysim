@@ -789,7 +789,7 @@ fn use_tool(
                 if state.path.is_empty() {
                     state.reset();
                 }
-            } else if finish && !state.path.is_empty() {
+            } else if finish && !state.path.is_empty() && !pressed {
                 if state.path.len() >= 2 {
                     finish_path(state, &sim, *kind, &mut out, &mut toasts);
                 } else {
@@ -862,6 +862,10 @@ fn use_tool(
                         }
                     }
                     _ => state.reset(),
+                }
+                // A click and Enter within one slow frame: the click first.
+                if finish && pressed && state.path.len() >= 2 && state.busy() {
+                    finish_path(state, &sim, *kind, &mut out, &mut toasts);
                 }
             }
         }
