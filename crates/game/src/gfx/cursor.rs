@@ -133,7 +133,7 @@ fn grid_mesh() -> Mesh {
 fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
     let ghost_road = |c: Color| StandardMaterial {
         base_color: c,
-        emissive: LinearRgba::from(c) * 0.15,
+        emissive: LinearRgba::from(c) * 0.3,
         alpha_mode: AlphaMode::Blend,
         perceptual_roughness: 0.9,
         depth_bias: 20.0,
@@ -143,8 +143,8 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
         ghost: overlay_material(&mut materials, Color::WHITE, 0.0),
         frame: overlay_material(&mut materials, Color::WHITE, 0.0),
         grid: overlay_material(&mut materials, Color::WHITE, 0.0),
-        road_ok: materials.add(ghost_road(Color::srgba(0.86, 0.93, 1.0, 0.62))),
-        road_bad: materials.add(ghost_road(Color::srgba(1.0, 0.55, 0.5, 0.62))),
+        road_ok: materials.add(ghost_road(Color::srgba(0.86, 0.93, 1.0, 0.72))),
+        road_bad: materials.add(ghost_road(Color::srgba(1.0, 0.55, 0.5, 0.72))),
     };
     let outline = overlay_material(&mut materials, Color::srgba(0.85, 0.93, 1.0, 0.9), 30.0);
     let bad = overlay_material(&mut materials, Color::srgb(1.0, 0.3, 0.25), 30.0);

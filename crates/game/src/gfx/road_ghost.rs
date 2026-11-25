@@ -119,7 +119,7 @@ pub fn ghost_meshes(roads: &RoadNetwork, legs: &[GhostLeg], kind: RoadKind) -> G
         };
         if leg.valid {
             for s in [1.0f32, -1.0] {
-                line(&mut outline, s * (outer - 0.1), 0.2, [1.0, 1.0, 1.0, 0.9]);
+                line(&mut outline, s * (outer - 0.15), 0.32, [1.0, 1.0, 1.0, 0.95]);
             }
         } else {
             for s in [1.0f32, -1.0] {
