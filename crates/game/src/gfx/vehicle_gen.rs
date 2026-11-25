@@ -8,7 +8,7 @@ use super::mesh_util::{Glow, MeshBuilder};
 use super::palette::{self, lin, shade};
 
 /// Number of body shapes.
-pub const SHAPES: u32 = 4;
+pub const SHAPES: u32 = 5;
 
 /// Extrude a convex side profile in (x, y) between `z0` and `z1`.
 fn extrude(m: &mut MeshBuilder, prof: &[Vec2], z0: f32, z1: f32, side: Color, around: &dyn Fn(usize) -> Color) {
@@ -63,6 +63,7 @@ pub fn car_size(shape: u32) -> (f32, f32) {
         2 => (4.3, 1.85),
         3 => (4.4, 1.85),
         1 => (3.6, 1.72),
+        4 => (4.4, 1.8),
         _ => (4.0, 1.78),
     }
 }
@@ -140,10 +141,11 @@ pub fn car_model(body: Color, shape: u32, lod: bool) -> MeshBuilder {
             );
         }
         _ => {
-            let (back, front) = if shape == 1 {
-                (-hl + 0.15, hl - 1.1)
-            } else {
-                (-hl + 0.7, hl - 1.25)
+            // Saloon (0), hatchback (1), estate (4: long roof to the back).
+            let (back, front) = match shape {
+                1 => (-hl + 0.15, hl - 1.1),
+                4 => (-hl + 0.12, hl - 1.3),
+                _ => (-hl + 0.7, hl - 1.25),
             };
             let cab = [
                 Vec2::new(back - 0.25, 0.88),

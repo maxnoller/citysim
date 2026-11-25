@@ -26,6 +26,7 @@ use citysim_sim::{RoadKind, SegmentId, TripPurpose, Vehicle, VehicleId, World, b
 use super::noise::hash;
 use super::palette;
 use super::road_geom::{self, ROAD_Y, lane_offset};
+use super::city_material::CityMaterial;
 use super::scene::WorldMaterials;
 use super::vehicle_gen::{self, SHAPES};
 use crate::shared::{GameSet, SimWorld, WorldCamera};
@@ -488,6 +489,16 @@ pub(super) struct VehicleVisual {
     /// The model the entity's mesh shows.
     mesh_model: Option<usize>,
     lod: bool,
+    /// Speed at the last sample, and whether the brake lights are on.
+    speed: f32,
+    brake: bool,
+    /// Brake state the entity's material shows.
+    shown_brake: Option<bool>,
+}
+
+/// Brake lights: the sim's flag, or standing / clearly slowing down.
+fn braking(v: &Vehicle, prev_speed: f32) -> bool {
+    v.braking || v.speed < 0.8 || v.speed < prev_speed - 0.04
 }
 
 /// A vehicle's drawn place on a straight run.
@@ -518,6 +529,9 @@ impl VehicleVisual {
             model: model_index(v.seed, kind),
             mesh_model: None,
             lod: false,
+            speed: v.speed,
+            brake: braking(v, v.speed),
+            shown_brake: None,
         }
     }
 
@@ -529,11 +543,14 @@ impl VehicleVisual {
             *self = VehicleVisual {
                 lod: self.lod,
                 mesh_model: self.mesh_model,
+                shown_brake: self.shown_brake,
                 ..VehicleVisual::new(v, kind, lanes)
             };
             return;
         }
         let now = advance(self, v, lanes);
+        self.brake = braking(v, self.speed);
+        self.speed = v.speed;
         self.prev = self.cur;
         self.cur = now;
         if self.prev.0.distance(self.cur.0) > TELEPORT_M {
@@ -598,11 +615,12 @@ fn model_index(seed: u32, kind: Kind) -> usize {
     if kind == Kind::Truck {
         return CAR_MODELS + (h / 16) as usize % palette::TRUCK_LIVERIES.len();
     }
-    // Mostly sedans and hatchbacks, some vans and pickups.
-    let shape = match h % 10 {
-        0..=4 => 0,
-        5..=7 => 1,
-        8 => 2,
+    // Mostly saloons, hatchbacks and estates, some vans and pickups.
+    let shape = match h % 12 {
+        0..=3 => 0,
+        4..=6 => 1,
+        7 | 8 => 4,
+        9 => 2,
         _ => 3,
     };
     let colours = palette::CAR_BODIES.len();
@@ -671,6 +689,13 @@ fn turn_control(p0: Vec2, d0: Vec2, p2: Vec2, d2: Vec2) -> Vec2 {
 
 /// New visual sample for a vehicle (position, heading), updating its state.
 fn advance(vis: &mut VehicleVisual, v: &Vehicle, lanes: &HashMap<SegmentId, LaneGeom>) -> (Vec2, f32) {
+    // Inside a junction box the sim gives the exact point on the turn path
+    // (lane offset included).
+    if v.junction.is_some() {
+        vis.crossing = None;
+        vis.lane = None;
+        return (Vec2::from(v.pos), v.heading);
+    }
     let seg = v.segment.map(|s| (s, v.forward));
     let geom = v.segment.and_then(|s| lanes.get(&s));
     if seg != vis.seg {
@@ -908,7 +933,12 @@ fn sync_vehicles(
     mats: Res<WorldMaterials>,
     mut state: Local<SyncState>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
-    mut q: Query<(&mut VehicleVisual, &mut Transform, &mut Mesh3d)>,
+    mut q: Query<(
+        &mut VehicleVisual,
+        &mut Transform,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<CityMaterial>,
+    )>,
 ) {
     let cam = cams.single().map_or(Vec3::ZERO, |c| c.translation());
     let world = &sim.world;
@@ -952,7 +982,7 @@ fn sync_vehicles(
         let kind = kind_of(world, id);
         match state.entities.get(&id) {
             Some(&e) => {
-                let Ok((mut vis, _, _)) = q.get_mut(e) else {
+                let Ok((mut vis, _, _, _)) = q.get_mut(e) else {
                     continue;
                 };
                 if tick_now {
@@ -980,9 +1010,17 @@ fn sync_vehicles(
         }
     }
     if tick_now {
-        keep_spacing(q.iter_mut().map(|(vis, _, _)| vis.into_inner()), &state.lanes);
+        keep_spacing(q.iter_mut().map(|(vis, _, _, _)| vis.into_inner()), &state.lanes);
     }
-    for (mut vis, mut t, mut mesh) in &mut q {
+    for (mut vis, mut t, mut mesh, mut mat) in &mut q {
+        if vis.shown_brake != Some(vis.brake) {
+            vis.shown_brake = Some(vis.brake);
+            mat.0 = if vis.brake {
+                mats.lit_brake.clone()
+            } else {
+                mats.lit.clone()
+            };
+        }
         let p = vis.prev.0.lerp(vis.cur.0, alpha);
         let h = lerp_angle(vis.prev.1, vis.cur.1, alpha);
         let new = Transform::from_xyz(p.x, ROAD_Y, p.y).with_rotation(Quat::from_rotation_y(-h));

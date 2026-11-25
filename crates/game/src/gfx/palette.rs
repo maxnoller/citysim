@@ -115,15 +115,19 @@ pub const SKY_GLOW: Color = c(0xF6E7C8);
 pub const SUN: Color = c(0xFFF1DC);
 
 // ------------------------------------------------------------ vehicles
-pub const CAR_BODIES: [Color; 8] = [
-    c(0xE0564A),
-    c(0x2F8FCB),
-    c(0xF2B33D),
-    c(0xF7F1E5),
-    c(0x3F4A55),
-    c(0x3FA66B),
-    c(0xB8CAD6),
-    c(0x8E3B34),
+/// Car paints: mostly whites, silvers, greys and black like a real car park,
+/// with a few colours.
+pub const CAR_BODIES: [Color; 10] = [
+    c(0xF2F1EC), // white
+    c(0xBFC4C8), // silver
+    c(0x5B6269), // grey
+    c(0x2A2D31), // black
+    c(0xD0483D), // red
+    c(0x2F6FB5), // blue
+    c(0x2F5D49), // dark green
+    c(0xD8C9A6), // beige
+    c(0xE6A83E), // amber
+    c(0x8E3B34), // maroon
 ];
 pub const CAR_GLASS: Color = c(0x3E5566);
 /// Delivery trucks: (cab, cargo box, livery stripe).
