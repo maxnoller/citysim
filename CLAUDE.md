@@ -60,6 +60,17 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   for a static layout (they cost more than a new game's money).
 - Sim balance runs: `cargo run -p citysim_sim --release --example headless` (scripted cities in `citysim_sim::scenarios`).
 - `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep).
+- Round 2 (sim): `RoadKind::{Street, Highway, Avenue}` (`lane_count`, `lane_offset_m(lane)` right of travel, lane 0 =
+  kerb, `half_width_m`, `cost_per_cell`); `Command::BuildRoad { from, to, kind }` upgrades/downgrades built pieces in
+  place (`Preview.{new_pieces, upgraded, downgraded}`); `Command::SetJunctionControl { cell, control:
+  JunctionSetting::{Auto, Signal, Priority} }` (`Preview.junction`). `junction::{junction_view, signal_aspect,
+  movement_aspect, junction_at, junction_nodes, setback}`: control, per-approach aspect / left arrow / time to change /
+  queue / major, stop-line setback. Vehicles: `lane`, `lane_shift` (ease over `LANE_CHANGE_S`), `junction:
+  Option<JunctionMove>` (in the box: `pos`/`heading` follow the turn curve), `braking`, `stopped()`;
+  `drive::vehicle_pose(world, v)` = exact lane pose. Lots: frontage only, 1x1 / deep 1x2 / 2x2, `facing` to the road
+  (`growth::has_frontage`). Money: `economy.fiscal` (`FiscalState`, `reason.text()`, `service_level`). Saves: format 4;
+  version-3 saves load (`save::v3`). Scripted players: `GridPlayer::{new, hierarchy, single_artery}`; renders:
+  `cargo run -p citysim_sim --release --example topdown -- signal|lots|video|watch out`.
 
 ## Dev / headless flags (need `DISPLAY=:0`; llvmpipe works)
 - `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000) · `jam` (bad layout, one overloaded junction): real towns

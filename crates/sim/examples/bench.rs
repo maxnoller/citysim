@@ -1,16 +1,21 @@
-//! Step timing at ~5,000 residents during the morning rush, with each
-//! slow step re-timed on clones to separate real cost from OS noise.
+//! Step timing over a full day in a ~10,000-resident city (the hierarchy
+//! player), with extra trips through the rush so about 2,000 cars are on
+//! the road at the peak. Each slow step is re-timed on clones (best of 5)
+//! to separate real cost from OS noise (other processes on the machine).
 //!
-//! cargo run -p citysim_sim --release --example bench
+//! cargo run -p citysim_sim --release --example bench [population] [cars]
 use std::time::Instant;
 
 use citysim_sim::scenarios::GridPlayer;
 use citysim_sim::*;
 
 fn main() {
+    let args: Vec<u32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
+    let pop = args.first().copied().unwrap_or(10_000);
+    let cars = args.get(1).copied().unwrap_or(2_000) as usize;
     let mut w = World::new(7);
-    let mut p = GridPlayer::new(&Zone::ALL);
-    while w.stats.population < 5000 {
+    let mut p = GridPlayer::hierarchy();
+    while w.stats.population < pop && w.time.day < 80 {
         p.act(&mut w);
         w.step();
     }
@@ -23,8 +28,24 @@ fn main() {
     let mut times = Vec::new();
     let mut worst: Vec<(u128, World)> = Vec::new();
     let mut peak = 0;
+    let homes: Vec<[f32; 2]> = w
+        .buildings
+        .values()
+        .map(|b| derived::rect_center(b.footprint))
+        .collect();
+    let mut r = Rng::new(9);
     for _ in 0..balance::TICKS_PER_DAY {
         p.act(&mut w);
+        // Top up the rush (06:30-10:00 and 16:00-19:30) towards `cars`.
+        let h = w.time.hour();
+        if ((6.5..10.0).contains(&h) || (16.0..19.5).contains(&h)) && w.vehicles.len() + w.traffic.pending.len() < cars
+        {
+            for _ in 0..2 {
+                let a = homes[r.below(homes.len() as u32) as usize];
+                let b = homes[r.below(homes.len() as u32) as usize];
+                traffic::debug_request(&mut w, a, b);
+            }
+        }
         let before = w.clone();
         let t = Instant::now();
         w.step();
