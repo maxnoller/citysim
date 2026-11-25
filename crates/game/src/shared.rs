@@ -169,6 +169,10 @@ pub struct ToolPreview {
     /// Affected cells (valid: from the preview; invalid road: the straight
     /// line's cells if it is straight, else empty).
     pub cells: Vec<Cell>,
+    /// Zoning tools: the zoning cells that would change, on any lattice
+    /// (`Preview::zone_cells`). When not empty gfx draws these (rotated
+    /// along their roads) instead of `cells`.
+    pub zone_cells: Vec<CellRef>,
     /// `None` when the command would succeed.
     pub error: Option<CommandError>,
     /// Money it would cost.

@@ -28,6 +28,19 @@ impl Plugin for StatsPlugin {
         if std::env::var("CITYSIM_GFX_TOOLDEMO").is_ok_and(|v| !v.is_empty() && v != "0") {
             app.add_systems(Update, tool_demo.before(crate::shared::GameSet::Render));
         }
+        if let Ok(at) = std::env::var("CITYSIM_GFX_SHOWCASE_SITES") {
+            let v: Vec<f32> = at.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if v.len() == 2 {
+                let at = Vec2::new(v[0], v[1]);
+                app.add_systems(
+                    PostStartup,
+                    move |c: Commands,
+                          m: ResMut<BuildingModels>,
+                          a: ResMut<Assets<Mesh>>,
+                          w: Res<super::scene::WorldMaterials>| { showcase_sites(c, m, a, w, at) },
+                );
+            }
+        }
         if std::env::var("CITYSIM_GFX_STATS").is_ok_and(|v| !v.is_empty() && v != "0") {
             app.add_systems(Update, log_stats);
         }
@@ -184,4 +197,47 @@ fn tool_demo(
         doomed_buildings: vec![],
         doomed_road_cells: vec![],
     });
+}
+
+/// Dev aid (`CITYSIM_GFX_SHOWCASE_SITES=x,z`): a row of building sites at
+/// sim point `(x, z)` (both stages; tall ones with their crane) and the
+/// finished buildings beside them, to look at sites without waiting for
+/// the sim to start one.
+fn showcase_sites(
+    mut commands: Commands,
+    mut models: ResMut<BuildingModels>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mats: Res<super::scene::WorldMaterials>,
+    at: Vec2,
+) {
+    use citysim_sim::Zone;
+
+    use super::building_gen::ModelKey;
+    let keys = [
+        (Zone::Residential, (2, 2), 3),
+        (Zone::Commercial, (2, 2), 3),
+        (Zone::Residential, (1, 2), 3),
+        (Zone::Commercial, (1, 1), 2),
+        (Zone::Industrial, (2, 2), 2),
+    ];
+    for (k, &(kind, cells, level)) in keys.iter().enumerate() {
+        let key = ModelKey {
+            kind,
+            cells,
+            level,
+            variant: 3,
+        };
+        for (row, stage) in [(0, Some(0u8)), (1, Some(1)), (2, None)] {
+            let mesh = match stage {
+                Some(s) => models.site(key, s, &mut meshes),
+                None => models.get(key, &mut meshes).0,
+            };
+            let p = at + Vec2::new(k as f32 * 22.0, row as f32 * 22.0);
+            commands.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mats.lit.clone()),
+                Transform::from_xyz(p.x, 0.0, p.y),
+            ));
+        }
+    }
 }

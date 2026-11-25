@@ -20,6 +20,7 @@ mod palette;
 mod props;
 mod road_geom;
 mod road_ghost;
+mod road_tool;
 mod roads;
 mod scene;
 mod signals;
@@ -64,6 +65,7 @@ impl Plugin for GfxPlugin {
             smoke::SmokePlugin,
             loading::LoadingPlugin,
             land::LandPlugin,
+            road_tool::RoadToolPlugin,
             bench::BenchPlugin,
         ));
     }

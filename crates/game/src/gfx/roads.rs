@@ -8,6 +8,7 @@ use std::hash::Hasher;
 
 use bevy::prelude::*;
 
+use super::buildings::DrivewayMouths;
 use super::mesh_util::MeshBuilder;
 use super::road_geom::{self, chunk_of};
 use super::scene::WorldMaterials;
@@ -17,7 +18,9 @@ const CHUNK: f32 = 128.0;
 
 #[derive(Default)]
 struct RoadChunks {
-    key: Option<(u64, u64)>,
+    key: Option<((u64, u64), u64)>,
+    /// Layout of the roads key it was made for.
+    layout: Option<((u64, u64), road_geom::RoadLayout)>,
     quality: Option<GraphicsQuality>,
     /// Chunk -> (content hash, road entity, lamp light pools entity).
     chunks: HashMap<IVec2, (u64, Entity, Entity)>,
@@ -37,12 +40,49 @@ pub struct LampPoolMesh;
 /// Radius of a lamp's light pool on the ground, m.
 const POOL_R: f32 = 7.5;
 
+/// Give each segment the driveway mouths along its sides.
+fn assign_driveways(layout: &mut road_geom::RoadLayout, points: &[Vec2]) {
+    const B: f32 = 32.0;
+    let mut buckets: HashMap<IVec2, Vec<Vec2>> = HashMap::new();
+    for &p in points {
+        buckets.entry(chunk_of(p, B)).or_default().push(p);
+    }
+    for s in &mut layout.segs {
+        if s.style.walk <= 0.0 {
+            continue;
+        }
+        let reach = s.style.outer() + 2.0;
+        let pts: Vec<Vec2> = s.frame.pts.iter().map(|p| p.1).collect();
+        let lo = pts.iter().fold(Vec2::splat(f32::MAX), |a, p| a.min(*p)) - reach;
+        let hi = pts.iter().fold(Vec2::splat(f32::MIN), |a, p| a.max(*p)) + reach;
+        let (b0, b1) = (chunk_of(lo, B), chunk_of(hi, B));
+        for y in b0.y..=b1.y {
+            for x in b0.x..=b1.x {
+                for &p in buckets.get(&IVec2::new(x, y)).map(Vec::as_slice).unwrap_or(&[]) {
+                    let d = pts
+                        .windows(2)
+                        .map(|w| super::land::point_seg(p, w[0], w[1]))
+                        .fold(f32::MAX, f32::min);
+                    if d < reach {
+                        s.avoid.push(p);
+                    }
+                }
+            }
+        }
+        s.avoid.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    }
+}
+
 pub struct RoadsPlugin;
 
 impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreStartup, init_pools)
-            .add_systems(Update, rebuild_roads.in_set(GameSet::Render));
+        app.add_systems(PreStartup, init_pools).add_systems(
+            Update,
+            rebuild_roads
+                .in_set(GameSet::Render)
+                .after(super::buildings::BuildingsSync),
+        );
     }
 }
 
@@ -57,6 +97,7 @@ fn init_pools(mut commands: Commands, mut materials: ResMut<Assets<StandardMater
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_roads(
     mut commands: Commands,
     sim: Res<SimWorld>,
@@ -65,8 +106,10 @@ fn rebuild_roads(
     mats: Res<WorldMaterials>,
     pools: Res<LampPools>,
     quality: Res<GraphicsQuality>,
+    mouths: Res<DrivewayMouths>,
 ) {
-    let key = sim.key(sim.world.versions.roads);
+    let roads_key = sim.key(sim.world.versions.roads);
+    let key = (roads_key, mouths.version);
     if state.key == Some(key) && state.quality == Some(*quality) {
         return;
     }
@@ -77,7 +120,13 @@ fn rebuild_roads(
         GraphicsQuality::Medium => 0.5,
         GraphicsQuality::High => 1.0,
     };
-    let layout = road_geom::layout(&sim.world);
+    // The layout changes only with the roads; driveways only move what
+    // the sidewalks keep clear.
+    if state.layout.as_ref().is_none_or(|(k, _)| *k != roads_key) {
+        state.layout = Some((roads_key, road_geom::layout(&sim.world)));
+    }
+    let mut layout = state.layout.as_ref().expect("layout").1.clone();
+    assign_driveways(&mut layout, &mouths.points);
     // Bucket pieces and hash each chunk's content.
     let mut nodes: HashMap<IVec2, Vec<usize>> = HashMap::new();
     let mut segs: HashMap<IVec2, Vec<usize>> = HashMap::new();

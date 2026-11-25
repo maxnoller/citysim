@@ -279,6 +279,9 @@ pub struct SegLayout {
     /// The end has a junction box (markings stop at the cut; arrows).
     pub box_a: bool,
     pub box_b: bool,
+    /// Points on the sidewalks to keep clear (driveway mouths): no
+    /// furniture there, lamps step aside.
+    pub avoid: Vec<Vec2>,
 }
 
 impl SegLayout {
@@ -295,6 +298,7 @@ impl SegLayout {
             deg_b: 1,
             box_a: false,
             box_b: false,
+            avoid: Vec::new(),
         }
     }
 
@@ -401,6 +405,7 @@ pub fn layout(world: &World) -> RoadLayout {
             deg_b: degree(seg.b),
             box_a: boxed.contains(&seg.a),
             box_b: boxed.contains(&seg.b),
+            avoid: Vec::new(),
         });
     }
     // The highway continues off the map into the fog.
@@ -418,6 +423,7 @@ pub fn layout(world: &World) -> RoadLayout {
                 deg_b: 2,
                 box_a: false,
                 box_b: false,
+                avoid: Vec::new(),
             });
         }
     }
@@ -475,6 +481,15 @@ pub fn hash_seg<H: Hasher>(s: &SegLayout, h: &mut H) {
         hf(h, v);
     }
     (s.deg_a, s.deg_b, s.box_a, s.box_b, s.style.highway, s.style.lanes).hash(h);
+    for p in &s.avoid {
+        hf(h, p.x);
+        hf(h, p.y);
+    }
+}
+
+/// Is `p` clear of the points a segment must keep free?
+fn clear_of(s: &SegLayout, p: Vec2, r: f32) -> bool {
+    s.avoid.iter().all(|a| a.distance_squared(p) > r * r)
 }
 
 // ---------------------------------------------------------------- meshing
@@ -936,7 +951,7 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
         return;
     }
     let lamps: Vec<Vec2> = lamp_spots(s).into_iter().map(|(b, _)| b).collect();
-    let clear = |p: Vec2| lamps.iter().all(|l| l.distance(p) > 2.5);
+    let clear = |p: Vec2| lamps.iter().all(|l| l.distance(p) > 2.5) && clear_of(s, p, 2.6);
     let off = h + st.walk * 0.55;
     // Street trees along avenue sidewalks.
     if st.median > 0.0 && furniture > 0.6 {
@@ -1073,14 +1088,21 @@ pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
             } else {
                 a + (b - a) * k as f32 / (count - 1) as f32
             };
-            let (p, d) = f.pose(t);
-            let n = perp(d);
+            let (p, _) = f.pose(t);
             // Alternate sides, phase from the position so neighbours agree.
             let side = if (p.dot(Vec2::ONE) / 26.0).round() as i32 % 2 == 0 {
                 1.0
             } else {
                 -1.0
             };
+            // Step aside from a driveway.
+            let t = [0.0f32, 3.0, -3.0, 5.5, -5.5]
+                .into_iter()
+                .map(|k| (t + k).clamp(a, b))
+                .find(|&t| clear_of(s, f.at(t, side * off), 2.0))
+                .unwrap_or(t);
+            let (p, d) = f.pose(t);
+            let n = perp(d);
             let base = p + n * side * off;
             (base, base - n * side * 1.1)
         })

@@ -33,6 +33,7 @@ pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
 pub struct BuildingModels {
     meshes: HashMap<ModelKey, (Handle<Mesh>, Handle<Mesh>)>,
     emitters: HashMap<ModelKey, Vec<Vec3>>,
+    driveways: HashMap<ModelKey, Vec<(f32, f32)>>,
     sites: HashMap<(ModelKey, u8), Handle<Mesh>>,
 }
 
@@ -42,7 +43,7 @@ impl BuildingModels {
         self.meshes.len()
     }
 
-    fn site(&mut self, key: ModelKey, stage: u8, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+    pub fn site(&mut self, key: ModelKey, stage: u8, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
         // Sites only depend on the lot, the tier and the stage.
         let k = ModelKey {
             variant: key.variant % 4,
@@ -56,17 +57,24 @@ impl BuildingModels {
 
     pub fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
         let emitters = &mut self.emitters;
+        let driveways = &mut self.driveways;
         self.meshes
             .entry(key)
             .or_insert_with(|| {
                 let mut detail = building_gen::generate(key, false);
                 emitters.insert(key, std::mem::take(&mut detail.emitters));
+                driveways.insert(key, std::mem::take(&mut detail.driveways));
                 (
                     meshes.add(detail.build()),
                     meshes.add(building_gen::generate(key, true).build()),
                 )
             })
             .clone()
+    }
+
+    /// Driveway x ranges at the lot front, in model space (after `get`).
+    pub fn driveways(&self, key: ModelKey) -> &[(f32, f32)] {
+        self.driveways.get(&key).map_or(&[], Vec::as_slice)
     }
 
     /// Chimney tops that smoke, in model space (after `get`).
@@ -82,6 +90,14 @@ pub(super) struct BuildingVisual;
 /// transform). Highlights draw over these.
 #[derive(Resource, Default)]
 pub struct BuildingEntities(pub HashMap<BuildingId, (Entity, ModelKey, Transform)>);
+
+/// Where driveways meet the road side (sim metres): street furniture keeps
+/// clear of them. `version` changes whenever the set changes.
+#[derive(Resource, Default)]
+pub struct DrivewayMouths {
+    pub version: u64,
+    pub points: Vec<Vec2>,
+}
 
 /// A building still under construction (its children show the site).
 #[derive(Component)]
@@ -147,15 +163,20 @@ pub fn lot_of(b: &Building) -> Lot {
     }
 }
 
+/// The system that syncs buildings (and the driveway mouths).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BuildingsSync;
+
 pub struct BuildingsPlugin;
 
 impl Plugin for BuildingsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BuildingModels>()
             .init_resource::<BuildingEntities>()
+            .init_resource::<DrivewayMouths>()
             .add_systems(
                 Update,
-                (sync_buildings, advance_sites, animate_buildings)
+                (sync_buildings.in_set(BuildingsSync), advance_sites, animate_buildings)
                     .chain()
                     .in_set(GameSet::Render)
                     .after(super::land::LandUpdate),
@@ -205,6 +226,7 @@ fn sync_buildings(
     mut spawned: Local<Spawned>,
     mut index: ResMut<BuildingEntities>,
     edges: Res<RoadEdges>,
+    mut mouths: ResMut<DrivewayMouths>,
 ) {
     let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
     if spawned.key == Some(key) {
@@ -324,6 +346,24 @@ fn sync_buildings(
         sp.entities.insert(id, (ec.id(), mk, pose_key(b), inset));
     }
     sp.insets = insets;
+    // Driveway mouths of every finished (or growing) building.
+    let mut points = Vec::new();
+    for (id, (_, key, _, inset)) in &sp.entities {
+        let Some(b) = buildings.get(*id) else { continue };
+        let lot = lot_of(b);
+        for &(x0, x1) in models.driveways(*key) {
+            let x = (x0 + x1) * 0.5;
+            points.push(lot.world(Vec2::new(
+                inset.shift.x + x * inset.scale.x,
+                inset.shift.y + lot.half.y * inset.scale.z,
+            )));
+        }
+    }
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    if points != mouths.points {
+        mouths.points = points;
+        mouths.version += 1;
+    }
 }
 
 /// Move building sites on: foundations -> frame -> the finished building
