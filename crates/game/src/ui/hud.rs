@@ -79,6 +79,7 @@ struct HudKey {
     booked: usize,
     paused: bool,
     menu: bool,
+    fiscal: (citysim_sim::FiscalState, citysim_sim::FiscalReason, u32),
 }
 
 /// Rounded square holding a chip's icon.
@@ -558,6 +559,11 @@ fn update_top_bar(
         booked: w.economy.history.len(),
         paused: clock.paused,
         menu: state.menu_open,
+        fiscal: (
+            w.economy.fiscal.state,
+            w.economy.fiscal.reason,
+            (w.economy.fiscal.service_level * 100.0) as u32,
+        ),
     };
     if *last == Some(key) {
         return;
@@ -568,7 +574,7 @@ fn update_top_bar(
         shown.warned_broke = true;
         toasts.write(Toast::new(
             ToastKind::Warning,
-            "Money is below zero. New roads wait until taxes bring it back; bulldozing still works.",
+            "Money is below zero: new roads wait, and at midnight city services are cut",
         ));
     } else if !broke {
         shown.warned_broke = false;
@@ -576,13 +582,17 @@ fn update_top_bar(
     // Booked at midnight; nothing to show before the first one.
     let booked = !w.economy.history.is_empty();
     let net = w.economy.last_day.income() - w.economy.last_day.expenses();
-    let net_color = if !booked {
+    let note = super::fiscal::fiscal_note(w);
+    let net_color = if let Some(n) = &note {
+        n.color
+    } else if !booked {
         t::TEXT_MUTED
     } else if net >= 0 {
         t::POSITIVE
     } else {
         t::NEGATIVE
     };
+    let alarm = broke || note.as_ref().is_some_and(|n| n.color == t::NEGATIVE);
     for (which, mut text, mut color) in &mut texts {
         let (s, c): (String, Color) = match which {
             HudText::Day => (format!("Day {}", w.time.day), t::TEXT),
@@ -598,14 +608,15 @@ fn update_top_bar(
             }
             HudText::Money => (format::money(money_shown), if broke { t::NEGATIVE } else { t::TEXT }),
             HudText::MoneyIcon => (
-                if broke { icon::ALERT } else { icon::WALLET }.to_string(),
-                if broke { t::NEGATIVE } else { t::ACCENT },
+                if alarm { icon::ALERT } else { icon::WALLET }.to_string(),
+                if alarm { t::NEGATIVE } else { t::ACCENT },
             ),
             HudText::MoneyDelta => (
-                if booked {
-                    format!("{} / day", format::signed_money(net))
-                } else {
-                    "Booked at midnight".to_string()
+                match (&note, booked) {
+                    (Some(n), true) => format!("{} · {}/day", n.short, format::signed_money(net)),
+                    (Some(n), false) => n.short.to_string(),
+                    (None, true) => format!("{} / day", format::signed_money(net)),
+                    (None, false) => "Booked at midnight".to_string(),
                 },
                 net_color,
             ),
@@ -663,7 +674,7 @@ fn update_top_bar(
     }
     if let Ok(mut bg) = money_box.single_mut() {
         bg.set_if_neq(BackgroundColor(t::alpha(
-            if broke { t::NEGATIVE } else { t::ACCENT },
+            if alarm { t::NEGATIVE } else { t::ACCENT },
             0.14,
         )));
     }

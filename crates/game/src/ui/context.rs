@@ -1063,7 +1063,7 @@ pub fn junction_card(world: &World, n: citysim_sim::NodeId) -> Option<Card> {
                 } else if a.left_protected {
                     v += ", left protected";
                 }
-                if let Some(s) = a.time_to_change_s.filter(|_| asp != Aspect::Yellow) {
+                if let Some(s) = a.time_to_change_s.filter(|&s| asp != Aspect::Yellow && s >= 0.5) {
                     v += &format!(" {}s", s.ceil() as i64);
                 }
                 (format!("{v} · {queue}"), aspect_color(asp))

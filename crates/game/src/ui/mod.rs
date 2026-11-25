@@ -10,6 +10,7 @@ mod budget;
 mod context;
 mod controls;
 mod demand;
+mod fiscal;
 mod format;
 mod hud;
 mod legend;
@@ -82,6 +83,7 @@ impl Plugin for UiPlugin {
                 menu::MenuPlugin,
                 tooltip::TooltipPlugin,
             ))
+            .add_plugins(fiscal::FiscalPlugin)
             .add_systems(PostStartup, fallback_ui_camera)
             .add_systems(PreUpdate, scale_ui);
         if let Some(dir) = std::env::var_os("CITYSIM_UI_SHOTS").filter(|d| !d.is_empty()) {
