@@ -986,6 +986,7 @@ impl Plugin for TourPlugin {
             release_right: false,
         })
         .init_resource::<TourData>()
+        .init_resource::<SavedWorld>()
         .insert_resource(Pointer {
             smooth: true,
             ..default()
