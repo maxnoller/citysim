@@ -566,7 +566,7 @@ impl RoadNetwork {
                     return false;
                 }
                 let (end1, end2) = (seg1.other(n), seg2.other(n));
-                if end1 == end2 {
+                if end1 == end2 || self.segment_between(end1, end2).is_some() {
                     return false;
                 }
                 let p = node.pos;

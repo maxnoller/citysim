@@ -406,6 +406,95 @@ pub(crate) fn plan_road(world: &World, curve: Curve, kind: RoadKind) -> Result<R
         }
         pieces.push(Piece::New(curve.sub(a.d, b.d).with_ends(a.pos, b.pos)));
     }
+    // A new piece between two nodes some road will already join (a curve
+    // beside a straight between the same junctions, a road crossing another
+    // twice) gets a node in its middle: the graph keeps one segment per pair
+    // of nodes. Node keys: existing nodes, or the stop that makes the node.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Key {
+        Node(NodeId),
+        Stop(usize),
+    }
+    let key_of = |k: usize, st: &Stop| match st.node {
+        StopNode::Existing(n) => Key::Node(n),
+        _ => Key::Stop(k),
+    };
+    let mut joined: Vec<(Key, Key)> = Vec::new();
+    let mut split_segs: Vec<SegmentId> = stops
+        .iter()
+        .filter_map(|st| match st.node {
+            StopNode::Split(sg, _) => Some(sg),
+            _ => None,
+        })
+        .collect();
+    split_segs.sort();
+    split_segs.dedup();
+    for &sg in &split_segs {
+        let seg = &roads.segments[sg];
+        let mut pts: Vec<(f32, Key)> = vec![(0.0, Key::Node(seg.a)), (seg.length, Key::Node(seg.b))];
+        for (k, st) in stops.iter().enumerate() {
+            if let StopNode::Split(s2, d) = st.node
+                && s2 == sg
+            {
+                pts.push((d, key_of(k, st)));
+            }
+        }
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for w in pts.windows(2) {
+            joined.push((w[0].1.min(w[1].1), w[0].1.max(w[1].1)));
+        }
+    }
+    fn joined_now(roads: &RoadNetwork, joined: &[(Key, Key)], split: &[SegmentId], a: Key, b: Key) -> bool {
+        let (a, b) = (a.min(b), a.max(b));
+        joined.contains(&(a, b))
+            || match (a, b) {
+                (Key::Node(x), Key::Node(y)) => roads.segment_between(x, y).is_some_and(|sg| !split.contains(&sg)),
+                _ => false,
+            }
+    }
+    let mut k = 0;
+    while k < pieces.len() {
+        if let Piece::New(c) = pieces[k]
+            && joined_now(
+                roads,
+                &joined,
+                &split_segs,
+                key_of(k, &stops[k]),
+                key_of(k + 1, &stops[k + 1]),
+            )
+        {
+            let l = c.length();
+            let mid = c.pose_at(l * 0.5, 0.0).pos;
+            if l < 2.0 * balance::MIN_SEGMENT_M {
+                return Err(CommandError::TooClose { at: mid });
+            }
+            let (c1, c2) = c.split_at(l * 0.5);
+            // Later stops shift by one: their keys must not change meaning.
+            for (a, b) in joined.iter_mut() {
+                for x in [a, b] {
+                    if let Key::Stop(i) = x
+                        && *i > k
+                    {
+                        *i += 1;
+                    }
+                }
+            }
+            stops.insert(
+                k + 1,
+                Stop {
+                    d: (stops[k].d + stops[k + 1].d) * 0.5,
+                    pos: c1.end(),
+                    node: StopNode::New,
+                    change: None,
+                },
+            );
+            pieces[k] = Piece::New(c1);
+            pieces.insert(k + 1, Piece::New(c2));
+            k += 2;
+            continue;
+        }
+        k += 1;
+    }
     // Arm angles at every stop the new road uses.
     let mut allow: Vec<([f32; 2], f32)> = Vec::new();
     for (k, st) in stops.iter().enumerate() {

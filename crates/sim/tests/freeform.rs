@@ -80,3 +80,221 @@ fn organic_town_builds_and_grows() {
     w.check_invariants().unwrap();
     w.check_sim_invariants().unwrap();
 }
+
+// ------------------------------------------------- random free-form edits ----
+
+use citysim_sim::{Command, CommandError, Curve, Rng, RoadKind, World as W, Zone};
+
+/// Segments cross only where they share a node; arms at every node are at
+/// least the minimum angle apart.
+fn check_geometry(w: &W) {
+    let segs: Vec<_> = w.roads.segments.iter().collect();
+    for (i, (sa, a)) in segs.iter().enumerate() {
+        let (alo, ahi) = a.curve.bounds();
+        for (sb, b) in &segs[i + 1..] {
+            let (blo, bhi) = b.curve.bounds();
+            if alo[0] > bhi[0] + 0.1 || blo[0] > ahi[0] + 0.1 || alo[1] > bhi[1] + 0.1 || blo[1] > ahi[1] + 0.1 {
+                continue;
+            }
+            for (_, _, p) in a.curve.intersections(&b.curve) {
+                let shared = [a.a, a.b]
+                    .iter()
+                    .any(|&n| (n == b.a || n == b.b) && citysim_sim::geom::dist(w.roads.nodes[n].pos, p) < 0.1);
+                assert!(shared, "{sa:?} and {sb:?} cross at {p:?} without a node");
+            }
+        }
+    }
+    for (n, node) in w.roads.nodes.iter() {
+        let dirs: Vec<[f32; 2]> = node.segments.iter().map(|&s| w.roads.segments[s].dir_from(n)).collect();
+        for i in 0..dirs.len() {
+            for j in i + 1..dirs.len() {
+                let d = citysim_sim::geom::dot(dirs[i], dirs[j]).clamp(-1.0, 1.0);
+                let deg = d.acos().to_degrees();
+                assert!(deg >= balance::MIN_ARM_ANGLE_DEG - 0.5, "{n:?} arms {deg} deg apart");
+            }
+        }
+    }
+}
+
+fn rand_pt(r: &mut Rng) -> [f32; 2] {
+    [200.0 + r.below(400) as f32, 800.0 + r.below(400) as f32]
+}
+
+fn rand_command(w: &W, r: &mut Rng) -> Command {
+    let segs: Vec<_> = w.roads.segments.iter().map(|(id, s)| (id, s.length)).collect();
+    match r.below(12) {
+        0..=4 => {
+            let a = rand_pt(r);
+            let b = rand_pt(r);
+            let curve = match r.below(3) {
+                0 => Curve::straight(a, b),
+                1 => Curve::through_corner(a, rand_pt(r), b),
+                _ => {
+                    let d = [r.below(200) as f32 - 100.0, r.below(200) as f32 - 100.0];
+                    Curve::continuing(a, d, b)
+                }
+            };
+            let kind = if r.below(4) == 0 {
+                RoadKind::Avenue
+            } else {
+                RoadKind::Street
+            };
+            Command::BuildCurve { curve, kind }
+        }
+        5 if !segs.is_empty() => {
+            let (s, l) = segs[r.below(segs.len() as u32) as usize];
+            let a = l * r.below(100) as f32 / 100.0;
+            Command::SetRoadKind {
+                segment: s,
+                from_m: a,
+                to_m: a + l * 0.5,
+                kind: if r.below(2) == 0 {
+                    RoadKind::Avenue
+                } else {
+                    RoadKind::Street
+                },
+            }
+        }
+        6 if !segs.is_empty() => {
+            let (s, l) = segs[r.below(segs.len() as u32) as usize];
+            let a = l * r.below(100) as f32 / 100.0;
+            Command::RemoveRoad {
+                segment: s,
+                from_m: a,
+                to_m: a + 20.0,
+            }
+        }
+        7 => {
+            let p = rand_pt(r);
+            let (dx, dy) = (10.0 + r.below(40) as f32, 10.0 + r.below(40) as f32);
+            Command::BulldozeArea {
+                quad: [
+                    p,
+                    [p[0] + dx, p[1] + 5.0],
+                    [p[0] + dx - 5.0, p[1] + dy],
+                    [p[0], p[1] + dy],
+                ],
+            }
+        }
+        8..=9 => {
+            let p = rand_pt(r);
+            let s = 30.0 + r.below(120) as f32;
+            let z = [Zone::Residential, Zone::Commercial, Zone::Industrial][r.below(3) as usize];
+            Command::ZoneArea {
+                quad: [p, [p[0] + s, p[1]], [p[0] + s, p[1] + s], [p[0], p[1] + s]],
+                zone: Some(z),
+            }
+        }
+        _ => {
+            let cells: Vec<_> = w.zoning.cells().map(|(c, _)| c).collect();
+            let pick: Vec<_> = (0..10)
+                .filter_map(|_| (!cells.is_empty()).then(|| cells[r.below(cells.len() as u32) as usize]))
+                .collect();
+            Command::ZoneCells {
+                cells: pick,
+                zone: if r.below(3) == 0 { None } else { Some(Zone::Residential) },
+            }
+        }
+    }
+}
+
+/// Run `n` random commands (with some simulation between them) from seed
+/// `seed`, checking everything after each.
+fn random_run(seed: u64, n: usize, check: bool) -> W {
+    random_run_counted(seed, n, check).0
+}
+
+/// Also returns how many commands were applied.
+fn random_run_counted(seed: u64, n: usize, check: bool) -> (W, usize) {
+    let mut ok = 0;
+    let mut w = W::new(seed);
+    w.economy.money = 10_000_000;
+    let mut r = Rng::new(seed ^ 0x5eed);
+    // A link from the highway into the test area.
+    w.apply(Command::BuildCurve {
+        curve: Curve::straight(w.roads.nodes[w.roads.entry.unwrap()].pos, [180.0, 1000.0]),
+        kind: RoadKind::Street,
+    })
+    .ok();
+    for k in 0..n {
+        let cmd = rand_command(&w, &mut r);
+        let preview = w.preview(&cmd);
+        let before = if check { Some(w.clone()) } else { None };
+        let got = w.apply(cmd.clone());
+        ok += usize::from(got.is_ok());
+        if check && let Err(e) = w.roads.validate() {
+            panic!("after {cmd:?} -> {got:?}: {e}");
+        }
+        match (&preview, &got) {
+            (Ok(p), Ok(o)) => assert_eq!(p, o, "{cmd:?}"),
+            (Err(a), Err(b)) => assert_eq!(a, b),
+            _ => panic!("preview {preview:?} but apply {got:?} for {cmd:?}"),
+        }
+        if let (Err(e), Some(b)) = (&got, &before) {
+            assert!(*b == w, "failed {cmd:?} ({e}) changed the world");
+            // Every refusal says where (except money and bad ids).
+            if !matches!(e, CommandError::InsufficientFunds { .. } | CommandError::NoSuchRoad) {
+                assert!(
+                    e.at().is_some() || matches!(e, CommandError::InvalidRoadKind(_)),
+                    "{e:?}"
+                );
+            }
+        }
+        for _ in 0..(r.below(4) * 40) {
+            w.step();
+        }
+        if check && k % 5 == 0 {
+            w.check_invariants().unwrap();
+            check_geometry(&w);
+        }
+    }
+    (w, ok)
+}
+
+#[test]
+fn random_free_form_edits_keep_the_world_valid() {
+    for seed in [1, 2, 3, 4, 5, 6] {
+        let (w, ok) = random_run_counted(seed, 200, true);
+        assert!(ok > 50, "only {ok} of 200 random commands applied");
+        w.check_invariants().unwrap();
+        w.check_sim_invariants().unwrap();
+        check_geometry(&w);
+        assert!(w.roads.segments.len() > 10);
+    }
+}
+
+#[test]
+fn random_free_form_edits_are_deterministic_and_survive_save_load() {
+    let a = random_run(9, 80, false);
+    let b = random_run(9, 80, false);
+    assert!(a == b, "same commands, different worlds");
+    let mut l = W::load(&a.save()).unwrap();
+    assert!(l == a);
+    let mut a = a;
+    for _ in 0..HOUR {
+        a.step();
+        l.step();
+    }
+    assert!(a == l, "save/load lost lockstep");
+}
+
+/// Buildings that grew after the last road removal all front a road.
+#[test]
+fn grown_buildings_front_their_road() {
+    let mut w = World::new(4);
+    citysim_sim::scenarios::prebuilt(&mut w, |w| {
+        citysim_sim::scenarios::organic(w);
+    });
+    for _ in 0..DAY {
+        w.step();
+    }
+    assert!(w.buildings.len() > 50);
+    for (id, b) in w.buildings.iter() {
+        assert!(
+            citysim_sim::growth::has_frontage(&w, &b.footprint, b.facing),
+            "{id:?} at {:?} has no road in front",
+            b.center()
+        );
+        assert_eq!(b.cells().count() as u32, b.footprint.area());
+    }
+}
