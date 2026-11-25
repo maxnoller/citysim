@@ -80,8 +80,10 @@ impl Plugin for ShotsPlugin {
 }
 
 /// Where the synthetic pointer is and whether the left button is held.
-#[derive(Resource, Default, Clone, Copy)]
+#[derive(Resource, Default, Clone)]
 struct Pointer {
+    /// Road path corners to force with `Action::Path`.
+    path: Vec<Cell>,
     target: PointerTarget,
     hold: bool,
     /// Glide towards the target instead of jumping (tour mode).
@@ -168,6 +170,16 @@ fn find_building_where(world: &World, focus: Cell, pred: impl Fn(&Building) -> b
         .min_by_key(|c| c.chebyshev(focus))
 }
 
+/// Force a road path in progress with these placed corners.
+fn force_path(w: &mut World, corners: Vec<Cell>) {
+    let mut p = w.resource_mut::<Pointer>();
+    p.path = corners;
+    p.action = Some(Action::Path {
+        held: false,
+        dragged: false,
+    });
+}
+
 fn point_at(w: &mut World, c: Option<Cell>) {
     if let Some(c) = c {
         w.resource_mut::<Pointer>().target = PointerTarget::Cell(c);
@@ -210,7 +222,11 @@ fn find_new_road(world: &World) -> Option<(Cell, Cell)> {
             }
             for (dx, dy) in [(1, 1), (1, -1), (0, 1), (1, 0)] {
                 let end = start.offset(dx * 9, dy * 9);
-                let cmd = citysim_sim::Command::BuildRoad { from: start, to: end };
+                let cmd = citysim_sim::Command::BuildRoad {
+                    from: start,
+                    to: end,
+                    kind: citysim_sim::RoadKind::Street,
+                };
                 // Only across unzoned empty land, so the demo town never
                 // grows a building into it before the click.
                 let clear = start.straight_line_to(end).is_some_and(|cells| {
@@ -370,7 +386,7 @@ fn steps() -> Vec<Step> {
                 p.focus = mid;
                 p.distance = 260.0;
                 w.resource_mut::<CameraOverride>().0 = Some(p);
-                w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
+                force_path(w, vec![start]);
                 w.resource_mut::<Pointer>().target = PointerTarget::Cell(end);
             },
         },
@@ -382,7 +398,7 @@ fn steps() -> Vec<Step> {
                 *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
                 let Some(b) = find_building(w) else { return };
                 let start = Cell::new(b.x, b.y - 8);
-                w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
+                force_path(w, vec![start]);
                 w.resource_mut::<Pointer>().target = PointerTarget::Cell(Cell::new(b.x, b.y + 3));
             },
         },
@@ -402,7 +418,7 @@ fn steps() -> Vec<Step> {
                 p.focus = mid;
                 p.distance = 260.0;
                 w.resource_mut::<CameraOverride>().0 = Some(p);
-                w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
+                force_path(w, vec![start]);
                 w.resource_mut::<Pointer>().target = PointerTarget::Cell(end);
             },
         },
@@ -464,6 +480,7 @@ fn steps() -> Vec<Step> {
                 let _ = fresh.apply(Command::BuildRoad {
                     from: Cell::new(11, 128),
                     to: Cell::new(40, 128),
+                    kind: citysim_sim::RoadKind::Street,
                 });
                 let _ = fresh.apply(Command::SetZone {
                     min: Cell::new(14, 126),
@@ -493,6 +510,7 @@ fn steps() -> Vec<Step> {
                     w.write_message(SimCommand(Command::BuildRoad {
                         from: Cell::new(b.x, b.y - 6),
                         to: Cell::new(b.x, b.y + 2),
+                        kind: citysim_sim::RoadKind::Street,
                     }));
                 }
             },
@@ -605,6 +623,9 @@ fn drive_pointer(
         && tools.action != a
     {
         tools.action = a;
+        if matches!(a, Action::Path { .. }) {
+            tools.path = pointer.path.clone();
+        }
     }
     let Ok(mut win) = window.single_mut() else { return };
     let cell_pos = |c: Cell| {

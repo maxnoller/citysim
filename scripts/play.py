@@ -255,7 +255,7 @@ def build_road(a, b):
             if point_at(b, a, b):
                 click()
         if tool() == "road":
-            key("Escape")  # end the chain (keeps the Road tool)
+            key("Return")  # build the path (two corners); keeps the Road tool
         if cmd(f"preview-road {a[0]} {a[1]} {b[0]} {b[1]}") == "ok 0":
             break
         log(f"road {a}->{b} not built yet, retrying")

@@ -161,6 +161,13 @@ pub mod icon {
     pub const LANDMARK: char = '\u{e23a}';
     pub const CHEVRON_DOWN: char = '\u{e06d}';
     pub const CIRCLE: char = '\u{e076}';
+    pub const SPLINE: char = '\u{e38b}';
+    pub const GRID: char = '\u{e4ff}'; // grid-2x2
+    pub const WAYPOINTS: char = '\u{e542}';
+    pub const SCAN: char = '\u{e257}'; // rectangle selection
+    pub const ROUTE: char = '\u{e53e}';
+    pub const PAINT_BUCKET: char = '\u{e2e6}';
+    pub const UNDO: char = '\u{e2a1}'; // undo-2
 }
 
 // ---------------------------------------------------------------- fonts

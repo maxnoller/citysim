@@ -14,12 +14,15 @@ mod format;
 mod hud;
 mod legend;
 mod menu;
+mod plan;
 mod pointer;
 mod save_load;
 mod shots;
+mod snap;
 mod theme;
 mod toasts;
 mod toolbar;
+mod toolopts;
 mod tools;
 mod tooltip;
 mod widgets;
@@ -70,6 +73,7 @@ impl Plugin for UiPlugin {
                 save_load::SaveLoadPlugin,
                 hud::HudPlugin,
                 toolbar::ToolbarPlugin,
+                toolopts::ToolOptsPlugin,
                 demand::DemandPlugin,
                 context::ContextPlugin,
                 legend::LegendPlugin,
