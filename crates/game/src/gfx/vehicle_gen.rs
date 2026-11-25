@@ -144,7 +144,7 @@ pub fn car_model(body: Color, shape: u32, lod: bool) -> MeshBuilder {
             // Saloon (0), hatchback (1), estate (4: long roof to the back).
             let (back, front) = match shape {
                 1 => (-hl + 0.15, hl - 1.1),
-                4 => (-hl + 0.12, hl - 1.3),
+                4 => (-hl + 0.38, hl - 1.3),
                 _ => (-hl + 0.7, hl - 1.25),
             };
             let cab = [

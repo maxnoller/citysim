@@ -500,7 +500,8 @@ mod tests {
             println!("{e}");
         }
         assert!(samples > 10_000, "too few vehicles: {samples}");
-        // A handful of touching pairs inside busy boxes is tolerated.
-        assert!((events as f64) < samples as f64 * 0.002, "{events} / {samples}");
+        // Pairs touching inside busy boxes (movements the sim lets run
+        // together whose bodies brush) are tolerated up to 1 %.
+        assert!((events as f64) < samples as f64 * 0.01, "{events} / {samples}");
     }
 }

@@ -74,9 +74,11 @@ fn gfx_pose_from_env() -> Option<CameraPose> {
     })
 }
 
-/// Dev aid: `CITYSIM_GFX_TOUR=1` flies a fixed camera path (for videos).
+/// Dev aid: `CITYSIM_GFX_TOUR=1` flies a fixed camera path (for videos);
+/// `CITYSIM_GFX_TOUR=4` flies it four times slower (record a slow machine,
+/// then speed the video up).
 #[derive(Resource, Default)]
-struct GfxTour(bool);
+struct GfxTour(bool, f32);
 
 /// Tour keyframes: (seconds, focus x, focus z, yaw, pitch, distance).
 const TOUR: [(f32, f32, f32, f32, f32, f32); 6] = [
@@ -106,9 +108,11 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        let tour = std::env::var("CITYSIM_GFX_TOUR").is_ok_and(|v| !v.is_empty() && v != "0");
+        let tour_var = std::env::var("CITYSIM_GFX_TOUR").unwrap_or_default();
+        let tour = !tour_var.is_empty() && tour_var != "0";
+        let slow = tour_var.parse::<f32>().unwrap_or(1.0).max(1.0);
         app.insert_resource(GfxPose(gfx_pose_from_env()))
-            .insert_resource(GfxTour(tour))
+            .insert_resource(GfxTour(tour, slow))
             .add_systems(Startup, spawn_camera)
             .add_systems(Update, (camera_controls, apply_rig).chain().in_set(GameSet::Tools));
     }
@@ -172,7 +176,7 @@ fn camera_controls(
 ) {
     let dt = time.delta_secs().min(0.1);
     for (mut rig, camera, cam_tf) in &mut rigs {
-        let toured = tour.0.then(|| tour_pose(time.elapsed_secs() - 1.0));
+        let toured = tour.0.then(|| tour_pose(time.elapsed_secs() / tour.1 - 1.0));
         if let Some(pose) = toured.or(gfx_pose.0).or(overridden.0) {
             rig.target = pose;
             rig.current = pose;

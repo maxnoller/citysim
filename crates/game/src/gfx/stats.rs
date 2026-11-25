@@ -34,7 +34,7 @@ impl Plugin for StatsPlugin {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn log_stats(
     time: Res<Time<Real>>,
     mut last: Local<f32>,

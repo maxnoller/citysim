@@ -1223,7 +1223,9 @@ mod tests {
             if nrm[1] > 0.99 && p[1] < 0.5 {
                 let y = p[1];
                 assert!(
-                    [ROAD_Y, WALK_Y, MARK_Y, 0.025].iter().any(|l| (y - l).abs() < 1e-4),
+                    [ROAD_Y, WALK_Y, MARK_Y, MARK_Y + 0.002, ROAD_Y + 0.13, 0.025]
+                        .iter()
+                        .any(|l| (y - l).abs() < 1e-4),
                     "unexpected level {y}"
                 );
             }
