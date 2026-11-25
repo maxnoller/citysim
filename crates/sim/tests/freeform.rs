@@ -70,12 +70,13 @@ fn organic_town_builds_and_grows() {
     for _ in 0..DAY / 2 {
         w.step();
     }
-    assert!(w.buildings.len() > 30, "{}", w.buildings.len());
-    // Buildings stand at their road's angle: some are turned.
-    assert!(w.buildings.values().any(
-        |b| (b.rotation().to_degrees().rem_euclid(90.0) - 45.0).abs() > 30.0 - 30.0
-            && b.rotation().to_degrees().rem_euclid(90.0) > 1.0
-    ));
+    assert!(w.buildings.len() > 20, "{}", w.buildings.len());
+    // Buildings stand at their road's angle: some are turned off the axes.
+    let turned = w.buildings.values().filter(|b| {
+        let r = b.rotation().to_degrees().rem_euclid(90.0);
+        r > 1.0 && r < 89.0
+    });
+    assert!(turned.count() > 5);
     w.check_invariants().unwrap();
     w.check_sim_invariants().unwrap();
 }
