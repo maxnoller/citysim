@@ -24,7 +24,13 @@
 //!   then reply and stop.
 //! * `ready` — ok once the scene draws (shaders built), else err.
 //! * `fps`, `counts` (entities, meshes, materials, vehicles, step time).
-//! * `window W H` — resize the window. `quit` — exit.
+//! * `window W H` — resize the window; `window` alone: its size `W H`.
+//! * `find-home` — the cell under a lived-in home near the camera's focus
+//!   whose residents include someone with a job: `ok X Y`.
+//! * `node PREFIX` — window position (logical px) of the first visible UI
+//!   node whose `Name` starts with PREFIX: `X Y` (people-panel links are
+//!   named "Person link", "Place link", "Vehicle link", "Follow").
+//! * `quit` — exit.
 
 use std::collections::VecDeque;
 use std::io::Write as _;
@@ -37,8 +43,8 @@ use bevy::window::PrimaryWindow;
 use citysim_sim::Cell;
 
 use crate::shared::{
-    ActiveTool, CameraOverride, CameraPose, HoveredCell, OverlayMode, PointerOverUi, SceneReady, SimClock, SimStep,
-    SimWorld, WorldCamera, cell_center,
+    ActiveTool, CameraFollow, CameraOverride, CameraPose, HoveredCell, OverlayMode, PointerOverUi, RoadChoice,
+    SceneReady, SimClock, SimStep, SimWorld, ToolModes, WorldCamera, cell_center,
 };
 
 const POLL_SECS: f32 = 0.1;
@@ -165,7 +171,7 @@ fn turbo_steps(mut ctl: ResMut<Control>, mut sim: ResMut<SimWorld>, clock: Res<S
     }
 }
 
-fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: OverlayMode) -> String {
+fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: OverlayMode, extra: &str) -> String {
     let w = &sim.world;
     let s = &w.stats;
     let e = &w.economy;
@@ -182,7 +188,7 @@ fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: Overl
         "day={} hour={:.2} tick={} pop={} households={} unemployment={:.3} jobs={} buildings={} res={} com={} ind={} \
          cars={} money={} income={} expenses={} tax={:.3} commute_s={:.1} speed={:.2} congestion={:.3} \
          demand_r={:.3} demand_c={:.3} demand_i={:.3} paused={} speed_idx={} segments={} nodes={} road_cells={} \
-         tool={} overlay={:?} days_logged={} free_r={} free_c={} free_i={}",
+         tool={} overlay={:?} days_logged={} free_r={} free_c={} free_i={} {}",
         w.time.day,
         w.time.hour(),
         w.time.tick,
@@ -216,6 +222,7 @@ fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: Overl
         free[0],
         free[1],
         free[2],
+        extra,
     )
 }
 
@@ -248,6 +255,18 @@ struct Ctx<'w, 's> {
     materials: Res<'w, Assets<StandardMaterial>>,
     exit: MessageWriter<'w, AppExit>,
     ready: Res<'w, SceneReady>,
+    modes: Res<'w, ToolModes>,
+    nodes: Query<
+        'w,
+        's,
+        (
+            &'static Name,
+            &'static bevy::ui::UiGlobalTransform,
+            &'static InheritedVisibility,
+        ),
+    >,
+    kind: Res<'w, RoadChoice>,
+    follow: Res<'w, CameraFollow>,
 }
 
 fn poll_commands(mut commands: Commands, time: Res<Time<Real>>, mut ctl: ResMut<Control>, mut cx: Ctx) {
@@ -364,7 +383,19 @@ fn run(
                 .observe(save_to_disk(path))
                 .observe(move |_: On<ScreenshotCaptured>| reply_to(&dir, seq, true, &p2));
         }
-        "stats" => ctl.reply(seq, true, &stats_line(&cx.sim, &cx.clock, *cx.tool, *cx.overlay)),
+        "stats" => {
+            // Tool modes, road kind and camera follow, for scripts that switch
+            // them with real keys.
+            let extra = format!(
+                "road_mode={:?} zone_mode={:?} bulldoze_mode={:?} road_kind={:?} following={}",
+                cx.modes.road,
+                cx.modes.zone,
+                cx.modes.bulldoze,
+                *cx.kind,
+                cx.follow.focus.is_some()
+            );
+            ctl.reply(seq, true, &stats_line(&cx.sim, &cx.clock, *cx.tool, *cx.overlay, &extra))
+        }
         "turbo" => {
             ctl.turbo = num(args, 0)?;
             ctl.reply(seq, true, &format!("turbo={}", ctl.turbo));
@@ -434,6 +465,55 @@ fn run(
                     max * 1e3,
                 ),
             );
+        }
+        "window" if args.is_empty() => {
+            let win = cx.window.single().map_err(|_| "no window".to_string())?;
+            ctl.reply(seq, true, &format!("{:.0} {:.0}", win.width(), win.height()));
+        }
+        "find-home" => {
+            let w = &cx.sim.world;
+            let focus = cx
+                .cams
+                .single()
+                .ok()
+                .and_then(|(cam, tf)| {
+                    let win = cx.window.single().ok()?;
+                    let ray = cam
+                        .viewport_to_world(tf, Vec2::new(win.width(), win.height()) * 0.5)
+                        .ok()?;
+                    ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+                })
+                .map_or([1024.0, 1024.0], |p| [p.x, p.z]);
+            let worker_at_home = |b: citysim_sim::BuildingId| {
+                citysim_sim::inspect::residents(w, b).any(|c| {
+                    w.citizens
+                        .get(c)
+                        .is_some_and(|c| c.job.is_some() && c.location.building() == Some(b))
+                })
+            };
+            let best = w
+                .buildings
+                .iter()
+                .filter(|(id, b)| b.kind == citysim_sim::Zone::Residential && b.occupied > 0 && worker_at_home(*id))
+                .map(|(_, b)| b.center())
+                .min_by(|a, b| {
+                    let d = |p: [f32; 2]| (p[0] - focus[0]).powi(2) + (p[1] - focus[1]).powi(2);
+                    d(*a).total_cmp(&d(*b))
+                })
+                .ok_or("no lived-in home")?;
+            let c = Cell::from_pos(best);
+            ctl.reply(seq, true, &format!("ok {} {}", c.x, c.y));
+        }
+        "node" => {
+            let prefix = args.join(" ");
+            let win = cx.window.single().map_err(|_| "no window".to_string())?;
+            let hit = cx
+                .nodes
+                .iter()
+                .find(|(n, _, v)| v.get() && n.as_str().starts_with(&prefix))
+                .map(|(_, tf, _)| tf.translation / win.scale_factor())
+                .ok_or_else(|| format!("no node named {prefix}"))?;
+            ctl.reply(seq, true, &format!("{:.0} {:.0}", hit.x, hit.y));
         }
         "window" => {
             let (w, h): (u32, u32) = (num(args, 0)?, num(args, 1)?);

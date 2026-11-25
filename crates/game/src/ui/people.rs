@@ -439,7 +439,14 @@ fn doing(world: &World, id: CitizenId) -> (String, String) {
                 .map(|b| format!(" · {}", building_name(world, b)))
                 .unwrap_or_default();
             match (n.activity, n.purpose, p.trip.is_some()) {
-                (_, _, true) => format!("Arrives about{when}, then {}", activity_word(n.activity).to_lowercase()),
+                (_, _, true) => match n.at_tick {
+                    Some(t) => format!(
+                        "Expected about {}, then {}",
+                        tick_clock(t),
+                        activity_word(n.activity).to_lowercase()
+                    ),
+                    None => format!("Then {}", activity_word(n.activity).to_lowercase()),
+                },
                 (Activity::Travelling, Some(TripPurpose::ToWork), _) => format!("Leaves for work{when}{place}"),
                 (Activity::Travelling, Some(TripPurpose::ToHome), _) => format!("Heads home{when}"),
                 (Activity::Travelling, Some(pp), _) => format!("Sets off {}{when}", purpose_word(pp)),

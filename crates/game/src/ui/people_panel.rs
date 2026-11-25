@@ -547,7 +547,7 @@ fn small_button(
     text: &'static str,
     tip: &'static str,
 ) {
-    spawn_button(
+    let id = spawn_button(
         p,
         UiButton {
             action,
@@ -586,6 +586,7 @@ fn small_button(
             }
         },
     );
+    p.commands().entity(id).insert(Name::new(tip));
 }
 
 fn tone_color(tone: Tone) -> Color {
@@ -849,7 +850,12 @@ fn link_row(
     tags: (SheetText, SheetText, Of),
 ) {
     let (l, v) = (l.to_string(), v.to_string());
-    spawn_button(
+    let name = match action {
+        UiAction::Person(_) => "Person link",
+        UiAction::Place(_) => "Place link",
+        _ => "Vehicle link",
+    };
+    let id = spawn_button(
         p,
         UiButton {
             action,
@@ -891,6 +897,8 @@ fn link_row(
             });
         },
     );
+    // Scripts find links by name (`CITYSIM_CONTROL` `node`).
+    p.commands().entity(id).insert(Name::new(name));
 }
 
 fn bar(p: &mut ChildSpawnerCommands, share: f32, color: Color, h: f32, tag: (SheetBar, Of)) {
