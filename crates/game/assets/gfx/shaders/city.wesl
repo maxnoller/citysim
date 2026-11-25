@@ -1,0 +1,111 @@
+// The one shared material for everything vertex-coloured: StandardMaterial
+// lighting plus night glow (windows, street lamps, car lights, signs, signal
+// lenses) selected by the vertex `uv.x` tag (`gfx::mesh_util::Glow`), and soft
+// drifting cloud shadows on the sunlight.
+
+import bevy_pbr::render::{
+    pbr_fragment::pbr_input_from_standard_material,
+    mesh_functions::get_world_from_local,
+    mesh_view_bindings::globals,
+    forward_io::{VertexOutput, FragmentOutput},
+    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
+};
+
+@if(VISIBILITY_RANGE_DITHER)
+import bevy_pbr::render::pbr_functions::visibility_range_dither;
+
+struct CityParams {
+    // 0 by day .. 1 at night: lamps and headlights.
+    night: f32,
+    // Share of windows lit right now (time of day).
+    windows: f32,
+    // 1 on the braking-car material: tail lights bright.
+    brake: f32,
+    // Cloud shadow strength (0 = off).
+    clouds: f32,
+    // Cloud drift speed, m/s (x, y), cloud size, m (z), unused (w).
+    wind: vec4<f32>,
+}
+
+@group(constants::MATERIAL_BIND_GROUP) @binding(100)
+var<uniform> city: CityParams;
+
+fn hash21(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 456.21));
+    q = q + dot(q, q + 45.32);
+    return fract(q.x * q.y);
+}
+
+fn vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 1 in the open, lower under a cloud.
+fn cloud_shadow(xz: vec2<f32>) -> f32 {
+    if city.clouds <= 0.0 {
+        return 1.0;
+    }
+    let p = (xz - city.wind.xy * globals.time) / city.wind.z;
+    let n = vnoise(p) * 0.65 + vnoise(p * 2.3 + vec2<f32>(17.0, 3.0)) * 0.35;
+    return 1.0 - city.clouds * smoothstep(0.52, 0.72, n);
+}
+
+@fragment
+fn fragment(
+    in: VertexOutput,
+    @builtin(front_facing) is_front: bool,
+) -> FragmentOutput {
+@if(VISIBILITY_RANGE_DITHER)
+    visibility_range_dither(in.position, in.visibility_range_dither);
+
+    var pbr_input = pbr_input_from_standard_material(in, is_front);
+    let wp = in.world_position.xyz;
+    pbr_input.directional_shadow_factor = cloud_shadow(wp.xz);
+
+    var glow = vec3<f32>(0.0);
+@if(VERTEX_UVS_A) {
+    let kind = u32(in.uv.x + 0.5);
+    let base = pbr_input.material.base_color.rgb;
+    if kind == 1u {
+        // Window: lit share varies per building (hash of the model origin).
+        let o = get_world_from_local(in.instance_index)[3].xyz;
+        let hb = hash21(floor(o.xz * 0.37) + vec2<f32>(3.1, 7.7));
+        let share = clamp(city.windows * (0.3 + 1.4 * hb), 0.0, 0.92);
+        let r = fract(in.uv.y * 7.31 + hb * 3.17);
+        if r < share {
+            let warm = vec3<f32>(1.0, 0.66, 0.32);
+            let cool = vec3<f32>(0.92, 0.86, 0.72);
+            let tint = mix(warm, cool, step(0.72, fract(in.uv.y * 13.7)));
+            let k = 0.7 + 0.5 * fract(in.uv.y * 29.3);
+            glow = tint * (2.6 * k * city.night);
+            pbr_input.material.base_color = vec4<f32>(base * (1.0 - 0.7 * city.night), 1.0);
+        }
+    } else if kind == 2u {
+        glow = vec3<f32>(1.0, 0.76, 0.42) * (9.0 * city.night);
+    } else if kind == 3u {
+        glow = vec3<f32>(1.0, 0.95, 0.82) * (7.0 * city.night);
+    } else if kind == 4u {
+        glow = vec3<f32>(1.0, 0.06, 0.03) * (2.2 * city.night + 6.0 * city.brake);
+    } else if kind == 5u {
+        glow = base * (2.2 * city.night);
+    } else if kind == 6u {
+        glow = base * 5.0;
+    } else if kind == 7u {
+        glow = vec3<f32>(1.0, 0.8, 0.55) * (2.0 * city.night);
+        pbr_input.material.base_color = vec4<f32>(base * (1.0 - 0.6 * city.night), 1.0);
+    }
+}
+    pbr_input.material.emissive = vec4<f32>(glow, 0.0);
+
+    var out: FragmentOutput;
+    out.color = apply_pbr_lighting(pbr_input);
+    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+    return out;
+}

@@ -4,7 +4,9 @@
 mod building_gen;
 mod buildings;
 mod camera;
+mod city_material;
 mod cursor;
+mod daynight;
 mod mesh_util;
 mod noise;
 mod overlay;
@@ -33,7 +35,9 @@ pub struct GfxPlugin;
 impl Plugin for GfxPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
+            city_material::CityMaterialPlugin,
             scene::ScenePlugin,
+            daynight::DayNightPlugin,
             camera::CameraPlugin,
             roads::RoadsPlugin,
             zones::ZonesPlugin,
@@ -84,6 +88,7 @@ mod reload_tests {
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
+            .init_asset::<super::city_material::CityMaterial>()
             .insert_resource(SimWorld {
                 world: w,
                 generation: 0,
@@ -100,9 +105,14 @@ mod reload_tests {
             ));
         let lit = app
             .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::default());
-        app.insert_resource(WorldMaterials { lit });
+            .resource_mut::<Assets<super::city_material::CityMaterial>>()
+            .add(super::city_material::city_material(StandardMaterial::default()));
+        app.insert_resource(WorldMaterials {
+            lit: lit.clone(),
+            lit_brake: lit.clone(),
+            ground: lit,
+            sky: Handle::default(),
+        });
         app
     }
 

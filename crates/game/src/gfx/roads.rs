@@ -18,16 +18,42 @@ const CHUNK: f32 = 128.0;
 #[derive(Default)]
 struct RoadChunks {
     key: Option<(u64, u64)>,
-    /// Chunk -> (content hash, entity).
-    chunks: HashMap<IVec2, (u64, Entity)>,
+    /// Chunk -> (content hash, road entity, lamp light pools entity).
+    chunks: HashMap<IVec2, (u64, Entity, Entity)>,
 }
+
+/// Additive material of the street lamps' light pools; its brightness
+/// follows the night (set by `daynight`).
+#[derive(Resource, Clone)]
+pub struct LampPools {
+    pub material: Handle<StandardMaterial>,
+}
+
+/// Marker for the light pool meshes (shown only after dusk).
+#[derive(Component)]
+pub struct LampPoolMesh;
+
+/// Radius of a lamp's light pool on the ground, m.
+const POOL_R: f32 = 7.5;
 
 pub struct RoadsPlugin;
 
 impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, rebuild_roads.in_set(GameSet::Render));
+        app.add_systems(PreStartup, init_pools)
+            .add_systems(Update, rebuild_roads.in_set(GameSet::Render));
     }
+}
+
+fn init_pools(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+    commands.insert_resource(LampPools {
+        material: materials.add(StandardMaterial {
+            base_color: Color::BLACK,
+            unlit: true,
+            alpha_mode: AlphaMode::Add,
+            ..default()
+        }),
+    });
 }
 
 fn rebuild_roads(
@@ -36,6 +62,7 @@ fn rebuild_roads(
     mut state: Local<RoadChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
     mats: Res<WorldMaterials>,
+    pools: Res<LampPools>,
 ) {
     let key = sim.key(sim.world.versions.roads);
     if state.key == Some(key) {
@@ -72,27 +99,34 @@ fn rebuild_roads(
         .copied()
         .collect();
     for c in gone {
-        if let Some((_, e)) = state.chunks.remove(&c) {
+        if let Some((_, e, g)) = state.chunks.remove(&c) {
             commands.entity(e).despawn();
+            commands.entity(g).despawn();
         }
     }
     for (&c, &hash) in &hashes {
-        if state.chunks.get(&c).is_some_and(|(h, _)| *h == hash) {
+        if state.chunks.get(&c).is_some_and(|(h, _, _)| *h == hash) {
             continue;
         }
         let mut m = MeshBuilder::new();
+        let mut glow = MeshBuilder::new();
         for &i in nodes.get(&c).map(Vec::as_slice).unwrap_or(&[]) {
             road_geom::mesh_node(&mut m, &layout.nodes[i]);
         }
         for &i in segs.get(&c).map(Vec::as_slice).unwrap_or(&[]) {
             road_geom::mesh_segment(&mut m, &layout.segs[i]);
+            for (_, tip) in road_geom::lamp_spots(&layout.segs[i]) {
+                road_geom::light_pool(&mut glow, tip, POOL_R, road_geom::WALK_Y + 0.025, Color::WHITE);
+            }
         }
         let mesh = meshes.add(m.build());
+        let glow_mesh = meshes.add(glow.build());
         rebuilt += 1;
         match state.chunks.get_mut(&c) {
-            Some((h, e)) => {
+            Some((h, e, g)) => {
                 *h = hash;
                 commands.entity(*e).insert(Mesh3d(mesh));
+                commands.entity(*g).insert(Mesh3d(glow_mesh));
             }
             None => {
                 let e = commands
@@ -103,7 +137,18 @@ fn rebuild_roads(
                         Transform::default(),
                     ))
                     .id();
-                state.chunks.insert(c, (hash, e));
+                let g = commands
+                    .spawn((
+                        Name::new(format!("Lamp light {c}")),
+                        LampPoolMesh,
+                        Mesh3d(glow_mesh),
+                        MeshMaterial3d(pools.material.clone()),
+                        Transform::default(),
+                        Visibility::Hidden,
+                        bevy::light::NotShadowCaster,
+                    ))
+                    .id();
+                state.chunks.insert(c, (hash, e, g));
             }
         }
     }

@@ -11,13 +11,40 @@ use bevy::prelude::*;
 
 use super::palette::lin;
 
+/// What a vertex glows as at night (`uv.x` in the city shader; keep in
+/// sync with `assets/gfx/shaders/city.wesl`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Glow {
+    None = 0,
+    /// A window: lit in the evening, a varying share per building.
+    Window = 1,
+    /// Street lamp head: on from dusk to dawn.
+    Lamp = 2,
+    /// Car headlight: on at night.
+    Headlight = 3,
+    /// Tail light: dim at night, bright when braking.
+    TailLight = 4,
+    /// Shop sign / shop window: its own colour, glowing at night.
+    Sign = 5,
+    /// Always glowing in its own colour (signal lenses).
+    Always = 6,
+    /// Shop front / lobby glass: warmly lit after dark.
+    Shop = 7,
+}
+
 /// Flat-shaded, vertex-coloured triangle soup.
 #[derive(Default, Clone, Debug)]
 pub struct MeshBuilder {
     pub pos: Vec<[f32; 3]>,
     pub nrm: Vec<[f32; 3]>,
     pub col: Vec<[f32; 4]>,
+    /// Per-vertex glow tag read by the city shader (`uv.x` = [`Glow`] kind,
+    /// `uv.y` = a random value per lit element, e.g. per window).
+    pub uv: Vec<[f32; 2]>,
     pub idx: Vec<u32>,
+    /// Tag written into `uv` for every vertex pushed while it is set.
+    pub tag: [f32; 2],
     /// When > 0, vertical faces get darker towards the ground (baked
     /// ambient occlusion), by up to this fraction at `y = 0`.
     pub ground_ao: f32,
@@ -60,6 +87,7 @@ impl MeshBuilder {
         self.pos.truncate(mark.0);
         self.nrm.truncate(mark.0);
         self.col.truncate(mark.0);
+        self.uv.truncate(mark.0);
         self.idx.truncate(mark.1);
     }
 
@@ -91,7 +119,17 @@ impl MeshBuilder {
         self.pos.push(p.to_array());
         self.nrm.push(n.to_array());
         self.col.push([c[0] * k, c[1] * k, c[2] * k, c[3]]);
+        self.uv.push(self.tag);
         i
+    }
+
+    /// Run `f` with every vertex tagged as glowing element `kind` (random
+    /// value `r` in `0..1`, used by windows to decide which ones are lit).
+    pub fn glow(&mut self, kind: Glow, r: f32, f: impl FnOnce(&mut MeshBuilder)) {
+        let old = self.tag;
+        self.tag = [kind as u32 as f32, r];
+        f(self);
+        self.tag = old;
     }
 
     /// Triangle with per-vertex linear colours; front face is counter-clockwise.
@@ -258,6 +296,7 @@ impl MeshBuilder {
     pub fn append(&mut self, other: &MeshBuilder, translation: Vec3, yaw: f32, scale: Vec3, tint: [f32; 4]) {
         let q = Quat::from_rotation_y(yaw);
         let base = self.pos.len() as u32;
+        self.uv.extend_from_slice(&other.uv);
         for ((p, n), c) in other.pos.iter().zip(&other.nrm).zip(&other.col) {
             let p = q * (Vec3::from(*p) * scale) + translation;
             let n = (q * (Vec3::from(*n) / scale)).normalize_or(Vec3::Y);
@@ -274,6 +313,7 @@ impl MeshBuilder {
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.pos)
             .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.nrm)
             .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.col)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uv)
             .with_inserted_indices(Indices::U32(self.idx))
     }
 }

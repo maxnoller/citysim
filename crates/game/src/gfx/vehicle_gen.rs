@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 
-use super::mesh_util::MeshBuilder;
+use super::mesh_util::{Glow, MeshBuilder};
 use super::palette::{self, lin, shade};
 
 /// Number of body shapes.
@@ -159,28 +159,32 @@ pub fn car_model(body: Color, shape: u32, lod: bool) -> MeshBuilder {
             side_windows(&mut m, front + 0.05, back + 0.1, 0.98, 1.36, cw - 0.05);
         }
     }
-    if lod {
-        return m;
-    }
-    // Lights.
+    // Lights (also on the distant model: they are what you see at night).
     let head = Color::srgb(0.98, 0.96, 0.85);
     let tail = Color::srgb(0.75, 0.12, 0.1);
     for s in [-1.0, 1.0] {
         let z = s * (hw - 0.3);
-        m.quad(
-            Vec3::new(hl + 0.005, 0.5, z + 0.2),
-            Vec3::new(hl + 0.005, 0.5, z - 0.2),
-            Vec3::new(hl + 0.005, 0.62, z - 0.2),
-            Vec3::new(hl + 0.005, 0.62, z + 0.2),
-            head,
-        );
-        m.quad(
-            Vec3::new(-hl - 0.005, 0.55, z - 0.2),
-            Vec3::new(-hl - 0.005, 0.55, z + 0.2),
-            Vec3::new(-hl - 0.005, 0.68, z + 0.2),
-            Vec3::new(-hl - 0.005, 0.68, z - 0.2),
-            tail,
-        );
+        m.glow(Glow::Headlight, 0.0, |m| {
+            m.quad(
+                Vec3::new(hl + 0.005, 0.5, z + 0.2),
+                Vec3::new(hl + 0.005, 0.5, z - 0.2),
+                Vec3::new(hl + 0.005, 0.62, z - 0.2),
+                Vec3::new(hl + 0.005, 0.62, z + 0.2),
+                head,
+            )
+        });
+        m.glow(Glow::TailLight, 0.0, |m| {
+            m.quad(
+                Vec3::new(-hl - 0.005, 0.55, z - 0.2),
+                Vec3::new(-hl - 0.005, 0.55, z + 0.2),
+                Vec3::new(-hl - 0.005, 0.68, z + 0.2),
+                Vec3::new(-hl - 0.005, 0.68, z - 0.2),
+                tail,
+            )
+        });
+    }
+    if lod {
+        return m;
     }
     let wb = hl - 0.75;
     for x in [-wb, wb] {
@@ -293,20 +297,24 @@ pub fn truck_model(cab: Color, cargo: Color, stripe: Color, lod: bool) -> MeshBu
     let tail = Color::srgb(0.75, 0.12, 0.1);
     for s in [-1.0, 1.0] {
         let z = s * (hw - 0.28);
-        m.quad(
-            Vec3::new(hl + 0.006, 0.62, z + 0.18),
-            Vec3::new(hl + 0.006, 0.62, z - 0.18),
-            Vec3::new(hl + 0.006, 0.8, z - 0.18),
-            Vec3::new(hl + 0.006, 0.8, z + 0.18),
-            head,
-        );
-        m.quad(
-            Vec3::new(xb - 0.004, 0.7, z - 0.15),
-            Vec3::new(xb - 0.004, 0.7, z + 0.15),
-            Vec3::new(xb - 0.004, 0.88, z + 0.15),
-            Vec3::new(xb - 0.004, 0.88, z - 0.15),
-            tail,
-        );
+        m.glow(Glow::Headlight, 0.0, |m| {
+            m.quad(
+                Vec3::new(hl + 0.006, 0.62, z + 0.18),
+                Vec3::new(hl + 0.006, 0.62, z - 0.18),
+                Vec3::new(hl + 0.006, 0.8, z - 0.18),
+                Vec3::new(hl + 0.006, 0.8, z + 0.18),
+                head,
+            )
+        });
+        m.glow(Glow::TailLight, 0.0, |m| {
+            m.quad(
+                Vec3::new(xb - 0.004, 0.7, z - 0.15),
+                Vec3::new(xb - 0.004, 0.7, z + 0.15),
+                Vec3::new(xb - 0.004, 0.88, z + 0.15),
+                Vec3::new(xb - 0.004, 0.88, z - 0.15),
+                tail,
+            )
+        });
     }
     for x in [hl - 0.75, -hl + 0.85] {
         for z in [-(hw - 0.16), hw - 0.16] {

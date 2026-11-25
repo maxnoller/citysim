@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 use citysim_sim::Zone;
 
-use super::mesh_util::MeshBuilder;
+use super::mesh_util::{Glow, MeshBuilder};
 use super::noise::Stream;
 use super::palette::{self, lin, mix, shade};
 use super::props;
@@ -121,12 +121,25 @@ impl Face {
     #[allow(clippy::too_many_arguments)]
     fn window(&self, m: &mut MeshBuilder, a: f32, b: f32, w: f32, h: f32, frame: Color, glass: Color) {
         let f = 0.1;
+        let r = wrand(self.at(a, b, 0.0));
         if m.lod {
-            self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, mix(glass, frame, 0.25));
+            m.glow(Glow::Window, r, |m| {
+                self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, mix(glass, frame, 0.25))
+            });
             return;
         }
         self.rect(m, a - w * 0.5 - f, a + w * 0.5 + f, b - f, b + h + f, 0.03, frame);
-        self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, glass);
+        m.glow(Glow::Window, r, |m| {
+            self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, glass)
+        });
+    }
+
+    /// Glass rectangle lit at night as one window (`Window`) or as a shop
+    /// front (`Shop`, always lit after dark).
+    #[allow(clippy::too_many_arguments)]
+    fn lit_rect(&self, m: &mut MeshBuilder, kind: Glow, a0: f32, a1: f32, b0: f32, b1: f32, off: f32, color: Color) {
+        let r = wrand(self.at((a0 + a1) * 0.5, b0, 0.0));
+        m.glow(kind, r, |m| self.rect(m, a0, a1, b0, b1, off, color));
     }
 
     /// Box sticking out of the face (canopies, balconies, signs).
@@ -138,6 +151,13 @@ impl Face {
         let max = p0.max(p1).with_y(b1 + self.origin.y);
         m.cuboid2(min, max, sides, top);
     }
+}
+
+/// A stable pseudo-random value in `0..1` for a point of a model (which
+/// windows are lit at night).
+fn wrand(p: Vec3) -> f32 {
+    let h = (p.x * 12.9898 + p.y * 78.233 + p.z * 37.719).sin() * 43_758.547;
+    h - h.floor()
 }
 
 /// Evenly spaced positions for `n` items across a face of `width`.
@@ -697,7 +717,7 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     let f = faces[0];
     let per = per_of(f.width);
     let a = spread(f.width, per)[per / 2];
-    f.rect(m, a - 0.75, a + 0.75, 0.0, 2.6, 0.08, palette::GLASS);
+    f.lit_rect(m, Glow::Shop, a - 0.75, a + 0.75, 0.0, 2.6, 0.08, palette::GLASS);
     f.slab(m, a - 1.3, a + 1.3, 2.8, 2.98, 1.4, accent, accent);
     flat_patch(
         m,
@@ -728,7 +748,7 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
             wall,
         );
         let f = Face::of(inner, top)[0];
-        f.rect(m, 0.5, f.width - 0.5, 0.3, 2.4, 0.04, palette::GLASS);
+        f.lit_rect(m, Glow::Window, 0.5, f.width - 0.5, 0.3, 2.4, 0.04, palette::GLASS);
         if hipped {
             pitched_roof(m, inner, atop, inner.d() * 0.25, true, true, 0.3, accent, wall);
         } else {
@@ -775,7 +795,7 @@ fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     let f = faces[0];
     // Shop front: big glass, door, awning and sign.
     f.rect(m, 0.35, f.width - 0.35, 0.0, 0.45, 0.03, shade(wall, 0.7));
-    f.rect(m, 0.4, f.width - 0.4, 0.45, 2.9, 0.04, palette::GLASS);
+    f.lit_rect(m, Glow::Shop, 0.4, f.width - 0.4, 0.45, 2.9, 0.04, palette::GLASS);
     let door = f.width * rng.range(0.25, 0.75);
     f.rect(m, door - 0.6, door + 0.6, 0.0, 2.5, 0.06, shade(palette::GLASS, 0.75));
     for a in spread(f.width - 0.8, 3) {
@@ -806,15 +826,17 @@ fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
         accent,
         shade(accent, 1.1),
     );
-    f.rect(
-        m,
-        f.width * 0.27,
-        f.width * 0.73,
-        sign_y + 0.18,
-        sign_y + 0.37,
-        0.19,
-        palette::WINDOW_FRAME,
-    );
+    m.glow(Glow::Sign, 0.0, |m| {
+        f.rect(
+            m,
+            f.width * 0.27,
+            f.width * 0.73,
+            sign_y + 0.18,
+            sign_y + 0.37,
+            0.19,
+            palette::WINDOW_FRAME,
+        )
+    });
     // Upper floors.
     for (fi, f) in faces.iter().enumerate() {
         let per = ((f.width / 2.2).floor() as usize).clamp(1, 6);
@@ -825,7 +847,16 @@ fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
             }
         }
         if fi > 0 && storeys == 1 {
-            f.rect(m, 0.6, f.width - 0.6, 1.0, 2.2, 0.03, shade(palette::GLASS, 0.9));
+            f.lit_rect(
+                m,
+                Glow::Shop,
+                0.6,
+                f.width - 0.6,
+                1.0,
+                2.2,
+                0.03,
+                shade(palette::GLASS, 0.9),
+            );
         }
     }
     flat_roof(m, body, top, wall, palette::ROOF_FLAT, 0.45);
@@ -878,14 +909,14 @@ fn office(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
         for f in &faces {
             if s0 == 0 {
                 // Lobby glass on the ground floor.
-                f.rect(m, 0.5, f.width - 0.5, 0.3, 3.3, 0.04, shade(glass, 0.85));
+                f.lit_rect(m, Glow::Shop, 0.5, f.width - 0.5, 0.3, 3.3, 0.04, shade(glass, 0.85));
             }
             for s in s0.max(1)..s1 {
                 let y = base_h + (s - 1) as f32 * sh;
                 match style {
                     0 => {
                         // Ribbon windows.
-                        f.rect(m, 0.3, f.width - 0.3, y + 0.75, y + 2.7, 0.04, glass);
+                        f.lit_rect(m, Glow::Window, 0.3, f.width - 0.3, y + 0.75, y + 2.7, 0.04, glass);
                     }
                     1 => {
                         // Punched windows in a stone or brick facade.
@@ -971,7 +1002,16 @@ fn supermarket(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
     );
     let f = Face::of(body, 0.0)[0];
     f.rect(m, 0.0, f.width, top - 1.1, top, 0.03, accent);
-    f.rect(m, f.width * 0.3, f.width * 0.7, 0.0, 3.0, 0.04, palette::GLASS);
+    f.lit_rect(
+        m,
+        Glow::Shop,
+        f.width * 0.3,
+        f.width * 0.7,
+        0.0,
+        3.0,
+        0.04,
+        palette::GLASS,
+    );
     f.slab(
         m,
         f.width * 0.28,
@@ -1050,7 +1090,16 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
         f.rect(m, 0.0, f.width, h - 0.9, h - 0.55, 0.02, palette::INDUSTRY_STRIPE);
         let per = ((f.width / 3.0).floor() as usize).max(1);
         for a in spread(f.width, per) {
-            f.rect(m, a - 0.7, a + 0.7, h - 2.0, h - 1.2, 0.03, palette::WINDOW);
+            f.lit_rect(
+                m,
+                Glow::Window,
+                a - 0.7,
+                a + 0.7,
+                h - 2.0,
+                h - 1.2,
+                0.03,
+                palette::WINDOW,
+            );
         }
     }
     // Loading doors.

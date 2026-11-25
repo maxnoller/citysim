@@ -12,7 +12,11 @@ use bevy::pbr::{DistanceFog, FogFalloff, ScreenSpaceAmbientOcclusion, ScreenSpac
 use bevy::prelude::*;
 use citysim_sim::MAP_SIZE_M;
 
+use bevy::camera::Hdr;
+use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
+
 use super::camera::CameraRig;
+use super::city_material::{CityMaterial, SkyExt, SkyMaterial, city_material};
 use super::mesh_util::MeshBuilder;
 use super::noise;
 use super::palette::{self, lin, mix};
@@ -38,8 +42,20 @@ pub fn sun_direction() -> Vec3 {
 /// One shared material for everything vertex-coloured and lit.
 #[derive(Resource, Clone)]
 pub struct WorldMaterials {
-    /// Opaque, lit, vertex colours.
-    pub lit: Handle<StandardMaterial>,
+    /// Opaque, lit, vertex colours (with night glow, see `city_material`).
+    pub lit: Handle<CityMaterial>,
+    /// `lit` with the brake lights on (cars that are stopping).
+    pub lit_brake: Handle<CityMaterial>,
+    /// The ground: like `lit`, fully rough.
+    pub ground: Handle<CityMaterial>,
+    pub sky: Handle<SkyMaterial>,
+}
+
+impl WorldMaterials {
+    /// Every city material (they all follow the time of day).
+    pub fn city_handles(&self) -> [&Handle<CityMaterial>; 3] {
+        [&self.lit, &self.lit_brake, &self.ground]
+    }
 }
 
 #[derive(Component)]
@@ -47,6 +63,10 @@ struct SkyDome;
 
 #[derive(Component)]
 pub struct Sun;
+
+/// Soft fill light from the ground side.
+#[derive(Component)]
+pub struct Bounce;
 
 pub struct ScenePlugin;
 
@@ -70,32 +90,46 @@ impl Plugin for ScenePlugin {
     }
 }
 
-fn init_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
-    commands.insert_resource(WorldMaterials {
-        lit: materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.92,
-            reflectance: 0.25,
-            ..default()
-        }),
-    });
-}
-
-fn setup_scene(
+fn init_materials(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    world_mats: Res<WorldMaterials>,
+    mut materials: ResMut<Assets<CityMaterial>>,
+    mut skies: ResMut<Assets<SkyMaterial>>,
 ) {
-    commands.spawn((
-        Name::new("Ground"),
-        Mesh3d(meshes.add(ground_mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
+    let lit = StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.92,
+        reflectance: 0.25,
+        ..default()
+    };
+    let mut brake = city_material(lit.clone());
+    brake.extension.params.brake = 1.0;
+    commands.insert_resource(WorldMaterials {
+        lit: materials.add(city_material(lit)),
+        lit_brake: materials.add(brake),
+        ground: materials.add(city_material(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 1.0,
             reflectance: 0.1,
             ..default()
         })),
+        sky: skies.add(SkyMaterial {
+            base: StandardMaterial {
+                base_color: Color::WHITE,
+                unlit: true,
+                fog_enabled: false,
+                cull_mode: None,
+                ..default()
+            },
+            extension: SkyExt::default(),
+        }),
+    });
+}
+
+fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, world_mats: Res<WorldMaterials>) {
+    commands.spawn((
+        Name::new("Ground"),
+        Mesh3d(meshes.add(ground_mesh())),
+        MeshMaterial3d(world_mats.ground.clone()),
         Transform::default(),
         NotShadowCaster,
     ));
@@ -110,13 +144,7 @@ fn setup_scene(
         Name::new("Sky"),
         SkyDome,
         Mesh3d(meshes.add(sky_mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
-            fog_enabled: false,
-            cull_mode: None,
-            ..default()
-        })),
+        MeshMaterial3d(world_mats.sky.clone()),
         Transform::default(),
         NotShadowCaster,
         NoFrustumCulling,
@@ -137,6 +165,7 @@ fn setup_scene(
     // faces from going flat.
     commands.spawn((
         Name::new("Bounce"),
+        Bounce,
         DirectionalLight {
             color: Color::srgb(1.0, 0.93, 0.82),
             illuminance: 650.0,
@@ -298,6 +327,9 @@ pub struct QualitySettings {
     pub fxaa: bool,
     /// Fraction of the full tree count to place.
     pub tree_density: f32,
+    pub bloom: bool,
+    /// Soft drifting cloud shadows on the sunlight.
+    pub cloud_shadows: bool,
 }
 
 pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
@@ -310,6 +342,8 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
             smaa: false,
             fxaa: true,
             tree_density: 0.35,
+            bloom: false,
+            cloud_shadows: false,
         },
         GraphicsQuality::Medium => QualitySettings {
             shadow_map: 2048,
@@ -319,6 +353,8 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
             smaa: false,
             fxaa: false,
             tree_density: 0.65,
+            bloom: true,
+            cloud_shadows: true,
         },
         GraphicsQuality::High => QualitySettings {
             shadow_map: 4096,
@@ -329,6 +365,8 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
             smaa: true,
             fxaa: false,
             tree_density: 1.0,
+            bloom: true,
+            cloud_shadows: true,
         },
     }
 }
@@ -337,6 +375,9 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
 pub fn camera_look() -> impl Bundle {
     (
         Tonemapping::TonyMcMapface,
+        // Always HDR (bloom only on some qualities): switching quality must
+        // not change the main pass's render target format.
+        Hdr,
         DistanceFog {
             color: palette::SKY_HORIZON,
             directional_light_color: Color::srgba(1.0, 0.95, 0.85, 0.25),
@@ -391,6 +432,20 @@ fn apply_quality(
             ec.insert(Fxaa::default());
         } else {
             ec.remove::<Fxaa>();
+        }
+        if s.bloom {
+            ec.insert(Bloom {
+                intensity: 0.12,
+                low_frequency_boost: 0.6,
+                prefilter: BloomPrefilter {
+                    threshold: 1.1,
+                    threshold_softness: 0.5,
+                },
+                composite_mode: BloomCompositeMode::Additive,
+                ..Bloom::NATURAL
+            });
+        } else {
+            ec.remove::<Bloom>();
         }
     }
 }

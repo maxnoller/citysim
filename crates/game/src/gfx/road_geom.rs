@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 use bevy::prelude::*;
 use citysim_sim::{NodeId, RoadKind, RoadNetwork, SegmentId};
 
-use super::mesh_util::MeshBuilder;
+use super::mesh_util::{Glow, MeshBuilder};
 use super::palette::{self, lin, shade};
 
 /// Top of the asphalt.
@@ -552,7 +552,7 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
         }
     }
     if st.walk > 0.0 {
-        street_lamps(m, s, t0, t1);
+        street_lamps(m, s);
     } else if s.id.is_none() {
         // The road out of town: a sign gantry just past the map edge.
         sign_gantry(m, s.b - dir * 35.0, dir, h);
@@ -626,43 +626,86 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
     }
 }
 
-/// Street lamps on alternating sides, clear of the junction ends.
-fn street_lamps(m: &mut MeshBuilder, s: &SegLayout, t0: f32, t1: f32) {
+/// Street lamp positions along a segment: (pole base, lamp head) on
+/// alternating sides, clear of the junction ends. Empty for roads without
+/// sidewalks.
+pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
+    if s.style.walk <= 0.0 {
+        return Vec::new();
+    }
     let dir = s.dir();
     let n = perp(dir);
     let off = s.style.h + s.style.walk * 0.62;
+    let (t0, t1) = (s.s_a, s.len() - s.s_b);
     let (a, b) = (t0 + 5.0, t1 - 5.0);
     if b <= a {
-        return;
+        return Vec::new();
     }
     let count = ((b - a) / 26.0).floor() as usize + 1;
+    (0..count)
+        .map(|k| {
+            let t = if count == 1 {
+                (a + b) * 0.5
+            } else {
+                a + (b - a) * k as f32 / (count - 1) as f32
+            };
+            // Alternate sides, phase from the position so neighbours agree.
+            let side = if ((s.a + dir * t).dot(Vec2::ONE) / 26.0).round() as i32 % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let base = s.a + dir * t + n * side * off;
+            (base, base - n * side * 1.1)
+        })
+        .collect()
+}
+
+/// Street lamps: pole, arm over the road and a glowing head.
+fn street_lamps(m: &mut MeshBuilder, s: &SegLayout) {
     let pole = palette::LAMP;
-    for k in 0..count {
-        let t = if count == 1 {
-            (a + b) * 0.5
-        } else {
-            a + (b - a) * k as f32 / (count - 1) as f32
-        };
-        // Alternate sides, phase from the position so neighbours agree.
-        let side = if ((s.a + dir * t).dot(Vec2::ONE) / 26.0).round() as i32 % 2 == 0 {
-            1.0
-        } else {
-            -1.0
-        };
-        let base = s.a + dir * t + n * side * off;
+    for (base, tip) in lamp_spots(s) {
         m.box_yaw(lift(base, WALK_Y), Vec3::new(0.14, 4.6, 0.14), 0.0, pole, pole);
-        // Arm reaching over the road and the lamp head.
-        let tip = base - n * side * 1.1;
         let mid = (base + tip) * 0.5;
-        let yaw = -n.y.atan2(n.x);
+        let d = tip - base;
+        let yaw = -d.y.atan2(d.x);
         m.box_yaw(lift(mid, WALK_Y + 4.5), Vec3::new(1.2, 0.1, 0.1), yaw, pole, pole);
-        m.box_yaw(
-            lift(tip, WALK_Y + 4.3),
-            Vec3::new(0.5, 0.18, 0.28),
-            yaw,
-            pole,
-            palette::LAMP_GLASS,
-        );
+        m.box_yaw(lift(tip, WALK_Y + 4.38), Vec3::new(0.62, 0.14, 0.32), yaw, pole, pole);
+        m.glow(Glow::Lamp, 0.0, |m| {
+            m.box_yaw(
+                lift(tip, WALK_Y + 4.26),
+                Vec3::new(0.5, 0.12, 0.24),
+                yaw,
+                palette::LAMP_GLASS,
+                palette::LAMP_GLASS,
+            )
+        });
+    }
+}
+
+/// Soft pool of lamp light on the ground around `p` (for an additive
+/// material): bright in the middle, fading to nothing at `r`.
+pub fn light_pool(m: &mut MeshBuilder, p: Vec2, r: f32, y: f32, color: Color) {
+    let c = lin(color);
+    let with_a = |a: f32| [c[0] * a, c[1] * a, c[2] * a, a];
+    let rings = [(0.0f32, 1.0f32), (0.35, 0.62), (0.7, 0.2), (1.0, 0.0)];
+    let seg = 14;
+    let at = |k: usize, i: usize| {
+        let ang = i as f32 / seg as f32 * TAU;
+        lift(p + Vec2::new(ang.cos(), ang.sin()) * r * rings[k].0, y)
+    };
+    for k in 0..rings.len() - 1 {
+        for i in 0..seg {
+            let q = [at(k, i), at(k, i + 1), at(k + 1, i + 1), at(k + 1, i)];
+            let (ci, co) = (with_a(rings[k].1), with_a(rings[k + 1].1));
+            let cols = [ci, ci, co, co];
+            // Upward facing whatever the winding.
+            if (q[1] - q[0]).cross(q[2] - q[0]).y >= 0.0 {
+                m.quad_c(q, cols);
+            } else {
+                m.quad_c([q[3], q[2], q[1], q[0]], [co, co, ci, ci]);
+            }
+        }
     }
 }
 
