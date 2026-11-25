@@ -319,15 +319,9 @@ fn resolve(world: &World, place: Place) -> Option<Access> {
 pub(crate) fn set_pose(roads: &RoadNetwork, v: &mut Vehicle) {
     let Some(s) = v.segment else { return };
     let Some(seg) = roads.segments.get(s) else { return };
-    let (pa, pb) = roads.segment_ends(s);
-    let (from, to) = if v.forward { (pa, pb) } else { (pb, pa) };
-    let f = if seg.length > 0.0 {
-        (v.progress / seg.length).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    v.pos = [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f];
-    v.heading = libm::atan2f(to[1] - from[1], to[0] - from[0]);
+    let p = seg.pose_dir(v.forward, v.progress.clamp(0.0, seg.length), 0.0);
+    v.pos = p.pos;
+    v.heading = p.heading();
 }
 
 fn route_valid(roads: &RoadNetwork, v: &Vehicle, dest: Option<Access>) -> bool {
@@ -500,13 +494,9 @@ fn relocate(world: &mut World, id: VehicleId) -> bool {
                 let Some(seg) = world.roads.segments.get(s) else {
                     continue;
                 };
-                let (pa, pb) = world.roads.segment_ends(s);
-                let ab = geom::sub(pb, pa);
-                let t = (geom::dot(geom::sub(pos, pa), ab) / geom::dot(ab, ab)).clamp(0.0, 1.0);
-                let p = [pa[0] + ab[0] * t, pa[1] + ab[1] * t];
-                let d = geom::dist(p, pos);
+                let (from_a, d, _) = seg.nearest(pos);
                 if d < 1.0 && best.is_none_or(|b| d < b.0) {
-                    best = Some((d, s, t * seg.length));
+                    best = Some((d, s, from_a));
                 }
             }
         }
@@ -514,8 +504,7 @@ fn relocate(world: &mut World, id: VehicleId) -> bool {
     let Some((_, s, from_a)) = best else {
         return false;
     };
-    let (pa, pb) = world.roads.segment_ends(s);
-    let forward = geom::dot(geom::sub(pb, pa), dir) >= 0.0;
+    let forward = geom::dot(world.roads.segments[s].pose(from_a, 0.0).dir, dir) >= 0.0;
     let len = world.roads.segments[s].length;
     let v = &mut world.vehicles[id];
     v.segment = Some(s);

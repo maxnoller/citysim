@@ -38,6 +38,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::curve::{ArcTable, Curve};
 use crate::roads::{NodeId, RoadKind, RoadNetwork, SegmentId};
 use crate::{Cell, TICKS_PER_SECOND, World, balance, geom};
 
@@ -101,7 +102,7 @@ pub struct Arm {
 }
 
 /// A path through a junction box.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Movement {
     /// Arm indices (into the node's `segments`).
     pub from_arm: u8,
@@ -109,46 +110,68 @@ pub struct Movement {
     pub from_lane: u8,
     pub to_lane: u8,
     pub turn: Turn,
-    /// Start (stop line, on the in-lane), control point and end (box edge
-    /// on the out-lane) of the quadratic curve, sim metres.
-    pub p0: [f32; 2],
-    pub p1: [f32; 2],
-    pub p2: [f32; 2],
+    /// The path, from the stop line on the in-lane to the box edge on the
+    /// out-lane, sim metres (lane offsets included).
+    pub curve: Curve,
     /// Curve length, metres.
     pub length: f32,
+    #[serde(skip)]
+    arc: ArcTable,
 }
 
-impl Movement {
-    /// Point and unit direction `d` metres along the curve (clamped).
-    pub fn pose_at(&self, d: f32) -> ([f32; 2], [f32; 2]) {
-        let t = if self.length > 0.0 {
-            (d / self.length).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        bezier_pose(self.p0, self.p1, self.p2, t)
+impl PartialEq for Movement {
+    fn eq(&self, o: &Self) -> bool {
+        (self.from_arm, self.to_arm, self.from_lane, self.to_lane, self.turn)
+            == (o.from_arm, o.to_arm, o.from_lane, o.to_lane, o.turn)
+            && self.curve == o.curve
+            && self.length == o.length
     }
 }
 
-fn bezier_pose(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], t: f32) -> ([f32; 2], [f32; 2]) {
-    let u = 1.0 - t;
-    let p = [
-        u * u * p0[0] + 2.0 * u * t * p1[0] + t * t * p2[0],
-        u * u * p0[1] + 2.0 * u * t * p1[1] + t * t * p2[1],
-    ];
-    let d = [
-        2.0 * u * (p1[0] - p0[0]) + 2.0 * t * (p2[0] - p1[0]),
-        2.0 * u * (p1[1] - p0[1]) + 2.0 * t * (p2[1] - p1[1]),
-    ];
-    let l = geom::dot(d, d).sqrt();
-    let dir = if l > 1e-6 {
-        [d[0] / l, d[1] / l]
-    } else {
-        let e = geom::sub(p2, p0);
-        let l = geom::dot(e, e).sqrt().max(1e-6);
-        [e[0] / l, e[1] / l]
-    };
-    (p, dir)
+impl Movement {
+    /// A movement along the quadratic `p0`, `p1`, `p2` (as a cubic).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn quadratic(
+        from_arm: u8,
+        to_arm: u8,
+        from_lane: u8,
+        to_lane: u8,
+        turn: Turn,
+        p0: [f32; 2],
+        p1: [f32; 2],
+        p2: [f32; 2],
+    ) -> Movement {
+        let curve = Curve::new(
+            p0,
+            [
+                p0[0] + (p1[0] - p0[0]) * (2.0 / 3.0),
+                p0[1] + (p1[1] - p0[1]) * (2.0 / 3.0),
+            ],
+            [
+                p2[0] + (p1[0] - p2[0]) * (2.0 / 3.0),
+                p2[1] + (p1[1] - p2[1]) * (2.0 / 3.0),
+            ],
+            p2,
+        );
+        let arc = curve.arc_table();
+        let length = curve.length_with(&arc).max(0.5);
+        Movement {
+            from_arm,
+            to_arm,
+            from_lane,
+            to_lane,
+            turn,
+            curve,
+            length,
+            arc,
+        }
+    }
+
+    /// Point and unit direction `d` metres along the curve (clamped).
+    pub fn pose_at(&self, d: f32) -> ([f32; 2], [f32; 2]) {
+        let p = self.curve.pose_at_with(&self.arc, d, 0.0);
+        (p.pos, p.dir)
+    }
 }
 
 /// Stage of the current signal phase.
@@ -333,10 +356,14 @@ pub struct JunctionView {
 
 /// Unit direction from `n` along segment `s`.
 pub(crate) fn arm_dir(roads: &RoadNetwork, n: NodeId, s: SegmentId) -> [f32; 2] {
-    let other = roads.nodes[roads.segments[s].other(n)].pos;
-    let d = geom::sub(other, roads.nodes[n].pos);
-    let l = geom::dot(d, d).sqrt().max(1e-6);
-    [d[0] / l, d[1] / l]
+    roads.segments[s].dir_from(n)
+}
+
+/// Pose `d` metres from node `n` along segment `s`, direction away from
+/// the node.
+fn arm_pose(roads: &RoadNetwork, n: NodeId, s: SegmentId, d: f32) -> crate::curve::Pose {
+    let seg = &roads.segments[s];
+    seg.pose_dir(seg.a == n, d, 0.0)
 }
 
 /// Right of travel direction `d`.
@@ -389,21 +416,9 @@ fn intersect(p: [f32; 2], d: [f32; 2], q: [f32; 2], e: [f32; 2]) -> Option<[f32;
     Some([p[0] + d[0] * t, p[1] + d[1] * t])
 }
 
-fn curve_length(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2]) -> f32 {
-    let mut len = 0.0;
-    let mut prev = p0;
-    for k in 1..=8 {
-        let (p, _) = bezier_pose(p0, p1, p2, k as f32 / 8.0);
-        len += geom::dist(prev, p);
-        prev = p;
-    }
-    len.max(0.5)
-}
-
 /// Build arms and movements of node `n` (any degree).
 pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<Movement>) {
     let node = &roads.nodes[n];
-    let pos = node.pos;
     let deg = node.segments.len();
     let mut arms: Vec<Arm> = node
         .segments
@@ -487,15 +502,15 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
                 Turn::Left | Turn::UTurn => vec![(ni - 1, no - 1)],
                 Turn::Straight => (0..ni).map(|l| (l, l.min(no - 1))).collect(),
             };
+            // Stop line and box edge on the arms' centre lines, and the
+            // travel directions there (the arms may be curved).
+            let line_a = arm_pose(roads, n, a.segment, a.setback);
+            let line_b = arm_pose(roads, n, b.segment, b.setback);
+            let din = [-line_a.dir[0], -line_a.dir[1]];
+            let dout = line_b.dir;
             for (fl, tl) in lanes {
-                let p0 = geom_add(
-                    geom_add(pos, scale(a.dir, a.setback)),
-                    scale(right_of(din), a.kind.lane_offset_m(fl)),
-                );
-                let p2 = geom_add(
-                    geom_add(pos, scale(b.dir, b.setback)),
-                    scale(right_of(dout), b.kind.lane_offset_m(tl)),
-                );
+                let p0 = geom_add(line_a.pos, scale(right_of(din), a.kind.lane_offset_m(fl)));
+                let p2 = geom_add(line_b.pos, scale(right_of(dout), b.kind.lane_offset_m(tl)));
                 let p1 = match turn {
                     Turn::UTurn => {
                         // Loop around the node.
@@ -504,17 +519,31 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
                     }
                     _ => intersect(p0, din, p2, dout).unwrap_or([(p0[0] + p2[0]) * 0.5, (p0[1] + p2[1]) * 0.5]),
                 };
-                let length = curve_length(p0, p1, p2);
+                // The quadratic through the lane lines' meeting point, as a
+                // cubic.
+                let curve = Curve::new(
+                    p0,
+                    [
+                        p0[0] + (p1[0] - p0[0]) * (2.0 / 3.0),
+                        p0[1] + (p1[1] - p0[1]) * (2.0 / 3.0),
+                    ],
+                    [
+                        p2[0] + (p1[0] - p2[0]) * (2.0 / 3.0),
+                        p2[1] + (p1[1] - p2[1]) * (2.0 / 3.0),
+                    ],
+                    p2,
+                );
+                let arc = curve.arc_table();
+                let length = curve.length_with(&arc).max(0.5);
                 movements.push(Movement {
                     from_arm: i as u8,
                     to_arm: j as u8,
                     from_lane: fl,
                     to_lane: tl,
                     turn,
-                    p0,
-                    p1,
-                    p2,
+                    curve,
                     length,
+                    arc,
                 });
             }
         }
@@ -534,7 +563,11 @@ fn scale(a: [f32; 2], k: f32) -> [f32; 2] {
 pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec<u128> {
     let n = movements.len().min(128);
     let ang = |p: [f32; 2]| pseudo_angle(geom::sub(p, node_pos));
-    let ends: Vec<(f32, f32)> = movements.iter().take(n).map(|m| (ang(m.p0), ang(m.p2))).collect();
+    let ends: Vec<(f32, f32)> = movements
+        .iter()
+        .take(n)
+        .map(|m| (ang(m.curve.start()), ang(m.curve.end())))
+        .collect();
     let mut out = vec![0u128; n];
     for i in 0..n {
         for j in i + 1..n {
@@ -570,7 +603,7 @@ fn paths_brush(a: &Movement, b: &Movement) -> bool {
     let pts = |m: &Movement| -> [[f32; 2]; SAMPLES + 1] {
         let mut out = [[0.0; 2]; SAMPLES + 1];
         for (k, p) in out.iter_mut().enumerate() {
-            *p = bezier_pose(m.p0, m.p1, m.p2, k as f32 / SAMPLES as f32).0;
+            *p = m.curve.point_t(k as f32 / SAMPLES as f32);
         }
         out
     };
@@ -1060,4 +1093,102 @@ pub fn setback(world: &World, n: NodeId, s: SegmentId) -> f32 {
         .get(n)
         .and_then(|j| j.arm_of(s).map(|a| j.arms[a].setback))
         .unwrap_or(0.0)
+}
+
+// ---------------------------------------------------------------- shape ----
+
+/// Where an arm's road surface meets the junction surface: the line across
+/// the road `setback` metres from the node.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ArmCut {
+    pub segment: SegmentId,
+    /// Metres along the segment's centre line from the node.
+    pub setback: f32,
+    /// Centre-line point of the cut.
+    pub center: [f32; 2],
+    /// Unit direction along the road away from the node at the cut.
+    pub dir: [f32; 2],
+    /// Kerb ends of the cut: left and right seen looking away from the node
+    /// (`right` = `center + right_of(dir) * half_width`).
+    pub left: [f32; 2],
+    pub right: [f32; 2],
+    /// Half the width of the cut (carriageway plus the requested extra).
+    pub half_width: f32,
+}
+
+/// A junction's surface for renderers: the outline polygon and the cut
+/// line of every arm, built from the same geometry vehicles use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JunctionShape {
+    pub node: NodeId,
+    pub pos: [f32; 2],
+    /// Arms in counter-clockwise order (sim axes: from `+x` towards `+y`).
+    pub arms: Vec<ArmCut>,
+    /// Closed polygon, counter-clockwise, no repeated first point: for each
+    /// arm its `left` then `right` cut point, then kerb-fillet points round
+    /// to the next arm's `left`.
+    pub outline: Vec<[f32; 2]>,
+}
+
+/// The surface of node `n` with its kerbs `extra` metres outside the
+/// carriageway (0 for the asphalt, the sidewalk width for the pavement).
+/// `None` for dead ends and for nodes without a box (straight or smooth
+/// continuations).
+pub fn junction_shape(world: &World, n: NodeId, extra: f32) -> Option<JunctionShape> {
+    let roads = &world.roads;
+    let node = roads.nodes.get(n)?;
+    if node.segments.len() < 2 {
+        return None;
+    }
+    let mut arms: Vec<(f32, ArmCut)> = Vec::new();
+    for &s in &node.segments {
+        let seg = roads.segments.get(s)?;
+        let sb = setback(world, n, s).min(seg.length);
+        let forward = seg.a == n;
+        let pose = seg.pose_dir(forward, sb, 0.0);
+        let hw = seg.kind.half_width_m() + extra;
+        let r = right_of(pose.dir);
+        let cut = ArmCut {
+            segment: s,
+            setback: sb,
+            center: pose.pos,
+            dir: pose.dir,
+            left: [pose.pos[0] - r[0] * hw, pose.pos[1] - r[1] * hw],
+            right: [pose.pos[0] + r[0] * hw, pose.pos[1] + r[1] * hw],
+            half_width: hw,
+        };
+        arms.push((pseudo_angle(seg.dir_from(n)), cut));
+    }
+    if arms.iter().all(|(_, a)| a.setback <= 1e-3) {
+        return None;
+    }
+    arms.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let arms: Vec<ArmCut> = arms.into_iter().map(|(_, a)| a).collect();
+    let mut outline = Vec::new();
+    let k = arms.len();
+    for i in 0..k {
+        let (a, b) = (&arms[i], &arms[(i + 1) % k]);
+        outline.push(a.left);
+        outline.push(a.right);
+        // Kerb fillet from this arm's right kerb to the next arm's left one:
+        // a quadratic whose control point is where the two kerb lines meet
+        // (towards the node), else a straight edge.
+        let ctrl = intersect(a.right, a.dir, b.left, b.dir)
+            .filter(|c| geom::dist(*c, node.pos) < 3.0 * (a.half_width + b.half_width) + a.setback + b.setback);
+        if let Some(c) = ctrl {
+            for t in [0.25f32, 0.5, 0.75] {
+                let u = 1.0 - t;
+                outline.push([
+                    u * u * a.right[0] + 2.0 * u * t * c[0] + t * t * b.left[0],
+                    u * u * a.right[1] + 2.0 * u * t * c[1] + t * t * b.left[1],
+                ]);
+            }
+        }
+    }
+    Some(JunctionShape {
+        node: n,
+        pos: node.pos,
+        arms,
+        outline,
+    })
 }

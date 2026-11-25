@@ -114,7 +114,7 @@ pub fn check_consistency(w: &World, after_step: bool) {
     // Buildings: footprint cells point back and stay zoned for the kind.
     for (bid, b) in w.buildings.iter() {
         assert!(b.level >= 1 && b.capacity > 0, "tick {tick}: {bid:?} {b:?}");
-        for cell in b.footprint.cells() {
+        for cell in b.footprint.rect().cells() {
             let cd = w.grid.get(cell).expect("footprint in bounds");
             assert_eq!(cd.occupant, Occupant::Building(bid), "tick {tick}: {cell:?}");
             assert_eq!(cd.zone, Some(b.kind), "tick {tick}: {cell:?} zone under {bid:?}");
@@ -214,14 +214,34 @@ pub fn check_full(w: &World) {
     }
 }
 
-/// Unit road pieces `(p, q, highway)` with `p < q`.
+/// Unit road pieces `(p, q, highway)` with `p < q`. A segment ending
+/// between two cell centres (where crossing diagonals meet) counts as the
+/// whole piece it is part of.
 pub fn pieces(w: &World) -> BTreeSet<(Cell, Cell, bool)> {
     let mut out = BTreeSet::new();
     for (s, seg) in w.roads.segments.iter() {
         let (pa, pb) = w.roads.segment_ends(s);
-        let line = Cell::from_pos(pa)
-            .straight_line_to(Cell::from_pos(pb))
-            .expect("straight");
+        let d = [pb[0] - pa[0], pb[1] - pa[1]];
+        let step = d[0].abs().max(d[1].abs());
+        let u = [d[0] / step, d[1] / step];
+        let (sx, sy) = (u[0].round() as i32, u[1].round() as i32);
+        // Cell centres on the line from the one at or before `pa` to the
+        // one at or after `pb`.
+        let first = |p: [f32; 2], back: bool| {
+            let c = Cell::from_pos(p);
+            if (c.center()[0] - p[0]).abs() < 1e-3 && (c.center()[1] - p[1]).abs() < 1e-3 {
+                return c;
+            }
+            // Half way along a piece: the centre half a piece back / ahead.
+            let k = if back { -0.5 } else { 0.5 };
+            Cell::from_pos([
+                p[0] + k * u[0] * CELL_SIZE + 1e-3 * u[0],
+                p[1] + k * u[1] * CELL_SIZE + 1e-3 * u[1],
+            ])
+        };
+        let (ca, cb) = (first(pa, true), first(pb, false));
+        let _ = (sx, sy);
+        let line = ca.straight_line_to(cb).expect("straight");
         for p in line.windows(2) {
             let (a, b) = if p[0] <= p[1] { (p[0], p[1]) } else { (p[1], p[0]) };
             out.insert((a, b, seg.kind == RoadKind::Highway));
@@ -242,14 +262,23 @@ pub fn check_bulldoze(before: &World, after: &World, rect: CellRect, cells: &[Ce
         .filter(|&(a, b, hw)| hw || !(rect.contains(a) || rect.contains(b)))
         .collect();
     let got = pieces(after);
-    assert_eq!(got, want, "bulldoze {rect:?} left the wrong pieces");
+    assert!(
+        got == want,
+        "bulldoze {rect:?} left the wrong pieces: extra {:?}, missing {:?}",
+        got.difference(&want).collect::<Vec<_>>(),
+        want.difference(&got).collect::<Vec<_>>()
+    );
     let mut reported: BTreeSet<Cell> = old
         .difference(&want)
         .flat_map(|&(a, b, _)| [a, b])
         .filter(|&x| rect.contains(x))
         .collect();
-    for b in before.buildings.values().filter(|b| b.footprint.intersects(&rect)) {
-        reported.extend(b.footprint.cells());
+    for b in before
+        .buildings
+        .values()
+        .filter(|b| b.footprint.rect().intersects(&rect))
+    {
+        reported.extend(b.footprint.rect().cells());
         assert!(!after.buildings.values().any(|a| a == b), "{b:?} survived");
     }
     assert_eq!(cells, reported.into_iter().collect::<Vec<_>>().as_slice());

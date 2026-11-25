@@ -32,10 +32,11 @@ use crate::{Budget, BuildingId, MAP_CELLS, World, balance};
 
 pub mod v3;
 pub mod v4;
+pub mod v5;
 
 pub const MAGIC: &[u8; 4] = b"CSIM";
 /// Bump when the World layout changes incompatibly.
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
@@ -170,6 +171,10 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
             let (old, rest): (v4::WorldV4, &[u8]) = postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?;
             (old.upgrade(), rest)
         }
+        5 => {
+            let (old, rest): (v5::WorldV5, &[u8]) = postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?;
+            (old.upgrade(), rest)
+        }
         _ => postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?,
     };
     check_loaded(&world).map_err(LoadError::Corrupt)?;
@@ -187,6 +192,8 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
         }
     }
     restore_derived(&mut world);
+    world.roads.refresh_tables();
+    crate::zoning::mirror_grid(&mut world);
     if version == 3 {
         crate::growth::convert_legacy_lots(&mut world);
         crate::traffic::sync_junctions(&mut world);

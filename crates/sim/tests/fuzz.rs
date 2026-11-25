@@ -133,7 +133,7 @@ fn rand_command(r: &mut Rng) -> Command {
 fn apply_checked(w: &mut World, cmd: Command) {
     let preview = w.preview(&cmd);
     let before = w.clone();
-    let got = w.apply(cmd);
+    let got = w.apply(cmd.clone());
     match (&preview, &got) {
         (Ok(p), Ok(o)) => {
             assert_eq!((p.cost, &p.cells), (o.cost, &o.cells), "{cmd:?}");

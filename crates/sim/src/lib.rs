@@ -26,9 +26,11 @@
 //! `(x, y)` is `((x + 0.5) * CELL_SIZE, (y + 0.5) * CELL_SIZE)`.
 
 pub mod balance;
+pub(crate) mod build;
 pub mod buildings;
 pub mod citizens;
 pub mod command;
+pub mod curve;
 pub(crate) mod day;
 pub mod demand;
 pub mod derived;
@@ -54,16 +56,20 @@ pub mod stats;
 pub mod time;
 pub mod traffic;
 pub mod world;
+pub mod zoning;
 
 #[cfg(test)]
 mod people_tests;
 
-pub use buildings::{Building, BuildingId, Facing};
+pub use buildings::{Building, BuildingId, Facing, Footprint};
 pub use citizens::{
     Activity, Citizen, CitizenId, Education, Happiness, HappinessPart, HouseholdRole, Job, JobTier, JournalEntry,
     Journey, LifeEvent, LifeStage, Location, Shift, TravelMode,
 };
-pub use command::{Command, CommandError, JunctionChange, Outcome, Preview};
+pub use command::{
+    Command, CommandError, JunctionChange, NodeChange, Outcome, PieceChange, PlannedNode, PlannedPiece, Preview,
+};
+pub use curve::{Curve, Pose};
 pub use demand::Demand;
 pub use derived::Access;
 pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus};
@@ -85,6 +91,7 @@ pub use stats::Stats;
 pub use time::SimTime;
 pub use traffic::{Departure, JunctionMove, Place, TrafficState, Trip, TripPurpose, Vehicle, VehicleId};
 pub use world::{Versions, World};
+pub use zoning::{Block, Blocked, CellRef, Lattice, LatticeId, Side, ZoneCell, Zoning};
 
 /// Cells per side of the square map.
 pub const MAP_CELLS: i32 = 256;

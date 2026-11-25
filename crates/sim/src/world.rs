@@ -65,6 +65,9 @@ pub struct World {
     /// Population bookkeeping: who lives and works where, counters, daily
     /// trip and life-event counts, city statistics (`people.stats`).
     pub people: People,
+    /// Zone blocks, lattices and cells (see [`crate::zoning`]).
+    #[serde(skip)]
+    pub zoning: crate::Zoning,
     /// Lazily rebuilt indices derived from the state above. Not saved,
     /// ignored by `==`.
     #[serde(skip)]
@@ -93,6 +96,7 @@ impl World {
             growth: GrowthState::default(),
             citizens: IdMap::new(),
             people: People::default(),
+            zoning: crate::Zoning::default(),
             cache: Derived::default(),
         };
         let start = World::highway_entry_cell();
@@ -107,6 +111,7 @@ impl World {
         traffic::sync_junctions(&mut world);
         stats::update(&mut world);
         demand::refresh(&mut world);
+        crate::zoning::mirror_grid(&mut world);
         world
     }
 
@@ -118,7 +123,7 @@ impl World {
     /// Validate `cmd` and report its cost and affected cells, without
     /// changing anything. Ok exactly when `apply` would succeed.
     pub fn preview(&self, cmd: &Command) -> Result<Preview, CommandError> {
-        command::plan(self, cmd).map(|p| p.preview())
+        command::plan(self, cmd).map(|p| p.preview(self))
     }
 
     /// Validate and execute `cmd`. On error nothing changes.
@@ -131,6 +136,7 @@ impl World {
             households::trip_ended(self, e);
         }
         stats::update(self);
+        crate::zoning::mirror_grid(self);
         if self.time.tick == 0 {
             // The clock never ran (a new game, paused from the start):
             // demand follows every command at once.
@@ -152,6 +158,7 @@ impl World {
         crate::errands::tick(self);
         traffic::tick(self);
         stats::update(self);
+        crate::zoning::mirror_grid(self);
     }
 
     pub fn save(&self) -> Vec<u8> {
@@ -281,17 +288,29 @@ impl World {
     /// match the graph, building cells match buildings). For tests/debug.
     pub fn check_invariants(&self) -> Result<(), String> {
         self.roads.validate()?;
+        // Segments by the cells their bounds touch (one cell of margin).
+        let n = MAP_CELLS as usize;
+        let mut buckets: Vec<Vec<crate::SegmentId>> = vec![Vec::new(); n * n];
+        for (s, seg) in self.roads.segments.iter() {
+            let (lo, hi) = seg.curve.bounds();
+            let (a, b) = (Cell::from_pos(lo), Cell::from_pos(hi));
+            for y in (a.y - 1).max(0)..=(b.y + 1).min(MAP_CELLS - 1) {
+                for x in (a.x - 1).max(0)..=(b.x + 1).min(MAP_CELLS - 1) {
+                    buckets[y as usize * n + x as usize].push(s);
+                }
+            }
+        }
         for y in 0..MAP_CELLS {
             for x in 0..MAP_CELLS {
                 let c = Cell::new(x, y);
                 let cd = self.grid.get(c).expect("in bounds");
-                let covered = self.roads.covers(c.center());
+                let covered = command::road_over(&self.roads, &buckets[y as usize * n + x as usize], c);
                 match cd.occupant {
                     Occupant::Road if !covered => return Err(format!("{c:?} marked road but no road there")),
                     Occupant::Road => {}
                     _ if covered => return Err(format!("{c:?} has road but is not marked road")),
                     Occupant::Building(id) => match self.buildings.get(id) {
-                        Some(b) if b.footprint.contains(c) => {}
+                        Some(b) if b.footprint.rect().contains(c) => {}
                         _ => return Err(format!("{c:?} references bad building {id:?}")),
                     },
                     Occupant::Empty => {}

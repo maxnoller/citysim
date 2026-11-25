@@ -125,7 +125,7 @@ fn cut(w: &mut World) -> Vec<BuildingId> {
     let ids: Vec<BuildingId> = w
         .buildings
         .iter()
-        .filter(|(_, b)| b.footprint.min.x >= 18)
+        .filter(|(_, b)| b.footprint.rect().min.x >= 18)
         .map(|(id, _)| id)
         .collect();
     assert!(ids.len() > 20, "{}", ids.len());

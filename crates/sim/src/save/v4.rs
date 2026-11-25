@@ -11,15 +11,17 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
+use super::v5::{
+    BuildingV5, GridV5, GrowthStateV5, JunctionStateV5, RoadNetworkV5, VehicleV5, VersionsV5, buildings_of,
+    junctions_of, upgrade_buildings, upgrade_junctions, upgrade_vehicles, vehicles_of,
+};
 use crate::derived::Access;
 use crate::economy::Economy;
-use crate::growth::GrowthState;
-use crate::junction::JunctionState;
-use crate::roads::{NodeId, RoadNetwork};
+use crate::roads::NodeId;
 use crate::side::SideTable;
 use crate::stats::Stats;
-use crate::traffic::{Departure, Place, TrafficState, Trip, TripPurpose, Vehicle, VehicleId};
-use crate::{BuildingId, Demand, Grid, Household, HouseholdId, HouseholdState, IdMap, Rng, SimTime, Versions, World};
+use crate::traffic::{Departure, Place, TrafficState, Trip, TripPurpose, VehicleId};
+use crate::{BuildingId, Demand, Household, HouseholdId, HouseholdState, IdMap, Rng, SimTime, World};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HouseholdV4 {
@@ -112,7 +114,7 @@ pub(crate) struct TripV4 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TrafficStateV4 {
     trips: SideTable<VehicleId, TripV4>,
-    junction_states: SideTable<NodeId, JunctionState>,
+    junction_states: SideTable<NodeId, JunctionStateV5>,
     junctions_version: u64,
     pending: VecDeque<DepartureV4>,
     replan: VecDeque<VehicleId>,
@@ -136,17 +138,17 @@ pub(crate) struct WorldV4 {
     seed: u64,
     rng: Rng,
     time: SimTime,
-    roads: RoadNetwork,
-    grid: Grid,
-    buildings: IdMap<BuildingId, crate::Building>,
+    roads: RoadNetworkV5,
+    grid: GridV5,
+    buildings: IdMap<BuildingId, BuildingV5>,
     households: IdMap<HouseholdId, HouseholdV4>,
-    vehicles: IdMap<VehicleId, Vehicle>,
+    vehicles: IdMap<VehicleId, VehicleV5>,
     economy: Economy,
     demand: Demand,
     stats: Stats,
-    versions: Versions,
+    versions: VersionsV5,
     traffic: TrafficStateV4,
-    growth: GrowthState,
+    growth: GrowthStateV5,
 }
 
 /// A live trip from a frozen one: the driver is unknown (set when the
@@ -178,11 +180,11 @@ impl WorldV4 {
         }
         let traffic = TrafficState {
             trips,
-            junction_states: t.junction_states,
-            junctions_version: t.junctions_version,
+            junction_states: upgrade_junctions(t.junction_states),
+            junctions_version: 0,
             pending: t.pending.into_iter().map(DepartureV4::upgrade).collect(),
             replan: t.replan,
-            roads_version: t.roads_version,
+            roads_version: 0,
             avg_commute_s: t.avg_commute_s,
             avg_speed: t.avg_speed,
             peak_today: t.peak_today,
@@ -199,17 +201,17 @@ impl WorldV4 {
         let mut w = World::new(self.seed);
         w.rng = self.rng;
         w.time = self.time;
-        w.roads = self.roads;
-        w.grid = self.grid;
-        w.buildings = self.buildings;
+        w.roads = self.roads.upgrade();
+        w.grid = self.grid.upgrade();
+        w.buildings = upgrade_buildings(self.buildings);
         w.households = self.households.map_values(|h| h.upgrade(day));
-        w.vehicles = self.vehicles;
+        w.vehicles = upgrade_vehicles(self.vehicles);
         w.economy = self.economy;
         w.demand = self.demand;
         w.stats = self.stats;
-        w.versions = self.versions;
+        w.versions = self.versions.upgrade();
         w.traffic = traffic;
-        w.growth = self.growth;
+        w.growth = self.growth.upgrade();
         w.cache = Default::default();
         w
     }
@@ -217,8 +219,8 @@ impl WorldV4 {
 
 /// Buildings with round-2 occupancy: residents per home, one worker per
 /// household job (what older saves hold).
-pub(crate) fn legacy_buildings(w: &World) -> IdMap<BuildingId, crate::Building> {
-    let mut b = w.buildings.clone();
+pub(crate) fn legacy_buildings(w: &World) -> IdMap<BuildingId, BuildingV5> {
+    let mut b = buildings_of(&w.buildings);
     for x in b.values_mut() {
         x.occupied = 0;
     }
@@ -263,18 +265,18 @@ pub fn save_as_v4(w: &World) -> Vec<u8> {
         seed: w.seed,
         rng: w.rng.clone(),
         time: w.time.clone(),
-        roads: w.roads.clone(),
-        grid: w.grid.clone(),
+        roads: RoadNetworkV5::of(&w.roads),
+        grid: GridV5::of(&w.grid),
         buildings: legacy_buildings(w),
         households: w.households.clone().map_values(|h| HouseholdV4::of(&h)),
-        vehicles: w.vehicles.clone(),
+        vehicles: vehicles_of(&w.vehicles),
         economy: w.economy.clone(),
         demand: w.demand,
         stats: w.stats.clone(),
-        versions: w.versions.clone(),
+        versions: VersionsV5::of(&w.versions),
         traffic: TrafficStateV4 {
             trips,
-            junction_states: t.junction_states.clone(),
+            junction_states: junctions_of(&t.junction_states),
             junctions_version: t.junctions_version,
             pending: t
                 .pending
@@ -297,7 +299,7 @@ pub fn save_as_v4(w: &World) -> Vec<u8> {
             deadlocks_resolved: t.deadlocks_resolved,
             control_version: t.control_version,
         },
-        growth: w.growth.clone(),
+        growth: GrowthStateV5::of(&w.growth),
     };
     let mut out = Vec::new();
     out.extend_from_slice(super::MAGIC);

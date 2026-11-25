@@ -240,7 +240,7 @@ fn spawn(world: &mut World, z: Zone) -> bool {
     let area = (footprint.width() * footprint.height()) as u32;
     let b = Building {
         kind: z,
-        footprint,
+        footprint: crate::Footprint::world(footprint, facing),
         level: 1,
         capacity: capacity(z, 1, area),
         occupied: 0,
@@ -268,7 +268,7 @@ fn spawn(world: &mut World, z: Zone) -> bool {
 /// beside it allow. Returns the new footprint, if it changed.
 fn grow_lot(world: &mut World, id: BuildingId) -> Option<CellRect> {
     let b = &world.buildings[id];
-    let (r, f, z) = (b.footprint, b.facing, b.kind);
+    let (r, f, z) = (b.footprint.rect(), b.facing, b.kind);
     let (w, h) = (r.width(), r.height());
     let depth = match f {
         Facing::PlusX | Facing::MinusX => w,
@@ -304,7 +304,7 @@ fn grow_lot(world: &mut World, id: BuildingId) -> Option<CellRect> {
     for c in add {
         world.grid.get_mut(c).expect("in bounds").occupant = Occupant::Building(id);
     }
-    world.buildings[id].footprint = nr;
+    world.buildings[id].footprint = crate::Footprint::world(nr, f);
     world.versions.grid += 1;
     Some(nr)
 }
@@ -321,13 +321,13 @@ pub(crate) fn convert_legacy_lots(world: &mut World) -> u32 {
         let Some(back) = world.buildings.get(back_id) else {
             continue;
         };
-        if back.footprint.cells().any(|c| touches_road(world, c)) {
+        if back.footprint.rect().cells().any(|c| touches_road(world, c)) {
             continue;
         }
-        if back.footprint.width() != 1 || back.footprint.height() != 1 {
+        if back.footprint.rect().width() != 1 || back.footprint.rect().height() != 1 {
             continue;
         }
-        let c = back.footprint.min;
+        let c = back.footprint.rect().min;
         let kind = back.kind;
         let mut front: Option<BuildingId> = None;
         for f in DIRS4 {
@@ -340,8 +340,8 @@ pub(crate) fn convert_legacy_lots(world: &mut World) -> u32 {
                 && let Some(fb) = world.buildings.get(fid)
                 && fb.kind == kind
                 && fb.facing == f
-                && fb.footprint == CellRect::single(n)
-                && has_frontage(world, fb.footprint, f)
+                && fb.footprint.rect() == CellRect::single(n)
+                && has_frontage(world, fb.footprint.rect(), f)
             {
                 front = Some(fid);
                 break;
@@ -351,7 +351,7 @@ pub(crate) fn convert_legacy_lots(world: &mut World) -> u32 {
         let back = world.buildings.remove(back_id).expect("exists");
         world.growth.meta.remove(back_id);
         let fb = &mut world.buildings[fid];
-        fb.footprint = rect_of(&[fb.footprint.min, c]);
+        fb.footprint = crate::Footprint::world(rect_of(&[fb.footprint.rect().min, c]), fb.facing);
         fb.capacity += back.capacity;
         fb.occupied += back.occupied;
         fb.level = fb.level.max(back.level);
@@ -395,7 +395,7 @@ fn upgrade(world: &mut World, z: Zone) -> bool {
     world.buildings[id].level += 1;
     grow_lot(world, id);
     let b = &mut world.buildings[id];
-    let area = (b.footprint.width() * b.footprint.height()) as u32;
+    let area = (b.footprint.rect().width() * b.footprint.rect().height()) as u32;
     b.capacity = capacity(z, b.level, area).max(b.capacity);
     world.versions.buildings += 1;
     // Better jobs pay better.
@@ -442,6 +442,12 @@ fn abandon(world: &mut World) {
     world.growth.abandoned_total += doomed.len() as u32;
 }
 
+/// Is there a road connected to the highway next to a footprint (its own
+/// road, or any within reach)?
+pub(crate) fn footprint_connected(world: &World, f: crate::Footprint) -> bool {
+    world.cache.connected_near(f.rect(), balance::ZONE_ROAD_REACH + 1)
+}
+
 /// Remove buildings (keeping zoning) and let their households react.
 pub(crate) fn remove_buildings(world: &mut World, ids: &[BuildingId]) {
     if ids.is_empty() {
@@ -449,7 +455,7 @@ pub(crate) fn remove_buildings(world: &mut World, ids: &[BuildingId]) {
     }
     for &id in ids {
         if let Some(b) = world.buildings.remove(id) {
-            for c in b.footprint.cells() {
+            for c in b.footprint.rect().cells() {
                 if let Some(cd) = world.grid.get_mut(c)
                     && cd.occupant == Occupant::Building(id)
                 {

@@ -773,3 +773,35 @@ pub const PEOPLE_STATS_CHUNKS: u64 = 20;
 /// The nightly household review is spread over this many ticks after
 /// midnight (~14 in-game minutes).
 pub const NIGHT_CHUNKS: u32 = 48;
+
+// ------------------------------------------------- free-form road geometry ----
+
+/// Tightest centre-line radius a street / avenue may be built with, metres.
+pub const STREET_MIN_RADIUS_M: f32 = 12.0;
+pub const AVENUE_MIN_RADIUS_M: f32 = 24.0;
+/// Shortest segment a command may leave behind, metres (between any two
+/// nodes, including those made by splits and crossings).
+pub const MIN_SEGMENT_M: f32 = 4.0;
+/// Most arms a node may have.
+pub const MAX_NODE_ARMS: usize = 6;
+/// Smallest angle between two arms at a node, degrees.
+pub const MIN_ARM_ANGLE_DEG: f32 = 25.0;
+/// A road end this close to an existing node joins it; this close to an
+/// existing road (and farther from its nodes) splits it into a T, metres.
+pub const SNAP_NODE_M: f32 = 1.5;
+pub const SNAP_ROAD_M: f32 = 0.75;
+/// Two roads may not run closer side by side than this (centre lines,
+/// metres) except where they meet at a node.
+pub const MIN_ROAD_SPACING_M: f32 = 8.0;
+/// Lateral acceleration drivers accept in curves, m/s² (speed limit on a
+/// curve of radius `r` is `sqrt(CORNER_ACCEL * r)`).
+pub const CORNER_ACCEL: f32 = 2.5;
+/// Zone blocks: cells per block side, from the road (the lot reach). The
+/// data structures allow up to [`MAX_BLOCK_DEPTH`].
+pub const BLOCK_DEPTH: u8 = 2;
+pub const MAX_BLOCK_DEPTH: u8 = 6;
+/// Lattices of two blocks coincide (share cells) when their directions are
+/// parallel or perpendicular within this many degrees and their offset is a
+/// whole number of cells within this fraction of a cell.
+pub const LATTICE_ANGLE_TOL_DEG: f32 = 1.0;
+pub const LATTICE_OFFSET_TOL: f32 = 0.02;

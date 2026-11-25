@@ -29,6 +29,8 @@ type RoadsKey = (u64, usize, usize);
 #[derive(Clone, Default)]
 pub(crate) struct Derived {
     roads_key: Option<RoadsKey>,
+    /// Versions `zoning::mirror_grid` last ran for.
+    pub zoning_key: Option<(u64, u64, u64)>,
     /// Cell -> segments passing through it (CSR layout over all map cells).
     cell_start: Vec<u32>,
     cell_segs: Vec<SegmentId>,
@@ -133,11 +135,9 @@ impl Derived {
         // Cell index: sample each segment every 2 m.
         let mut pairs: Vec<(u32, SegmentId)> = Vec::new();
         for (s, seg) in roads.segments.iter() {
-            let (pa, pb) = roads.segment_ends(s);
             let steps = (seg.length / 2.0).ceil().max(1.0) as usize;
             for k in 0..=steps {
-                let t = k as f32 / steps as f32;
-                let p = [pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t];
+                let p = seg.pose(seg.length * k as f32 / steps as f32, 0.0).pos;
                 if let Some(i) = cell_index(Cell::from_pos(p)) {
                     pairs.push((i as u32, s));
                 }
@@ -207,11 +207,7 @@ impl Derived {
             for x in c.x - r..=c.x + r {
                 for &s in self.segments_in(Cell::new(x, y)) {
                     let Some(seg) = roads.segments.get(s) else { continue };
-                    let (pa, pb) = roads.segment_ends(s);
-                    let ab = geom::sub(pb, pa);
-                    let t = (geom::dot(geom::sub(pos, pa), ab) / geom::dot(ab, ab)).clamp(0.0, 1.0);
-                    let p = [pa[0] + ab[0] * t, pa[1] + ab[1] * t];
-                    let d = geom::dist(p, pos);
+                    let (from_a, d, _) = seg.nearest(pos);
                     if d > (r as f32 + 0.5) * CELL_SIZE {
                         continue;
                     }
@@ -222,15 +218,7 @@ impl Derived {
                         Some((bc, bd, bi, _)) => (rank.0, rank.1, rank.2) < (*bc, *bd, *bi),
                     };
                     if better {
-                        best = Some((
-                            rank.0,
-                            d,
-                            rank.2,
-                            Access {
-                                segment: s,
-                                from_a: t * seg.length,
-                            },
-                        ));
+                        best = Some((rank.0, d, rank.2, Access { segment: s, from_a }));
                     }
                 }
             }
@@ -353,9 +341,9 @@ impl Derived {
 
     /// Distances (m) from a footprint to the nearest shop and venue.
     /// Requires `ensure_access`; far away when unknown.
-    pub fn access_at(&self, r: Option<CellRect>) -> (f32, f32) {
+    pub fn access_at(&self, r: Option<crate::Footprint>) -> (f32, f32) {
         let Some(r) = r else { return (1.0e7, 1.0e7) };
-        let c = Cell::from_pos(rect_center(r));
+        let c = Cell::from_pos(r.center);
         let (tx, ty) = (c.x / ACCESS_TILE, c.y / ACCESS_TILE);
         if !(0..ACCESS_TILES as i32).contains(&tx) || !(0..ACCESS_TILES as i32).contains(&ty) {
             return (1.0e7, 1.0e7);
@@ -425,7 +413,12 @@ fn chamfer(f: &mut [f32], n: usize, tile_m: f32) {
 }
 
 /// Centre of a footprint in sim metres.
-pub fn rect_center(r: CellRect) -> [f32; 2] {
+pub fn rect_center(f: crate::Footprint) -> [f32; 2] {
+    f.center
+}
+
+/// Centre of a world-grid cell rectangle in sim metres.
+pub fn cell_rect_center(r: CellRect) -> [f32; 2] {
     let a = r.min.center();
     let b = r.max.center();
     [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
@@ -434,11 +427,5 @@ pub fn rect_center(r: CellRect) -> [f32; 2] {
 /// Point of an access on the road, metres.
 pub fn access_pos(roads: &RoadNetwork, a: Access) -> Option<[f32; 2]> {
     let seg = roads.segments.get(a.segment)?;
-    let (pa, pb) = roads.segment_ends(a.segment);
-    let t = if seg.length > 0.0 {
-        (a.from_a / seg.length).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    Some([pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t])
+    Some(seg.pose(a.from_a.clamp(0.0, seg.length), 0.0).pos)
 }

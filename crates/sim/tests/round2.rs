@@ -449,18 +449,21 @@ fn deadlock_breaker_almost_never_fires_in_a_scripted_city() {
 fn assert_frontage(w: &World) {
     for (id, b) in w.buildings.iter() {
         assert!(
-            growth::has_frontage(w, b.footprint, b.facing),
+            growth::has_frontage(w, b.footprint.rect(), b.facing),
             "{id:?} {:?} facing {:?} has no frontage",
-            b.footprint,
+            b.footprint.rect(),
             b.facing
         );
         let (wd, h) = b.size();
         let ok = matches!((wd, h), (1, 1) | (1, 2) | (2, 1) | (2, 2));
         assert!(ok, "{id:?} footprint {wd}x{h}");
-        // A deep lot is deep along its facing.
+        // A deep lot is deep along its facing (`size` is width along the
+        // front, depth).
         if wd * h == 2 {
+            assert_eq!(h, 2, "{id:?} {:?} {:?}", b.footprint.rect(), b.facing);
+            let r = b.footprint.rect();
             let along_x = matches!(b.facing, Facing::PlusX | Facing::MinusX);
-            assert_eq!(wd == 2, along_x, "{id:?} {:?} {:?}", b.footprint, b.facing);
+            assert_eq!(r.width() == 2, along_x, "{id:?} {r:?} {:?}", b.facing);
         }
     }
 }
@@ -497,7 +500,7 @@ fn a_large_zoned_block_fills_with_lots_that_all_front_a_road() {
     // Along the diagonals too: some lots front a diagonal road cell.
     let diag = w.buildings.values().any(|b| {
         let (dx, dy) = b.facing.offset();
-        growth::front_cells(b.footprint, b.facing).iter().any(|&f| {
+        growth::front_cells(b.footprint.rect(), b.facing).iter().any(|&f| {
             let r = f.offset(dx, dy);
             w.grid.is_road(r) && !w.grid.is_road(r.offset(dy, dx)) && !w.grid.is_road(r.offset(-dy, -dx))
         })
@@ -528,7 +531,7 @@ fn second_row_cells_without_a_front_lot_stay_empty() {
     assert!(
         w.buildings
             .values()
-            .any(|b| b.footprint.height() == 2 && b.facing == Facing::PlusY)
+            .any(|b| b.footprint.rect().height() == 2 && b.facing == Facing::PlusY)
     );
 }
 
@@ -659,7 +662,7 @@ fn round1_saves_load_and_second_row_buildings_are_merged() {
     let mk = |cell: Cell, w: &mut World| {
         let id = w.buildings.insert(Building {
             kind: Zone::Residential,
-            footprint: CellRect::single(cell),
+            footprint: citysim_sim::Footprint::world(CellRect::single(cell), Facing::PlusY),
             level: 1,
             capacity: 4,
             occupied: 0,
@@ -682,7 +685,7 @@ fn round1_saves_load_and_second_row_buildings_are_merged() {
     let mut loaded = World::load(&old).expect("round-1 save loads");
     assert!(!loaded.buildings.contains_key(b), "second-row building merged");
     let fb = &loaded.buildings[f];
-    assert_eq!(fb.footprint, CellRect::from_corners(back, front));
+    assert_eq!(fb.footprint.rect(), CellRect::from_corners(back, front));
     assert_eq!((fb.capacity, fb.occupied), (8, 2));
     assert_eq!(loaded.households[hh].home, f);
     assert_eq!(loaded.growth.legacy_lots_merged, 1);
@@ -747,4 +750,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0x1851f76eeb515a56;
+const PINNED_CHECKSUM: u64 = 0x41d2e74d7d44c4f9;
