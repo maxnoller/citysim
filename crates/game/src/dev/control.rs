@@ -394,7 +394,11 @@ fn run(
                 *cx.kind,
                 cx.follow.focus.is_some()
             );
-            ctl.reply(seq, true, &stats_line(&cx.sim, &cx.clock, *cx.tool, *cx.overlay, &extra))
+            ctl.reply(
+                seq,
+                true,
+                &stats_line(&cx.sim, &cx.clock, *cx.tool, *cx.overlay, &extra),
+            )
         }
         "turbo" => {
             ctl.turbo = num(args, 0)?;
