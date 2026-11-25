@@ -145,9 +145,9 @@ pub fn check_consistency(w: &World, after_step: bool) {
                 .or_default() += 1.0;
         }
         for (s, seg) in w.roads.segments.iter() {
-            for d in 0..2 {
+            for (d, &have) in seg.load.iter().enumerate() {
                 let want = load.get(&(s, d)).copied().unwrap_or(0.0);
-                assert_eq!(seg.load[d], want, "tick {tick}: {s:?} load[{d}]");
+                assert_eq!(have, want, "tick {tick}: {s:?} load[{d}]");
             }
         }
     }
