@@ -265,20 +265,17 @@ pub fn fit_checked(lot: Lot, edges: &RoadEdges) -> (Inset, bool) {
                 .all(|w| seg_rect(w[0], w[1], min, max) >= keep + ROAD_CLEARANCE)
         })
     };
-    let (mut lo, mut hi) = (-lot.half, lot.half);
+    let (lo, hi) = (-lot.half, lot.half);
     if clear(lo, hi) {
         return (Inset::NONE, true);
     }
-    let size = hi - lo;
-    // Largest share `s` of the full extent for which `ok(s)` holds.
+    // Largest share `s` (down to MIN_INSET_SCALE) for which `ok(s)` holds,
+    // or None when not even the smallest is clear.
     let largest = |ok: &dyn Fn(f32) -> bool| {
-        if ok(1.0) {
-            return 1.0;
+        if !ok(MIN_INSET_SCALE) {
+            return None;
         }
         let (mut a, mut b) = (MIN_INSET_SCALE, 1.0f32);
-        if !ok(a) {
-            return a;
-        }
         for _ in 0..12 {
             let mid = (a + b) * 0.5;
             if ok(mid) {
@@ -287,26 +284,84 @@ pub fn fit_checked(lot: Lot, edges: &RoadEdges) -> (Inset, bool) {
                 b = mid;
             }
         }
-        a
+        Some(a)
     };
-    // Front (+y), right (-x... both sides), back: each side in turn, the
-    // others as they are so far.
-    let s = largest(&|s| clear(lo, Vec2::new(hi.x, lo.y + size.y * s)));
-    hi.y = lo.y + size.y * s;
-    for _ in 0..2 {
-        let s = largest(&|s| clear(lo, Vec2::new(lo.x + size.x * s, hi.y)));
-        hi.x = lo.x + size.x * s;
-        let s = largest(&|s| clear(Vec2::new(hi.x - size.x * s, lo.y), hi));
-        lo.x = hi.x - size.x * s;
+    let size = hi - lo;
+    // Squeezing one side in: front (+y, the usual case: a wide road in
+    // front), either side, the back. Each keeps the opposite side.
+    let squeezes: [&dyn Fn(f32) -> (Vec2, Vec2); 4] = [
+        &|s| (lo, Vec2::new(hi.x, lo.y + size.y * s)),
+        &|s| (lo, Vec2::new(lo.x + size.x * s, hi.y)),
+        &|s| (Vec2::new(hi.x - size.x * s, lo.y), hi),
+        &|s| (Vec2::new(lo.x, hi.y - size.y * s), hi),
+    ];
+    let mut best: Option<(f32, Vec2, Vec2)> = None;
+    for f in squeezes {
+        if let Some(s) = largest(&|s| {
+            let (a, b) = f(s);
+            clear(a, b)
+        }) && best.is_none_or(|b| s > b.0 + 1e-3)
+        {
+            let (a, b) = f(s);
+            best = Some((s, a, b));
+        }
     }
-    let s = largest(&|s| clear(Vec2::new(lo.x, hi.y - size.y * s), hi));
-    lo.y = hi.y - size.y * s;
+    let (rlo, rhi, ok) = match best {
+        Some((_, a, b)) => (a, b, true),
+        None => {
+            // Roads on more than one side: shrink evenly towards the point
+            // of the lot farthest from them.
+            let pts = [
+                lo,
+                hi,
+                Vec2::new(lo.x, hi.y),
+                Vec2::new(hi.x, lo.y),
+                Vec2::new(0.0, lo.y),
+                Vec2::new(0.0, hi.y),
+                Vec2::new(lo.x, 0.0),
+                Vec2::new(hi.x, 0.0),
+                Vec2::ZERO,
+            ];
+            let room = |p: Vec2| {
+                near.iter()
+                    .map(|(pts, keep)| {
+                        let d = if pts.len() == 1 {
+                            p.distance(pts[0])
+                        } else {
+                            pts.windows(2)
+                                .map(|w| point_seg(p, w[0], w[1]))
+                                .fold(f32::MAX, f32::min)
+                        };
+                        d - keep
+                    })
+                    .fold(f32::MAX, f32::min)
+            };
+            let anchor = pts
+                .into_iter()
+                .max_by(|a, b| room(*a).total_cmp(&room(*b)))
+                .unwrap_or(Vec2::ZERO);
+            let at = |s: f32| (anchor + (lo - anchor) * s, anchor + (hi - anchor) * s);
+            match largest(&|s| {
+                let (a, b) = at(s);
+                clear(a, b)
+            }) {
+                Some(s) => {
+                    let (a, b) = at(s);
+                    (a, b, true)
+                }
+                None => {
+                    let (a, b) = at(MIN_INSET_SCALE);
+                    (a, b, false)
+                }
+            }
+        }
+    };
     (
         Inset {
-            scale: Vec3::new((hi.x - lo.x) / size.x, 1.0, (hi.y - lo.y) / size.y),
-            shift: (lo + hi) * 0.5,
+            scale: Vec3::new((rhi.x - rlo.x) / size.x, 1.0, (rhi.y - rlo.y) / size.y),
+            shift: (rlo + rhi) * 0.5,
         },
-        clear(lo, hi),
+        ok,
     )
 }
 

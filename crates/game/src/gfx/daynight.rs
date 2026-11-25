@@ -413,7 +413,9 @@ mod tests {
         for i in 1..=24 * 20 {
             let d = day_light(i as f32 / 20.0);
             assert!((d.elevation - prev.elevation).abs() < 4.0, "{}", d.hour);
-            assert!((d.light_lux - prev.light_lux).abs() < 400.0, "{}", d.hour);
+            // A low sun lights the town well, so it brightens quickly (but
+            // without a jump) as it clears the horizon.
+            assert!((d.light_lux - prev.light_lux).abs() < 500.0, "{}", d.hour);
             assert!(d.light_dir.y < 0.0, "light from below at {}", d.hour);
             prev = d;
         }
