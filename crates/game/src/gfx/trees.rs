@@ -35,9 +35,12 @@ const TREE_LOD_FAR: (std::ops::Range<f32>, std::ops::Range<f32>) = (600.0..650.0
 /// Countryside chunk size, metres.
 const OUT_CHUNK: f32 = 512.0;
 
+/// Grid and roads keys.
+type Keys = ((u64, u64), (u64, u64));
+
 #[derive(Default)]
 struct TreeChunks {
-    key: Option<(((u64, u64), (u64, u64)), GraphicsQuality)>,
+    key: Option<(Keys, GraphicsQuality)>,
     /// Chunk -> (cells hash, [near, far] entities, trees placed).
     chunks: HashMap<IVec2, (u64, [Entity; 2], usize)>,
     outside: Vec<Entity>,
@@ -212,6 +215,7 @@ fn chunk_hashes(world: &World) -> HashMap<IVec2, u64> {
     hashers.into_iter().map(|(c, h)| (c, h.finish())).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_trees(
     mut commands: Commands,
     sim: Res<SimWorld>,
