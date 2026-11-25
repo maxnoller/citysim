@@ -110,6 +110,11 @@ pub struct Movement {
     pub from_lane: u8,
     pub to_lane: u8,
     pub turn: Turn,
+    /// Made from the lane drivers should use for this turn (the kerb lane
+    /// for right turns, the inner lane for left turns, any lane straight
+    /// on). The others exist so a car that could not reach that lane in
+    /// time turns from where it is.
+    pub preferred: bool,
     /// The path, from the stop line on the in-lane to the box edge on the
     /// out-lane, sim metres (lane offsets included).
     pub curve: Curve,
@@ -121,8 +126,14 @@ pub struct Movement {
 
 impl PartialEq for Movement {
     fn eq(&self, o: &Self) -> bool {
-        (self.from_arm, self.to_arm, self.from_lane, self.to_lane, self.turn)
-            == (o.from_arm, o.to_arm, o.from_lane, o.to_lane, o.turn)
+        (
+            self.from_arm,
+            self.to_arm,
+            self.from_lane,
+            self.to_lane,
+            self.turn,
+            self.preferred,
+        ) == (o.from_arm, o.to_arm, o.from_lane, o.to_lane, o.turn, o.preferred)
             && self.curve == o.curve
             && self.length == o.length
     }
@@ -161,6 +172,7 @@ impl Movement {
             from_lane,
             to_lane,
             turn,
+            preferred: true,
             curve,
             length,
             arc,
@@ -510,11 +522,12 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             arms[i].setback = sb;
         }
     }
-    // A road that changes width without a junction (a lane ends, e.g. the
-    // highway or an avenue continuing as a street): a short merge box, so
+    // A road that changes width or kind without a junction (a lane ends,
+    // or the lanes move sideways: the highway becoming an avenue, an avenue
+    // continuing as a street): a short merge box, so
     // cars waiting to merge stop clear of the stream they join and the
     // merge runs along a curve instead of a sideways jump.
-    if deg == 2 && arms[0].lanes_in != arms[1].lanes_in {
+    if deg == 2 && (arms[0].lanes_in != arms[1].lanes_in || arms[0].kind != arms[1].kind) {
         for a in arms.iter_mut() {
             let len = roads.segments[a.segment].length;
             a.setback = (balance::LANE_MERGE_TAPER_M * 0.5).min(len * 0.4);
@@ -529,10 +542,11 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             let dout = b.dir;
             let turn = if i == j { Turn::UTurn } else { classify(din, dout) };
             let (ni, no) = (a.lanes_in, b.lanes_out);
-            let lanes: Vec<(u8, u8)> = match turn {
-                Turn::Right => vec![(0, 0)],
-                Turn::Left | Turn::UTurn => vec![(ni - 1, no - 1)],
-                Turn::Straight => (0..ni).map(|l| (l, l.min(no - 1))).collect(),
+            // (from lane, to lane, preferred)
+            let lanes: Vec<(u8, u8, bool)> = match turn {
+                Turn::Right => (0..ni).map(|l| (l, 0, l == 0)).collect(),
+                Turn::Left | Turn::UTurn => (0..ni).map(|l| (l, no - 1, l == ni - 1)).collect(),
+                Turn::Straight => (0..ni).map(|l| (l, l.min(no - 1), true)).collect(),
             };
             // Stop line and box edge on the arms' centre lines, and the
             // travel directions there (the arms may be curved).
@@ -540,7 +554,7 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             let line_b = arm_pose(roads, n, b.segment, b.setback);
             let din = [-line_a.dir[0], -line_a.dir[1]];
             let dout = line_b.dir;
-            for (fl, tl) in lanes {
+            for (fl, tl, preferred) in lanes {
                 let p0 = geom_add(line_a.pos, scale(right_of(din), a.kind.lane_offset_m(fl)));
                 let p2 = geom_add(line_b.pos, scale(right_of(dout), b.kind.lane_offset_m(tl)));
                 let p1 = match turn {
@@ -551,32 +565,10 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
                     }
                     _ => intersect(p0, din, p2, dout).unwrap_or([(p0[0] + p2[0]) * 0.5, (p0[1] + p2[1]) * 0.5]),
                 };
-                // The quadratic through the lane lines' meeting point, as a
-                // cubic.
-                let curve = Curve::new(
-                    p0,
-                    [
-                        p0[0] + (p1[0] - p0[0]) * (2.0 / 3.0),
-                        p0[1] + (p1[1] - p0[1]) * (2.0 / 3.0),
-                    ],
-                    [
-                        p2[0] + (p1[0] - p2[0]) * (2.0 / 3.0),
-                        p2[1] + (p1[1] - p2[1]) * (2.0 / 3.0),
-                    ],
-                    p2,
-                );
-                let arc = curve.arc_table();
-                let length = curve.length_with(&arc).max(0.5);
-                movements.push(Movement {
-                    from_arm: i as u8,
-                    to_arm: j as u8,
-                    from_lane: fl,
-                    to_lane: tl,
-                    turn,
-                    curve,
-                    length,
-                    arc,
-                });
+                // The quadratic through the lane lines' meeting point.
+                let mut m = Movement::quadratic(i as u8, j as u8, fl, tl, turn, p0, p1, p2);
+                m.preferred = preferred;
+                movements.push(m);
             }
         }
     }
