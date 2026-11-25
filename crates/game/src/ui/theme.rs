@@ -160,6 +160,7 @@ pub mod icon {
     pub const PLUS: char = '\u{e13d}';
     pub const LANDMARK: char = '\u{e23a}';
     pub const CHEVRON_DOWN: char = '\u{e06d}';
+    pub const CHEVRON_LEFT: char = '\u{e06e}';
     pub const CIRCLE: char = '\u{e076}';
     pub const SPLINE: char = '\u{e38b}';
     pub const GRID: char = '\u{e4ff}'; // grid-2x2

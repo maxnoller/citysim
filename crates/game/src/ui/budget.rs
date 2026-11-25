@@ -842,6 +842,14 @@ fn update_budget(
     for (which, mut text, mut color) in &mut texts {
         let (s, c) = match *which {
             BudgetText::Balance => (format::money(e.money), if e.money < 0 { t::NEGATIVE } else { t::TEXT }),
+            // With a fiscal note below, the line beside the balance stays short.
+            BudgetText::BalanceNote if note.is_some() => match booked {
+                true => (
+                    format!("{} yesterday", format::signed_money(e.last_day.net())),
+                    signed_color(e.last_day.net()),
+                ),
+                false => (String::new(), t::TEXT_MUTED),
+            },
             BudgetText::BalanceNote => balance_note(e.money, booked.then_some(e.last_day.net()), cache.today.net()),
             BudgetText::UpkeepCaption => (
                 if avenue_cells >= 1.0 {

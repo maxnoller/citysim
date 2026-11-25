@@ -151,7 +151,8 @@ fn spawn_settings(mut commands: Commands, fonts: Res<UiFonts>) {
                 ..default()
             },
             BackgroundColor(t::BACKDROP),
-            GlobalZIndex(210),
+            // Above toasts (300): the settings are modal.
+            GlobalZIndex(320),
         ))
         .with_children(|root| {
             root.spawn((
@@ -219,6 +220,47 @@ fn spawn_settings(mut commands: Commands, fonts: Res<UiFonts>) {
                                 (UiAction::LotMarkers(true), "Always"),
                                 (UiAction::LotMarkers(false), "While zoning"),
                             ],
+                        );
+                        l.spawn(layout(Node {
+                            flex_grow: 1.0,
+                            ..default()
+                        }));
+                        spawn_button(
+                            l,
+                            UiButton {
+                                action: UiAction::CloseSettings,
+                                kind: ButtonKind::Menu,
+                                accent: t::ACCENT,
+                            },
+                            Node {
+                                height: px(38),
+                                padding: UiRect::axes(px(t::S3), px(0)),
+                                align_items: AlignItems::Center,
+                                column_gap: px(t::S3 + 2.0),
+                                ..default()
+                            },
+                            None,
+                            |b, id| {
+                                b.spawn((
+                                    super::widgets::icon(fonts, icon::CHEVRON_LEFT, t::ICON_MD, t::TEXT_MUTED),
+                                    ButtonFg {
+                                        owner: id,
+                                        base: t::TEXT_MUTED,
+                                    },
+                                ));
+                                b.spawn((
+                                    label(fonts, "Back to the menu", t::FONT_LABEL, t::W_MEDIUM, t::TEXT),
+                                    ButtonFg {
+                                        owner: id,
+                                        base: t::TEXT,
+                                    },
+                                    Node {
+                                        flex_grow: 1.0,
+                                        ..default()
+                                    },
+                                ));
+                                spawn_key_badge(b, fonts, "Esc");
+                            },
                         );
                     });
                     // Right: keys.

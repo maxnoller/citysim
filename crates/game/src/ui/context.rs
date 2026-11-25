@@ -160,7 +160,8 @@ fn spawn_card_with(commands: &mut Commands, fonts: &UiFonts, which: u8) {
                 spread_radius: px(0),
                 blur_radius: px(16),
             }]),
-            GlobalZIndex(90),
+            // The cursor card draws over the pinned one.
+            GlobalZIndex(if which == 0 { 90 } else { 85 }),
             UiTransform::default(),
             Visibility::Hidden,
         ))
@@ -516,7 +517,10 @@ pub fn tool_card(
                 }
                 if let Some(r) = block {
                     card.rows.push(Row::line(
-                        format!("{} x {} cells", r.width(), r.height()),
+                        match state.block_spacing() {
+                            Some(b) => format!("{} x {} cells · blocks of {b}", r.width(), r.height()),
+                            None => format!("{} x {} cells · outline only", r.width(), r.height()),
+                        },
                         t::TEXT_MUTED,
                     ));
                 }

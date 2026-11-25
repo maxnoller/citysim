@@ -381,13 +381,9 @@ fn track_pointer(
                     let spacing = if enabled { state.block_spacing() } else { None };
                     let c = plan::block_corner(start, raw, spacing);
                     let mut s = snap::snap_point(&state.index, c.center(), 0.0, false);
+                    // Whole blocks: the card names the block size, no snap row.
                     s.cell = c;
-                    s.target = if spacing.is_some() {
-                        SnapTarget::Spacing
-                    } else {
-                        SnapTarget::Grid
-                    };
-                    s.spacing = spacing;
+                    s.target = SnapTarget::Grid;
                     s
                 }
                 _ => snap::snap_point(&state.index, cursor, radius, enabled),
