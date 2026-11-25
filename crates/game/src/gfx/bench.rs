@@ -248,8 +248,8 @@ fn city_extent(sim: &SimWorld) -> (Vec2, f32) {
     let w = &sim.world;
     let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
     for (_, b) in w.buildings.iter() {
-        lo = lo.min(Vec2::from(b.footprint.min.center()));
-        hi = hi.max(Vec2::from(b.footprint.max.center()));
+        lo = lo.min(Vec2::from(b.center()));
+        hi = hi.max(Vec2::from(b.center()));
     }
     if lo.x > hi.x {
         let c = Vec2::splat(citysim_sim::MAP_SIZE_M * 0.5);

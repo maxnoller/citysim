@@ -168,8 +168,8 @@ fn tool_demo(
         .buildings
         .iter()
         .min_by(|a, b| {
-            let d = |c: Cell| Vec2::from(c.center()).distance(at);
-            d(a.1.footprint.min).total_cmp(&d(b.1.footprint.min))
+            let d = |c: [f32; 2]| Vec2::from(c).distance(at);
+            d(a.1.center()).total_cmp(&d(b.1.center()))
         })
         .map(|(id, _)| id);
     let junction = citysim_sim::junction::junction_nodes(world)

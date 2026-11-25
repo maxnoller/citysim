@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
-use citysim_sim::{Building, BuildingId, CELL_SIZE, Facing, RoadNetwork};
+use citysim_sim::{Building, BuildingId, CELL_SIZE};
 
 use super::building_gen::{self, ModelKey, VARIANTS};
 use super::road_geom;
@@ -127,132 +127,79 @@ pub(super) struct Shrinking {
 #[derive(Default)]
 struct Spawned {
     key: Option<((u64, u64), (u64, u64))>,
-    entities: HashMap<BuildingId, (Entity, ModelKey, Facing, Inset)>,
+    entities: HashMap<BuildingId, (Entity, ModelKey, [u32; 3], Inset)>,
+    /// Road edges for fitting lots, per roads version.
+    edges: Option<((u64, u64), RoadEdges)>,
+    /// Fitted lot per building (and the pose it was fitted for).
+    insets: HashMap<BuildingId, ([u32; 3], Inset)>,
     /// Buildings rebuilt for a big level-up: sim tick the works started
     /// (they show a building site again, with a crane when tall).
     rebuilt: HashMap<BuildingId, u64>,
 }
 
-/// How a building model is shrunk away from a diagonal road: uniform
-/// scale about the lot corner farthest from the road, and the resulting
-/// shift of the lot centre (world xz).
+/// How a building model is fitted clear of the roads beside its lot, in
+/// the model's frame (front towards `+z`, width along `x`): the lot is
+/// squeezed (`scale.x` width, `scale.z` depth) and its centre moved by
+/// `shift` (model x, z). Lots are laid out on cells whose centres keep the
+/// sim's road reserve clear, but wide roads (avenues), curves and junction
+/// corners can still reach into the drawn lot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Inset {
-    pub scale: f32,
+    pub scale: Vec3,
     pub shift: Vec2,
-    /// Extra squeeze along world x / z (lots stepping back from a wide
-    /// road beside them), 1 = none.
-    pub squeeze: Vec2,
 }
 
 impl Inset {
-    const NONE: Inset = Inset {
-        scale: 1.0,
+    pub const NONE: Inset = Inset {
+        scale: Vec3::ONE,
         shift: Vec2::ZERO,
-        squeeze: Vec2::ONE,
     };
-
-    /// Scale for the model child, in the model's local frame (its x runs
-    /// along world z when the building faces +-x).
-    fn local_scale(&self, f: Facing) -> Vec3 {
-        let (sx, sz) = match f {
-            Facing::PlusY | Facing::MinusY => (self.squeeze.x, self.squeeze.y),
-            Facing::PlusX | Facing::MinusX => (self.squeeze.y, self.squeeze.x),
-        };
-        Vec3::new(sx, 1.0, sz) * self.scale
-    }
 }
 
-/// Axis-aligned roads drawn wider than their cell line (avenues), as
-/// (a, b, half-width incl. sidewalks).
-pub fn wide_roads(roads: &RoadNetwork) -> Vec<(Vec2, Vec2, f32)> {
-    roads
-        .segments
-        .iter()
-        .filter_map(|(_, seg)| {
-            let a = Vec2::from(roads.nodes.get(seg.a)?.pos);
-            let b = Vec2::from(roads.nodes.get(seg.b)?.pos);
-            let d = (b - a).normalize_or_zero();
-            let outer = road_geom::style(seg.kind).outer();
-            (outer > CELL_SIZE * 0.5 + 0.01 && (d.x.abs() < 0.02 || d.y.abs() < 0.02)).then_some((a, b, outer))
-        })
-        .collect()
-}
-
-/// Step a lot (`min..max`) back from wide roads running beside it: the
-/// lot shrinks on that side (never below `MIN_INSET_SCALE` of its size).
-pub fn wide_inset(min: Vec2, max: Vec2, roads: &[(Vec2, Vec2, f32)]) -> Inset {
-    let (mut lo, mut hi) = (min, max);
-    for &(a, b, outer) in roads {
-        let need = outer + ROAD_CLEARANCE;
-        if (a.y - b.y).abs() < 0.01 {
-            // Along x at z = a.y: must overlap the lot's x extent.
-            if a.x.max(b.x) <= min.x + 0.5 || a.x.min(b.x) >= max.x - 0.5 {
-                continue;
-            }
-            let z = a.y;
-            if z <= min.y {
-                lo.y = lo.y.max(z + need);
-            } else if z >= max.y {
-                hi.y = hi.y.min(z - need);
-            }
-        } else {
-            if a.y.max(b.y) <= min.y + 0.5 || a.y.min(b.y) >= max.y - 0.5 {
-                continue;
-            }
-            let x = a.x;
-            if x <= min.x {
-                lo.x = lo.x.max(x + need);
-            } else if x >= max.x {
-                hi.x = hi.x.min(x - need);
-            }
-        }
-    }
-    if lo == min && hi == max {
-        return Inset::NONE;
-    }
-    let size = max - min;
-    let floor = size * MIN_INSET_SCALE;
-    // Keep at least the floor, anchored at the side away from the road.
-    if hi.x - lo.x < floor.x {
-        if lo.x > min.x {
-            lo.x = hi.x - floor.x;
-        } else {
-            hi.x = lo.x + floor.x;
-        }
-    }
-    if hi.y - lo.y < floor.y {
-        if lo.y > min.y {
-            lo.y = hi.y - floor.y;
-        } else {
-            hi.y = lo.y + floor.y;
-        }
-    }
-    Inset {
-        scale: 1.0,
-        shift: (lo + hi) * 0.5 - (min + max) * 0.5,
-        squeeze: (hi - lo) / size,
-    }
-}
-
-/// Clearance kept between a building lot and a diagonal road's edge, m.
+/// Clearance kept between a building lot and a road's sidewalk edge, m.
 const ROAD_CLEARANCE: f32 = 0.3;
-/// A building is never shrunk below this.
+/// A lot is never shrunk below this share of its depth / width.
 const MIN_INSET_SCALE: f32 = 0.45;
 
-/// Diagonal road segments as (a, b, half-width incl. sidewalks). Roads
-/// along the grid axes fill their cells exactly and need no inset.
-pub fn diagonal_roads(roads: &RoadNetwork) -> Vec<(Vec2, Vec2, f32)> {
-    roads
-        .segments
-        .iter()
-        .filter_map(|(_, seg)| {
-            let a = Vec2::from(roads.nodes.get(seg.a)?.pos);
-            let b = Vec2::from(roads.nodes.get(seg.b)?.pos);
-            let d = (b - a).normalize_or_zero();
-            (d.x.abs() > 0.02 && d.y.abs() > 0.02).then_some((a, b, road_geom::style(seg.kind).outer()))
-        })
-        .collect()
+/// Road edges near lots: polylines (sim metres) with the distance that
+/// must stay clear of them (half the drawn road width incl. sidewalks, or 0
+/// for a junction's pavement outline), and their bounding boxes.
+#[derive(Default)]
+pub struct RoadEdges {
+    lines: Vec<(Vec<Vec2>, f32, Vec2, Vec2)>,
+}
+
+impl RoadEdges {
+    pub fn new(world: &citysim_sim::World) -> RoadEdges {
+        let mut lines = Vec::new();
+        for (_, seg) in world.roads.segments.iter() {
+            let pts: Vec<Vec2> = seg.curve.flatten(0.25).into_iter().map(Vec2::from).collect();
+            let keep = road_geom::style(seg.kind).outer();
+            lines.push(bounded(pts, keep));
+        }
+        for (n, _) in world.roads.nodes.iter() {
+            let walk = world.roads.nodes[n]
+                .segments
+                .iter()
+                .filter_map(|&s| world.roads.segments.get(s))
+                .map(|s| road_geom::style(s.kind).walk)
+                .fold(0.0, f32::max);
+            if let Some(shape) = citysim_sim::junction::junction_shape(world, n, walk) {
+                let mut pts: Vec<Vec2> = shape.outline.iter().map(|p| Vec2::from(*p)).collect();
+                if let Some(&first) = pts.first() {
+                    pts.push(first);
+                }
+                lines.push(bounded(pts, 0.0));
+            }
+        }
+        RoadEdges { lines }
+    }
+}
+
+fn bounded(pts: Vec<Vec2>, keep: f32) -> (Vec<Vec2>, f32, Vec2, Vec2) {
+    let lo = pts.iter().fold(Vec2::splat(f32::MAX), |a, p| a.min(*p)) - Vec2::splat(keep);
+    let hi = pts.iter().fold(Vec2::splat(f32::MIN), |a, p| a.max(*p)) + Vec2::splat(keep);
+    (pts, keep, lo, hi)
 }
 
 /// Distance from point `p` to segment `a..b`.
@@ -300,57 +247,92 @@ fn seg_rect(a: Vec2, b: Vec2, min: Vec2, max: Vec2) -> f32 {
         .fold(f32::MAX, f32::min)
 }
 
-/// Shrink a lot (`min..max`, world xz) away from the diagonal roads that
-/// cut into it (on a 45 degree road the road surface covers the corners of
-/// the zoned cells beside it).
-pub fn diagonal_inset(min: Vec2, max: Vec2, roads: &[(Vec2, Vec2, f32)]) -> Inset {
-    let mut best = Inset::NONE;
-    let corners = [min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)];
-    let centre = (min + max) * 0.5;
-    for &(a, b, w) in roads {
-        let need = w + ROAD_CLEARANCE;
-        // Cheap reject on bounding boxes.
-        if a.x.min(b.x) - need > max.x
-            || a.x.max(b.x) + need < min.x
-            || a.y.min(b.y) - need > max.y
-            || a.y.max(b.y) + need < min.y
-            || seg_rect(a, b, min, max) >= need
-        {
-            continue;
+/// The lot of a building in its own frame: centre `c`, front `f` (unit, sim
+/// axes), `half` = (half width, half depth).
+#[derive(Debug, Clone, Copy)]
+pub struct Lot {
+    pub c: Vec2,
+    pub f: Vec2,
+    pub half: Vec2,
+}
+
+impl Lot {
+    pub fn of(b: &Building) -> Lot {
+        let (w, d) = b.size();
+        Lot {
+            c: Vec2::from(b.center()),
+            f: Vec2::from(b.front_dir()),
+            half: Vec2::new(w as f32, d as f32) * CELL_SIZE * 0.5,
         }
-        // Scale about the corner farthest from the road.
-        let anchor = *corners
-            .iter()
-            .max_by(|p, q| point_seg(**p, a, b).total_cmp(&point_seg(**q, a, b)))
-            .expect("corners");
-        if point_seg(anchor, a, b) < need {
-            continue;
+    }
+
+    /// Sim point -> lot frame (x = model x, y = model z = towards the front).
+    fn local(&self, p: Vec2) -> Vec2 {
+        let d = p - self.c;
+        Vec2::new(d.x * self.f.y - d.y * self.f.x, d.dot(self.f))
+    }
+}
+
+/// Fit a lot clear of the roads: first squeeze its depth away from the
+/// front (anchored at the back), then, if a road still reaches in (a side
+/// road at a corner, a junction), squeeze its width away from that side.
+pub fn road_inset(lot: Lot, edges: &RoadEdges) -> Inset {
+    let r = lot.half.length() + 1.0;
+    let near: Vec<(Vec<Vec2>, f32)> = edges
+        .lines
+        .iter()
+        .filter(|(_, _, lo, hi)| {
+            lot.c.x + r >= lo.x && lot.c.x - r <= hi.x && lot.c.y + r >= lo.y && lot.c.y - r <= hi.y
+        })
+        .map(|(pts, keep, _, _)| (pts.iter().map(|p| lot.local(*p)).collect(), *keep))
+        .collect();
+    if near.is_empty() {
+        return Inset::NONE;
+    }
+    let clear = |min: Vec2, max: Vec2| {
+        near.iter().all(|(pts, keep)| {
+            pts.windows(2)
+                .all(|w| seg_rect(w[0], w[1], min, max) >= keep + ROAD_CLEARANCE)
+        })
+    };
+    let (min, max) = (-lot.half, lot.half);
+    if clear(min, max) {
+        return Inset::NONE;
+    }
+    // Largest share of the depth (from the back) that is clear.
+    let fit = |ok: &dyn Fn(f32) -> bool| {
+        if ok(1.0) {
+            return 1.0;
         }
-        let fits = |s: f32| {
-            let (lo, hi) = (anchor + (min - anchor) * s, anchor + (max - anchor) * s);
-            seg_rect(a, b, lo.min(hi), lo.max(hi)) >= need
-        };
         let (mut lo, mut hi) = (MIN_INSET_SCALE, 1.0f32);
-        if !fits(lo) {
-            continue;
+        if !ok(lo) {
+            return lo;
         }
-        for _ in 0..14 {
+        for _ in 0..12 {
             let mid = (lo + hi) * 0.5;
-            if fits(mid) {
+            if ok(mid) {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
-        if lo < best.scale {
-            best = Inset {
-                scale: lo,
-                shift: (anchor + (centre - anchor) * lo) - centre,
-                squeeze: Vec2::ONE,
-            };
-        }
+        lo
+    };
+    let depth = fit(&|s| clear(min, Vec2::new(max.x, min.y + 2.0 * lot.half.y * s)));
+    let top = min.y + 2.0 * lot.half.y * depth;
+    // Then the width, from whichever side is clear.
+    let from_left = fit(&|s| clear(min, Vec2::new(min.x + 2.0 * lot.half.x * s, top)));
+    let from_right = fit(&|s| clear(Vec2::new(max.x - 2.0 * lot.half.x * s, min.y), Vec2::new(max.x, top)));
+    let (x0, x1) = if from_left >= from_right {
+        (min.x, min.x + 2.0 * lot.half.x * from_left)
+    } else {
+        (max.x - 2.0 * lot.half.x * from_right, max.x)
+    };
+    let (lo, hi) = (Vec2::new(x0, min.y), Vec2::new(x1, top));
+    Inset {
+        scale: Vec3::new((hi.x - lo.x) / (max.x - min.x), 1.0, (hi.y - lo.y) / (max.y - min.y)),
+        shift: (lo + hi) * 0.5,
     }
-    best
 }
 
 pub struct BuildingsPlugin;
@@ -371,10 +353,6 @@ impl Plugin for BuildingsPlugin {
 /// Model key and placement for a building.
 pub fn model_key(b: &Building) -> ModelKey {
     let (w, d) = b.size();
-    let (w, d) = match b.facing {
-        Facing::PlusY | Facing::MinusY => (w, d),
-        Facing::PlusX | Facing::MinusX => (d, w),
-    };
     ModelKey {
         kind: b.kind,
         cells: (w.clamp(1, 255) as u8, d.clamp(1, 255) as u8),
@@ -383,25 +361,24 @@ pub fn model_key(b: &Building) -> ModelKey {
     }
 }
 
-/// Rotation turning the model's front (+z) towards the building's facing.
-pub fn facing_rotation(f: Facing) -> Quat {
-    use std::f32::consts::{FRAC_PI_2, PI};
-    Quat::from_rotation_y(match f {
-        Facing::PlusY => 0.0,
-        Facing::PlusX => FRAC_PI_2,
-        Facing::MinusY => PI,
-        Facing::MinusX => -FRAC_PI_2,
-    })
+/// Rotation turning the model's front (+z) towards `rotation` (the sim's
+/// front direction, `atan2` in sim axes).
+pub fn front_rotation(rotation: f32) -> Quat {
+    Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 - rotation)
 }
 
-fn footprint_center(b: &Building) -> Vec3 {
-    let (w, d) = b.size();
-    let min = b.footprint.min;
-    Vec3::new(
-        (min.x as f32 + w as f32 * 0.5) * CELL_SIZE,
-        0.0,
-        (min.y as f32 + d as f32 * 0.5) * CELL_SIZE,
-    )
+/// Where a building stands (centre and rotation bits), to notice moves.
+fn pose_key(b: &Building) -> [u32; 3] {
+    let c = b.center();
+    [c[0].to_bits(), c[1].to_bits(), b.rotation().to_bits()]
+}
+
+/// Placement of a building: (parent transform, model child transform).
+pub fn placement(b: &Building, inset: Inset) -> (Transform, Transform) {
+    let c = b.center();
+    let tf = Transform::from_xyz(c[0], 0.0, c[1]).with_rotation(front_rotation(b.rotation()));
+    let model_tf = Transform::from_xyz(inset.shift.x, 0.0, inset.shift.y).with_scale(inset.scale);
+    (tf, model_tf)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -421,35 +398,37 @@ fn sync_buildings(
     }
     let reloaded = spawned.key.is_some_and(|((g, _), _)| g != sim.generation);
     spawned.key = Some(key);
+    let sp = &mut *spawned;
     let now = time.elapsed_secs();
     let world = &sim.world;
     let buildings = &world.buildings;
-    let diagonals = diagonal_roads(&world.roads);
-    let wides = wide_roads(&world.roads);
-    let inset_of = |b: &Building| {
-        if diagonals.is_empty() && wides.is_empty() {
-            return Inset::NONE;
+    // Road edges change only with the roads; each building's fit only
+    // with the roads or its own lot.
+    let roads_key = sim.key(world.versions.roads);
+    if sp.edges.as_ref().is_none_or(|(k, _)| *k != roads_key) {
+        sp.edges = Some((roads_key, RoadEdges::new(world)));
+        sp.insets.clear();
+    }
+    let edges = &sp.edges.as_ref().expect("edges").1;
+    let mut insets = std::mem::take(&mut sp.insets);
+    insets.retain(|id, _| buildings.contains_key(*id));
+    let mut inset_of = |id: BuildingId, b: &Building| {
+        let pose = pose_key(b);
+        if let Some((k, i)) = insets.get(&id)
+            && *k == pose
+        {
+            return *i;
         }
-        let (w, d) = b.size();
-        let min = Vec2::new(b.footprint.min.x as f32, b.footprint.min.y as f32) * CELL_SIZE;
-        let max = min + Vec2::new(w as f32, d as f32) * CELL_SIZE;
-        let wide = wide_inset(min, max, &wides);
-        // Diagonal clearance is measured on the stepped-back lot.
-        let c = (min + max) * 0.5 + wide.shift;
-        let half = (max - min) * 0.5 * wide.squeeze;
-        let diag = diagonal_inset(c - half, c + half, &diagonals);
-        Inset {
-            scale: diag.scale,
-            shift: wide.shift + diag.shift,
-            squeeze: wide.squeeze,
-        }
+        let i = road_inset(Lot::of(b), edges);
+        insets.insert(id, (pose, i));
+        i
     };
     let tick = world.time.tick;
     let mut rebuilt: Vec<BuildingId> = Vec::new();
-    spawned.entities.retain(|id, (e, k, f, i)| {
+    sp.entities.retain(|id, (e, k, f, i)| {
         let keep = buildings
             .get(*id)
-            .is_some_and(|b| model_key(b) == *k && b.facing == *f && inset_of(b) == *i && !reloaded);
+            .is_some_and(|b| model_key(b) == *k && pose_key(b) == *f && inset_of(*id, b) == *i && !reloaded);
         if !keep
             && !reloaded
             && let Some(b) = buildings.get(*id)
@@ -464,25 +443,21 @@ fn sync_buildings(
         keep
     });
     for id in rebuilt {
-        spawned.rebuilt.insert(id, tick);
+        sp.rebuilt.insert(id, tick);
     }
-    spawned
-        .rebuilt
+    sp.rebuilt
         .retain(|id, t| buildings.contains_key(*id) && tick.saturating_sub(*t) < SITE_TICKS && !reloaded);
     for (id, b) in buildings.iter() {
-        if spawned.entities.contains_key(&id) {
+        if sp.entities.contains_key(&id) {
             continue;
         }
         let mk = model_key(b);
         let young = world.time.tick.saturating_sub(b.created_tick) < ANIMATE_IF_YOUNGER && !reloaded;
-        let rot = facing_rotation(b.facing);
-        let tf = Transform::from_translation(footprint_center(b)).with_rotation(rot);
-        let inset = inset_of(b);
+        let inset = inset_of(id, b);
         // The inset lives on the model children, so the grow animation can
         // scale the parent freely.
-        let model_tf = Transform::from_translation(rot.inverse() * Vec3::new(inset.shift.x, 0.0, inset.shift.y))
-            .with_scale(inset.local_scale(b.facing));
-        let start = spawned.rebuilt.get(&id).copied().unwrap_or(b.created_tick);
+        let (tf, model_tf) = placement(b, inset);
+        let start = sp.rebuilt.get(&id).copied().unwrap_or(b.created_tick);
         let age = world.time.tick.saturating_sub(start);
         if !reloaded && let Some(stage) = site_stage(age) {
             let mesh = models.site(mk, stage, &mut meshes);
@@ -502,7 +477,7 @@ fn sync_buildings(
                 p.spawn((model_tf, Mesh3d(mesh), MeshMaterial3d(mats.lit.clone())));
             });
             index.0.insert(id, (ec.id(), mk, model_tf));
-            spawned.entities.insert(id, (ec.id(), mk, b.facing, inset));
+            sp.entities.insert(id, (ec.id(), mk, pose_key(b), inset));
             continue;
         }
         let (detail, far) = models.get(mk, &mut meshes);
@@ -535,8 +510,9 @@ fn sync_buildings(
             ec.insert(tf);
         }
         index.0.insert(id, (ec.id(), mk, model_tf));
-        spawned.entities.insert(id, (ec.id(), mk, b.facing, inset));
+        sp.entities.insert(id, (ec.id(), mk, pose_key(b), inset));
     }
+    sp.insets = insets;
 }
 
 /// Move building sites on: foundations -> frame -> the finished building

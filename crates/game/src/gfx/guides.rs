@@ -10,8 +10,8 @@
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
+use citysim_sim::RoadKind;
 use citysim_sim::junction::{self, JunctionControl};
-use citysim_sim::{CELL_SIZE, RoadKind};
 
 use super::buildings::{BuildingEntities, BuildingModels};
 use super::heights;
@@ -385,10 +385,7 @@ fn draw_highlight(
         match t {
             WorldTarget::Building(id) => {
                 let Some(b) = world.buildings.get(*id) else { continue };
-                let (w, d) = b.size();
-                let min = Vec2::new(b.footprint.min.x as f32, b.footprint.min.y as f32) * CELL_SIZE;
-                let max = min + Vec2::new(w as f32, d as f32) * CELL_SIZE;
-                let pts = [min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)];
+                let pts = b.corners().map(Vec2::from);
                 outline(&mut m, &pts, if selected { 0.55 } else { 0.4 }, y, col);
                 if let Some(&(parent, key, model_tf)) = index.0.get(id) {
                     let (detail, _) = models.get(key, &mut meshes);
