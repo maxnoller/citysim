@@ -165,7 +165,7 @@ def chart_per_1000(before, after, out):
         out,
         "Cars on the road per 1,000 residents through the day (avenue city, mean of ten seeds)",
         "Before: about 9 in 10 of these cars were empty (their people had got out on the calendar). "
-        "After: every car carries its driver; trips of up to 150 m are walked.",
+        "After: every car carries its driver; trips of up to 100 m are walked.",
     )
 
 
