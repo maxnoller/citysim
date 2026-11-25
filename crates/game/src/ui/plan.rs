@@ -17,8 +17,20 @@ use super::snap::RoadIndex;
 use crate::shared::{PathLeg, RoadChoice, RoadStretch};
 
 /// The command that builds one straight leg of the chosen kind.
-pub fn road_command(from: Cell, to: Cell, _kind: RoadChoice) -> Command {
-    Command::BuildRoad { from, to }
+pub fn road_command(from: Cell, to: Cell, kind: RoadChoice) -> Command {
+    Command::BuildRoad {
+        from,
+        to,
+        kind: road_kind(kind),
+    }
+}
+
+/// The sim's road kind for the tool's choice.
+pub fn road_kind(kind: RoadChoice) -> RoadKind {
+    match kind {
+        RoadChoice::Street => RoadKind::Street,
+        RoadChoice::Avenue => RoadKind::Avenue,
+    }
 }
 
 /// A copy of the parts of `world` that commands read and change (roads,
@@ -700,7 +712,12 @@ mod tests {
 
     fn build(w: &mut World, legs: &[(Cell, Cell)]) {
         for &(a, b) in legs {
-            w.apply(Command::BuildRoad { from: a, to: b }).expect("road");
+            w.apply(Command::BuildRoad {
+                from: a,
+                to: b,
+                kind: citysim_sim::RoadKind::Street,
+            })
+            .expect("road");
         }
     }
 
@@ -765,6 +782,7 @@ mod tests {
             Command::BuildRoad {
                 from: Cell::new(20, 120),
                 to: Cell::new(20, 135),
+                kind: citysim_sim::RoadKind::Street,
             },
             Command::Bulldoze {
                 min: Cell::new(14, 128),

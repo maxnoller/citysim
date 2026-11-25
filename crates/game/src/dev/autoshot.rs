@@ -44,22 +44,27 @@ pub fn sample_city() -> Vec<Command> {
         Command::BuildRoad {
             from: c(11, 128),
             to: c(60, 128),
+            kind: citysim_sim::RoadKind::Street,
         },
         Command::BuildRoad {
             from: c(30, 104),
             to: c(30, 156),
+            kind: citysim_sim::RoadKind::Street,
         },
         Command::BuildRoad {
             from: c(45, 128),
             to: c(45, 150),
+            kind: citysim_sim::RoadKind::Street,
         },
         Command::BuildRoad {
             from: c(30, 150),
             to: c(60, 150),
+            kind: citysim_sim::RoadKind::Street,
         },
         Command::BuildRoad {
             from: c(30, 104),
             to: c(52, 126),
+            kind: citysim_sim::RoadKind::Street,
         },
         Command::SetZone {
             min: c(31, 129),

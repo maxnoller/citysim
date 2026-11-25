@@ -222,7 +222,11 @@ fn find_new_road(world: &World) -> Option<(Cell, Cell)> {
             }
             for (dx, dy) in [(1, 1), (1, -1), (0, 1), (1, 0)] {
                 let end = start.offset(dx * 9, dy * 9);
-                let cmd = citysim_sim::Command::BuildRoad { from: start, to: end };
+                let cmd = citysim_sim::Command::BuildRoad {
+                    from: start,
+                    to: end,
+                    kind: citysim_sim::RoadKind::Street,
+                };
                 // Only across unzoned empty land, so the demo town never
                 // grows a building into it before the click.
                 let clear = start.straight_line_to(end).is_some_and(|cells| {
@@ -476,6 +480,7 @@ fn steps() -> Vec<Step> {
                 let _ = fresh.apply(Command::BuildRoad {
                     from: Cell::new(11, 128),
                     to: Cell::new(40, 128),
+                    kind: citysim_sim::RoadKind::Street,
                 });
                 let _ = fresh.apply(Command::SetZone {
                     min: Cell::new(14, 126),
@@ -505,6 +510,7 @@ fn steps() -> Vec<Step> {
                     w.write_message(SimCommand(Command::BuildRoad {
                         from: Cell::new(b.x, b.y - 6),
                         to: Cell::new(b.x, b.y + 2),
+                        kind: citysim_sim::RoadKind::Street,
                     }));
                 }
             },

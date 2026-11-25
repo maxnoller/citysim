@@ -695,7 +695,12 @@ mod tests {
         let mut w = World::new(1);
         w.economy.money = 10_000_000;
         for &(a, b) in roads {
-            w.apply(Command::BuildRoad { from: a, to: b }).expect("road");
+            w.apply(Command::BuildRoad {
+                from: a,
+                to: b,
+                kind: citysim_sim::RoadKind::Street,
+            })
+            .expect("road");
         }
         w
     }

@@ -1135,7 +1135,7 @@ pub fn compute_preview(w: &World, cmd: Command) -> ToolPreview {
     let result = w.preview(&cmd);
     let mut p = ToolPreview::default();
     match cmd {
-        Command::BuildRoad { from, to } => {
+        Command::BuildRoad { from, to, .. } => {
             p.kind = PreviewKind::Road;
             p.line = Some((from, to));
         }
@@ -1147,7 +1147,7 @@ pub fn compute_preview(w: &World, cmd: Command) -> ToolPreview {
             p.kind = PreviewKind::Bulldoze;
             p.rect = Some(CellRect::from_corners(min, max));
         }
-        Command::SetTaxRate(_) => {}
+        Command::SetTaxRate(_) | Command::SetJunctionControl { .. } => {}
     }
     match result {
         Ok(r) => {
@@ -1227,11 +1227,13 @@ mod tests {
         w.apply(Command::BuildRoad {
             from: Cell::new(11, 128),
             to: Cell::new(30, 128),
+            kind: citysim_sim::RoadKind::Street,
         })
         .unwrap();
         w.apply(Command::BuildRoad {
             from: Cell::new(20, 128),
             to: Cell::new(20, 120),
+            kind: citysim_sim::RoadKind::Street,
         })
         .unwrap();
         let mut s = state_for(&w);
@@ -1257,6 +1259,7 @@ mod tests {
         w.apply(Command::BuildRoad {
             from: Cell::new(11, 128),
             to: Cell::new(30, 128),
+            kind: citysim_sim::RoadKind::Street,
         })
         .unwrap();
         let mut s = state_for(&w);

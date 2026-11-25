@@ -320,6 +320,7 @@ fn run(
             let cmd = citysim_sim::Command::BuildRoad {
                 from: Cell::new(num(args, 0)?, num(args, 1)?),
                 to: Cell::new(num(args, 2)?, num(args, 3)?),
+                kind: citysim_sim::RoadKind::Street,
             };
             match cx.sim.world.preview(&cmd) {
                 Ok(p) => ctl.reply(seq, true, &format!("ok {}", p.cost)),

@@ -113,6 +113,8 @@ pub fn error_text(e: &CommandError) -> String {
             format::money(*cost),
             format::money(*money)
         ),
+        CommandError::InvalidRoadKind(_) => "That road type can't be built".into(),
+        CommandError::NotAJunction(_) => "Not a junction: point at a crossing of three or more roads".into(),
         CommandError::InvalidTaxRate(_) => format!(
             "Tax rate must be between 0% and {}",
             format::percent(balance::MAX_TAX_RATE)
@@ -347,8 +349,7 @@ pub fn road_kind_name(kind: RoadChoice) -> &'static str {
 
 /// Price of one cell of road of `kind`.
 pub fn road_price(kind: RoadChoice) -> i64 {
-    let _ = kind;
-    balance::ROAD_COST_PER_CELL
+    super::plan::road_kind(kind).cost_per_cell()
 }
 
 fn cost_text(cost: i64) -> String {
@@ -1098,6 +1099,7 @@ mod tests {
         w.apply(Command::BuildRoad {
             from: Cell::new(11, 128),
             to: Cell::new(30, 128),
+            kind: citysim_sim::RoadKind::Street,
         })
         .unwrap();
         let card = inspect_card(&w, Cell::new(20, 128)).expect("road card");
@@ -1114,6 +1116,7 @@ mod tests {
         let cmd = Command::BuildRoad {
             from: Cell::new(11, 128),
             to: Cell::new(20, 128),
+            kind: citysim_sim::RoadKind::Street,
         };
         let p = super::super::tools::compute_preview(&w, cmd);
         let mut state = ToolState::default();
@@ -1171,6 +1174,7 @@ mod tests {
         w.apply(Command::BuildRoad {
             from: Cell::new(11, 128),
             to: Cell::new(30, 128),
+            kind: citysim_sim::RoadKind::Street,
         })
         .unwrap();
         let r = Some(Zone::Residential);
