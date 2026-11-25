@@ -7,7 +7,7 @@
 //! Trucks belong to no household.
 
 use crate::derived::rect_center;
-use crate::traffic::{self, Place, TripPurpose};
+use crate::traffic::{self, Departure, Place, TripPurpose};
 use crate::{Building, BuildingId, Cell, World, Zone, balance, geom, households, people};
 
 /// Relative goods traffic by hour of day.
@@ -68,7 +68,7 @@ fn deliveries(world: &mut World) {
         let to = rect_center(sb.footprint);
         // Nearest of a few random factories with workers.
         let f = world.cache.factories.len();
-        let mut best: Option<(f32, [f32; 2])> = None;
+        let mut best: Option<(f32, [f32; 2], BuildingId)> = None;
         if f > 0 && world.rng.next_f32() >= balance::GOODS_IMPORT_SHARE {
             for _ in 0..balance::DELIVERY_SAMPLES {
                 let b = world.cache.factories[world.rng.below(f as u32) as usize];
@@ -79,12 +79,16 @@ fn deliveries(world: &mut World) {
                 let p = rect_center(fb.footprint);
                 let d = geom::dist(p, to);
                 if best.is_none_or(|x| d < x.0) {
-                    best = Some((d, p));
+                    best = Some((d, p, b));
                 }
             }
         }
         let from = best.map_or(Place::Entry, |b| Place::At(b.1));
-        traffic::request(world, None, TripPurpose::Goods, from, Place::At(to));
+        let mut d = Departure::new(world, TripPurpose::Goods, from, Place::At(to));
+        d.from_building = best.map(|b| b.2);
+        d.to_building = Some(shop);
+        d.cargo = balance::TRUCK_LOAD;
+        traffic::request_trip(world, d);
         people::count_trip(world, TripPurpose::Goods);
     }
 }
@@ -123,21 +127,28 @@ fn exports(world: &mut World) {
             continue;
         }
         let from = Place::At(rect_center(fb.footprint));
-        traffic::request(world, None, TripPurpose::Goods, from, Place::Entry);
+        let mut d = Departure::new(world, TripPurpose::Goods, from, Place::Entry);
+        d.from_building = Some(b);
+        d.cargo = balance::TRUCK_LOAD;
+        traffic::request_trip(world, d);
         people::count_trip(world, TripPurpose::Goods);
     }
 }
 
 /// A goods trip ended (arrived, or completed off screen): a shop at its
 /// destination gets a truckload.
-pub(crate) fn delivered(world: &mut World, to: Place) {
-    let Place::At(p) = to else { return };
-    let Some(crate::grid::CellData {
-        occupant: crate::grid::Occupant::Building(b),
-        ..
-    }) = world.grid.get(Cell::from_pos(p)).copied()
-    else {
-        return;
+pub(crate) fn delivered(world: &mut World, to: Place, to_building: Option<BuildingId>) {
+    let b = match (to_building, to) {
+        (Some(b), _) => b,
+        // Trucks from saves before trips named their buildings.
+        (None, Place::At(p)) => match world.grid.get(Cell::from_pos(p)).copied() {
+            Some(crate::grid::CellData {
+                occupant: crate::grid::Occupant::Building(b),
+                ..
+            }) => b,
+            _ => return,
+        },
+        (None, Place::Entry) => return,
     };
     let Some(cap) = world.buildings.get(b).map(stock_cap) else {
         return;

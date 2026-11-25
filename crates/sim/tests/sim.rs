@@ -355,16 +355,26 @@ fn bulldozing_under_traffic_never_panics() {
 fn economy_books_taxes_and_upkeep_daily() {
     let mut w = World::new(15);
     let mut p = Some(GridPlayer::new(&Zone::ALL));
-    run_to(&mut w, &mut p, 3 * DAY + 1);
+    run_to(&mut w, &mut p, 2 * DAY + 1);
     let e = &w.economy;
-    assert_eq!(e.history.len(), 3);
+    assert_eq!(e.history.len(), 2);
     let b = e.last_day;
     assert!(b.residential_tax > 0 && b.commercial_tax + b.industrial_tax > 0);
     let day = e.history.last().unwrap();
+    // Road upkeep by road class and traffic lights, services by city size
+    // and density: the categories add up to the budget's lines.
+    let costs = e.last_day_costs;
+    assert_eq!(b.road_upkeep, costs.road_upkeep());
+    assert_eq!(b.services, costs.services());
     assert_eq!(
-        b.road_upkeep,
-        day.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
+        costs.streets + costs.highway,
+        (day.road_cells - w.stats.avenue_cells) as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
     );
+    assert_eq!(
+        costs.signals,
+        costs.signal_count as i64 * balance::SIGNAL_UPKEEP_PER_DAY
+    );
+    assert!(costs.services_city_size > 0 && costs.services_base > costs.services_city_size);
     assert_eq!(day.income - day.expenses, b.income() - b.expenses());
     assert_eq!(e.last_day_income, b.income());
     assert_eq!(e.last_day_expenses, b.expenses());
@@ -387,7 +397,7 @@ fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
     let mut player = World::new(16);
     let mut p = Some(GridPlayer::new(&Zone::ALL));
     let hundred_cells = 100 * balance::ROAD_COST_PER_CELL;
-    for _ in 0..4 * DAY {
+    for _ in 0..DAY {
         over.step();
         good.step();
         let next = player.time.tick + 1;
@@ -397,7 +407,7 @@ fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
     assert!(over.economy.money < 0, "{}", over.economy.money);
     assert!(good.economy.money > 0, "{}", good.economy.money);
     // Its roads cost more to keep than its town pays (the young player city
-    // is about break-even on day 4 and in profit later).
+    // is about break-even on day 1 and in profit later).
     let (over_net, player_net) = (over.economy.last_day.net(), player.economy.last_day.net());
     assert!(
         over_net < 0 && over_net < player_net - 1000,

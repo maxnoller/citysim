@@ -84,6 +84,10 @@ impl DepartureV4 {
             from: self.from,
             to: self.to,
             requested_tick: self.requested_tick,
+            from_building: None,
+            to_building: None,
+            party: 0,
+            cargo: 0.0,
         }
     }
 
@@ -131,6 +135,45 @@ struct TrafficStateV4 {
     control_version: u64,
 }
 
+/// `Economy` as rounds 2-3 saved it (no running-cost breakdown).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EconomyV4 {
+    money: i64,
+    tax_rate: f32,
+    last_day_income: i64,
+    last_day_expenses: i64,
+    last_day: crate::Budget,
+    history: Vec<crate::DaySummary>,
+    fiscal: crate::FiscalStatus,
+}
+
+impl EconomyV4 {
+    fn upgrade(self) -> Economy {
+        Economy {
+            money: self.money,
+            tax_rate: self.tax_rate,
+            last_day_income: self.last_day_income,
+            last_day_expenses: self.last_day_expenses,
+            last_day: self.last_day,
+            history: self.history,
+            fiscal: self.fiscal,
+            last_day_costs: Default::default(),
+        }
+    }
+
+    fn of(e: &Economy) -> EconomyV4 {
+        EconomyV4 {
+            money: e.money,
+            tax_rate: e.tax_rate,
+            last_day_income: e.last_day_income,
+            last_day_expenses: e.last_day_expenses,
+            last_day: e.last_day,
+            history: e.history.clone(),
+            fiscal: e.fiscal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorldV4 {
     seed: u64,
@@ -141,7 +184,7 @@ pub(crate) struct WorldV4 {
     buildings: IdMap<BuildingId, crate::Building>,
     households: IdMap<HouseholdId, HouseholdV4>,
     vehicles: IdMap<VehicleId, Vehicle>,
-    economy: Economy,
+    economy: EconomyV4,
     demand: Demand,
     stats: Stats,
     versions: Versions,
@@ -163,7 +206,25 @@ pub(crate) fn trip_from(t: TripV4, here: [f32; 2]) -> Trip {
         citizen: None,
         owner: None,
         from: Place::At(here),
+        from_building: None,
+        to_building: None,
+        party: 0,
+        cargo: if t.purpose == TripPurpose::Goods {
+            crate::balance::TRUCK_LOAD
+        } else {
+            0.0
+        },
+        started_tick: t.requested_tick,
     }
+}
+
+/// The clock of a save from before the 16-minute day (rounds 1-3 had a
+/// 4-minute day of 4,800 ticks): the same time of day.
+pub(crate) fn upgrade_time(t: SimTime) -> SimTime {
+    const OLD_TICKS_PER_DAY: u32 = 4 * 60 * crate::TICKS_PER_SECOND;
+    let tod = (t.tick_of_day.min(OLD_TICKS_PER_DAY - 1) as u64 * crate::balance::TICKS_PER_DAY as u64
+        / OLD_TICKS_PER_DAY as u64) as u32;
+    SimTime { tick_of_day: tod, ..t }
 }
 
 impl WorldV4 {
@@ -198,13 +259,13 @@ impl WorldV4 {
         };
         let mut w = World::new(self.seed);
         w.rng = self.rng;
-        w.time = self.time;
+        w.time = upgrade_time(self.time);
         w.roads = self.roads;
         w.grid = self.grid;
         w.buildings = self.buildings;
         w.households = self.households.map_values(|h| h.upgrade(day));
         w.vehicles = self.vehicles;
-        w.economy = self.economy;
+        w.economy = self.economy.upgrade();
         w.demand = self.demand;
         w.stats = self.stats;
         w.versions = self.versions;
@@ -268,7 +329,7 @@ pub fn save_as_v4(w: &World) -> Vec<u8> {
         buildings: legacy_buildings(w),
         households: w.households.clone().map_values(|h| HouseholdV4::of(&h)),
         vehicles: w.vehicles.clone(),
-        economy: w.economy.clone(),
+        economy: EconomyV4::of(&w.economy),
         demand: w.demand,
         stats: w.stats.clone(),
         versions: w.versions.clone(),

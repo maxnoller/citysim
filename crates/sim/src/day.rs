@@ -12,11 +12,14 @@
 //!   out for leisure when their need is high and they have time (choosing a
 //!   venue by distance and how well it restores the need; children come
 //!   along). Otherwise they stay in, and sleep at night.
-//! * A trip by car is drawn on the road with a per-purpose probability
-//!   (`balance::{COMMUTE_DRIVE_SHARE, SHOP_DRIVE_SHARE,
-//!   LEISURE_DRIVE_SHARE}`), else it happens off screen and takes the
-//!   estimated drive time. Without a free car an adult rides with a member
-//!   going to a workplace nearby (car-sharing), or travels off screen for
+//! * Every trip by car is a car on the road while the vehicle budget allows
+//!   (`balance::MAX_VEHICLES`; beyond it the trip happens off screen and
+//!   takes the estimated drive time). Its driver and passengers are in the
+//!   car from departure until it arrives, however long the drive takes on
+//!   the calendar; what they do next starts when they arrive. Workers leave
+//!   home early enough for the door-to-door time their last commute took.
+//!   Without a free car an adult rides with a member going to a workplace
+//!   nearby (car-sharing), or travels off screen for
 //!   `balance::CARLESS_TIME_FACTOR` times as long. Children only travel as
 //!   passengers; teens without a car travel off screen.
 
@@ -24,8 +27,8 @@ use crate::citizens::{Activity, CitizenId, Journey, LifeStage, Location, TravelM
 use crate::derived::rect_center;
 use crate::households::place_of;
 use crate::people::{self, daily, habit, hours};
-use crate::traffic::{self, Ended, Place, TripEnd, TripPurpose};
-use crate::{BuildingId, World, balance, geom};
+use crate::traffic::{self, Departure, Ended, Place, TripEnd, TripPurpose};
+use crate::{BuildingId, TICKS_PER_SECOND, World, balance, geom};
 
 const DAY: i64 = balance::TICKS_PER_DAY as i64;
 const HOUR: u64 = balance::TICKS_PER_HOUR as u64;
@@ -46,17 +49,37 @@ fn spread(seed: u32, salt: u64, spread: f32) -> f32 {
     (habit(seed, salt) * 2.0 - 1.0) * spread
 }
 
-/// Shift times on day `d`: (leave home, start, end), absolute ticks.
-fn shift_times(world: &World, seed: u32, shift: crate::citizens::Shift, d: u32) -> (i64, i64, i64) {
+/// Longest trip time a worker plans for, hours (a commute that took longer
+/// once is not planned around).
+const MAX_PLANNED_TRIP_H: f32 = 3.0;
+
+/// Ticks a worker expects their trip to work to take, door to door: the
+/// last one's (with a margin), or the estimate before the first.
+pub(crate) fn expected_commute_ticks(world: &World, id: CitizenId) -> u64 {
+    let c = &world.citizens[id];
+    let t = if c.commute_ticks > 0 {
+        c.commute_ticks as f32
+    } else {
+        let home = world.households.get(c.household).map(|h| h.home);
+        secs_to_ticks(estimate_s(pos_of(world, home), pos_of(world, c.workplace()))) as f32
+    };
+    (t * balance::COMMUTE_TIME_MARGIN).min(MAX_PLANNED_TRIP_H * balance::TICKS_PER_HOUR as f32) as u64
+}
+
+/// Shift times of citizen `id` on day `d`: (leave home, start, end),
+/// absolute ticks. They leave the expected trip time plus a personal slack
+/// before the start.
+fn shift_times(world: &World, id: CitizenId, shift: crate::citizens::Shift, d: u32) -> (i64, i64, i64) {
+    let seed = world.citizens[id].seed;
     let wobble = (daily(seed, d, 0x5717) * 2.0 - 1.0) * balance::SHIFT_DAILY_WOBBLE_H;
     let start = midnight(world, d) + shift.start as i64 + (wobble * balance::TICKS_PER_HOUR as f32) as i64;
-    let lead = balance::COMMUTE_LEAD_H + habit(seed, 0x1EAD) * balance::COMMUTE_LEAD_SPREAD_H;
-    let leave = start - (lead * balance::TICKS_PER_HOUR as f32) as i64;
-    (leave, start, start + shift.length as i64)
+    let slack = balance::COMMUTE_LEAD_H + habit(seed, 0x1EAD) * balance::COMMUTE_LEAD_SPREAD_H;
+    let lead = (slack * balance::TICKS_PER_HOUR as f32) as i64 + expected_commute_ticks(world, id) as i64;
+    (start - lead, start, start + shift.length as i64)
 }
 
 /// The next shift this citizen still has to go to: (day, leave, end).
-fn next_shift(world: &World, id: CitizenId) -> Option<(u32, i64, i64)> {
+pub(crate) fn next_shift(world: &World, id: CitizenId) -> Option<(u32, i64, i64)> {
     let c = &world.citizens[id];
     let job = c.job?;
     let now = world.time.tick as i64;
@@ -66,7 +89,7 @@ fn next_shift(world: &World, id: CitizenId) -> Option<(u32, i64, i64)> {
         if !job.shift.works_on(d) || c.worked_day >= d {
             continue;
         }
-        let (leave, _, end) = shift_times(world, c.seed, job.shift, d);
+        let (leave, _, end) = shift_times(world, id, job.shift, d);
         if now < end - min_work {
             return Some((d, leave, end));
         }
@@ -75,7 +98,7 @@ fn next_shift(world: &World, id: CitizenId) -> Option<(u32, i64, i64)> {
 }
 
 /// Waking and bedtime in hours for a citizen.
-fn wake_bed(world: &World, id: CitizenId) -> (f32, f32) {
+pub(crate) fn wake_bed(world: &World, id: CitizenId) -> (f32, f32) {
     let c = &world.citizens[id];
     let shift: f32 = match c.stage {
         LifeStage::Senior => -1.0,
@@ -88,39 +111,26 @@ fn wake_bed(world: &World, id: CitizenId) -> (f32, f32) {
     (wake, bed)
 }
 
-fn drive_share(purpose: TripPurpose) -> f32 {
-    match purpose {
-        TripPurpose::ToWork | TripPurpose::ToHome => balance::COMMUTE_DRIVE_SHARE,
-        TripPurpose::Shopping => balance::SHOP_DRIVE_SHARE,
-        TripPurpose::Leisure => balance::LEISURE_DRIVE_SHARE,
-        _ => 1.0,
-    }
-}
-
 /// Estimated drive time between two points, vehicle seconds.
 pub(crate) fn estimate_s(from: [f32; 2], to: [f32; 2]) -> f32 {
     geom::dist(from, to) * balance::OFFSCREEN_ROUTE_FACTOR / balance::OFFSCREEN_SPEED + balance::OFFSCREEN_BASE_S
 }
 
-/// Calendar ticks an off-screen trip of `s` estimated vehicle seconds
-/// takes. Off-screen trips run on the calendar (a 2-minute drive takes
-/// `2 * OFFSCREEN_CALENDAR_FACTOR` in-game minutes), unlike cars on the
-/// road, which move in real time (see the `balance` time scales).
+/// Ticks a trip of `s` estimated vehicle seconds takes, on the road or off
+/// screen alike (vehicle time is real time, see the `balance` time scales).
 fn secs_to_ticks(s: f32) -> u64 {
-    let h = s * balance::OFFSCREEN_CALENDAR_FACTOR / 3600.0;
-    (h * balance::TICKS_PER_HOUR as f32).round().max(1.0) as u64
+    (s * balance::OFFSCREEN_CALENDAR_FACTOR * TICKS_PER_SECOND as f32)
+        .round()
+        .max(1.0) as u64
 }
 
-/// Calendar ticks a trip from `from` to `to` may take at most (see
+/// Expected ticks of a car trip from `from` to `to` (see
 /// `Journey::due_tick`).
 pub(crate) fn due_after(world: &World, from: Option<BuildingId>, to: Option<BuildingId>) -> u64 {
-    let est = secs_to_ticks(estimate_s(pos_of(world, from), pos_of(world, to))) as f32;
-    let lo = balance::MIN_TRIP_H * balance::TICKS_PER_HOUR as f32;
-    let hi = balance::MAX_TRIP_H * balance::TICKS_PER_HOUR as f32;
-    (est * balance::TRIP_DUE_FACTOR).clamp(lo, hi) as u64
+    secs_to_ticks(estimate_s(pos_of(world, from), pos_of(world, to)))
 }
 
-fn pos_of(world: &World, b: Option<BuildingId>) -> [f32; 2] {
+pub(crate) fn pos_of(world: &World, b: Option<BuildingId>) -> [f32; 2] {
     match b.and_then(|b| world.buildings.get(b)) {
         Some(b) => rect_center(b.footprint),
         None => world
@@ -180,11 +190,8 @@ pub(crate) fn decide(world: &mut World, id: CitizenId) {
                 return;
             }
             // On the road or waiting for the car: the traffic callback
-            // ends it, or the calendar does (`due_tick`).
-            if now >= j.due_tick {
-                release(world, id);
-                return;
-            }
+            // ends it when the car arrives (or gives up, or could not
+            // start). Look again in a while in case the car is lost.
             let lost = match j.mode {
                 TravelMode::Passenger => j.driver.is_none_or(|d| {
                     world
@@ -200,7 +207,7 @@ pub(crate) fn decide(world: &mut World, id: CitizenId) {
             if lost {
                 continue_off_screen(world, id);
             } else {
-                people::set_until(world, id, j.due_tick.min(now + HOUR));
+                people::set_until(world, id, now + HOUR);
             }
         }
         Location::In(b) if b == home => at_home(world, id),
@@ -397,9 +404,15 @@ fn go_shopping(world: &mut World, id: CitizenId) -> bool {
     let h = &world.households[c.household];
     let want = (h.citizens.len() as f32 * balance::BUY_UP_TO_DAYS - h.goods).max(1.0);
     let hid = c.household;
-    let Some(shop) = pick_shop(world, pos_of(world, Some(from)), want) else {
+    let fp = pos_of(world, Some(from));
+    let Some(shop) = pick_shop(world, fp, want) else {
         return false;
     };
+    // Only if they get there before the shop shuts.
+    let arrive_h = world.time.hour() + secs_to_ticks(estimate_s(fp, pos_of(world, Some(shop)))) as f32 / HOUR as f32;
+    if arrive_h > balance::SHOP_CLOSE_H - balance::SHOP_LAST_ENTRY_BEFORE_CLOSE_H {
+        return false;
+    }
     world.households[hid].shopper = Some(id);
     go(world, id, shop, TripPurpose::Shopping, &[]);
     true
@@ -410,9 +423,15 @@ fn go_leisure(world: &mut World, id: CitizenId) -> bool {
     let Some(from) = c.location.building() else {
         return false;
     };
-    let Some(venue) = pick_venue(world, pos_of(world, Some(from))) else {
+    let fp = pos_of(world, Some(from));
+    let Some(venue) = pick_venue(world, fp) else {
         return false;
     };
+    // Only if there is time for a night out before the venue closes.
+    let arrive_h = world.time.hour() + secs_to_ticks(estimate_s(fp, pos_of(world, Some(venue)))) as f32 / HOUR as f32;
+    if arrive_h + balance::LEISURE_DURATION_H > balance::LEISURE_LAST_H {
+        return false;
+    }
     let kids = companions_at(world, id, from, true);
     go(world, id, venue, TripPurpose::Leisure, &kids);
     true
@@ -490,34 +509,35 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
     let hid = c.household;
     let from = c.location.building();
     let at_home = from == Some(world.households[hid].home);
-    let mode = if c.drives() && (c.has_car || (at_home && world.households[hid].free_cars(world) > 0)) {
+    let (fp, tp) = (pos_of(world, from), pos_of(world, Some(to)));
+    let near = geom::dist(fp, tp) <= balance::WALK_MAX_M;
+    let mode = if c.has_car && c.drives() {
+        TravelMode::Driving
+    } else if near {
+        TravelMode::Walking
+    } else if c.drives() && at_home && world.households[hid].free_cars(world) > 0 {
         TravelMode::Driving
     } else {
         TravelMode::NoCar
     };
-    let (fp, tp) = (pos_of(world, from), pos_of(world, Some(to)));
     let est = estimate_s(fp, tp);
-    let day = world.time.day;
-    let seed = c.seed;
-    let visible = mode == TravelMode::Driving
-        && match purpose {
-            TripPurpose::ToWork | TripPurpose::ToHome => daily(seed, day, 0xD71E) < drive_share(purpose),
-            _ => world.rng.next_f32() < drive_share(purpose),
-        };
+    // Every car trip is a car on the road while the budget allows.
+    let visible = mode == TravelMode::Driving && traffic::has_room(world);
     if mode == TravelMode::Driving {
         world.citizens[id].has_car = true;
     }
-    let arrive_tick = if visible {
-        None
+    let f = if mode == TravelMode::NoCar {
+        balance::CARLESS_TIME_FACTOR
     } else {
-        let f = if mode == TravelMode::NoCar {
-            balance::CARLESS_TIME_FACTOR
-        } else {
-            1.0
-        };
-        Some(now + secs_to_ticks(est * f))
+        1.0
     };
-    let due_tick = now + due_after(world, from, Some(to)).max(arrive_tick.map_or(0, |t| t - now));
+    let arrive_tick = (!visible).then(|| now + secs_to_ticks(est * f));
+    let expected = if purpose == TripPurpose::ToWork && world.citizens[id].workplace() == Some(to) {
+        expected_commute_ticks(world, id)
+    } else {
+        secs_to_ticks(est)
+    };
+    let due_tick = arrive_tick.unwrap_or(now + expected);
     let journey = Journey {
         purpose,
         from,
@@ -530,33 +550,53 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
         due_tick,
     };
     if visible {
-        traffic::request_for(world, Some(hid), Some(id), purpose, Place::At(fp), Place::At(tp));
+        let mut d = Departure::new(world, purpose, Place::At(fp), Place::At(tp));
+        d.household = Some(hid);
+        d.citizen = Some(id);
+        d.from_building = from;
+        d.to_building = Some(to);
+        traffic::request_trip(world, d);
     }
-    let until = arrive_tick.unwrap_or(due_tick.min(now + HOUR));
+    let until = arrive_tick.unwrap_or(now + HOUR);
     people::set_place(world, id, Activity::Travelling, Location::Travelling(journey), until);
     people::count_trip(world, purpose);
-    if mode == TravelMode::Driving {
-        for &p in passengers {
-            let to_p = match purpose {
+    for &p in passengers {
+        if purpose == TripPurpose::ToWork {
+            match world.citizens[p].workplace() {
                 // Car-sharing: off at their own workplace.
-                TripPurpose::ToWork => world.citizens[p].workplace().unwrap_or(to),
-                _ => to,
-            };
-            let j = Journey {
+                Some(w) if mode == TravelMode::Driving => {
+                    let j = Journey {
+                        mode: TravelMode::Passenger,
+                        driver: Some(id),
+                        to: w,
+                        ..journey
+                    };
+                    people::set_place(world, p, Activity::Travelling, Location::Travelling(j), until);
+                }
+                // No lift after all: they make their own way.
+                Some(w) => go(world, p, w, TripPurpose::ToWork, &[]),
+                None => {}
+            }
+            continue;
+        }
+        // Children (and teens) come along however the adult travels.
+        let j = if mode == TravelMode::Driving {
+            Journey {
                 mode: TravelMode::Passenger,
                 driver: Some(id),
-                to: to_p,
                 ..journey
-            };
-            people::set_place(world, p, Activity::Travelling, Location::Travelling(j), until);
-        }
+            }
+        } else {
+            journey
+        };
+        people::set_place(world, p, Activity::Travelling, Location::Travelling(j), until);
     }
 }
 
 /// Newcomers drive in from the highway together (`driver` drives).
 pub(crate) fn move_in(world: &mut World, hid: crate::HouseholdId, driver: CitizenId, members: &[CitizenId], now: u64) {
     let home = world.households[hid].home;
-    let has_car = world.households[hid].cars > 0 && world.citizens[driver].drives();
+    let has_car = world.households[hid].cars > 0 && world.citizens[driver].drives() && traffic::has_room(world);
     let journey = Journey {
         purpose: TripPurpose::MoveIn,
         from: None,
@@ -575,7 +615,11 @@ pub(crate) fn move_in(world: &mut World, hid: crate::HouseholdId, driver: Citize
     let to = place_of(world, home).expect("home exists");
     let journey = if has_car {
         world.citizens[driver].has_car = true;
-        traffic::request_for(world, Some(hid), Some(driver), TripPurpose::MoveIn, Place::Entry, to);
+        let mut d = Departure::new(world, TripPurpose::MoveIn, Place::Entry, to);
+        d.household = Some(hid);
+        d.citizen = Some(driver);
+        d.to_building = Some(home);
+        traffic::request_trip(world, d);
         journey
     } else {
         let est = estimate_s(pos_of(world, None), pos_of(world, Some(home)));
@@ -586,7 +630,7 @@ pub(crate) fn move_in(world: &mut World, hid: crate::HouseholdId, driver: Citize
             ..journey
         }
     };
-    let until = journey.arrive_tick.unwrap_or(journey.due_tick.min(now + HOUR));
+    let until = journey.arrive_tick.unwrap_or(now + HOUR);
     people::set_place(
         world,
         driver,
@@ -635,45 +679,6 @@ pub(crate) fn continue_off_screen(world: &mut World, id: CitizenId) {
     people::set_place(world, id, Activity::Travelling, Location::Travelling(j), t);
 }
 
-/// The calendar says the trip of `id` is over (`Journey::due_tick`): the
-/// driver and passengers arrive. A car on the road finishes its drive
-/// without them (its trip keeps its `owner`); a car that never started is
-/// dropped, and for a commute that counts as hopeless (the driveway or the
-/// network was jammed).
-fn release(world: &mut World, id: CitizenId) {
-    let Location::Travelling(j) = world.citizens[id].location else {
-        return;
-    };
-    let driver = if j.mode == TravelMode::Passenger {
-        j.driver.filter(|&d| world.citizens.contains_key(d)).unwrap_or(id)
-    } else {
-        id
-    };
-    let Location::Travelling(dj) = world.citizens[driver].location else {
-        arrive(world, id);
-        return;
-    };
-    let riders = riders_of(world, driver);
-    match dj.vehicle {
-        Some(v) => {
-            if let Some(t) = world.traffic.trips.get_mut(v) {
-                t.citizen = None;
-            }
-        }
-        None if dj.arrive_tick.is_none() => {
-            world.traffic.pending.retain(|d| d.citizen != Some(driver));
-            record_commute(world, driver, dj.purpose, balance::MAX_DEPARTURE_WAIT_S, true);
-        }
-        None => {}
-    }
-    for m in std::iter::once(driver).chain(riders) {
-        arrive(world, m);
-    }
-    if id != driver && world.citizens[id].location.journey().is_some() {
-        arrive(world, id);
-    }
-}
-
 /// Members riding with `driver` right now.
 fn riders_of(world: &World, driver: CitizenId) -> Vec<CitizenId> {
     let Some(c) = world.citizens.get(driver) else {
@@ -694,7 +699,7 @@ fn riders_of(world: &World, driver: CitizenId) -> Vec<CitizenId> {
 /// A car trip ended (traffic callback).
 pub(crate) fn trip_ended(world: &mut World, e: Ended) {
     if e.purpose == TripPurpose::Goods {
-        crate::errands::delivered(world, e.to);
+        crate::errands::delivered(world, e.to, e.to_building);
         return;
     }
     if let Some(hid) = e.household
@@ -799,6 +804,13 @@ fn arrive(world: &mut World, id: CitizenId) {
     let hid = c.household;
     let home = world.households[hid].home;
     let to = if world.buildings.contains_key(j.to) { j.to } else { home };
+    if j.purpose == TripPurpose::ToWork && c.workplace() == Some(to) {
+        // Door to door, waiting for the car included: they plan the next
+        // commute by it.
+        let took = now.saturating_sub(j.departed_tick).min(u32::MAX as u64) as u32;
+        world.citizens[id].commute_ticks = took.max(1);
+    }
+    let c = &world.citizens[id];
     if j.arrive_tick.is_some() && matches!(j.purpose, TripPurpose::ToWork | TripPurpose::ToHome) && c.job.is_some() {
         // Off screen: the estimated drive (the commute a car would have).
         let f = if j.mode == TravelMode::NoCar {
@@ -822,7 +834,7 @@ fn arrive(world: &mut World, id: CitizenId) {
     match j.purpose {
         TripPurpose::ToWork if c.workplace() == Some(to) => {
             let job = c.job.expect("checked");
-            let (_, _, end) = shift_times(world, c.seed, job.shift, c.worked_day);
+            let (_, _, end) = shift_times(world, id, job.shift, c.worked_day);
             if end > now as i64 + HOUR as i64 / 4 {
                 people::set_place(world, id, Activity::Working, Location::In(to), at(end));
             } else {
@@ -831,11 +843,25 @@ fn arrive(world: &mut World, id: CitizenId) {
             }
         }
         TripPurpose::Shopping => {
+            let tod = world.time.hour();
+            let close = now + hours((balance::SHOP_CLOSE_H - tod).max(0.0)) as u64;
+            if !(balance::SHOP_OPEN_H..balance::SHOP_CLOSE_H).contains(&tod) {
+                // Shut by the time they got there: home again.
+                people::set_place(world, id, Activity::Home, Location::In(to), now);
+                return;
+            }
             buy(world, id, to);
-            let t = now + hours(balance::SHOP_DURATION_H) as u64;
+            let t = (now + hours(balance::SHOP_DURATION_H) as u64).min(close.max(now + 1));
             people::set_place(world, id, Activity::Shopping, Location::In(to), t);
         }
         TripPurpose::Leisure => {
+            let tod = world.time.hour();
+            if !(balance::LEISURE_OPEN_H..balance::LEISURE_LAST_H).contains(&tod) {
+                // The venue has closed: home again.
+                people::set_place(world, id, Activity::Home, Location::In(to), now);
+                return;
+            }
+            let close = now + hours(balance::LEISURE_LAST_H - tod) as u64;
             let c = &world.citizens[id];
             let d = balance::LEISURE_DURATION_H + habit(c.seed, 0x1E1) * balance::LEISURE_DURATION_SPREAD_H;
             if c.drives() {
@@ -844,7 +870,8 @@ fn arrive(world: &mut World, id: CitizenId) {
                 h.ledger.leisure += balance::LEISURE_COST;
                 h.today.leisure += balance::LEISURE_COST;
             }
-            people::set_place(world, id, Activity::Leisure, Location::In(to), now + hours(d) as u64);
+            let end = (now + hours(d) as u64).min(close.max(now + 1));
+            people::set_place(world, id, Activity::Leisure, Location::In(to), end);
         }
         _ => people::set_place(world, id, Activity::Home, Location::In(to), now),
     }

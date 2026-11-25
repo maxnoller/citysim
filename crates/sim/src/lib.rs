@@ -66,7 +66,7 @@ pub use citizens::{
 pub use command::{Command, CommandError, JunctionChange, Outcome, Preview};
 pub use demand::Demand;
 pub use derived::Access;
-pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus};
+pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus, RunningCosts};
 pub use geom::{Cell, CellRect};
 pub use grid::{CellData, Grid, Occupant, Zone};
 pub use growth::{BuildingMeta, GrowthState};

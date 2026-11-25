@@ -226,12 +226,12 @@ fn grace_clock_is_saved() {
 fn budget_by_category_and_unemployment_for_the_hud() {
     let mut w = World::new(44);
     let mut p = GridPlayer::new(&Zone::ALL);
-    while w.time.tick < 3 * DAY + 2 * HOUR {
+    while w.time.tick < 2 * DAY + 2 * HOUR {
         p.act(&mut w);
         w.step();
     }
     let e = &w.economy;
-    assert_eq!(e.history.len(), 3);
+    assert_eq!(e.history.len(), 2);
     let b = e.last_day;
     assert!(
         b.residential_tax > 0 && b.commercial_tax > 0 && b.industrial_tax > 0,
@@ -242,16 +242,17 @@ fn budget_by_category_and_unemployment_for_the_hud() {
     assert_eq!(e.last_day_expenses, b.expenses());
     assert_eq!(b.net(), b.income() - b.road_upkeep - b.services);
     assert_eq!(e.history.last().unwrap().budget, b);
+    assert_eq!(e.last_day_costs.road_upkeep(), b.road_upkeep);
+    assert_eq!(e.last_day_costs.services(), b.services);
     let mut money = balance::STARTING_MONEY;
     for d in &e.history {
         assert_eq!(d.income, d.budget.income());
         assert_eq!(d.expenses, d.budget.expenses());
-        assert_eq!(
-            d.budget.road_upkeep,
-            d.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
-        );
-        let services = (d.population as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64).round() as i64;
-        assert_eq!(d.budget.services, services);
+        // Every street cell, more per avenue cell, and the traffic lights.
+        assert!(d.budget.road_upkeep >= d.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY);
+        // A base cost per resident, more in a bigger and denser city.
+        let base = (d.population as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64).round() as i64;
+        assert!(d.budget.services > base, "{} vs {base}", d.budget.services);
         money += d.budget.net();
         assert!(d.money < money, "construction comes on top of the budget");
     }
@@ -276,12 +277,12 @@ fn real_s(ticks: u64) -> f64 {
     ticks as f64 / TICKS_PER_SECOND as f64 / 2.5
 }
 
-/// Plays `p` for 20 days; returns the most money held before reaching
-/// 5,000 residents, the lowest money at any tick and the tick it reached
-/// 5,000 residents.
+/// Plays `p` for 6 days (96 minutes at 1x); returns the most money held
+/// before reaching 5,000 residents, the lowest money at any tick and the
+/// tick it reached 5,000 residents.
 fn play(w: &mut World, p: &mut GridPlayer) -> (i64, i64, u64) {
     let (mut most, mut lowest, mut reached) = (i64::MIN, i64::MAX, None);
-    while w.time.tick < 20 * DAY {
+    while w.time.tick < 6 * DAY {
         p.act(w);
         w.step();
         lowest = lowest.min(w.economy.money);
@@ -315,10 +316,12 @@ fn money_stays_a_constraint_for_a_player_who_keeps_expanding() {
     assert!(lowest >= hundred_cells, "lowest cash ${lowest}");
     let waited = real_s(p.longest_money_wait_ticks);
     assert!(waited <= 60.0, "waited {waited:.0} s for money");
+    // 100 road cells are a few real minutes of net income at 5,000
+    // residents (a quarter to a half of a 16-minute day).
     let at_5k = w.economy.history.iter().find(|d| d.population >= 5000).unwrap().budget;
     let days_per_100 = hundred_cells as f64 / at_5k.net() as f64;
     assert!(
-        (0.7..=2.0).contains(&days_per_100),
+        (0.15..=0.5).contains(&days_per_100),
         "100 cells = {days_per_100:.2} days of net"
     );
     assert!(w.economy.history.iter().skip(1).all(|d| d.budget.net() > 0));
@@ -340,17 +343,17 @@ fn building_a_district_up_front_is_viable() {
 }
 
 /// Every road of a growing two-district town laid on day one: a deficit on
-/// the first day or two while it is empty, then a clear, growing surplus;
-/// money never goes below zero. The same for the one-junction layout fixed
-/// on day 4 (which also pays for the fix).
+/// the first day while it is empty, then a clear, growing surplus; money
+/// never goes below zero. The same for the one-junction layout fixed at
+/// the start of day 2 (which also pays for the fix).
 #[test]
 fn a_sensible_layout_built_all_at_once_stays_solvent() {
     for (grid, fix) in [(true, false), (false, true)] {
         let mut w = World::new(7);
         scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, grid));
         let mut lowest = i64::MAX;
-        for _ in 0..10 * DAY {
-            if fix && w.time.day == 4 && w.time.tick_of_day == 0 {
+        for _ in 0..3 * DAY {
+            if fix && w.time.day == 2 && w.time.tick_of_day == 0 {
                 let before = w.economy.money;
                 scenarios::add_connections(&mut w);
                 assert!(w.economy.money < before, "the fix was built and paid");
@@ -359,20 +362,24 @@ fn a_sensible_layout_built_all_at_once_stays_solvent() {
             lowest = lowest.min(w.economy.money);
         }
         let h = &w.economy.history;
+        eprintln!(
+            "grid {grid}: {:?}",
+            h.iter()
+                .map(|d| (d.population, d.money, d.budget.net()))
+                .collect::<Vec<_>>()
+        );
         assert!(lowest > 0, "grid {grid}: lowest ${lowest}");
         assert!(
-            h.iter().skip(2).all(|d| d.budget.net() > 0),
-            "grid {grid}: deficit after day 2"
+            h.iter().skip(1).all(|d| d.budget.net() > 0),
+            "grid {grid}: deficit after day 1"
         );
-        // (The one-junction layout fixed on day 4 recovers more slowly.)
-        let factor = if grid { 3.0 } else { 1.8 };
         assert!(
-            (h[2].budget.net() as f64) < h[9].budget.net() as f64 / factor,
+            (h[1].budget.net() as f64) < h[2].budget.net() as f64,
             "grid {grid}: surplus grows {} -> {}",
-            h[2].budget.net(),
-            h[9].budget.net()
+            h[1].budget.net(),
+            h[2].budget.net()
         );
-        assert!(h[9].money > h[5].money + 3_000, "grid {grid}: money trends up");
+        assert!(h[2].money > h[1].money + 3_000, "grid {grid}: money trends up");
     }
 }
 
@@ -382,7 +389,7 @@ fn overbuilding_goes_broke() {
     let mut over = World::new(7);
     scenarios::prebuilt(&mut over, scenarios::overbuilt);
     assert!(over.stats.road_cells > 5_000);
-    for _ in 0..6 * DAY {
+    for _ in 0..2 * DAY {
         over.step();
     }
     assert!(over.economy.history.iter().all(|d| d.budget.net() < 0));

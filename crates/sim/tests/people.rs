@@ -18,26 +18,45 @@ fn grid_city(seed: u64, days: u64) -> (World, GridPlayer) {
     (w, p)
 }
 
-/// No citizen stays on a trip longer than `balance::MAX_TRIP_H` (plus the
-/// decision bucket's delay), whatever the traffic; at 03:00 in a healthy
-/// town hardly anyone is travelling.
+/// People stay with their car from departure to arrival: every car on the
+/// road (trucks aside) carries its driver, who is in it, or a household
+/// moving out; nobody waits for a car that is not queued; an off-screen
+/// trip ends when it is due (plus the decision bucket's delay). At 03:00
+/// in a healthy town few are travelling (early-shift workers setting off
+/// for a long drive, the last cars home from a night out).
 #[test]
-fn trips_end_in_sane_time_and_nights_are_quiet() {
-    let (mut w, mut p) = grid_city(11, 3);
-    let bound = (balance::MAX_TRIP_H * balance::TICKS_PER_HOUR as f32) as u64 + balance::THINK_BUCKETS + 1;
-    let mut longest = 0;
+fn people_stay_with_their_car_and_nights_are_quiet() {
+    let (mut w, mut p) = grid_city(11, 1);
     let mut night = Vec::new();
     let mut rush = Vec::new();
-    for _ in 0..3 * DAY {
+    let (mut cars, mut with_driver) = (0u64, 0u64);
+    for _ in 0..2 * DAY {
         p.act(&mut w);
         w.step();
         let now = w.time.tick;
         if now.is_multiple_of(20) {
             for (id, c) in w.citizens.iter() {
-                if let Location::Travelling(j) = c.location {
-                    let age = now - j.departed_tick;
-                    longest = longest.max(age);
-                    assert!(age <= bound, "{id:?} travelling for {age} ticks: {j:?}");
+                if let Location::Travelling(j) = c.location
+                    && let Some(t) = j.arrive_tick
+                {
+                    assert!(now <= t + balance::THINK_BUCKETS, "{id:?} past its arrival: {j:?}");
+                }
+            }
+            for (vid, t) in w.traffic.trips.iter() {
+                if t.purpose == TripPurpose::Goods {
+                    continue;
+                }
+                cars += 1;
+                match t.citizen {
+                    Some(d) => {
+                        let j = w.citizens[d].location.journey().expect("the driver is travelling");
+                        assert_eq!(j.vehicle, Some(vid), "{d:?} drives {vid:?}");
+                        with_driver += 1;
+                    }
+                    None => assert!(
+                        t.purpose == TripPurpose::MoveOut && t.party > 0,
+                        "{vid:?} on the road with nobody in it: {t:?}"
+                    ),
                 }
             }
         }
@@ -52,13 +71,56 @@ fn trips_end_in_sane_time_and_nights_are_quiet() {
             check_consistency(&w, true);
         }
     }
-    eprintln!("longest trip {longest} ticks; travelling at 03:00 {night:?}, at 08:00 {rush:?}");
+    eprintln!(
+        "{with_driver} of {cars} car samples with their driver; travelling at 03:00 {night:?}, at 08:00 {rush:?}"
+    );
     assert!(w.stats.population > 1_000);
-    assert!(night.iter().all(|&s| s < 0.01), "night travel {night:?}");
+    assert!(with_driver * 100 >= cars * 98, "{with_driver} of {cars}");
+    assert!(night.iter().all(|&s| s < 0.07), "night travel {night:?}");
     assert!(
         rush.iter().zip(&night).all(|(r, n)| r > n),
         "more travel at 08:00 than 03:00"
     );
+}
+
+/// A commuter learns how long the trip to work takes and leaves early
+/// enough: most workers who drove to work arrive before their shift starts.
+#[test]
+fn commuters_leave_early_enough() {
+    let (mut w, mut p) = grid_city(14, 1);
+    let (mut arrived, mut on_time) = (0u32, 0u32);
+    let mut was_travelling: std::collections::BTreeMap<CitizenId, u64> = Default::default();
+    for _ in 0..DAY {
+        p.act(&mut w);
+        w.step();
+        for (id, c) in w.citizens.iter() {
+            match c.location {
+                Location::Travelling(j) if j.purpose == TripPurpose::ToWork && c.workplace() == Some(j.to) => {
+                    was_travelling.insert(id, j.departed_tick);
+                }
+                Location::In(b)
+                    if c.workplace() == Some(b)
+                        && c.activity == Activity::Working
+                        && was_travelling.remove(&id).is_some() =>
+                {
+                    arrived += 1;
+                    // Arrived before the shift's start (plus the daily
+                    // wobble): the shift has at least its length left.
+                    let job = c.job.unwrap();
+                    let left = c.until_tick - w.time.tick;
+                    let wobble = (balance::SHIFT_DAILY_WOBBLE_H * balance::TICKS_PER_HOUR as f32) as u64;
+                    if left + wobble >= job.shift.length as u64 {
+                        on_time += 1;
+                    }
+                    assert!(c.commute_ticks > 0, "{id:?} learnt its commute time");
+                }
+                _ => {}
+            }
+        }
+    }
+    eprintln!("{on_time} of {arrived} commuters on time");
+    assert!(arrived > 200, "{arrived}");
+    assert!(on_time * 10 >= arrived * 8, "{on_time} of {arrived} on time");
 }
 
 /// Rush hours come from people: more commuters set off between 06:00 and
@@ -66,13 +128,16 @@ fn trips_end_in_sane_time_and_nights_are_quiet() {
 /// evening; shopping and leisure fill the day and the evening.
 #[test]
 fn rush_hours_and_daytime_errands_emerge() {
-    let (w, _) = grid_city(12, 6);
+    let (w, _) = grid_city(12, 2);
     let by_hour = &w.people.trips_by_hour_yesterday;
+    eprintln!("{by_hour:?}");
     let sum =
         |purpose: TripPurpose, h0: usize, h1: usize| -> u32 { (h0..h1).map(|h| by_hour[h][purpose.index()]).sum() };
-    let morning = sum(TripPurpose::ToWork, 6, 9);
-    for h0 in (0..24).step_by(3).filter(|&h| h != 6) {
-        assert!(morning > sum(TripPurpose::ToWork, h0, h0 + 3), "to work {h0}h");
+    // Workers leave early enough for the trip (an hour or two by car on
+    // the compressed calendar), so the commute starts before dawn.
+    let morning = sum(TripPurpose::ToWork, 4, 8);
+    for h0 in (0..24).step_by(4).filter(|&h| h != 4) {
+        assert!(morning > sum(TripPurpose::ToWork, h0, h0 + 4), "to work {h0}h");
     }
     assert!(sum(TripPurpose::ToHome, 14, 20) > sum(TripPurpose::ToHome, 0, 6) * 3);
     assert!(sum(TripPurpose::Shopping, 9, 21) > 10 * sum(TripPurpose::Shopping, 0, 7).max(1));
@@ -83,7 +148,7 @@ fn rush_hours_and_daytime_errands_emerge() {
 /// The read API agrees with the state for citizens, buildings and cars.
 #[test]
 fn read_api_matches_the_state() {
-    let (w, _) = grid_city(13, 3);
+    let (w, _) = grid_city(13, 1);
     let mut seen_driver = false;
     for (vid, _) in w.vehicles.iter() {
         let v = inspect::vehicle(&w, vid).expect("every car has a trip");
@@ -103,6 +168,54 @@ fn read_api_matches_the_state() {
         }
     }
     assert!(seen_driver, "some cars carry people");
+    // Who is inside each building right now: exactly the citizens there.
+    let mut inside: std::collections::BTreeMap<BuildingId, Vec<CitizenId>> = Default::default();
+    for (cid, c) in w.citizens.iter() {
+        if let Location::In(b) = c.location {
+            inside.entry(b).or_default().push(cid);
+        }
+    }
+    for (bid, _) in w.buildings.iter() {
+        let mut got: Vec<CitizenId> = inspect::inside(&w, bid).collect();
+        got.sort();
+        let mut want = inside.remove(&bid).unwrap_or_default();
+        want.sort();
+        assert_eq!(got, want, "{bid:?}");
+    }
+    // A plan for everyone; working means a trip home next, at the shift's
+    // end; travelling means arriving where the trip goes.
+    for (cid, c) in w.citizens.iter() {
+        let plan = inspect::plan(&w, cid).unwrap();
+        assert_eq!(plan.activity, c.activity);
+        if c.activity == Activity::Working {
+            let n = plan.next.unwrap();
+            assert_eq!(n.purpose, Some(TripPurpose::ToHome));
+            assert_eq!(n.at_tick, Some(c.until_tick.max(w.time.tick)));
+        }
+        if let Some(t) = plan.trip {
+            assert_eq!(plan.next.unwrap().place, Some(t.to));
+        }
+        let reasons = inspect::happiness_reasons(&w, cid).unwrap();
+        assert!(reasons.windows(2).all(|r| r[0].loss >= r[1].loss));
+        assert!(reasons.iter().all(|r| !r.text.is_empty()));
+        assert!(inspect::citizen_pos(&w, cid).is_some_and(|p| p[0].is_finite() && p[1].is_finite()));
+    }
+    // A car says who is in it, where from and to, and since when.
+    for (vid, _) in w.vehicles.iter() {
+        let v = inspect::vehicle(&w, vid).unwrap();
+        assert!(v.started_tick >= v.requested_tick && v.started_tick <= w.time.tick);
+        if v.purpose == TripPurpose::Goods {
+            assert!(v.cargo > 0.0);
+        } else {
+            assert!(v.occupants > 0, "{vid:?} {v:?}");
+        }
+        if let Some(d) = v.driver
+            && let Some(t) = inspect::citizen(&w, d).unwrap().trip
+        {
+            assert_eq!(v.destination_building, Some(t.to));
+            assert_eq!(v.origin_building, t.from);
+        }
+    }
     for (bid, b) in w.buildings.iter() {
         let bv = inspect::building(&w, bid).unwrap();
         match b.kind {
@@ -138,7 +251,7 @@ fn read_api_matches_the_state() {
 /// biggest groups.
 #[test]
 fn a_new_town_is_young() {
-    let (w, _) = grid_city(14, 8);
+    let (w, _) = grid_city(14, 2);
     let s = &w.people.stats;
     let hh: u32 = s.by_kind.iter().sum();
     assert!(
@@ -160,7 +273,7 @@ fn a_new_town_is_young() {
 /// complaint and lower the average; back to normal, it recovers.
 #[test]
 fn happiness_responds_to_taxes() {
-    let (mut w, _) = grid_city(15, 3);
+    let (mut w, _) = grid_city(15, 2);
     let base = w.people.stats.avg_parts[HappinessPart::Taxes.index()];
     assert!(base > 0.95, "default tax is fine: {base}");
     w.apply(Command::SetTaxRate(balance::MAX_TAX_RATE)).unwrap();
@@ -195,10 +308,10 @@ fn unhappiness_has_reasons() {
 }
 
 /// Round-2 saves (format 4) load with plausible citizens, keep running and
-/// save in format 5; damaged format-5 saves never panic.
+/// save in the current format; damaged current saves never panic.
 #[test]
 fn round2_saves_load_with_citizens() {
-    let (w, _) = grid_city(17, 2);
+    let (w, _) = grid_city(17, 1);
     let old = save::v4::save_as_v4(&w);
     assert_eq!(&old[4..8], &4u32.to_le_bytes());
     let mut l = World::load(&old).expect("round-2 save loads");

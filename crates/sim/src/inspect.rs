@@ -260,6 +260,10 @@ pub struct TripView {
     pub departed_tick: u64,
     /// Arrival tick of an off-screen trip.
     pub eta_tick: Option<u64>,
+    /// Expected arrival (off screen: exact; by car: departure plus the
+    /// expected door-to-door time; the car may be late, nobody gets out
+    /// before it arrives).
+    pub expected_tick: u64,
 }
 
 /// Everything about one citizen.
@@ -292,6 +296,211 @@ impl CitizenView<'_> {
     pub fn wage(&self) -> Option<u32> {
         self.citizen.job.map(|j| j.wage)
     }
+    /// The household's money (shared by its members), dollars.
+    pub fn money(&self) -> i64 {
+        self.household.money
+    }
+    /// Happiness, `0..=1`.
+    pub fn happiness(&self) -> f32 {
+        self.citizen.happiness.total
+    }
+}
+
+// ------------------------------------------------------------- plans ----
+
+/// What comes after the current activity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NextStep {
+    /// What they will be doing (`Travelling` for setting off on a trip).
+    pub activity: Activity,
+    /// Why they set off, when `activity` is `Travelling`.
+    pub purpose: Option<TripPurpose>,
+    /// Where it happens (or where the trip goes).
+    pub place: Option<BuildingId>,
+    /// When it starts (tick), if known. For a car trip under way: the
+    /// expected arrival (it may be late: the next activity starts when the
+    /// car arrives).
+    pub at_tick: Option<u64>,
+}
+
+/// A citizen's day as the interface shows it: what now, until when, what
+/// next. Cheap (a few lookups).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DayPlan {
+    pub activity: Activity,
+    /// Building they are in, or the trip under way.
+    pub inside: Option<BuildingId>,
+    pub trip: Option<TripView>,
+    /// When the current activity is expected to end, if it has a set end
+    /// (a shift, a night's sleep, a visit, an off-screen trip; a car trip:
+    /// the expected arrival). `None` while at home with nothing planned.
+    pub until_tick: Option<u64>,
+    pub next: Option<NextStep>,
+    /// Their next shift still to come: (leave home, end) ticks.
+    pub next_shift: Option<(u64, u64)>,
+}
+
+/// What `id` is doing now, until when, and what comes next.
+pub fn plan(world: &World, id: CitizenId) -> Option<DayPlan> {
+    let v = citizen(world, id)?;
+    let c = v.citizen;
+    let now = world.time.tick;
+    let shift = crate::day::next_shift(world, id).map(|(_, leave, end)| (leave.max(0) as u64, end.max(0) as u64));
+    let home = v.home;
+    let step = |activity, purpose, place, at_tick| {
+        Some(NextStep {
+            activity,
+            purpose,
+            place,
+            at_tick,
+        })
+    };
+    let (until, next) = match (c.activity, v.trip) {
+        (_, Some(t)) => {
+            let at = Some(t.expected_tick);
+            let next = match t.purpose {
+                TripPurpose::ToWork if Some(t.to) == v.workplace => step(Activity::Working, None, Some(t.to), at),
+                TripPurpose::Shopping if t.to != home => step(Activity::Shopping, None, Some(t.to), at),
+                TripPurpose::Leisure if t.to != home => step(Activity::Leisure, None, Some(t.to), at),
+                _ => step(Activity::Home, None, Some(home), at),
+            };
+            (at, next)
+        }
+        (Activity::Working | Activity::Shopping | Activity::Leisure, None) => {
+            let until = Some(c.until_tick.max(now));
+            (
+                until,
+                step(Activity::Travelling, Some(TripPurpose::ToHome), Some(home), until),
+            )
+        }
+        (Activity::Sleeping, None) => {
+            let wake = c.until_tick.max(now);
+            match shift {
+                Some((leave, _)) if leave <= wake => (
+                    Some(leave),
+                    step(
+                        Activity::Travelling,
+                        Some(TripPurpose::ToWork),
+                        v.workplace,
+                        Some(leave),
+                    ),
+                ),
+                _ => (Some(wake), step(Activity::Home, None, Some(home), Some(wake))),
+            }
+        }
+        _ => {
+            // At home (or turned back): the next shift if any, else bed.
+            let (_, bed) = crate::day::wake_bed(world, id);
+            let midnight = now - world.time.tick_of_day as u64;
+            let bed_t = midnight + (bed * balance::TICKS_PER_HOUR as f32) as u64;
+            match shift {
+                Some((leave, _)) if leave < bed_t || (bed_t <= now && leave <= now) => (
+                    None,
+                    step(
+                        Activity::Travelling,
+                        Some(TripPurpose::ToWork),
+                        v.workplace,
+                        Some(leave.max(now)),
+                    ),
+                ),
+                _ => (None, step(Activity::Sleeping, None, Some(home), Some(bed_t.max(now)))),
+            }
+        }
+    };
+    Some(DayPlan {
+        activity: c.activity,
+        inside: v.inside,
+        trip: v.trip,
+        until_tick: until,
+        next,
+        next_shift: shift,
+    })
+}
+
+/// Where a citizen is, sim metres: the centre of the building they are in,
+/// the car they ride, or (off screen) a point on the straight line of their
+/// trip by the time elapsed (approximate).
+pub fn citizen_pos(world: &World, id: CitizenId) -> Option<[f32; 2]> {
+    let v = citizen(world, id)?;
+    let centre = |b: Option<BuildingId>| crate::day::pos_of(world, b);
+    match v.trip {
+        None => v.inside.map(|b| centre(Some(b))),
+        Some(t) => {
+            if let Some(car) = t.vehicle.and_then(|car| world.vehicles.get(car)) {
+                return Some(car.pos);
+            }
+            let (a, b) = (centre(t.from), centre(Some(t.to)));
+            let span = t.expected_tick.saturating_sub(t.departed_tick).max(1) as f32;
+            let f = (world.time.tick.saturating_sub(t.departed_tick) as f32 / span).clamp(0.0, 1.0);
+            Some([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f])
+        }
+    }
+}
+
+/// One happiness component in words.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HappinessReason {
+    pub part: HappinessPart,
+    /// The component's value, `0..=1` (1 = content).
+    pub value: f32,
+    /// How much it pulls the total down (weighted shortfall).
+    pub loss: f32,
+    /// A short sentence about this citizen ("Out of work for 2 days").
+    pub text: &'static str,
+    /// Good news rather than a complaint.
+    pub good: bool,
+}
+
+/// Every happiness component of a citizen in words, the biggest complaint
+/// first (no allocation).
+pub fn happiness_reasons(world: &World, id: CitizenId) -> Option<[HappinessReason; 7]> {
+    let c = world.citizens.get(id)?;
+    let h = world.households.get(c.household)?;
+    let hp = &c.happiness;
+    let w = balance::HAPPINESS_WEIGHTS;
+    let ok = 0.75;
+    let mut out = HappinessPart::ALL.map(|part| {
+        let value = hp.part(part);
+        let good = value >= ok;
+        let text = match part {
+            HappinessPart::Employment => match (c.job.is_some(), c.retired, c.in_workforce(), good) {
+                (true, _, _, _) => "Has a job",
+                (_, true, _, _) => "Retired on a pension",
+                (_, _, true, _) if c.unemployed_days >= 2 => "Out of work for days",
+                (_, _, true, _) => "Looking for a job",
+                (_, _, false, true) => "The household has an income",
+                _ => "Nobody in the household earns",
+            },
+            HappinessPart::Commute if c.job.is_none() => "No commute",
+            HappinessPart::Commute if c.hopeless_commutes > 0 => "Hopeless commute",
+            HappinessPart::Commute if good => "Short commute",
+            HappinessPart::Commute => "Long commute",
+            HappinessPart::Affordability if h.money < 0 => "The household is in debt",
+            HappinessPart::Affordability if h.austerity => "Money is tight: essentials only",
+            HappinessPart::Affordability if good => "Can afford rent and living",
+            HappinessPart::Affordability => "Rent and costs too high",
+            HappinessPart::Access if h.goods <= 0.0 => "Ran out of goods at home",
+            HappinessPart::Access if good => "Shops and leisure nearby",
+            HappinessPart::Access if c.leisure_need >= balance::LEISURE_URGENT_NEED => "Needs a night out",
+            HappinessPart::Access => "Few shops or leisure nearby",
+            HappinessPart::Taxes if good => "Taxes are fair",
+            HappinessPart::Taxes => "Taxes too high",
+            HappinessPart::Finances if good => "City services are good",
+            HappinessPart::Finances if world.economy.money < 0 => "The city is in debt",
+            HappinessPart::Finances => "City services cut",
+            HappinessPart::Housing if good => "A home of their own",
+            HappinessPart::Housing => "Still living with their parents",
+        };
+        HappinessReason {
+            part,
+            value,
+            loss: (1.0 - value) * w[part.index()],
+            text,
+            good,
+        }
+    });
+    out.sort_by(|a, b| b.loss.total_cmp(&a.loss));
+    Some(out)
 }
 
 /// Look up a citizen (`None` if they no longer live in the city).
@@ -318,6 +527,7 @@ pub fn citizen(world: &World, id: CitizenId) -> Option<CitizenView<'_>> {
                 driver: j.driver,
                 departed_tick: j.departed_tick,
                 eta_tick: j.arrive_tick,
+                expected_tick: j.arrive_tick.unwrap_or(j.due_tick),
             })
         }
     };
@@ -395,6 +605,19 @@ pub fn building(world: &World, id: BuildingId) -> Option<BuildingView<'_>> {
     })
 }
 
+/// Everyone inside a building right now: residents at home, staff on
+/// shift, shoppers and visitors (no allocation).
+pub fn inside(world: &World, id: BuildingId) -> impl Iterator<Item = CitizenId> + '_ {
+    let at_home = residents(world, id).filter(move |&c| world.citizens[c].location == Location::In(id));
+    let guests = world
+        .people
+        .places
+        .get(id)
+        .into_iter()
+        .flat_map(|p| p.guests.iter().copied());
+    at_home.chain(guests)
+}
+
 /// Everyone who lives in a building (no allocation).
 pub fn residents(world: &World, id: BuildingId) -> impl Iterator<Item = CitizenId> + '_ {
     world
@@ -430,13 +653,25 @@ pub struct VehicleView {
     /// The citizen whose trip this car draws, also after they got out (the
     /// car is finishing the drive to where they now are).
     pub owner: Option<CitizenId>,
-    /// Citizens in the car, driver included.
+    /// People in the car, driver included (citizens, plus `party`).
     pub occupants: u8,
     pub origin: Place,
     pub destination: Place,
-    /// Buildings at the two ends (none for the highway).
+    /// Buildings at the two ends (none for the highway; a building that
+    /// has been removed since the car set off is still named).
     pub origin_building: Option<BuildingId>,
     pub destination_building: Option<BuildingId>,
+    /// People aboard a car of a household that is leaving the city (they
+    /// are no longer citizens); 0 otherwise.
+    pub party: u8,
+    /// Goods aboard a truck, units.
+    pub cargo: f32,
+    /// Tick the trip was asked for (the people left the building) and the
+    /// tick the car pulled out onto the road.
+    pub requested_tick: u64,
+    pub started_tick: u64,
+    /// Seconds of vehicle time since the car pulled out.
+    pub on_road_s: f32,
 }
 
 /// Look up a vehicle's trip and occupants.
@@ -448,16 +683,22 @@ pub fn vehicle(world: &World, id: VehicleId) -> Option<VehicleView> {
         Place::Entry => None,
     };
     let driver = t.citizen.filter(|&c| world.citizens.contains_key(c));
+    let now = world.time.tick;
     Some(VehicleView {
         purpose: t.purpose,
         household: v.household,
         driver,
         owner: t.owner.filter(|&c| world.citizens.contains_key(c)),
-        occupants: occupants(world, id).count().min(u8::MAX as usize) as u8,
+        occupants: (occupants(world, id).count() + t.party as usize).min(u8::MAX as usize) as u8,
         origin: t.from,
         destination: t.to,
-        origin_building: at(t.from),
-        destination_building: at(t.to),
+        origin_building: t.from_building.or_else(|| at(t.from)),
+        destination_building: t.to_building.or_else(|| at(t.to)),
+        party: t.party,
+        cargo: t.cargo,
+        requested_tick: t.requested_tick,
+        started_tick: t.started_tick,
+        on_road_s: now.saturating_sub(t.started_tick) as f32 / crate::TICKS_PER_SECOND as f32,
     })
 }
 

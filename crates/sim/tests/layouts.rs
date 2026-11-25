@@ -336,6 +336,9 @@ fn map_spanning_diagonal_mesh() {
         zone: None,
     })
     .unwrap();
-    run(&mut w, 2 * HOUR);
+    // Cars with people in them drive on out of the city (the households
+    // left with their homes); on the bare highway stub they turn round one
+    // by one at its end.
+    run(&mut w, 4 * HOUR);
     assert!(w.vehicles.is_empty() && w.households.is_empty());
 }
