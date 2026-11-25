@@ -57,6 +57,8 @@ pub mod world;
 
 #[cfg(test)]
 mod people_tests;
+#[cfg(test)]
+mod trip_tests;
 
 pub use buildings::{Building, BuildingId, Facing};
 pub use citizens::{

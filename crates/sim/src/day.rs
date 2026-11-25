@@ -207,11 +207,56 @@ pub(crate) fn decide(world: &mut World, id: CitizenId) {
             if lost {
                 continue_off_screen(world, id);
             } else {
+                if j.mode == TravelMode::Driving && j.to != home && closed_by_now(world, j.purpose) {
+                    turn_back(world, id, home);
+                }
                 people::set_until(world, id, now + HOUR);
             }
         }
         Location::In(b) if b == home => at_home(world, id),
         Location::In(b) => away(world, id, b),
+    }
+}
+
+/// Has the place a trip of `purpose` goes to closed by now (shops,
+/// leisure venues)?
+fn closed_by_now(world: &World, purpose: TripPurpose) -> bool {
+    let tod = world.time.hour();
+    match purpose {
+        TripPurpose::Shopping => !(balance::SHOP_OPEN_H..balance::SHOP_CLOSE_H).contains(&tod),
+        TripPurpose::Leisure => !(balance::LEISURE_OPEN_H..balance::LEISURE_LAST_H).contains(&tod),
+        _ => false,
+    }
+}
+
+/// The driver of a car stuck on its way to a shop or venue that has closed
+/// turns back home, with everyone in the car.
+fn turn_back(world: &mut World, driver: CitizenId, home: BuildingId) {
+    let Location::Travelling(j) = world.citizens[driver].location else {
+        return;
+    };
+    let Some(v) = j.vehicle else { return };
+    let Some(place) = place_of(world, home) else { return };
+    let Some(at) = world.vehicles.get(v).map(|car| car.pos) else {
+        return;
+    };
+    traffic::redirect(world, v, place, Some(home));
+    let due = world.time.tick + secs_to_ticks(estimate_s(at, pos_of(world, Some(home))));
+    for m in std::iter::once(driver).chain(riders_of(world, driver)) {
+        if let Location::Travelling(mj) = world.citizens[m].location {
+            let nj = Journey {
+                to: home,
+                due_tick: due,
+                ..mj
+            };
+            people::set_place(
+                world,
+                m,
+                Activity::Travelling,
+                Location::Travelling(nj),
+                world.citizens[m].until_tick,
+            );
+        }
     }
 }
 

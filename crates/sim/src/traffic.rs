@@ -349,6 +349,19 @@ pub(crate) fn move_out(world: &mut World, id: VehicleId, party: u8) {
     }
 }
 
+/// The people in car `id` change their mind: it heads for `to` instead
+/// (they turn back home when the shop or venue they were driving to has
+/// closed).
+pub(crate) fn redirect(world: &mut World, id: VehicleId, to: Place, to_building: Option<BuildingId>) {
+    let Some(t) = world.traffic.trips.get_mut(id) else {
+        return;
+    };
+    t.to = to;
+    t.to_building = to_building;
+    t.needs_route = true;
+    queue_replan(&mut world.traffic, id, true);
+}
+
 /// Cars allowed on the road (and waiting to start) at once: 125 per 1,000
 /// residents, at least 150, at most `balance::MAX_VEHICLES`.
 pub fn vehicle_budget(world: &World) -> usize {
