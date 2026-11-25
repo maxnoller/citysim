@@ -175,7 +175,7 @@ fn find_building_where(world: &World, focus: Cell, pred: impl Fn(&Building) -> b
         .buildings
         .values()
         .filter(|b| pred(b))
-        .map(|b| b.footprint.min)
+        .map(|b| Cell::from_pos(b.center()))
         .min_by_key(|c| c.chebyshev(focus))
 }
 
@@ -201,11 +201,12 @@ fn find_road(world: &World) -> Option<Cell> {
 
 fn find_road_near(world: &World, focus: Cell) -> Option<Cell> {
     let sim = &world.resource::<SimWorld>().world;
+    let grid = sim.grid_view();
     let mut best: Option<(i32, Cell)> = None;
     for y in focus.y - 20..focus.y + 20 {
         for x in focus.x - 20..focus.x + 20 {
             let c = Cell::new(x, y);
-            if sim.grid.get(c).is_some_and(|cd| cd.occupant == Occupant::Road)
+            if grid.is_road(c)
                 && sim.roads.segment_through(c.center()).is_some()
             {
                 let d = c.chebyshev(focus);
@@ -222,11 +223,12 @@ fn find_road_near(world: &World, focus: Cell) -> Option<Cell> {
 fn find_new_road(world: &World) -> Option<(Cell, Cell)> {
     let sim = &world.resource::<SimWorld>().world;
     let focus = Cell::new(46, 126);
+    let grid = sim.grid_view();
     let mut best: Option<(i32, Cell, Cell)> = None;
     for y in focus.y - 60..focus.y + 60 {
         for x in focus.x - 60..focus.x + 60 {
             let start = Cell::new(x, y);
-            if !sim.grid.is_road(start) {
+            if !grid.is_road(start) {
                 continue;
             }
             for (dx, dy) in [(1, 1), (1, -1), (0, 1), (1, 0)] {
@@ -240,8 +242,7 @@ fn find_new_road(world: &World) -> Option<(Cell, Cell)> {
                 // grows a building into it before the click.
                 let clear = start.straight_line_to(end).is_some_and(|cells| {
                     cells[1..].iter().all(|&c| {
-                        sim.grid
-                            .get(c)
+                        grid.get(c)
                             .is_some_and(|cd| cd.zone.is_none() && cd.occupant == Occupant::Empty)
                     })
                 });
@@ -273,9 +274,9 @@ fn look_at(w: &mut World, c: Cell, distance: f32) {
 fn find_empty_area(world: &World, wdt: i32, hgt: i32) -> Option<Cell> {
     let sim = &world.resource::<SimWorld>().world;
     let focus = Cell::new(46, 126);
+    let grid = sim.grid_view();
     let free = |c: Cell| {
-        sim.grid
-            .get(c)
+        grid.get(c)
             .is_some_and(|cd| cd.zone.is_none() && cd.occupant == Occupant::Empty)
     };
     let mut best: Option<(i32, Cell)> = None;
@@ -302,8 +303,8 @@ fn build_now(w: &mut World, cmds: &[Command]) {
     let mut sim = w.resource_mut::<SimWorld>();
     let money = sim.world.economy.money;
     sim.world.economy.money = money.max(0) + 1_000_000;
-    for &c in cmds {
-        let _ = sim.world.apply(c);
+    for c in cmds {
+        let _ = sim.world.apply(c.clone());
     }
     sim.world.economy.money = money;
 }
@@ -387,7 +388,7 @@ fn steps() -> Vec<Step> {
                 let c = find_building_where(w, Cell::new(48, 130), |b| b.kind == Zone::Residential && b.occupied > 0);
                 let world = &mut w.resource_mut::<SimWorld>().into_inner().world;
                 if let Some(c) = c
-                    && let Some(Occupant::Building(id)) = world.grid.get(c).map(|cd| cd.occupant)
+                    && let Some(Occupant::Building(id)) = world.grid_view().get(c).map(|cd| cd.occupant)
                 {
                     let hour = citysim_sim::balance::TICKS_PER_HOUR as u64;
                     let since = (world.time.tick / hour).saturating_sub(7) * hour;
@@ -406,11 +407,11 @@ fn steps() -> Vec<Step> {
                 // "needs a road" here).
                 let sim = &w.resource::<SimWorld>().world;
                 let focus = Cell::new(48, 130);
-                let lot = (0..sim.grid.cells.len() as i32)
+                let grid = sim.grid_view();
+                let lot = (0..citysim_sim::MAP_CELLS * citysim_sim::MAP_CELLS)
                     .map(|i| Cell::new(i % citysim_sim::MAP_CELLS, i / citysim_sim::MAP_CELLS))
                     .filter(|&c| {
-                        sim.grid
-                            .get(c)
+                        grid.get(c)
                             .is_some_and(|cd| cd.zone == Some(Zone::Residential) && cd.occupant == Occupant::Empty)
                     })
                     .min_by_key(|c| c.chebyshev(focus));
@@ -654,7 +655,7 @@ fn steps() -> Vec<Step> {
             setup: |w| {
                 reset(w);
                 let Some(c) = find_building(w) else { return };
-                let id = match w.resource::<SimWorld>().world.grid.get(c).map(|cd| cd.occupant) {
+                let id = match w.resource::<SimWorld>().world.grid_view().get(c).map(|cd| cd.occupant) {
                     Some(Occupant::Building(id)) => id,
                     _ => return,
                 };

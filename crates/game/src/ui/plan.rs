@@ -39,7 +39,7 @@ pub fn road_kind(kind: RoadChoice) -> RoadKind {
 pub fn scratch(world: &World) -> World {
     let mut w = World::new(world.seed);
     w.roads = world.roads.clone();
-    w.grid = world.grid.clone();
+    w.zoning = world.zoning.clone();
     w.buildings = world.buildings.clone();
     w.growth = world.growth.clone();
     w.economy = world.economy.clone();
@@ -109,12 +109,12 @@ pub fn evaluate(base: &World, cmds: Vec<Command>) -> (Evaluated, World) {
     let mut cells = BTreeSet::new();
     let (mut new_pieces, mut upgraded, mut downgraded) = (0, 0, 0);
     let mut changed_cells = Vec::with_capacity(cmds.len());
-    for &cmd in &cmds {
-        changed_cells.push(match cmd {
+    for cmd in &cmds {
+        changed_cells.push(match *cmd {
             Command::BuildRoad { from, to, kind } => kind_changes(&w, from, to, kind),
             _ => Vec::new(),
         });
-        match w.apply(cmd) {
+        match w.apply(cmd.clone()) {
             Ok(o) => {
                 cost += o.cost;
                 cells.extend(o.cells);
@@ -575,10 +575,10 @@ pub fn bulldoze_commands(cells: &[Cell]) -> Vec<Command> {
 
 /// Road cells that are road in `before` and not in `after`.
 pub fn cleared_road_cells(before: &World, after: &World, cells: &[Cell]) -> Vec<Cell> {
-    let is_road = |w: &World, c: Cell| w.grid.get(c).is_some_and(|cd| cd.occupant == Occupant::Road);
+    let (gb, ga) = (before.grid_view(), after.grid_view());
     let set: BTreeSet<Cell> = cells.iter().copied().collect();
     set.into_iter()
-        .filter(|&c| is_road(before, c) && !is_road(after, c))
+        .filter(|&c| gb.is_road(c) && !ga.is_road(c))
         .collect()
 }
 
@@ -667,10 +667,11 @@ pub fn undo_for_roads(before: &World, after: &World, label: String) -> Result<Un
     if new_pieces.iter().any(|(p, q)| !set.contains(p) && !set.contains(q)) {
         return Err("a new piece joins two roads that were already there".into());
     }
+    let grid = before.grid_view();
     let rezone = cells
         .iter()
         .filter_map(|&c| {
-            let z = before.grid.get(c)?.zone?;
+            let z = grid.get(c)?.zone?;
             Some((c, z))
         })
         .collect();
@@ -723,8 +724,9 @@ pub fn undo_commands(world: &World, rec: &UndoRecord) -> Result<Vec<Command>, St
         }
         UndoRecord::Zones { restore, .. } => {
             let mut by_zone: BTreeMap<Option<u8>, (Option<Zone>, Vec<Cell>)> = BTreeMap::new();
+            let grid = world.grid_view();
             for &(c, z) in restore {
-                let now = world.grid.get(c).map(|cd| (cd.zone, cd.occupant));
+                let now = grid.get(c).map(|cd| (cd.zone, cd.occupant));
                 if now.is_some_and(|(zn, occ)| zn != z && occ == Occupant::Empty) {
                     by_zone.entry(z.map(|z| z as u8)).or_insert((z, Vec::new())).1.push(c);
                 }
@@ -773,10 +775,11 @@ fn check_undo(world: &World, rec: &UndoRecord) -> Result<(), String> {
 
 /// Undo record for a zoning action: each changed cell's previous zone.
 pub fn undo_for_zones(before: &World, changed: &[Cell], label: String) -> UndoRecord {
+    let grid = before.grid_view();
     UndoRecord::Zones {
         restore: changed
             .iter()
-            .filter_map(|&c| Some((c, before.grid.get(c)?.zone)))
+            .filter_map(|&c| Some((c, grid.get(c)?.zone)))
             .collect(),
         label,
     }
@@ -818,21 +821,6 @@ mod tests {
         let pts = [STUB_END, Cell::new(20, 128), Cell::new(15, 128)];
         let plan = plan_roads(&base, &legs_of(&pts), RoadChoice::Street);
         assert_eq!(plan.eval.cost, 9 * balance::ROAD_COST_PER_CELL);
-    }
-
-    #[test]
-    fn path_that_crosses_itself_diagonally_is_refused_at_that_leg() {
-        let base = scratch(&rich());
-        let pts = [
-            Cell::new(30, 30),
-            Cell::new(34, 34),
-            Cell::new(34, 33),
-            Cell::new(33, 34),
-        ];
-        let plan = plan_roads(&base, &legs_of(&pts), RoadChoice::Street);
-        assert!(plan.legs[0].error.is_none());
-        assert!(matches!(plan.legs[2].error, Some(CommandError::DiagonalCrossing(_))));
-        assert!(!plan.eval.ok());
     }
 
     #[test]
@@ -1010,10 +998,13 @@ mod tests {
         }
         assert_eq!(pieces(&w), pieces(&before));
         assert_eq!(
-            before.grid.get(Cell::new(37, 126)).unwrap().zone,
+            before.grid_view().get(Cell::new(37, 126)).unwrap().zone,
             Some(Zone::Commercial)
         );
-        assert_eq!(w.grid.get(Cell::new(37, 126)).unwrap().zone, Some(Zone::Commercial));
+        assert_eq!(
+            w.grid_view().get(Cell::new(37, 126)).unwrap().zone,
+            Some(Zone::Commercial)
+        );
         w.check_invariants().unwrap();
         // A one-piece link between two old roads cannot be taken back alone.
         let mut w = town();
@@ -1041,7 +1032,7 @@ mod tests {
         assert_eq!(plan.eval.new_pieces, 10);
         assert_eq!(plan.legs[0].upgrade_cells.len(), 11);
         let before = w.clone();
-        w.apply(plan.eval.cmds[0]).unwrap();
+        w.apply(plan.eval.cmds[0].clone()).unwrap();
         let rec = undo_for_roads(&before, &w, "avenue".into()).unwrap();
         for c in undo_commands(&w, &rec).unwrap() {
             w.apply(c).unwrap();

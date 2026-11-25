@@ -376,7 +376,7 @@ fn update_hint(
     if progress.grid_version != Some(key) || last.is_changed() {
         progress.grid_version = Some(key);
         if !progress.done[1] {
-            progress.done[1] = w.grid.cells.iter().any(|c| c.zone.is_some())
+            progress.done[1] = w.zoning.cells().any(|(_, c)| c.zone.is_some())
                 || matches!(&last.result, Some((Command::SetZone { zone: Some(_), .. }, Ok(o))) if !o.cells.is_empty());
         }
     }

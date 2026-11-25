@@ -127,6 +127,22 @@ pub fn error_text(e: &CommandError) -> String {
             "Tax rate must be between 0% and {}",
             format::percent(balance::MAX_TAX_RATE)
         ),
+        CommandError::TooShort { length, min, .. } => {
+            format!("Too short: {length:.0} m here, a road piece needs {min:.0} m")
+        }
+        CommandError::TooTight { radius, min, .. } => {
+            format!("Bend too tight: radius {radius:.0} m, this road needs {min:.0} m")
+        }
+        CommandError::SharpAngle { degrees, min, .. } => {
+            format!("Roads would meet at {degrees:.0}°: at least {min:.0}° needed")
+        }
+        CommandError::TooClose { .. } => "Too close to another road: keep at least a lot's width".into(),
+        CommandError::SelfCrossing { .. } => "The road crosses itself".into(),
+        CommandError::BuildingInTheWay { .. } => "A building is in the way. Bulldoze it first".into(),
+        CommandError::OffMap { .. } => "That's outside the map".into(),
+        CommandError::NoSuchRoad => "There's no road there".into(),
+        CommandError::NotANode => "Not a junction: point at a crossing of three or more roads".into(),
+        CommandError::TooManyArms { arms, .. } => format!("{arms} roads can't meet at one junction (6 at most)"),
     }
 }
 
@@ -653,8 +669,9 @@ pub fn zone_noop_reason(world: &World, rect: CellRect, zone: Option<Zone>) -> (S
         return ("That's outside the map".into(), t::TEXT_MUTED);
     };
     let (mut road, mut built, mut same, mut far) = (0usize, 0usize, 0usize, 0usize);
+    let grid = world.grid_view();
     for c in rect.cells() {
-        let Some(cd) = world.grid.get(c) else { continue };
+        let Some(cd) = grid.get(c) else { continue };
         match cd.occupant {
             Occupant::Road => road += 1,
             Occupant::Building(_) => built += 1,
@@ -710,7 +727,7 @@ fn zone_slot(z: Zone) -> usize {
 
 /// Inspect card for whatever is on `cell`.
 pub fn inspect_card(world: &World, cell: Cell) -> Option<Card> {
-    let cd = world.grid.get(cell)?;
+    let cd = world.grid_view().get(cell)?;
     match cd.occupant {
         Occupant::Building(id) => building_card(world, id, world.buildings.get(id)?),
         Occupant::Road => road_card(world, cell),
@@ -786,7 +803,7 @@ fn building_card(world: &World, id: BuildingId, b: &Building) -> Option<Card> {
     }
     // Deep lots: the sim folds the second row into the lot of the building
     // that fronts the road.
-    let (w, h) = (b.footprint.width(), b.footprint.height());
+    let (w, h) = b.size();
     if w * h > 1 {
         let side = match b.facing {
             citysim_sim::Facing::PlusX => "east",
@@ -1255,11 +1272,7 @@ fn pinned_card(world: &World, target: &WorldTarget) -> Option<(Card, [f32; 2])> 
     match target {
         WorldTarget::Building(id) => {
             let b = world.buildings.get(*id)?;
-            let (lo, hi) = (b.footprint.min.center(), b.footprint.max.center());
-            Some((
-                building_card(world, *id, b)?,
-                [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5],
-            ))
+            Some((building_card(world, *id, b)?, b.center()))
         }
         WorldTarget::Junction { node, pos } => Some((junction_card(world, *node)?, *pos)),
         WorldTarget::Road(stretch) => {

@@ -710,10 +710,10 @@ fn commit(
         _ => {}
     }
     state.batch_frame = !single;
-    for &cmd in &plan.eval.cmds {
-        state.sent = Some(cmd);
+    for cmd in &plan.eval.cmds {
+        state.sent = Some(cmd.clone());
         debug!("tool sends {cmd:?}");
-        out.write(SimCommand(cmd));
+        out.write(SimCommand(cmd.clone()));
     }
     toast
 }
@@ -915,7 +915,7 @@ fn use_tool(
                 let cmd = Command::SetJunctionControl { cell: c, control: next };
                 match sim.world.preview(&cmd) {
                     Ok(p) => {
-                        state.sent = Some(cmd);
+                        state.sent = Some(cmd.clone());
                         out.write(SimCommand(cmd));
                         let now_control = p.junction.map(|j| j.control_after);
                         let text = match (next, now_control) {
@@ -1037,7 +1037,7 @@ fn finish_path(
 
 /// What the inspect / junction tools point at on `cell`.
 pub fn target_at(world: &World, state: &ToolState, cell: Cell) -> Option<WorldTarget> {
-    let cd = world.grid.get(cell)?;
+    let cd = world.grid_view().get(cell)?;
     match cd.occupant {
         Occupant::Building(id) => Some(WorldTarget::Building(id)),
         Occupant::Road => {
@@ -1213,7 +1213,7 @@ pub fn compute_preview(w: &World, cmd: Command) -> ToolPreview {
             p.kind = PreviewKind::Bulldoze;
             p.rect = Some(CellRect::from_corners(min, max));
         }
-        Command::SetTaxRate(_) | Command::SetJunctionControl { .. } => {}
+        _ => {}
     }
     match result {
         Ok(r) => {
