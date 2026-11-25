@@ -466,18 +466,29 @@ fn go_shopping(world: &mut World, id: CitizenId) -> bool {
     true
 }
 
-fn go_leisure(world: &mut World, id: CitizenId) -> bool {
+pub(crate) fn go_leisure(world: &mut World, id: CitizenId) -> bool {
     let c = &world.citizens[id];
     let Some(from) = c.location.building() else {
         return false;
     };
+    let car = c.drives() && (c.has_car || world.households[c.household].free_cars(world) > 0);
     let fp = pos_of(world, Some(from));
     let Some(venue) = pick_venue(world, fp) else {
         return false;
     };
-    // Only if there is time for a night out before the venue closes.
-    let arrive_h = world.time.hour() + secs_to_ticks(estimate_s(fp, pos_of(world, Some(venue)))) as f32 / HOUR as f32;
-    if arrive_h + balance::LEISURE_DURATION_H > balance::LEISURE_LAST_H {
+    // Only if getting there takes less than the night out itself (a long
+    // trip without a car is not worth it) and there is time for it before
+    // the venue closes.
+    let vp = pos_of(world, Some(venue));
+    let factor = if car || geom::dist(fp, vp) <= balance::WALK_MAX_M {
+        1.0
+    } else {
+        balance::CARLESS_TIME_FACTOR
+    };
+    let trip_h = secs_to_ticks(estimate_s(fp, vp) * factor) as f32 / HOUR as f32;
+    if trip_h > balance::LEISURE_DURATION_H
+        || world.time.hour() + trip_h + balance::LEISURE_DURATION_H > balance::LEISURE_LAST_H
+    {
         return false;
     }
     let kids = companions_at(world, id, from, true);

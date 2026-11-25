@@ -257,3 +257,66 @@ fn services_cost_more_per_resident_in_a_bigger_denser_city() {
     );
     assert_eq!(small.road_upkeep(), economy::budget_now(&w).road_upkeep);
 }
+
+#[test]
+fn nobody_goes_out_for_longer_on_the_way_than_at_the_venue() {
+    // The same citizen, the same evening, a venue far away: with the
+    // household's car free a night out is on; with no car (a long trip off
+    // screen) it is not.
+    for car_free in [true, false] {
+        let mut w = town(37);
+        // A household and a shop about 50 s of driving apart (an hour and
+        // a quarter: worth it for a night out by car, not without one).
+        let mut best: Option<(f32, crate::HouseholdId, BuildingId)> = None;
+        for (hid, h) in w.households.iter() {
+            if h.cars == 0 || !h.citizens.iter().any(|&c| w.citizens[c].drives()) {
+                continue;
+            }
+            for (b, bb) in w.buildings.iter() {
+                if bb.kind == Zone::Commercial {
+                    let off = (day::estimate_s(centre(&w, h.home), centre(&w, b)) - 50.0).abs();
+                    if best.is_none_or(|x| off < x.0) {
+                        best = Some((off, hid, b));
+                    }
+                }
+            }
+        }
+        let (_, hid, far) = best.unwrap();
+        let home = w.households[hid].home;
+        let id = w.households[hid]
+            .citizens
+            .iter()
+            .copied()
+            .find(|&c| w.citizens[c].drives())
+            .unwrap();
+        let now = w.time.tick;
+        for m in w.households[hid].citizens.clone() {
+            w.traffic.pending.retain(|d| d.citizen != Some(m));
+            w.citizens[m].has_car = false;
+            people::set_place(&mut w, m, Activity::Home, Location::In(home), now + DAY);
+        }
+        // The far shop is the only venue (the others become workshops).
+        for (b, bb) in w.buildings.iter_mut() {
+            if b != far && bb.kind == Zone::Commercial {
+                bb.kind = Zone::Industrial;
+            }
+        }
+        w.versions.buildings += 1;
+        crate::people::place(&mut w, far).staff_present = 1;
+        if !car_free {
+            w.households[hid].cars = 0;
+        }
+        w.time.tick_of_day = 17 * balance::TICKS_PER_HOUR;
+        let est = day::estimate_s(centre(&w, home), centre(&w, far));
+        let hours = |s: f32| s * crate::TICKS_PER_SECOND as f32 / balance::TICKS_PER_HOUR as f32;
+        assert!(
+            hours(est) <= balance::LEISURE_DURATION_H,
+            "by car it is worth it: {est:.0} s"
+        );
+        assert!(
+            hours(est * balance::CARLESS_TIME_FACTOR) > balance::LEISURE_DURATION_H,
+            "without a car it is not: {est:.0} s"
+        );
+        assert_eq!(day::go_leisure(&mut w, id), car_free, "car free: {car_free}");
+    }
+}
