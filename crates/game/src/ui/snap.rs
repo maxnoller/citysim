@@ -445,8 +445,19 @@ fn best(cands: Vec<Cand>, radius: f32) -> Option<Cand> {
 }
 
 fn guide_draw(g: &GuideLine, to: Cell) -> Guide {
+    // A spacing guide is drawn along the line it proposes (the length of
+    // the neighbouring road, out to the point), so it reads as "a road
+    // here mirrors the block"; the others run from the node that makes them.
+    let from = if g.kind == GuideKind::Spacing {
+        let (lo, hi) = (g.p_min + 6, g.p_max - 6);
+        let pt = fam_p(g.fam, to);
+        let far = if (pt - lo).abs() >= (pt - hi).abs() { lo } else { hi };
+        fam_cell(g.fam, g.n, far)
+    } else {
+        g.origin
+    };
     Guide {
-        from: g.origin.center(),
+        from: from.center(),
         to: to.center(),
         kind: g.kind,
     }
@@ -487,13 +498,16 @@ pub fn snap_point(index: &RoadIndex, cursor: [f32; 2], radius: f32, enabled: boo
         }
     }
     for l in &index.lines {
-        if l.dist_to(cursor) <= radius {
+        // Pointing anywhere on the drawn road counts (a wide avenue
+        // covers part of the neighbouring cells).
+        let half = l.kind.half_width_m();
+        if l.dist_to(cursor) <= radius + half {
             let c = l.nearest_cell(cursor);
             cands.push(Cand {
                 cell: c,
                 kinds: vec![SnapTarget::Road],
                 from: Vec::new(),
-                dist: dist_m(c, cursor),
+                dist: (dist_m(c, cursor) - half).max(0.0),
             });
         }
     }
@@ -608,7 +622,7 @@ pub fn snap_leg(index: &RoadIndex, from: Cell, cursor: [f32; 2], radius: f32, en
                     cell: c,
                     kinds: vec![SnapTarget::Road],
                     from: Vec::new(),
-                    dist: dist_m(c, cursor),
+                    dist: (dist_m(c, cursor) - l.kind.half_width_m()).max(0.0),
                 });
             }
         }

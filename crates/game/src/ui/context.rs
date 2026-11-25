@@ -1225,7 +1225,9 @@ fn update_card(
     if pos.x + size.x > screen.x - t::EDGE {
         pos.x = cursor.x - off.x - size.x;
     }
-    if pos.y + size.y > screen.y - t::EDGE - t::TOOL_BUTTON - 2.0 * t::EDGE {
+    // Keep clear of the toolbar and, for building tools, its options bar.
+    let options_bar = if *tool == ActiveTool::Inspect { 0.0 } else { 52.0 };
+    if pos.y + size.y > screen.y - t::EDGE - t::TOOL_BUTTON - 2.0 * t::EDGE - options_bar {
         pos.y = cursor.y - off.y * 0.6 - size.y;
     }
     pos = pos.max(Vec2::splat(t::EDGE));

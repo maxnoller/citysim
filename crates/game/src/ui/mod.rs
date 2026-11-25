@@ -142,7 +142,10 @@ fn scale_ui(
     *first = true;
     if let Ok(w) = window.single() {
         let mult = settings::UI_SCALES[state.ui_scale.min(settings::UI_SCALES.len() - 1)].0;
-        let s = ui_scale_for(Vec2::new(w.width(), w.height())) * mult;
+        let size = Vec2::new(w.width(), w.height());
+        // Larger than the window can hold would cut panels off: the design
+        // size must always fit.
+        let s = (ui_scale_for(size) * mult).min((size / theme::DESIGN_SIZE).min_element().max(0.6));
         if (scale.0 - s).abs() > 1e-3 {
             scale.0 = s;
         }

@@ -454,8 +454,9 @@ fn spawn_settings(mut commands: Commands, fonts: Res<UiFonts>) {
 fn show_settings(
     time: Res<Time<Real>>,
     state: Res<UiState>,
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut root: Query<&mut Node, With<SettingsRoot>>,
-    mut card: Query<&mut UiTransform, With<SettingsCard>>,
+    mut card: Query<(&mut UiTransform, &ComputedNode), With<SettingsCard>>,
     mut anim: Local<f32>,
 ) {
     let Ok(mut node) = root.single_mut() else { return };
@@ -465,14 +466,30 @@ fn show_settings(
         node.display = d;
         *anim = 0.0;
     }
-    if open && *anim < 1.0 {
+    if !open {
+        return;
+    }
+    if *anim < 1.0 {
         *anim += (1.0 - *anim) * approach(time.delta_secs(), 0.07);
         if *anim > 0.995 {
             *anim = 1.0;
         }
-        if let Ok(mut tf) = card.single_mut() {
-            tf.scale = Vec2::splat(0.96 + 0.04 * *anim);
-            tf.translation = Val2::px(0.0, (1.0 - *anim) * 8.0);
+    }
+    if let Ok((mut tf, computed)) = card.single_mut() {
+        // Shrink to fit a small window at a large interface size.
+        let fit = match window.single() {
+            Ok(w) if computed.size.y > 0.0 => (w.physical_height() as f32 * 0.96 / computed.size.y)
+                .min(w.physical_width() as f32 * 0.96 / computed.size.x)
+                .min(1.0),
+            _ => 1.0,
+        };
+        let scale = Vec2::splat((0.96 + 0.04 * *anim) * fit);
+        if tf.scale != scale {
+            tf.scale = scale;
+        }
+        let shift = Val2::px(0.0, (1.0 - *anim) * 8.0);
+        if tf.translation != shift {
+            tf.translation = shift;
         }
     }
 }

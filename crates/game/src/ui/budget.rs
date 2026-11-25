@@ -832,13 +832,6 @@ fn update_budget(
         bg.set_if_neq(BackgroundColor(t::alpha(note_color, 0.10)));
         border.set_if_neq(BorderColor::all(t::alpha(note_color, 0.35)));
     }
-    let avenue_cells: f32 = w
-        .roads
-        .segments
-        .values()
-        .filter(|s| s.kind == citysim_sim::RoadKind::Avenue)
-        .map(|s| s.length / citysim_sim::CELL_SIZE)
-        .sum();
     for (which, mut text, mut color) in &mut texts {
         let (s, c) = match *which {
             BudgetText::Balance => (format::money(e.money), if e.money < 0 { t::NEGATIVE } else { t::TEXT }),
@@ -851,16 +844,9 @@ fn update_budget(
                 false => (String::new(), t::TEXT_MUTED),
             },
             BudgetText::BalanceNote => balance_note(e.money, booked.then_some(e.last_day.net()), cache.today.net()),
+            // (Short: a longer caption pushes the numbers out of the panel.)
             BudgetText::UpkeepCaption => (
-                if avenue_cells >= 1.0 {
-                    format!(
-                        "{} cells · {} avenue",
-                        format::group(w.stats.road_cells as u64),
-                        format::group(avenue_cells.round() as u64)
-                    )
-                } else {
-                    format!("{} cells", format::group(w.stats.road_cells as u64))
-                },
+                format!("{} cells", format::group(w.stats.road_cells as u64)),
                 t::TEXT_FAINT,
             ),
             BudgetText::FiscalTitle => (note.as_ref().map_or("", |n| n.title).to_string(), note_color),

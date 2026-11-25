@@ -1,9 +1,11 @@
-//! `CITYSIM_DEMO=town|city|jam`: a real town built by the sim's own scripted
+//! `CITYSIM_DEMO=town|city|hierarchy|jam`: a real town built by the sim's own scripted
 //! players (`citysim_sim::scenarios`, commands only) and fast-forwarded
 //! before the first frame, so a developed city is one command away.
 //!
 //! * `town` — `GridPlayer` until ~1,500 residents.
-//! * `city` — `GridPlayer` until ~5,000 residents.
+//! * `city` — `GridPlayer` until ~5,000 residents (streets only).
+//! * `hierarchy` — `GridPlayer::hierarchy` (avenues as arterials) until
+//!   ~10,000 residents (about 20 s of fast-forward in a release build).
 //! * `jam`  — the deliberately bad `two_districts(grid = false)` layout
 //!   (every commuter through one junction) on its third day.
 //!
@@ -21,13 +23,14 @@ use crate::shared::{SimClock, SimWorld};
 
 /// Hard cap on fast-forwarding (in-game days) so a target that cannot be
 /// reached does not hang the start.
-const MAX_DAYS: u32 = 40;
+const MAX_DAYS: u32 = 70;
 
 /// Where the town's centre is, for camera presets.
 pub fn focus(kind: DemoKind) -> (Cell, f32) {
     match kind {
         DemoKind::Jam => (Cell::new(48, 128), 560.0),
         DemoKind::City => (Cell::new(62, 128), 900.0),
+        DemoKind::Hierarchy => (Cell::new(70, 128), 1100.0),
         _ => (Cell::new(45, 128), 560.0),
     }
 }
@@ -70,8 +73,16 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
             run_to_hour(&mut w, hour, |_| {});
         }
         _ => {
-            let target = env::<u32>("CITYSIM_DEMO_POP").unwrap_or(if kind == DemoKind::City { 5_000 } else { 1_500 });
-            let mut player = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+            let target = env::<u32>("CITYSIM_DEMO_POP").unwrap_or(match kind {
+                DemoKind::City => 5_000,
+                DemoKind::Hierarchy => 10_000,
+                _ => 1_500,
+            });
+            let mut player = if kind == DemoKind::Hierarchy {
+                GridPlayer::hierarchy()
+            } else {
+                GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial])
+            };
             while w.stats.population < target && w.time.day <= MAX_DAYS {
                 player.act(&mut w);
                 w.step();

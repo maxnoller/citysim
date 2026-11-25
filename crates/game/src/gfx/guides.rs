@@ -19,8 +19,8 @@ use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix};
 use super::road_geom;
 use crate::shared::{
-    ActiveTool, GameSet, GuideKind, RoadMode, SimWorld, SnapFeedback, SnapTarget, ToolModes, WorldHighlight,
-    WorldTarget, cell_corners,
+    ActiveTool, GameSet, GuideKind, RoadMode, SimWorld, SnapFeedback, SnapTarget, ToolModes, WorldCamera,
+    WorldHighlight, WorldTarget, cell_corners,
 };
 
 #[derive(Component)]
@@ -98,9 +98,11 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     commands.insert_resource(mats);
 }
 
-/// Guides are muted white whatever the rule (the marker glyph says which).
+/// Guides are a warm amber whatever the rule (the marker glyph says
+/// which): it stands apart from the white construction grid and the
+/// blue-white road ghost.
 fn guide_color(_: GuideKind) -> Color {
-    Color::srgba(0.92, 0.94, 0.97, 0.7)
+    Color::srgba(1.0, 0.78, 0.3, 0.95)
 }
 
 /// The interface accent blue (ui theme `ACCENT`).
@@ -242,7 +244,7 @@ fn dashed(m: &mut MeshBuilder, a: Vec2, b: Vec2, w: f32, y: f32, col: [f32; 4]) 
         return;
     }
     let d = (b - a) / len;
-    let (dash, gap) = (2.2, 1.6);
+    let (dash, gap) = ((w * 5.0).max(2.2), (w * 3.5).max(1.6));
     let mut t = 0.0;
     while t < len {
         let e = (t + dash).min(len);
@@ -258,10 +260,12 @@ fn draw_snap(
     mut meshes: ResMut<Assets<Mesh>>,
     mut markers: Query<(Entity, &mut Visibility, &mut Transform), (With<SnapMarker>, Without<GuideLines>)>,
     mut lines: Query<(Entity, &mut Visibility), (With<GuideLines>, Without<SnapMarker>)>,
+    camera: Query<&GlobalTransform, With<WorldCamera>>,
 ) {
     if !snap.is_changed() {
         return;
     }
+    let eye = camera.single().map(|t| t.translation()).ok();
     let y = heights::GHOST + 0.05;
     if let Ok((e, mut vis, mut t)) = markers.single_mut() {
         match snap.point {
@@ -288,8 +292,14 @@ fn draw_snap(
         } else {
             let mut m = MeshBuilder::new();
             for g in &snap.guides {
-                let col = lin(guide_color(g.kind).with_alpha(0.85));
-                dashed(&mut m, Vec2::from(g.from), Vec2::from(g.to), 0.3, y, col);
+                let (a, b) = (Vec2::from(g.from), Vec2::from(g.to));
+                // A few pixels wide at any zoom.
+                let mid = v3((a + b) * 0.5, y);
+                let w = eye.map_or(0.6, |e| (e.distance(mid) * 0.0045).clamp(0.4, 3.0));
+                let col = lin(guide_color(g.kind));
+                let halo = lin(Color::srgba(0.1, 0.08, 0.02, 0.35));
+                band(&mut m, a, b, w * 2.2, y - 0.01, halo);
+                dashed(&mut m, a, b, w, y, col);
             }
             commands.entity(e).insert(Mesh3d(meshes.add(m.build())));
             vis.set_if_neq(Visibility::Inherited);
