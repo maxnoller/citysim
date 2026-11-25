@@ -36,13 +36,22 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `PointerOverUi` (ui writes), `HoveredCell` (shared computes from the `WorldCamera` ray).
 - `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose).
 - Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`.
-- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B Esc/right-click, Space 1 2 3, O, G, F5/F9,
-  J, Tab, Alt, Enter, Backspace, [ ], Ctrl+Z.
+- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B Esc/right-click, Space 1 2 3 4, O, G, F5/F9,
+  J, Tab, Alt, Enter, Backspace, [ ], Ctrl+Z, P (people).
 - Round 2 (ui writes, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`, `SnapFeedback` (snapped point,
   `SnapTarget`, `Guide` lines in sim metres, spacing), `PathPreview` (corners, legs with per-leg error and
   `upgrade_cells`, length, cost), `WorldHighlight` (hovered / pinned `WorldTarget`, doomed buildings and road cells),
   `DisplaySettings { edge_scroll, lot_markers }` (gfx's camera pans at the window edge when `edge_scroll`; default off).
   `ToolPreview::line` is the leg under the cursor only.
+- Round 4 (ui writes, gfx draws / honours): `CurveToolView` (the free-form road being drawn or changed: pieces with
+  `PieceChange`, refused curves, `error_at`, control points, handles, tightest bend, planned nodes; written only when
+  it changes so gfx's `CITYSIM_GFX_TOOLDEMO` samples survive; its `snap`/`guides` stay empty, the live snap is in
+  `SnapFeedback`), `ToolPreview::area` (marquee quad along a lattice) and `zone_cells`, `WorldHighlight::doomed_roads`
+  (road parts the bulldozer removes, with kinds), `WorldTarget::Vehicle` (gfx draws a ring at its lane pose),
+  `CameraFollow { focus }` (gfx keeps the camera focus there, pans ignored), `CameraGoTo` message (move the focus /
+  zoom once). `RoadMode::{Straight, Curve, Continuous, Grid, Upgrade, Junction}`, `ZoneMode::{Paint, Frontage, Fill,
+  Marquee}`, `BulldozeMode::{Road, Area}`, `SnapTarget::Length`. `SPEEDS = [1, 3, 6, 12]` (a day is 16 min at 1x).
+  `PathPreview`, `ToolPreview::{line, rect, cells}` and `WorldHighlight::doomed_road_cells` are no longer written.
 - `SceneReady(bool)`: gfx sets it once the render pipelines are built (`gfx/loading.rs` counts them in the render
   world); ui shows a loading card until then (`ui/loading.rs`), autoshot counts its delay from it.
 
@@ -118,14 +127,24 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   world seed (the `hierarchy` demo reaches 10,000 fastest with seed 3). `CITYSIM_CONFIG_DIR` overrides the settings
   folder (`settings.cfg`; not written during autoshot / UI shots).
 - `CITYSIM_CONTROL=dir` + `scripts/play.py` (see its docstring): `launch`, `start`, `grow --until-pop N`, `road`, `zone`,
-  `bulldoze`, `look`, `shot`, `stats`, `counts`, `cmd 'until-day N'` (`launch` waits for the `ready` reply: shaders
-  built). `launch --env K=V` passes extra variables. The channel only reads numbers, frames the camera,
-  fast-forwards (`turbo`, `until-*`; they fail while paused) and takes screenshots; all play goes through real input.
-- UI capture: `CITYSIM_UI_SHOTS=dir` (interface states; `CITYSIM_SAVE_DIR` for the save/load step), `CITYSIM_UI_TOUR=1`.
-  `CITYSIM_UI_SHOTS_ONLY=road-path,junction-tool,...` picks states (names in `ui/shots.rs`).
-- ui tools: every plan (path, block grid, frontage, fill, road bulldoze, undo) is a list of ordinary `Command`s checked
-  in order on a scratch copy of the world (`ui/plan.rs`) and sent only when all pass. Snapping is pure lattice maths in
-  `ui/snap.rs`. `scripts/play.py road` presses Enter to build its two-corner path.
+  `bulldoze`, `curve`, `follow`, `checks`, `look`, `shot`, `stats`, `counts`, `cmd 'until-day N'` (`launch` waits for
+  the `ready` reply: shaders built). `launch --env K=V` passes extra variables. The channel only reads numbers, frames
+  the camera, fast-forwards (`turbo`, `until-*`; they fail while paused), finds things (`find-home`, `node NAME` = a
+  named UI node's position) and takes screenshots; all play goes through real input. `stats` includes the tool modes
+  (`road_mode=...`); `play.py` switches modes with Tab. `play.py checks` (right after `launch`, new game) runs eight
+  awkward real-input cases (fast clicks, drag off the window, UI to map, two snaps, a self-crossing loop, zoom and
+  rotate mid-draw, curve and undo, step back) and prints PASS / FAIL.
+- UI capture: `CITYSIM_UI_SHOTS=dir` (interface states, best on `CITYSIM_DEMO=organic`; `CITYSIM_SAVE_DIR` for the
+  save/load step; `CITYSIM_SHOT_SIZE=WxH` sets the window), `CITYSIM_UI_TOUR=1`.
+  `CITYSIM_UI_SHOTS_ONLY=road-curve,people-person,...` picks states (names in `ui/shots.rs`).
+- ui tools: plain modules know nothing of layout: `ui/fsnap.rs` (snapping: nodes, T onto roads, angles from the start
+  road and 15° steps, whole-cell lengths, zoning lattices, parallel at a set distance, extensions, line meetings),
+  `ui/shapes.rs` (`Draft` chains of straight / curve / continuous pieces, `GridFrame`, `Stretch` of road between
+  junctions), `ui/plan.rs` (`Op`s checked in order on a scratch copy; road parts named by centre line and resolved
+  when their turn comes; undo by serials / curves / zone cells), `ui/readout.rs` (the cursor card's words),
+  `ui/people.rs` (names, portraits, person / place / car / city `Sheet`s). Widgets (`context.rs`, `toolopts.rs`,
+  `people_panel.rs`) only display them. A plan is sent only when every step passes. `scripts/play.py road` presses
+  Enter to build its two-point road.
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`), `CITYSIM_GFX_HOUR=h` (pin the drawn time of
@@ -143,7 +162,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - gfx roads: `road_geom::Frame` samples a segment's curve (two points when straight); everything along a road is a
   ribbon over it between the arm cuts of `junction::junction_shape`. `gfx/land.rs`: one index of drawn road edges per
   roads version; building lots, lot markers and zone cells are fitted clear of it in their own frame (`land::fit`).
-  The free-form road tool is drawn from gfx's `road_tool::CurveToolView`.
+  The free-form road tool is drawn from `shared::CurveToolView` (filled by ui's road tool).
 
 ## Bevy 0.20 API facts (verify in `~/.cargo/registry/src/*/bevy*-0.20.1`)
 - Events between systems are `Message`s (`#[derive(Message)]`, `add_message`, `MessageWriter::write`); `AppExit`

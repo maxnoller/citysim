@@ -849,8 +849,12 @@ fn refresh_plan(state: &mut ToolState, sim: &SimWorld, pending: Pending) {
     if state.plan_key.as_ref() == Some(&key) {
         return;
     }
-    let base = state.scratch_for(sim).clone();
-    let (eval, _) = plan::evaluate(&base, key.0.ops());
+    let started = std::time::Instant::now();
+    let (eval, _) = plan::evaluate(state.scratch_for(sim), key.0.ops());
+    let ms = started.elapsed().as_secs_f32() * 1e3;
+    if ms > 8.0 {
+        debug!("tool plan took {ms:.1} ms ({} steps)", eval.steps.len());
+    }
     state.plan = ToolPlan {
         pending: key.0.clone(),
         eval,
