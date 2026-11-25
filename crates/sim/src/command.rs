@@ -767,6 +767,7 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             }
             if !cells.is_empty() {
                 world.versions.grid += 1;
+                world.zoning.zones_version += 1;
             }
         }
         Plan::Tax(r) => world.economy.tax_rate = r,

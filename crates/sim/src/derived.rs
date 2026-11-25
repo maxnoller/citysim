@@ -46,7 +46,8 @@ pub(crate) struct Derived {
     /// By segment slot: its `a` node.
     seg_a: Vec<Option<NodeId>>,
     cand_key: Option<(u64, (u64, RoadsKey))>,
-    /// Zoned, empty front cells with road access to the entry, per zone.
+    /// Zoned front cells with road access to the entry, per zone (built or
+    /// not: growth skips occupied ones when it picks).
     candidates: [Vec<CellRef>; 3],
     road_cells_key: Option<RoadsKey>,
     road_cells: u32,
@@ -283,11 +284,12 @@ impl Derived {
         self.conn_fronts.binary_search(&(c, f as u8)).is_ok()
     }
 
-    /// Growth candidates for zone `z`: zoned, empty, usable front cells
-    /// of blocks whose road is connected to the entry. Requires
+    /// Growth candidates for zone `z`: usable front cells of zone `z` of
+    /// blocks whose road is connected to the entry, free or not (rebuilt
+    /// only when zones, blocks or connectivity change). Requires
     /// `ensure_zoning`.
-    pub fn candidates(&mut self, zoning: &Zoning, grid_version: u64, z: Zone) -> &[CellRef] {
-        let key = (grid_version, self.zoning_key.unwrap_or_default());
+    pub fn candidates(&mut self, zoning: &Zoning, z: Zone) -> &[CellRef] {
+        let key = (zoning.zones_version, self.zoning_key.unwrap_or_default());
         if self.cand_key != Some(key) {
             self.cand_key = Some(key);
             for v in &mut self.candidates {
@@ -300,13 +302,18 @@ impl Derived {
                 }
                 last = Some(c);
                 if let Some(x) = zoning.cell(c)
-                    && x.free()
+                    && x.usable()
                     && let Some(zone) = x.zone
                 {
                     self.candidates[zone_index(zone)].push(c);
                 }
             }
         }
+        &self.candidates[zone_index(z)]
+    }
+
+    /// The candidate list of zone `z` as last built by [`Self::candidates`].
+    pub fn candidates_built(&self, z: Zone) -> &[CellRef] {
         &self.candidates[zone_index(z)]
     }
 

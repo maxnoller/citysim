@@ -648,13 +648,32 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             l.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
             l
         });
-        let blocked = |fwd: bool| {
-            let lane = lane_of(from.segment, fwd);
-            let progress = if fwd {
+        // Where the car would start in direction `fwd`: at its access point,
+        // but on the road, not inside a junction box.
+        let setbacks_ok = world.cache.setbacks_key == Some(world.traffic.junctions_version);
+        let setbacks = &world.cache.setbacks;
+        let start_at = |fwd: bool| {
+            let p = if fwd {
                 from.from_a
             } else {
                 from_seg.length - from.from_a
             };
+            if setbacks_ok {
+                let (lo, hi) = crate::drive::lane_range(setbacks, from.segment, fwd, from_seg.length);
+                let lo = if lo > 0.0 {
+                    (lo + balance::NO_LANE_CHANGE_AFTER_BOX_M).min(hi)
+                } else {
+                    lo
+                };
+                p.clamp(lo, hi)
+            } else {
+                p
+            }
+        };
+        let (start_fwd, start_back) = (start_at(true), start_at(false));
+        let blocked = |fwd: bool| {
+            let lane = lane_of(from.segment, fwd);
+            let progress = if fwd { start_fwd } else { start_back };
             let start = lanes.partition_point(|&(l, _)| l < lane);
             lanes[start..]
                 .iter()
@@ -700,18 +719,8 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         } else {
             from_seg.length - from.from_a
         };
-        // Start on the road, not inside a junction box.
-        let progress = if world.cache.setbacks_key == Some(world.traffic.junctions_version) {
-            let (lo, hi) = crate::drive::lane_range(&world.cache.setbacks, from.segment, forward, from_seg.length);
-            let lo = if lo > 0.0 {
-                (lo + balance::NO_LANE_CHANGE_AFTER_BOX_M).min(hi)
-            } else {
-                lo
-            };
-            progress.clamp(lo, hi)
-        } else {
-            progress
-        };
+        let _ = progress;
+        let progress = if forward { start_fwd } else { start_back };
         if from.segment == to.segment && (to.from_a - from.from_a).abs() < 2.0 {
             ended.push(gone(TripEnd::Arrived(0.0)));
             continue;

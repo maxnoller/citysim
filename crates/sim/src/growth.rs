@@ -271,14 +271,26 @@ fn refresh_around(world: &mut World, fps: &[Footprint]) {
 }
 
 fn spawn(world: &mut World, z: Zone) -> bool {
-    let n = world.cache.candidates(&world.zoning, world.versions.grid, z).len();
+    let n = world.cache.candidates(&world.zoning, z).len();
     if n == 0 {
         return false;
     }
-    let c = world.cache.candidates(&world.zoning, world.versions.grid, z)[world.rng.below(n as u32) as usize];
-    if !free_for(world, c, z) {
-        return false;
+    // A random free candidate: a few random tries (the list also holds
+    // built-up cells), then the next free one after the last try.
+    let mut pick = None;
+    let mut at = 0;
+    for _ in 0..24 {
+        at = world.rng.below(n as u32) as usize;
+        let c = world.cache.candidates_built(z)[at];
+        if free_for(world, c, z) {
+            pick = Some(c);
+            break;
+        }
     }
+    let list = world.cache.candidates_built(z);
+    let Some(c) = pick.or_else(|| (0..n).map(|k| list[(at + k) % n]).find(|&c| free_for(world, c, z))) else {
+        return false;
+    };
     let zi = zone_index(z);
     let wide = world.rng.below(100) < balance::BIG_FOOTPRINT_PERCENT[zi];
     let Some((facing, cells)) = plan_lot(world, c, z, wide) else {

@@ -296,6 +296,9 @@ pub struct Zoning {
     pub(crate) built_for: BTreeMap<SegmentId, (crate::Curve, u64)>,
     /// `versions.roads` the blocks were made for.
     pub(crate) roads_version: u64,
+    /// Bumped whenever any cell's zone changes (not when buildings come
+    /// and go): growth's candidate lists follow it.
+    pub(crate) zones_version: u64,
 }
 
 impl Default for Zoning {
@@ -305,6 +308,7 @@ impl Default for Zoning {
             blocks: Vec::new(),
             built_for: BTreeMap::new(),
             roads_version: 0,
+            zones_version: 0,
         }
     }
 }
@@ -497,8 +501,9 @@ pub fn fill_area(world: &World, pos: [f32; 2], limit: usize) -> Vec<CellRef> {
 }
 
 /// Cells of the blocks on one side of a road, along the stretch between
-/// the two junctions (or dead ends) around `segment` (continuing through
-/// nodes where only two segments meet), up to `depth` cells from the road
+/// the two junctions (or dead ends, or bends sharper than 45°) around
+/// `segment` (continuing through nodes where only two segments meet), up to
+/// `depth` cells from the road
 /// (1 = the front row). `side` is seen travelling along `segment` from `a`
 /// to `b`. Usable cells only, without duplicates, ordered along the road.
 pub fn frontage(world: &World, segment: SegmentId, side: Side, depth: u8) -> Vec<CellRef> {
@@ -519,6 +524,14 @@ pub fn frontage(world: &World, segment: SegmentId, side: Side, depth: u8) -> Vec
             let Some(&n) = node.segments.iter().find(|&&x| stretch.iter().all(|&(y, _)| y != x)) else {
                 break;
             };
+            // Only through smooth continuations, not round a corner.
+            let Some(&prev) = node.segments.iter().find(|&&x| x != n) else {
+                break;
+            };
+            let (din, dout) = (roads.segments[prev].dir_from(end), roads.segments[n].dir_from(end));
+            if geom::dot(din, dout) > -libm::cosf(45f32.to_radians()) {
+                break;
+            }
             let ns = &roads.segments[n];
             let (rel, next) = match (forward, ns.a == end) {
                 (true, true) => (true, ns.b),
@@ -710,5 +723,6 @@ pub(crate) fn adopt_grid(world: &mut World, zones: &[(Cell, Zone)]) {
         let doomed = crate::blocks::refresh_boxes(world, &[([0.0, 0.0], [crate::MAP_SIZE_M, crate::MAP_SIZE_M])]);
         debug_assert!(doomed.is_empty());
     }
+    world.zoning.zones_version += 1;
     world.versions.grid += 1;
 }

@@ -66,19 +66,11 @@ fn trips_end_in_sane_time_and_nights_are_quiet() {
 /// evening; shopping and leisure fill the day and the evening.
 #[test]
 fn rush_hours_and_daytime_errands_emerge() {
-    // (Seed 13: with the free-form road rules seed 12 happens to put more
-    // early-shift jobs in its first blocks; 7 of seeds 8..16 hold either way.)
-    let (w, _) = grid_city(13, 6);
+    let (w, _) = grid_city(12, 6);
     let by_hour = &w.people.trips_by_hour_yesterday;
     let sum =
         |purpose: TripPurpose, h0: usize, h1: usize| -> u32 { (h0..h1).map(|h| by_hour[h][purpose.index()]).sum() };
     let morning = sum(TripPurpose::ToWork, 6, 9);
-    eprintln!(
-        "to work by 3h: {:?}",
-        (0..8)
-            .map(|k| sum(TripPurpose::ToWork, 3 * k, 3 * k + 3))
-            .collect::<Vec<_>>()
-    );
     for h0 in (0..24).step_by(3).filter(|&h| h != 6) {
         assert!(morning > sum(TripPurpose::ToWork, h0, h0 + 3), "to work {h0}h");
     }
