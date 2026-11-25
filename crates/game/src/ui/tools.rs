@@ -58,6 +58,22 @@ pub enum Action {
 /// `None` = outline only). 5 leaves two rows of lots on each side.
 pub const BLOCK_SIZES: [Option<i32>; 6] = [None, Some(4), Some(5), Some(6), Some(7), Some(9)];
 
+/// Index into [`BLOCK_SIZES`]; starts at blocks of 5 cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockSize(pub usize);
+
+impl Default for BlockSize {
+    fn default() -> Self {
+        BlockSize(2)
+    }
+}
+
+impl BlockSize {
+    pub fn step(&mut self, d: i32) {
+        self.0 = (self.0 as i32 + d).clamp(0, BLOCK_SIZES.len() as i32 - 1) as usize;
+    }
+}
+
 /// Max cells of an enclosed block the fill tool zones.
 const FILL_LIMIT: usize = 6000;
 /// Double-click window, seconds.
@@ -142,8 +158,8 @@ pub struct ToolState {
     pub snap_off: bool,
     /// Where the press that started an `Along` drag was (sim metres).
     pub press_point: Option<[f32; 2]>,
-    /// Index into `BLOCK_SIZES`.
-    pub block_size: usize,
+    /// Index into `BLOCK_SIZES`, counted from the default (blocks of 5).
+    pub block_size: BlockSize,
     last_press: Option<(f32, Cell)>,
     pub undo: Vec<UndoRecord>,
     /// The current plan and the inputs it came from.
@@ -167,7 +183,7 @@ impl ToolState {
     }
 
     pub fn block_spacing(&self) -> Option<i32> {
-        BLOCK_SIZES[self.block_size.min(BLOCK_SIZES.len() - 1)]
+        BLOCK_SIZES[self.block_size.0.min(BLOCK_SIZES.len() - 1)]
     }
 
     fn scratch_for(&mut self, sim: &SimWorld) -> &World {
@@ -285,12 +301,11 @@ fn tool_keys(
             modes.set_if_neq(m);
         }
         if *tool == ActiveTool::Road && modes.road == RoadMode::Block {
-            let n = BLOCK_SIZES.len();
             if keys.just_pressed(KeyCode::BracketRight) {
-                state.block_size = (state.block_size + 1).min(n - 1);
+                state.block_size.step(1);
             }
             if keys.just_pressed(KeyCode::BracketLeft) {
-                state.block_size = state.block_size.saturating_sub(1);
+                state.block_size.step(-1);
             }
         }
     }
@@ -675,7 +690,7 @@ fn commit(
     state.batch_frame = !single;
     for &cmd in &plan.eval.cmds {
         state.sent = Some(cmd);
-        info!("tool sends {cmd:?}");
+        debug!("tool sends {cmd:?}");
         out.write(SimCommand(cmd));
     }
     toast
@@ -737,7 +752,7 @@ fn use_tool(
     let state = state.as_mut();
     let undo_asked = actions.read().any(|a| *a == UiAction::Undo);
     if mouse.just_pressed(MouseButton::Left) || mouse.just_released(MouseButton::Left) {
-        info!(
+        debug!(
             "tool mouse pressed={} released={} hovered={:?} snap={:?} action={:?} path={:?}",
             mouse.just_pressed(MouseButton::Left),
             mouse.just_released(MouseButton::Left),

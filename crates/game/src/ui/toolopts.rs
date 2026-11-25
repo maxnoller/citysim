@@ -67,7 +67,7 @@ pub fn spawn_opts(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 fonts,
                 UiAction::RoadMode(RoadMode::Path),
                 icon::SPLINE,
-                "Path",
+                "",
                 Tooltip {
                     title: "Draw a road",
                     desc: "Click corners; double-click, Enter or right-click builds the whole path. Drag for one straight road.",
@@ -80,7 +80,7 @@ pub fn spawn_opts(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 fonts,
                 UiAction::RoadMode(RoadMode::Block),
                 icon::GRID,
-                "Block",
+                "",
                 Tooltip {
                     title: "Block of streets",
                     desc: "Drag a rectangle for a street loop, split into blocks of the chosen size.",
@@ -93,7 +93,7 @@ pub fn spawn_opts(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 fonts,
                 UiAction::RoadMode(RoadMode::Junction),
                 icon::WAYPOINTS,
-                "Junctions",
+                "",
                 Tooltip {
                     title: "Junctions",
                     desc: "Hover a junction to see how it is controlled; click to switch it.",

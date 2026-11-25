@@ -545,16 +545,12 @@ pub fn tool_card(
                     t::TEXT,
                 ));
                 let (b, r) = (plan.doomed_buildings.len(), plan.doomed_road.len());
-                if b > 0 || r > 0 {
-                    let mut parts = Vec::new();
+                if b > 0 {
+                    let mut s = format!("Removes {}", plural(b, "building", "buildings"));
                     if r > 0 {
-                        parts.push(plural(r, "road cell", "road cells"));
+                        s += &format!(" and {}", plural(r, "road cell", "road cells"));
                     }
-                    if b > 0 {
-                        parts.push(plural(b, "building", "buildings"));
-                    }
-                    card.rows
-                        .push(Row::line(format!("Removes {}", parts.join(" and ")), t::NEGATIVE));
+                    card.rows.push(Row::line(s, t::NEGATIVE));
                 }
             }
             let dragging = matches!(action, Action::Rect { .. } | Action::Along { .. });

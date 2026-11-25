@@ -198,10 +198,7 @@ fn handle_actions(
                     modes.road = RoadMode::Path;
                 }
             }
-            UiAction::BlockSize(d) => {
-                let n = super::tools::BLOCK_SIZES.len() as i32;
-                tools.block_size = (tools.block_size as i32 + d).clamp(0, n - 1) as usize;
-            }
+            UiAction::BlockSize(d) => tools.block_size.step(d),
             // Handled in tools.rs.
             UiAction::Undo => {}
             // Handled in save_load.rs.
