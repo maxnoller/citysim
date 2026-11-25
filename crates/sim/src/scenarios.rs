@@ -511,6 +511,10 @@ pub fn organic(w: &mut World) -> Vec<(crate::Curve, crate::CommandError)> {
         }
     }
 
+    // The estate's end runs on to the ring: both get a second way out.
+    let est_end = [520.0, y0 + 300.0];
+    road(w, Curve::straight(est_end, ring_pt(135.0)), st);
+
     // Industry by the highway: straight streets on the world grid north of
     // the avenue.
     let n0 = [140.0, y0 - 200.0];
@@ -521,21 +525,23 @@ pub fn organic(w: &mut World) -> Vec<(crate::Curve, crate::CommandError)> {
     // Zoning.
     let quad = |a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]| [a, b, c, d];
     let g = |k: f32, m: f32| add(add(o, u, k * bw), v, m * bh);
-    // The turned grid: housing, one row of shops near the avenue.
-    zone_quad(
-        w,
-        quad(g(-0.5, -0.5), g(4.5, -0.5), g(4.5, 3.5), g(-0.5, 3.5)),
+    // The turned grid: rows of housing with rows of shops and workshops
+    // between them, so most people work a few streets from home.
+    let rows_zone = [
         Zone::Residential,
-    );
-    zone_quad(
-        w,
-        quad(g(-0.5, 3.5), g(4.5, 3.5), g(4.5, 5.6), g(-0.5, 5.6)),
         Zone::Commercial,
-    );
+        Zone::Residential,
+        Zone::Industrial,
+        Zone::Residential,
+    ];
+    for (m, &z) in rows_zone.iter().enumerate() {
+        let (m0, m1) = (m as f32 - if m == 0 { 0.5 } else { 0.0 }, m as f32 + 1.0);
+        zone_quad(w, quad(g(-0.5, m0), g(4.5, m0), g(4.5, m1), g(-0.5, m1)), z);
+    }
     // Housing on the long streets down to the avenue.
     zone_quad(
         w,
-        quad(g(-0.5, 5.6), g(4.5, 5.6), g(4.5, 12.0), g(-0.5, 12.0)),
+        quad(g(-0.5, 5.0), g(4.5, 5.0), g(4.5, 12.0), g(-0.5, 12.0)),
         Zone::Residential,
     );
     // Shops along the avenue (both sides).
