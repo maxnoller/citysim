@@ -1,6 +1,7 @@
 //! GFX: everything drawn in 3D, and the camera. Talks to the rest of the
 //! game only through `crate::shared` (never import from `crate::ui`).
 
+mod bench;
 mod building_gen;
 mod buildings;
 mod camera;
@@ -61,6 +62,7 @@ impl Plugin for GfxPlugin {
             guides::GuidesPlugin,
             smoke::SmokePlugin,
             loading::LoadingPlugin,
+            bench::BenchPlugin,
         ));
     }
 }
@@ -121,12 +123,15 @@ mod reload_tests {
         let lit = app
             .world_mut()
             .resource_mut::<Assets<super::city_material::CityMaterial>>()
-            .add(super::city_material::city_material(StandardMaterial::default()));
+            .add(super::city_material::city_material(
+                StandardMaterial::default(),
+                Handle::default(),
+            ));
         app.insert_resource(WorldMaterials {
             lit: lit.clone(),
-            lit_brake: lit.clone(),
             ground: lit,
             sky: Handle::default(),
+            day: Handle::default(),
         });
         app
     }

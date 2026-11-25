@@ -73,7 +73,12 @@ impl Plugin for SignalsPlugin {
     }
 }
 
-fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<CityMaterial>>) {
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<CityMaterial>>,
+    world_mats: Res<WorldMaterials>,
+) {
     let colors = [
         Color::srgb(1.0, 0.16, 0.1),
         Color::srgb(1.0, 0.62, 0.08),
@@ -81,11 +86,14 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: Res
     ];
     let lens = [0, 1, 2].map(|i| meshes.add(lens_mesh(i).build()));
     let mats = colors.map(|c| {
-        mats.add(city_material(StandardMaterial {
-            base_color: c,
-            perceptual_roughness: 0.4,
-            ..default()
-        }))
+        mats.add(city_material(
+            StandardMaterial {
+                base_color: c,
+                perceptual_roughness: 0.4,
+                ..default()
+            },
+            world_mats.day.clone(),
+        ))
     });
     commands.insert_resource(SignalAssets { lens, mats });
 }

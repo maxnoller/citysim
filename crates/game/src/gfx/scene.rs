@@ -21,11 +21,12 @@ use bevy::render::render_resource::{PipelineCache, TextureFormat};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use super::camera::CameraRig;
-use super::city_material::{CityMaterial, SkyExt, SkyMaterial, city_material};
+use super::city_material::{CityMaterial, DayParams, SkyExt, SkyMaterial, city_material, day_buffer};
 use super::mesh_util::MeshBuilder;
 use super::noise;
 use super::palette::{self, lin, mix};
 use crate::shared::{GameSet, GraphicsQuality, WorldCamera};
+use bevy::render::storage::ShaderBuffer;
 
 /// How far the countryside extends beyond each map edge, metres.
 pub const OUTSIDE: f32 = 9000.0;
@@ -49,18 +50,11 @@ pub fn sun_direction() -> Vec3 {
 pub struct WorldMaterials {
     /// Opaque, lit, vertex colours (with night glow, see `city_material`).
     pub lit: Handle<CityMaterial>,
-    /// `lit` with the brake lights on (cars that are stopping).
-    pub lit_brake: Handle<CityMaterial>,
     /// The ground: like `lit`, fully rough.
     pub ground: Handle<CityMaterial>,
     pub sky: Handle<SkyMaterial>,
-}
-
-impl WorldMaterials {
-    /// Every city material (they all follow the time of day).
-    pub fn city_handles(&self) -> [&Handle<CityMaterial>; 3] {
-        [&self.lit, &self.lit_brake, &self.ground]
-    }
+    /// Time-of-day inputs shared by every city material (`DayParams`).
+    pub day: Handle<ShaderBuffer>,
 }
 
 #[derive(Component)]
@@ -112,24 +106,26 @@ fn init_materials(
     mut commands: Commands,
     mut materials: ResMut<Assets<CityMaterial>>,
     mut skies: ResMut<Assets<SkyMaterial>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
+    let day = buffers.add(day_buffer(DayParams::default()));
     let lit = StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.92,
         reflectance: 0.25,
         ..default()
     };
-    let mut brake = city_material(lit.clone());
-    brake.extension.params.brake = 1.0;
     commands.insert_resource(WorldMaterials {
-        lit: materials.add(city_material(lit)),
-        lit_brake: materials.add(brake),
-        ground: materials.add(city_material(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 1.0,
-            reflectance: 0.1,
-            ..default()
-        })),
+        lit: materials.add(city_material(lit, day.clone())),
+        ground: materials.add(city_material(
+            StandardMaterial {
+                base_color: Color::WHITE,
+                perceptual_roughness: 1.0,
+                reflectance: 0.1,
+                ..default()
+            },
+            day.clone(),
+        )),
         sky: skies.add(SkyMaterial {
             base: StandardMaterial {
                 base_color: Color::WHITE,
@@ -140,6 +136,7 @@ fn init_materials(
             },
             extension: SkyExt::default(),
         }),
+        day,
     });
 }
 

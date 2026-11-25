@@ -12,7 +12,9 @@ use bevy::light::GlobalAmbientLight;
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 
-use super::city_material::{CityMaterial, SkyMaterial};
+use bevy::render::storage::ShaderBuffer;
+
+use super::city_material::{DayParams, SkyMaterial};
 use super::palette::{self, mix};
 use super::roads::{LampPoolMesh, LampPools};
 use super::scene::{Bounce, Sun, WorldMaterials, quality_settings};
@@ -323,7 +325,7 @@ fn apply_materials(
     light: Res<DayLight>,
     quality: Res<GraphicsQuality>,
     mats: Option<Res<WorldMaterials>>,
-    mut city: ResMut<Assets<CityMaterial>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut sky: ResMut<Assets<SkyMaterial>>,
     pools: Option<Res<LampPools>>,
     mut std_mats: ResMut<Assets<StandardMaterial>>,
@@ -363,12 +365,15 @@ fn apply_materials(
         let k = light.night * 0.42;
         m.base_color = Color::linear_rgb(1.0 * k, 0.72 * k, 0.4 * k);
     }
-    for h in mats.city_handles() {
-        if let Some(mut m) = city.get_mut(h) {
-            m.extension.params.night = light.night;
-            m.extension.params.windows = light.windows;
-            m.extension.params.clouds = clouds;
-        }
+    let day = DayParams {
+        night: light.night,
+        windows: light.windows,
+        clouds,
+        ..default()
+    };
+    if let Some(mut b) = buffers.get_mut(&mats.day) {
+        b.clear();
+        b.extend_from_slice(&day.to_buffer());
     }
     if let Some(mut m) = sky.get_mut(&mats.sky) {
         let p = &mut m.extension.params;

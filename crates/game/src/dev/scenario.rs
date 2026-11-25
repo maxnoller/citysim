@@ -143,8 +143,38 @@ impl Plugin for ScenarioPlugin {
 
 fn load_scenario(pending: Res<Pending>, mut sim: ResMut<SimWorld>, mut clock: ResMut<SimClock>) {
     let seed = sim.world.seed;
-    sim.replace(build(pending.0, seed));
+    sim.replace(cached_build(pending.0, seed));
     clock.paused = false;
+}
+
+/// `CITYSIM_DEMO_CACHE=dir`: keep each built demo world as a save in `dir`
+/// (keyed by kind, seed, population target and hour) and load it instead
+/// of building it again (dev aid: the 10,000-resident city takes ~50 s).
+fn cached_build(kind: DemoKind, seed: u64) -> World {
+    let Some(dir) = std::env::var_os("CITYSIM_DEMO_CACHE").filter(|d| !d.is_empty()) else {
+        return build(kind, seed);
+    };
+    let name = format!(
+        "{kind:?}-seed{seed}-pop{}-hour{}-avenues{}.citysave",
+        std::env::var("CITYSIM_DEMO_POP").unwrap_or_default(),
+        std::env::var("CITYSIM_DEMO_HOUR").unwrap_or_default(),
+        std::env::var("CITYSIM_DEMO_AVENUES").unwrap_or_default(),
+    );
+    let path = std::path::Path::new(&dir).join(name);
+    if let Ok(bytes) = std::fs::read(&path) {
+        match World::load(&bytes) {
+            Ok(w) => {
+                info!("dev scenario {kind:?}: loaded {}", path.display());
+                return w;
+            }
+            Err(e) => warn!("dev scenario: cannot load {}: {e:?}", path.display()),
+        }
+    }
+    let w = build(kind, seed);
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, w.save())) {
+        warn!("dev scenario: cannot write {}: {e}", path.display());
+    }
+    w
 }
 
 #[cfg(test)]

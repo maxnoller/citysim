@@ -5,7 +5,7 @@
 
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
-    mesh_functions::get_world_from_local,
+    mesh_functions::{get_world_from_local, get_tag},
     mesh_view_bindings::{globals, view},
     forward_io::{VertexOutput, FragmentOutput},
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
@@ -14,21 +14,22 @@ import bevy_pbr::render::{
 @if(VISIBILITY_RANGE_DITHER)
 import bevy_pbr::render::pbr_functions::visibility_range_dither;
 
+// Shared by every city material (a storage buffer, so the time of day can
+// change without touching the materials; see `city_material.rs`).
 struct CityParams {
     // 0 by day .. 1 at night: lamps and headlights.
     night: f32,
     // Share of windows lit right now (time of day).
     windows: f32,
-    // 1 on the braking-car material: tail lights bright.
-    brake: f32,
     // Cloud shadow strength (0 = off).
     clouds: f32,
+    unused: f32,
     // Cloud drift speed, m/s (x, y), cloud size, m (z), unused (w).
     wind: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
-var<uniform> city: CityParams;
+var<storage, read> city: CityParams;
 
 fn hash21(p: vec2<f32>) -> f32 {
     var q = fract(p * vec2<f32>(123.34, 456.21));
@@ -157,7 +158,9 @@ fn fragment(
     } else if kind == 3u {
         glow = vec3<f32>(1.0, 0.95, 0.82) * (7.0 * city.night);
     } else if kind == 4u {
-        glow = vec3<f32>(1.0, 0.06, 0.03) * (2.2 * city.night + 6.0 * city.brake);
+        // Tail lights: bright when the car's `MeshTag` says it brakes.
+        let brake = f32(get_tag(in.instance_index) & 1u);
+        glow = vec3<f32>(1.0, 0.06, 0.03) * (2.2 * city.night + 6.0 * brake);
     } else if kind == 5u {
         glow = base * (2.2 * city.night);
     } else if kind == 6u {
