@@ -4,6 +4,12 @@
 //! [`World`], then optionally an extension block (postcard, starts with its
 //! own version number).
 //!
+//! Version 4 (round 2: avenues, lanes, junction control, fiscal state) is
+//! written now. Version-3 saves (round 1) still load: their body decodes
+//! into the frozen round-1 types in [`v3`] and is upgraded (vehicles on
+//! lane 0, junctions on `Auto`, second-row buildings merged into the lot in
+//! front where possible).
+//!
 //! The extension block carries state added after format version 3 without
 //! breaking it: those fields are `#[serde(skip)]` in the World's types, so
 //! the body keeps exactly the version-3 layout. Saves written before the
@@ -16,9 +22,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Budget, BuildingId, MAP_CELLS, World, balance};
 
+pub mod v3;
+
 pub const MAGIC: &[u8; 4] = b"CSIM";
 /// Bump when the World layout changes incompatibly.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
+/// Oldest version that still loads.
+pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
 pub const EXTENSION_VERSION: u32 = 1;
 
@@ -58,7 +68,7 @@ impl From<BudgetRecord> for Budget {
 
 /// Extension block, version 1. Append new fields only in a new version.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ExtensionV1 {
+pub(crate) struct ExtensionV1 {
     /// `Economy::last_day`.
     last_day: BudgetRecord,
     /// `DaySummary::budget` of every `Economy::history` entry, in order.
@@ -68,7 +78,7 @@ struct ExtensionV1 {
 }
 
 impl ExtensionV1 {
-    fn of(w: &World) -> ExtensionV1 {
+    pub(crate) fn of(w: &World) -> ExtensionV1 {
         ExtensionV1 {
             last_day: w.economy.last_day.into(),
             day_budgets: w.economy.history.iter().map(|d| d.budget.into()).collect(),
@@ -80,7 +90,7 @@ impl ExtensionV1 {
         }
     }
 
-    fn restore(self, w: &mut World) {
+    pub(crate) fn restore(self, w: &mut World) {
         w.economy.last_day = self.last_day.into();
         for (d, b) in w.economy.history.iter_mut().zip(self.day_budgets) {
             d.budget = b.into();
@@ -137,11 +147,16 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
         return Err(LoadError::BadMagic);
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().expect("4 bytes"));
-    if version != FORMAT_VERSION {
+    if !(OLDEST_LOADABLE_VERSION..=FORMAT_VERSION).contains(&version) {
         return Err(LoadError::UnsupportedVersion(version));
     }
-    let (mut world, rest): (World, &[u8]) =
-        postcard::take_from_bytes(&bytes[8..]).map_err(|e| LoadError::Corrupt(e.to_string()))?;
+    let (mut world, rest): (World, &[u8]) = if version == 3 {
+        let (old, rest): (v3::WorldV3, &[u8]) =
+            postcard::take_from_bytes(&bytes[8..]).map_err(|e| LoadError::Corrupt(e.to_string()))?;
+        (old.upgrade(), rest)
+    } else {
+        postcard::take_from_bytes(&bytes[8..]).map_err(|e| LoadError::Corrupt(e.to_string()))?
+    };
     check_loaded(&world).map_err(LoadError::Corrupt)?;
     if !rest.is_empty() {
         let (ext_version, rest): (u32, &[u8]) =
@@ -154,6 +169,11 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
         }
     }
     restore_derived(&mut world);
+    if version == 3 {
+        crate::growth::convert_legacy_lots(&mut world);
+        crate::traffic::sync_junctions(&mut world);
+        crate::stats::update(&mut world);
+    }
     Ok(world)
 }
 
@@ -209,6 +229,7 @@ mod tests {
         let cmd = Command::BuildRoad {
             from: Cell::new(11, 128),
             to: Cell::new(30, 128),
+            kind: crate::RoadKind::Street,
         };
         w.apply(cmd).unwrap();
         w.apply(Command::SetZone {

@@ -95,7 +95,9 @@ impl World {
         for c in start.straight_line_to(end).expect("horizontal") {
             world.grid.get_mut(c).expect("in bounds").occupant = Occupant::Road;
         }
+        traffic::sync_junctions(&mut world);
         stats::update(&mut world);
+        demand::refresh(&mut world);
         world
     }
 
@@ -120,6 +122,11 @@ impl World {
             households::trip_ended(self, e);
         }
         stats::update(self);
+        if self.time.tick == 0 {
+            // The clock never ran (a new game, paused from the start):
+            // demand follows every command at once.
+            demand::refresh(self);
+        }
         Ok(outcome)
     }
 

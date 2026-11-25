@@ -43,7 +43,11 @@ fn rand_command(r: &mut Rng) -> Command {
                     from.offset(dx * n, dy * n)
                 }
             };
-            Command::BuildRoad { from, to }
+            Command::BuildRoad {
+                from,
+                to,
+                kind: citysim_sim::RoadKind::Street,
+            }
         }
         35..=49 => {
             let min = rand_cell(r);
@@ -97,6 +101,7 @@ fn rand_command(r: &mut Rng) -> Command {
                 Command::BuildRoad {
                     from: min,
                     to: min.offset(dx * n, dy * n),
+                    kind: citysim_sim::RoadKind::Street,
                 }
             }
         }

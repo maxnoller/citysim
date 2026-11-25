@@ -20,6 +20,7 @@ pub mod grid;
 pub mod growth;
 pub mod households;
 pub mod idmap;
+pub mod junction;
 pub mod path;
 pub mod rng;
 pub mod roads;
@@ -32,22 +33,25 @@ pub mod traffic;
 pub mod world;
 
 pub use buildings::{Building, BuildingId, Facing};
-pub use command::{Command, CommandError, Outcome, Preview};
+pub use command::{Command, CommandError, JunctionChange, Outcome, Preview};
 pub use demand::Demand;
 pub use derived::Access;
-pub use economy::{Budget, DaySummary, Economy};
+pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus};
 pub use geom::{Cell, CellRect};
 pub use grid::{CellData, Grid, Occupant, Zone};
 pub use growth::{BuildingMeta, GrowthState};
 pub use households::{Household, HouseholdId, HouseholdState};
 pub use idmap::IdMap;
+pub use junction::{
+    ApproachView, Aspect, JunctionControl, JunctionSetting, JunctionState, JunctionView, SignalStage, Turn,
+};
 pub use rng::Rng;
 pub use roads::{NodeId, RoadKind, RoadNetwork, RoadNode, RoadSegment, SegmentId};
 pub use save::LoadError;
 pub use side::SideTable;
 pub use stats::Stats;
 pub use time::SimTime;
-pub use traffic::{Departure, Junction, Place, TrafficState, Trip, TripPurpose, Vehicle, VehicleId};
+pub use traffic::{Departure, JunctionMove, Place, TrafficState, Trip, TripPurpose, Vehicle, VehicleId};
 pub use world::{Versions, World};
 
 /// Cells per side of the square map.

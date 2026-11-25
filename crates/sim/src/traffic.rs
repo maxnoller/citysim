@@ -22,6 +22,7 @@ use slotmap::new_key_type;
 
 use crate::derived::{Access, access_pos};
 use crate::idmap::key_index;
+use crate::junction::{self, ArmDemand, JunctionControl, JunctionState, Turn};
 use crate::path::{self, Target};
 use crate::roads::RoadSegment;
 use crate::side::SideTable;
@@ -32,10 +33,12 @@ new_key_type! {
     pub struct VehicleId;
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Vehicle {
     /// Position in sim metres, on the segment centre line (renderers offset
-    /// to the driving lane using `heading`).
+    /// to the driving lane using `heading` and `lane`, see
+    /// `RoadKind::lane_offset_m`). Inside a junction (`junction` is
+    /// `Some`) it is the exact point on the turn path, lane offset included.
     pub pos: [f32; 2],
     /// Heading in radians, `atan2(dy, dx)` in sim space.
     pub heading: f32,
@@ -58,6 +61,46 @@ pub struct Vehicle {
     /// Stable random number for purely visual variation.
     #[serde(default)]
     pub seed: u32,
+    /// Lane on the current segment direction: 0 is the kerb-side (right)
+    /// lane, 1 the next one left (avenues and the highway have two).
+    pub lane: u8,
+    /// Lateral position still to cover after a lane change, in lanes
+    /// (+1: the car came from the lane to its left, -1: from the right);
+    /// eases to 0 over about a second. Renderers add it to `lane`.
+    pub lane_shift: f32,
+    /// Set while the car is inside a junction box.
+    pub junction: Option<JunctionMove>,
+    /// Slowing down (brake lights).
+    pub braking: bool,
+}
+
+impl Vehicle {
+    /// Standing (or crawling) still.
+    pub fn stopped(&self) -> bool {
+        self.speed < balance::WAIT_SPEED
+    }
+}
+
+/// A vehicle's way through a junction box. While it is set, the vehicle's
+/// `segment` / `progress` stay at the end of the segment it left; `pos` and
+/// `heading` follow the movement's curve
+/// (`junction::JunctionState::movements[movement]`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct JunctionMove {
+    pub node: NodeId,
+    /// Segment the vehicle came from and the one it turns into.
+    pub from: SegmentId,
+    pub to: SegmentId,
+    /// Direction it will drive `to` in (`a -> b`).
+    pub to_forward: bool,
+    /// Index into the junction's `movements`.
+    pub movement: u16,
+    pub turn: Turn,
+    pub from_lane: u8,
+    pub to_lane: u8,
+    /// Metres travelled along the turn so far, and its length.
+    pub distance: f32,
+    pub length: f32,
 }
 
 /// Why a car is on the road.
@@ -112,20 +155,6 @@ pub struct Departure {
     pub requested_tick: u64,
 }
 
-/// Junction control state per node slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct Junction {
-    /// Approaches outside the current phase may not enter before this tick
-    /// (last crossing + clearance time).
-    pub busy_until: u64,
-    /// Index (into the node's `segments`) of the approach that opened the
-    /// current phase; approaches parallel to it (straight across) share it.
-    pub last_served: u8,
-    /// Cars let through in the current phase.
-    #[serde(default)]
-    pub phase_count: u16,
-}
-
 /// Unit direction from node `n` along its `i`-th segment.
 fn approach_dir(roads: &RoadNetwork, n: NodeId, i: usize) -> [f32; 2] {
     let node = &roads.nodes[n];
@@ -136,12 +165,6 @@ fn approach_dir(roads: &RoadNetwork, n: NodeId, i: usize) -> [f32; 2] {
     let d = geom::sub(other, node.pos);
     let l = geom::dot(d, d).sqrt().max(1e-6);
     [d[0] / l, d[1] / l]
-}
-
-/// Do two approaches of a junction move in the same signal phase (they lie
-/// on one straight line, or are the same approach)?
-fn same_phase(roads: &RoadNetwork, n: NodeId, a: usize, b: usize) -> bool {
-    a == b || geom::cross(approach_dir(roads, n, a), approach_dir(roads, n, b)).abs() < 0.35
 }
 
 /// Is the move from segment `from` into segment `to` at node `n` a turn?
@@ -177,8 +200,12 @@ pub(crate) type Ended = (Option<HouseholdId>, TripPurpose, TripEnd);
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TrafficState {
     pub trips: SideTable<VehicleId, Trip>,
-    /// Indexed by node slot (`idmap::key_index`).
-    pub junctions: Vec<Junction>,
+    /// Geometry, control and signal state per node (see `junction`).
+    /// Rebuilt when the road graph changes; settings and signal timers
+    /// survive edits that keep a junction's arms.
+    pub junction_states: SideTable<NodeId, JunctionState>,
+    /// `versions.roads` the junction states were built for.
+    pub junctions_version: u64,
     /// Trips waiting for a car to start (path budget or blocked driveway).
     pub pending: VecDeque<Departure>,
     /// Vehicles waiting for a new route.
@@ -201,6 +228,10 @@ pub struct TrafficState {
     pub congestion_share: f32,
     pub peak_congestion_today: f32,
     pub peak_congestion_yesterday: f32,
+    /// Gridlock breakers that fired (all time): a car stuck so long it was
+    /// taken off the road, and junction deadlocks that had to be cleared.
+    pub stuck_removed: u32,
+    pub deadlocks_resolved: u32,
 }
 
 const DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
@@ -261,7 +292,7 @@ fn set_pose(roads: &RoadNetwork, v: &mut Vehicle) {
         0.0
     };
     v.pos = [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f];
-    v.heading = (to[1] - from[1]).atan2(to[0] - from[0]);
+    v.heading = libm::atan2f(to[1] - from[1], to[0] - from[0]);
 }
 
 fn route_valid(roads: &RoadNetwork, v: &Vehicle, dest: Option<Access>) -> bool {
@@ -322,10 +353,7 @@ fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, ended: &mut Ve
 /// nothing changed).
 pub(crate) fn sync_network(world: &mut World, ended: &mut Vec<Ended>) {
     world.cache.ensure_roads(&world.roads, world.versions.roads);
-    let n = world.roads.nodes.slot_count();
-    if world.traffic.junctions.len() < n {
-        world.traffic.junctions.resize(n, Junction::default());
-    }
+    sync_junctions(world);
     if world.traffic.roads_version == world.versions.roads {
         return;
     }
@@ -368,11 +396,27 @@ pub(crate) fn sync_network(world: &mut World, ended: &mut Vec<Ended>) {
     }
 }
 
+/// Rebuild junction geometry / control for the current road graph (no-op
+/// when it did not change).
+pub(crate) fn sync_junctions(world: &mut World) {
+    if world.traffic.junctions_version == world.versions.roads {
+        return;
+    }
+    world.traffic.junctions_version = world.versions.roads;
+    let roads = &world.roads;
+    let states = &mut world.traffic.junction_states;
+    states.retain_keys(|n| roads.nodes.contains_key(n));
+    for n in roads.nodes.keys() {
+        let old = states.remove(n);
+        states.insert(n, junction::build_state(roads, n, old.as_ref()));
+    }
+}
+
 /// Put a vehicle on the segment under its position, keeping its heading.
 fn relocate(world: &mut World, id: VehicleId) -> bool {
     let v = &world.vehicles[id];
     let pos = v.pos;
-    let dir = [v.heading.cos(), v.heading.sin()];
+    let dir = [libm::cosf(v.heading), libm::sinf(v.heading)];
     let c = crate::Cell::from_pos(pos);
     let mut best: Option<(f32, SegmentId, f32)> = None;
     for y in c.y - 1..=c.y + 1 {
@@ -437,6 +481,92 @@ struct Request {
     approach: usize,
     order_idx: usize,
     next_lane: usize,
+    movement: Option<usize>,
+    speed: f32,
+}
+
+/// Turn a car on `from` makes into `to` at node `n`, per the junction's
+/// movement table (Straight when unknown).
+fn turn_at(traffic: &TrafficState, n: NodeId, from: SegmentId, to: SegmentId, lane: u8) -> (Option<usize>, Turn) {
+    let Some(j) = traffic.junction_states.get(n) else {
+        return (None, Turn::Straight);
+    };
+    let (Some(a), Some(b)) = (j.arm_of(from), j.arm_of(to)) else {
+        return (None, Turn::Straight);
+    };
+    match j.movement(a, lane, b) {
+        Some(m) => (Some(m), j.movements[m].turn),
+        None => (None, Turn::Straight),
+    }
+}
+
+/// Signals: per-arm demand from the lane fronts, then one tick of every
+/// signal.
+fn tick_signals(world: &mut World, order: &[(u32, f32, VehicleId)]) {
+    let World {
+        roads,
+        vehicles,
+        traffic,
+        time,
+        ..
+    } = world;
+    let mut demand: Vec<(NodeId, usize, bool)> = Vec::new();
+    for (i, &(lane, _, id)) in order.iter().enumerate() {
+        if i > 0 && order[i - 1].0 == lane {
+            continue;
+        }
+        let v = &vehicles[id];
+        let Some(next) = next_step(roads, v) else { continue };
+        let s = v.segment.expect("in order");
+        let d_end = roads.segments[s].length - v.progress;
+        if d_end > balance::SIGNAL_DETECT_M {
+            continue;
+        }
+        let Some(j) = traffic.junction_states.get(next.node) else {
+            continue;
+        };
+        if j.control != JunctionControl::Signal {
+            continue;
+        }
+        let (_, turn) = turn_at(traffic, next.node, s, next.segment, v.lane);
+        if let Some(arm) = j.arm_of(s) {
+            demand.push((next.node, arm, matches!(turn, Turn::Left | Turn::UTurn)));
+        }
+    }
+    demand.sort_by_key(|d| (key_index(d.0), d.1, d.2));
+    let now = time.tick;
+    let mut k = 0;
+    let nodes: Vec<NodeId> = roads.nodes.keys().collect();
+    let mut per_arm: Vec<ArmDemand> = Vec::new();
+    for n in nodes {
+        let Some(j) = traffic.junction_states.get_mut(n) else {
+            continue;
+        };
+        if j.control != JunctionControl::Signal {
+            while k < demand.len() && key_index(demand[k].0) <= key_index(n) {
+                k += 1;
+            }
+            continue;
+        }
+        per_arm.clear();
+        per_arm.resize(j.arms.len(), ArmDemand::default());
+        while k < demand.len() && key_index(demand[k].0) < key_index(n) {
+            k += 1;
+        }
+        while k < demand.len() && demand[k].0 == n {
+            let (_, arm, left) = demand[k];
+            if let Some(d) = per_arm.get_mut(arm) {
+                if left {
+                    d.left = true;
+                } else {
+                    d.through = true;
+                }
+            }
+            k += 1;
+        }
+        let box_clear = now >= j.clear_at;
+        junction::tick_signal(j, &per_arm, now, box_clear);
+    }
 }
 
 fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
@@ -456,6 +586,7 @@ fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
         remove_vehicle(world, id, TripEnd::Vanished, ended);
     }
     order.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
+    tick_signals(world, &order);
     let mut lane_rear = vec![f32::INFINITY; nlanes];
     for &(lane, p, _) in &order {
         let r = &mut lane_rear[lane as usize];
@@ -469,6 +600,7 @@ fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
         ..
     } = world;
     let roads: &RoadNetwork = roads;
+    let traffic: &mut TrafficState = traffic;
 
     // Junction requests from lane fronts about to reach their end node.
     let mut requests: Vec<Request> = Vec::new();
@@ -492,12 +624,15 @@ fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
             .iter()
             .position(|&x| Some(x) == v.segment)
             .unwrap_or(0);
+        let (movement, _) = turn_at(traffic, next.node, v.segment.expect("in order"), next.segment, v.lane);
         requests.push(Request {
             node_slot: key_index(next.node),
             node: next.node,
             approach,
             order_idx: i,
             next_lane: next.lane,
+            movement,
+            speed: v.speed,
         });
     }
     let mut granted = vec![false; order.len()];
@@ -518,39 +653,62 @@ fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
                     granted[r.order_idx] = true;
                 }
             }
-        } else {
-            // Signal-like phases: approaches on one straight line flow
-            // together for up to PHASE_MAX_CARS cars, then (after the
-            // clearance time) the next waiting approach gets its phase.
-            let j = &mut traffic.junctions[requests[k].node_slot];
-            let cur = (j.last_served as usize).min(deg - 1);
+        } else if let Some(j) = traffic.junction_states.get_mut(node) {
             let reqs = &requests[k..e];
-            let in_phase = |a: usize| same_phase(roads, node, a, cur);
-            let any_in = reqs.iter().any(|r| in_phase(r.approach));
-            let others = reqs.iter().filter(|r| !in_phase(r.approach));
-            let waiting_others = others.clone().count() > 0;
-            let phase = if any_in && (j.phase_count < balance::PHASE_MAX_CARS || !waiting_others) {
-                if j.phase_count >= balance::PHASE_MAX_CARS {
-                    j.phase_count = 0;
+            let clearance = secs_to_ticks(balance::JUNCTION_CLEARANCE_S);
+            match j.control {
+                JunctionControl::Signal => {
+                    for r in reqs {
+                        let go = match r.movement.and_then(|m| j.movement_aspect(m)) {
+                            Some(crate::junction::Aspect::Green) => true,
+                            // Too close to stop: clear the junction.
+                            Some(crate::junction::Aspect::Yellow) => r.speed > balance::YELLOW_GO_SPEED,
+                            _ => false,
+                        };
+                        if go && !lane_taken.contains(&r.next_lane) {
+                            lane_taken.push(r.next_lane);
+                            granted[r.order_idx] = true;
+                            j.clear_at = now + clearance;
+                            j.entered_minute = j.entered_minute.saturating_add(1);
+                        }
+                    }
                 }
-                Some(cur)
-            } else if waiting_others && j.busy_until <= now {
-                let pick = others
-                    .min_by_key(|r| (r.approach + deg - cur - 1) % deg)
-                    .expect("waiting");
-                j.last_served = pick.approach as u8;
-                j.phase_count = 0;
-                Some(pick.approach)
-            } else {
-                None
-            };
-            if let Some(p) = phase {
-                for r in reqs {
-                    if same_phase(roads, node, r.approach, p) && !lane_taken.contains(&r.next_lane) {
-                        lane_taken.push(r.next_lane);
-                        granted[r.order_idx] = true;
-                        j.phase_count = j.phase_count.saturating_add(1);
-                        j.busy_until = now + secs_to_ticks(balance::JUNCTION_CLEARANCE_S);
+                JunctionControl::Priority => {
+                    // Interim (round-1 style): approaches on one straight
+                    // line flow together for up to PHASE_MAX_CARS cars,
+                    // then the next waiting approach gets its turn.
+                    let deg = j.arms.len();
+                    let cur = (j.last_served as usize).min(deg - 1);
+                    let same = |a: usize, b: usize| a == b || j.arms[a].opposite == Some(b as u8);
+                    let any_in = reqs.iter().any(|r| same(r.approach, cur));
+                    let waiting_others = reqs.iter().any(|r| !same(r.approach, cur));
+                    let phase = if any_in && (j.phase_count < balance::PHASE_MAX_CARS || !waiting_others) {
+                        if j.phase_count >= balance::PHASE_MAX_CARS {
+                            j.phase_count = 0;
+                        }
+                        Some(cur)
+                    } else if waiting_others && j.clear_at <= now {
+                        let pick = reqs
+                            .iter()
+                            .filter(|r| !same(r.approach, cur))
+                            .min_by_key(|r| (r.approach + deg - cur - 1) % deg)
+                            .expect("waiting");
+                        j.last_served = pick.approach as u8;
+                        j.phase_count = 0;
+                        Some(pick.approach)
+                    } else {
+                        None
+                    };
+                    if let Some(p) = phase {
+                        for r in reqs {
+                            if same(r.approach, p) && !lane_taken.contains(&r.next_lane) {
+                                lane_taken.push(r.next_lane);
+                                granted[r.order_idx] = true;
+                                j.phase_count = j.phase_count.saturating_add(1);
+                                j.clear_at = now + clearance;
+                                j.entered_minute = j.entered_minute.saturating_add(1);
+                            }
+                        }
                     }
                 }
             }
@@ -612,11 +770,22 @@ fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
                         let deg = roads.nodes[n.node].segments.len();
                         let eta = d_end / v.speed.max(1.0);
                         let open = deg <= 2
-                            || traffic.junctions.get(key_index(n.node)).is_some_and(|j| {
-                                let me = roads.nodes[n.node].segments.iter().position(|&x| x == s).unwrap_or(0);
-                                (same_phase(roads, n.node, me, j.last_served as usize)
-                                    && j.phase_count < balance::PHASE_MAX_CARS)
-                                    || j.busy_until <= now + secs_to_ticks(eta)
+                            || traffic.junction_states.get(n.node).is_some_and(|j| {
+                                let me = j.arm_of(s).unwrap_or(0);
+                                match j.control {
+                                    JunctionControl::Signal => {
+                                        let to = j.arm_of(n.segment).unwrap_or(0);
+                                        j.movement(me, v.lane, to)
+                                            .and_then(|m| j.movement_aspect(m))
+                                            .is_some_and(|a| a != crate::junction::Aspect::Red)
+                                    }
+                                    JunctionControl::Priority => {
+                                        let cur = j.last_served as usize;
+                                        ((me == cur || j.arms[me].opposite == Some(cur as u8))
+                                            && j.phase_count < balance::PHASE_MAX_CARS)
+                                            || j.clear_at <= now + secs_to_ticks(eta)
+                                    }
+                                }
                             });
                         let clear = lane_rear[n.lane] >= balance::MIN_GAP_M && open;
                         if clear {
@@ -891,6 +1060,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             destination: last,
             household: dep.household,
             seed,
+            ..Vehicle::default()
         };
         set_pose(&world.roads, &mut v);
         let id = world.vehicles.insert(v);
@@ -921,6 +1091,47 @@ fn update_loads(world: &mut World) {
         speed_sum += v.speed;
         if let Some(seg) = v.segment.and_then(|s| world.roads.segments.get_mut(s)) {
             seg.load[RoadSegment::dir(v.forward)] += 1.0;
+        }
+    }
+    // Queues per approach, per-minute entry counts (auto control).
+    for j in world.traffic.junction_states.values_mut() {
+        j.queue.iter_mut().for_each(|q| *q = 0);
+    }
+    for v in world.vehicles.values() {
+        if !v.stopped() || v.junction.is_some() {
+            continue;
+        }
+        let Some(seg) = v.segment.and_then(|s| world.roads.segments.get(s)) else {
+            continue;
+        };
+        let end = if v.forward { seg.b } else { seg.a };
+        if let Some(j) = world.traffic.junction_states.get_mut(end)
+            && let Some(arm) = j.arm_of(v.segment.expect("checked"))
+        {
+            j.queue[arm] = j.queue[arm].saturating_add(1);
+        }
+    }
+    let minute = 60 * TICKS_PER_SECOND as u64;
+    if world.time.tick.is_multiple_of(minute) {
+        for j in world.traffic.junction_states.values_mut() {
+            j.peak_minute_today = j.peak_minute_today.max(j.entered_minute);
+            j.entered_minute = 0;
+        }
+    }
+    if world.time.tick_of_day == 0 {
+        for j in world.traffic.junction_states.values_mut() {
+            j.peak_minute_yesterday = j.peak_minute_today.max(j.entered_minute);
+            j.peak_minute_today = 0;
+            let busy = if j.busy {
+                j.peak_minute_yesterday >= balance::AUTO_PRIORITY_PER_MINUTE
+            } else {
+                j.peak_minute_yesterday >= balance::AUTO_SIGNAL_PER_MINUTE
+            };
+            if busy != j.busy {
+                j.busy = busy;
+                let setting = j.setting;
+                junction::set_setting(j, setting);
+            }
         }
     }
     let n = world.vehicles.len();
