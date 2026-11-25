@@ -114,7 +114,7 @@ pub fn check_consistency(w: &World, after_step: bool) {
     // Buildings: footprint cells point back and stay zoned for the kind.
     for (bid, b) in w.buildings.iter() {
         assert!(b.level >= 1 && b.capacity > 0, "tick {tick}: {bid:?} {b:?}");
-        for cell in b.footprint.cells() {
+        for cell in b.footprint.rect().cells() {
             let cd = w.grid.get(cell).expect("footprint in bounds");
             assert_eq!(cd.occupant, Occupant::Building(bid), "tick {tick}: {cell:?}");
             assert_eq!(cd.zone, Some(b.kind), "tick {tick}: {cell:?} zone under {bid:?}");
@@ -248,8 +248,12 @@ pub fn check_bulldoze(before: &World, after: &World, rect: CellRect, cells: &[Ce
         .flat_map(|&(a, b, _)| [a, b])
         .filter(|&x| rect.contains(x))
         .collect();
-    for b in before.buildings.values().filter(|b| b.footprint.intersects(&rect)) {
-        reported.extend(b.footprint.cells());
+    for b in before
+        .buildings
+        .values()
+        .filter(|b| b.footprint.rect().intersects(&rect))
+    {
+        reported.extend(b.footprint.rect().cells());
         assert!(!after.buildings.values().any(|a| a == b), "{b:?} survived");
     }
     assert_eq!(cells, reported.into_iter().collect::<Vec<_>>().as_slice());

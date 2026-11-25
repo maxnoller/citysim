@@ -1027,18 +1027,10 @@ pub fn vehicle_pose(world: &World, v: &traffic::Vehicle) -> ([f32; 2], [f32; 2])
     {
         return m.pose_at(jm.distance);
     }
-    let Some(s) = v.segment.filter(|&s| world.roads.segments.contains_key(s)) else {
+    let Some(seg) = v.segment.and_then(|s| world.roads.segments.get(s)) else {
         return (v.pos, [1.0, 0.0]);
     };
-    let (a, b) = world.roads.segment_ends(s);
-    let d = crate::geom::sub(b, a);
-    let l = crate::geom::dot(d, d).sqrt().max(1e-6);
-    let dir = if v.forward {
-        [d[0] / l, d[1] / l]
-    } else {
-        [-d[0] / l, -d[1] / l]
-    };
-    let off = lane_offset(world.roads.segments[s].kind, v.lane, v.lane_shift);
-    let r = crate::junction::right_of(dir);
-    ([v.pos[0] + r[0] * off, v.pos[1] + r[1] * off], dir)
+    let off = lane_offset(seg.kind, v.lane, v.lane_shift);
+    let p = seg.pose_dir(v.forward, v.progress.clamp(0.0, seg.length), off);
+    (p.pos, p.dir)
 }

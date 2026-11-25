@@ -187,6 +187,8 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
         }
     }
     restore_derived(&mut world);
+    world.roads.refresh_tables();
+    crate::zoning::mirror_grid(&mut world);
     if version == 3 {
         crate::growth::convert_legacy_lots(&mut world);
         crate::traffic::sync_junctions(&mut world);

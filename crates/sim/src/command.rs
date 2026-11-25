@@ -10,32 +10,70 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::curve::Curve;
 use crate::geom::{Cell, CellRect};
 use crate::grid::{Occupant, Zone};
 use crate::junction::{JunctionControl, JunctionSetting};
 use crate::roads::{NodeId, RoadKind, RoadNetwork, SegmentId};
+use crate::zoning::CellRef;
 use crate::{BuildingId, World, balance, geom};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    /// Straight road of `kind` between two cell centres (horizontal,
-    /// vertical or 45°). Pieces already built as another kind are changed
-    /// in place: a street becomes an avenue for the price difference, an
-    /// avenue becomes a street for free (no refund). The highway stub never
-    /// changes. `kind` must be buildable (`RoadKind::BUILDABLE`).
+    /// Shorthand: a straight road of `kind` between two cell centres
+    /// (horizontal, vertical or 45°). Pieces already built as another kind
+    /// are changed in place: a street becomes an avenue for the price
+    /// difference, an avenue becomes a street for free (no refund). The
+    /// highway stub never changes. `kind` must be buildable
+    /// (`RoadKind::BUILDABLE`).
     BuildRoad { from: Cell, to: Cell, kind: RoadKind },
-    /// Remove road pieces touching cells in the rectangle, and buildings
-    /// overlapping it. The highway stub is not removable. Allowed without
-    /// the money for it (the cost then pushes money negative), so a city in
-    /// debt can still demolish roads to cut upkeep.
+    /// A road of `kind` along `curve` (sim metres), anywhere on the map. An
+    /// end within `balance::SNAP_NODE_M` of a node joins it; an end on an
+    /// existing road splits it into a T; every crossing with an existing
+    /// road becomes a junction splitting both. A straight curve laid exactly
+    /// along an existing straight road changes that stretch's kind like
+    /// `BuildRoad`. Refused (with the position) when too short, too tight
+    /// for the kind, making arms closer than `MIN_ARM_ANGLE_DEG`, running
+    /// along or too close beside another road, crossing itself, a building
+    /// in the way, off the map, or not affordable. Priced by metre.
+    BuildCurve { curve: Curve, kind: RoadKind },
+    /// Change the kind of the part of `segment` from `from_m` to `to_m`
+    /// metres from its `a` node (`0..=length` for all of it; the segment is
+    /// split at interior ends). Upgrades cost the price difference by metre,
+    /// downgrades are free.
+    SetRoadKind {
+        segment: SegmentId,
+        from_m: f32,
+        to_m: f32,
+        kind: RoadKind,
+    },
+    /// Remove the part of `segment` from `from_m` to `to_m` metres from its
+    /// `a` node (`0..=length` for all of it). Never refused for money.
+    RemoveRoad { segment: SegmentId, from_m: f32, to_m: f32 },
+    /// Shorthand: remove road pieces touching cells in the rectangle, and
+    /// buildings overlapping it. The highway stub is not removable. Allowed
+    /// without the money for it (the cost then pushes money negative), so a
+    /// city in debt can still demolish roads to cut upkeep.
     Bulldoze { min: Cell, max: Cell },
-    /// Zone (or with `None`, unzone) the eligible cells in the rectangle.
+    /// Remove everything in a convex quad (sim metres, either winding): the
+    /// parts of roads whose centre line runs inside it and the buildings
+    /// overlapping it. Never refused for money.
+    BulldozeArea { quad: [[f32; 2]; 4] },
+    /// Shorthand: zone (or with `None`, unzone) the eligible cells whose
+    /// centre lies in the rectangle of world cells.
     SetZone { min: Cell, max: Cell, zone: Option<Zone> },
+    /// Zone (or unzone) every eligible cell whose centre lies inside a
+    /// convex quad (sim metres, either winding).
+    ZoneArea { quad: [[f32; 2]; 4], zone: Option<Zone> },
+    /// Zone (or unzone) these cells (those that are eligible).
+    ZoneCells { cells: Vec<CellRef>, zone: Option<Zone> },
     /// Fraction in `0.0..=balance::MAX_TAX_RATE`.
     SetTaxRate(f32),
     /// Choose how the junction at this cell's centre (a node with three or
     /// more arms) is controlled. `Auto` lets the sim decide.
     SetJunctionControl { cell: Cell, control: JunctionSetting },
+    /// The same for a junction node anywhere.
+    SetNodeControl { node: NodeId, control: JunctionSetting },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,12 +82,12 @@ pub enum CommandError {
     OutOfBounds,
     /// Road start and end are the same cell.
     ZeroLength,
-    /// Road is not horizontal, vertical or exactly diagonal.
+    /// `BuildRoad`: not horizontal, vertical or exactly diagonal.
     NotStraight,
     /// A building stands on this cell of the road.
     BlockedByBuilding(Cell),
-    /// The diagonal step starting at this cell would cross another diagonal
-    /// road between cell centres.
+    /// No longer produced (crossing diagonals now make a junction); kept so
+    /// matches on old variants still compile.
     DiagonalCrossing(Cell),
     InsufficientFunds {
         cost: i64,
@@ -60,6 +98,66 @@ pub enum CommandError {
     InvalidRoadKind(RoadKind),
     /// No junction (node with three or more arms) at this cell.
     NotAJunction(Cell),
+    /// A road (or a piece it would leave between two nodes) shorter than
+    /// `min` metres, at `at`.
+    TooShort {
+        at: [f32; 2],
+        length: f32,
+        min: f32,
+    },
+    /// Curve radius `radius` at `at` is below the kind's minimum.
+    TooTight {
+        at: [f32; 2],
+        radius: f32,
+        min: f32,
+    },
+    /// Two arms at the node `at` would meet at `degrees`, below the
+    /// minimum.
+    SharpAngle {
+        at: [f32; 2],
+        degrees: f32,
+        min: f32,
+    },
+    /// Runs along or too close beside an existing road (or a node) at `at`.
+    TooClose {
+        at: [f32; 2],
+    },
+    /// The curve crosses itself at `at`.
+    SelfCrossing {
+        at: [f32; 2],
+    },
+    /// A building stands in the way at `at`.
+    BuildingInTheWay {
+        at: [f32; 2],
+        building: BuildingId,
+    },
+    /// The point `at` is off the map.
+    OffMap {
+        at: [f32; 2],
+    },
+    /// The segment does not exist (or the range is empty).
+    NoSuchRoad,
+    /// No junction at that node.
+    NotANode,
+}
+
+impl CommandError {
+    /// Where the problem is, sim metres, when it has a place.
+    pub fn at(&self) -> Option<[f32; 2]> {
+        match *self {
+            CommandError::BlockedByBuilding(c) | CommandError::DiagonalCrossing(c) | CommandError::NotAJunction(c) => {
+                Some(c.center())
+            }
+            CommandError::TooShort { at, .. }
+            | CommandError::TooTight { at, .. }
+            | CommandError::SharpAngle { at, .. }
+            | CommandError::TooClose { at }
+            | CommandError::SelfCrossing { at }
+            | CommandError::BuildingInTheWay { at, .. }
+            | CommandError::OffMap { at } => Some(at),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for CommandError {
@@ -74,29 +172,95 @@ impl fmt::Display for CommandError {
             CommandError::InvalidTaxRate(r) => write!(f, "tax rate {r} out of range"),
             CommandError::InvalidRoadKind(k) => write!(f, "{k:?} roads cannot be built"),
             CommandError::NotAJunction(c) => write!(f, "no junction at ({}, {})", c.x, c.y),
+            CommandError::TooShort { length, min, .. } => {
+                write!(f, "too short: {length:.1} m, roads need at least {min:.0} m")
+            }
+            CommandError::TooTight { radius, min, .. } => {
+                write!(f, "curve too tight: radius {radius:.0} m, this road needs {min:.0} m")
+            }
+            CommandError::SharpAngle { degrees, min, .. } => {
+                write!(f, "roads meet at {degrees:.0}°, at least {min:.0}° needed")
+            }
+            CommandError::TooClose { .. } => write!(f, "too close to another road"),
+            CommandError::SelfCrossing { .. } => write!(f, "the road crosses itself"),
+            CommandError::BuildingInTheWay { .. } => write!(f, "a building is in the way"),
+            CommandError::OffMap { .. } => write!(f, "outside the map"),
+            CommandError::NoSuchRoad => write!(f, "no such road"),
+            CommandError::NotANode => write!(f, "no junction there"),
         }
     }
 }
 
 impl std::error::Error for CommandError {}
 
-/// What a command would do. Returned by `World::preview`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// What a command would do. Returned by `World::preview`; `World::apply`
+/// returns the same ([`Outcome`]).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Preview {
     /// Money that will be spent.
     pub cost: i64,
-    /// Cells the command affects: for roads every cell of the line, for
-    /// zoning the cells that get (un)zoned, for bulldoze the cells cleared,
-    /// for junction control the junction's cell.
+    /// World-grid cells the command affects: for `BuildRoad` every cell of
+    /// the line, for zoning the world cells of the cells that get (un)zoned,
+    /// for bulldoze the cells cleared, for junction control the junction's
+    /// cell.
     pub cells: Vec<Cell>,
-    /// Roads: cell-to-cell pieces built new.
+    /// Roads: new road length in cells (`length_m / CELL_SIZE`, rounded).
     pub new_pieces: u32,
-    /// Roads: existing pieces changed to a pricier kind (street -> avenue).
+    /// Roads: changed road length in cells, to a pricier kind.
     pub upgraded: u32,
-    /// Roads: existing pieces changed to a cheaper kind (no refund).
+    /// Roads: changed road length in cells, to a cheaper kind (no refund).
     pub downgraded: u32,
     /// Junction control: what changes.
     pub junction: Option<JunctionChange>,
+    /// Roads: the pieces built or changed, as they will be (split at every
+    /// node they will have).
+    pub pieces: Vec<PlannedPiece>,
+    /// Roads: the nodes the command makes or joins.
+    pub nodes: Vec<PlannedNode>,
+    /// Roads: metres of new road.
+    pub length_m: f32,
+    /// Removal: the road parts removed.
+    pub removed: Vec<Curve>,
+    /// Removal: buildings demolished.
+    pub buildings: Vec<BuildingId>,
+    /// Zoning: the cells that get (un)zoned.
+    pub zone_cells: Vec<CellRef>,
+}
+
+/// One road piece of a [`Preview`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlannedPiece {
+    pub curve: Curve,
+    pub kind: RoadKind,
+    pub change: PieceChange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PieceChange {
+    New,
+    /// An existing piece becomes a pricier kind.
+    Upgrade,
+    /// An existing piece becomes a cheaper kind.
+    Downgrade,
+}
+
+/// A node a road command makes or uses.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlannedNode {
+    pub pos: [f32; 2],
+    pub change: NodeChange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NodeChange {
+    /// A new dead end.
+    End,
+    /// Joins an existing node (a new arm).
+    Join,
+    /// Splits an existing road into a T.
+    Split,
+    /// A crossing with an existing road (both split).
+    Crossing,
 }
 
 /// Effect of `Command::SetJunctionControl`.
@@ -110,15 +274,7 @@ pub struct JunctionChange {
 }
 
 /// What a command did. Returned by `World::apply`; equals the preview.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct Outcome {
-    pub cost: i64,
-    pub cells: Vec<Cell>,
-    pub new_pieces: u32,
-    pub upgraded: u32,
-    pub downgraded: u32,
-    pub junction: Option<JunctionChange>,
-}
+pub type Outcome = Preview;
 
 /// A validated command, ready to execute.
 pub(crate) enum Plan {
@@ -132,6 +288,8 @@ pub(crate) enum Plan {
         upgraded: u32,
         downgraded: u32,
         cost: i64,
+        pieces: Vec<PlannedPiece>,
+        nodes: Vec<PlannedNode>,
     },
     Bulldoze {
         pieces: Vec<(Cell, Cell)>,
@@ -159,6 +317,8 @@ impl Plan {
                 new_pieces,
                 upgraded,
                 downgraded,
+                pieces,
+                nodes,
                 ..
             } => Preview {
                 cost: *cost,
@@ -166,16 +326,34 @@ impl Plan {
                 new_pieces: new_pieces.len() as u32,
                 upgraded: *upgraded,
                 downgraded: *downgraded,
+                pieces: pieces.clone(),
+                nodes: nodes.clone(),
+                length_m: pieces
+                    .iter()
+                    .filter(|p| p.change == PieceChange::New)
+                    .map(|p| p.curve.length())
+                    .sum(),
                 ..Preview::default()
             },
-            Plan::Bulldoze { cells, cost, .. } => Preview {
+            Plan::Bulldoze {
+                cells,
+                cost,
+                pieces,
+                buildings,
+            } => Preview {
                 cost: *cost,
                 cells: cells.clone(),
+                removed: pieces
+                    .iter()
+                    .map(|(p, q)| Curve::straight(p.center(), q.center()))
+                    .collect(),
+                buildings: buildings.clone(),
                 ..Preview::default()
             },
             Plan::Zone { cells, .. } => Preview {
                 cost: 0,
                 cells: cells.clone(),
+                zone_cells: cells.iter().map(|&c| CellRef::world(c)).collect(),
                 ..Preview::default()
             },
             Plan::Tax(_) => Preview::default(),
@@ -205,19 +383,128 @@ fn afford(world: &World, cost: i64) -> Result<(), CommandError> {
     }
 }
 
+/// The world cell whose centre is `p`, if `p` is a cell centre.
+fn centre_cell(p: [f32; 2]) -> Option<Cell> {
+    let c = Cell::from_pos(p);
+    geom::same_pos(c.center(), p).then_some(c)
+}
+
+/// Map a world-space command onto the cell-based shorthand while only the
+/// lattice is supported.
+fn lattice_road(world: &World, curve: &Curve) -> Result<(Cell, Cell), CommandError> {
+    let _ = world;
+    for p in [curve.start(), curve.end()] {
+        if !(0.0..crate::MAP_SIZE_M).contains(&p[0]) || !(0.0..crate::MAP_SIZE_M).contains(&p[1]) {
+            return Err(CommandError::OffMap { at: p });
+        }
+    }
+    match (
+        curve.is_straight(),
+        centre_cell(curve.start()),
+        centre_cell(curve.end()),
+    ) {
+        (true, Some(a), Some(b)) => Ok((a, b)),
+        _ => Err(CommandError::NotStraight),
+    }
+}
+
+/// World cells of a part of a straight lattice segment.
+fn lattice_part(world: &World, s: SegmentId, from_m: f32, to_m: f32) -> Result<(Cell, Cell), CommandError> {
+    let seg = world.roads.segments.get(s).ok_or(CommandError::NoSuchRoad)?;
+    let (lo, hi) = (from_m.min(to_m).max(0.0), from_m.max(to_m).min(seg.length));
+    if hi - lo < 1e-3 {
+        return Err(CommandError::NoSuchRoad);
+    }
+    let a = seg.pose(lo, 0.0).pos;
+    let b = seg.pose(hi, 0.0).pos;
+    match (seg.curve.is_straight(), centre_cell(a), centre_cell(b)) {
+        (true, Some(a), Some(b)) => Ok((a, b)),
+        _ => Err(CommandError::NotStraight),
+    }
+}
+
+fn quad_cells(quad: &[[f32; 2]; 4]) -> Vec<Cell> {
+    let lo = quad
+        .iter()
+        .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+    let hi = quad
+        .iter()
+        .fold([f32::NEG_INFINITY; 2], |a, p| [a[0].max(p[0]), a[1].max(p[1])]);
+    let r = CellRect::from_corners(Cell::from_pos(lo), Cell::from_pos(hi));
+    match r.clamp_to_map() {
+        Some(r) => r.cells().filter(|c| crate::zoning::in_quad(quad, c.center())).collect(),
+        None => Vec::new(),
+    }
+}
+
 pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
-    match *cmd {
-        Command::BuildRoad { from, to, kind } => plan_road(world, from, to, kind),
-        Command::Bulldoze { min, max } => plan_bulldoze(world, CellRect::from_corners(min, max)),
-        Command::SetZone { min, max, zone } => plan_zone(world, CellRect::from_corners(min, max), zone),
-        Command::SetTaxRate(r) => {
+    match cmd {
+        &Command::BuildRoad { from, to, kind } => plan_road(world, from, to, kind),
+        Command::BuildCurve { curve, kind } => {
+            let (a, b) = lattice_road(world, curve)?;
+            plan_road(world, a, b, *kind)
+        }
+        &Command::SetRoadKind {
+            segment,
+            from_m,
+            to_m,
+            kind,
+        } => {
+            let (a, b) = lattice_part(world, segment, from_m, to_m)?;
+            plan_road(world, a, b, kind)
+        }
+        &Command::RemoveRoad { segment, from_m, to_m } => {
+            let (a, b) = lattice_part(world, segment, from_m, to_m)?;
+            let line = a.straight_line_to(b).ok_or(CommandError::NotStraight)?;
+            let pieces: Vec<(Cell, Cell)> = line.windows(2).map(|w| ordered(w[0], w[1])).collect();
+            let cost = line.len() as i64 * balance::BULLDOZE_COST_PER_CELL;
+            Ok(Plan::Bulldoze {
+                pieces,
+                buildings: Vec::new(),
+                cells: line,
+                cost,
+            })
+        }
+        Command::BulldozeArea { quad } => {
+            let cells = quad_cells(quad);
+            let lo = cells.iter().fold(None::<CellRect>, |r, &c| {
+                Some(match r {
+                    None => CellRect::single(c),
+                    Some(r) => CellRect::from_corners(
+                        Cell::new(r.min.x.min(c.x), r.min.y.min(c.y)),
+                        Cell::new(r.max.x.max(c.x), r.max.y.max(c.y)),
+                    ),
+                })
+            });
+            let rect = lo.ok_or(CommandError::OutOfBounds)?;
+            plan_bulldoze(world, rect)
+        }
+        &Command::Bulldoze { min, max } => plan_bulldoze(world, CellRect::from_corners(min, max)),
+        &Command::SetZone { min, max, zone } => plan_zone(world, CellRect::from_corners(min, max), zone),
+        Command::ZoneArea { quad, zone } => Ok(zone_list(world, quad_cells(quad), *zone)),
+        Command::ZoneCells { cells, zone } => Ok(zone_list(
+            world,
+            cells
+                .iter()
+                .filter(|c| c.lattice == crate::zoning::LatticeId::WORLD)
+                .map(|c| Cell::new(c.i, c.j))
+                .filter(|c| c.in_bounds())
+                .collect(),
+            *zone,
+        )),
+        &Command::SetNodeControl { node, control } => {
+            let pos = world.roads.nodes.get(node).ok_or(CommandError::NotANode)?.pos;
+            let cell = centre_cell(pos).ok_or(CommandError::NotANode)?;
+            plan_junction(world, cell, control)
+        }
+        &Command::SetTaxRate(r) => {
             if r.is_finite() && (0.0..=balance::MAX_TAX_RATE).contains(&r) {
                 Ok(Plan::Tax(r))
             } else {
                 Err(CommandError::InvalidTaxRate(r))
             }
         }
-        Command::SetJunctionControl { cell, control } => plan_junction(world, cell, control),
+        &Command::SetJunctionControl { cell, control } => plan_junction(world, cell, control),
     }
 }
 
@@ -295,6 +582,45 @@ fn plan_road(world: &World, from: Cell, to: Cell, kind: RoadKind) -> Result<Plan
     }
     let cost = new_pieces.len() as i64 * kind.cost_per_cell() + change_cost;
     afford(world, cost)?;
+    let mut pieces: Vec<PlannedPiece> = new_pieces
+        .iter()
+        .map(|&(p, q)| PlannedPiece {
+            curve: Curve::straight(p.center(), q.center()),
+            kind,
+            change: PieceChange::New,
+        })
+        .collect();
+    for &(p, q) in &changed {
+        let old = world.roads.piece(p, q).map(|s| world.roads.segments[s].kind);
+        pieces.push(PlannedPiece {
+            curve: Curve::straight(p.center(), q.center()),
+            kind,
+            change: if old.is_some_and(|o| o.cost_per_cell() > kind.cost_per_cell()) {
+                PieceChange::Downgrade
+            } else {
+                PieceChange::Upgrade
+            },
+        });
+    }
+    let mut nodes = Vec::new();
+    for (k, &c) in cells.iter().enumerate() {
+        let p = c.center();
+        let end = k == 0 || k + 1 == cells.len();
+        let change = if world.roads.node_at(p).is_some() {
+            Some(NodeChange::Join)
+        } else if world.roads.segment_through(p).is_some() {
+            Some(if end { NodeChange::Split } else { NodeChange::Crossing })
+        } else if end {
+            Some(NodeChange::End)
+        } else {
+            None
+        };
+        // Only nodes the new pieces touch.
+        let touched = new_pieces.iter().any(|&(a, b)| a == c || b == c);
+        if let Some(change) = change.filter(|_| touched) {
+            nodes.push(PlannedNode { pos: p, change });
+        }
+    }
     Ok(Plan::Road {
         cells,
         kind,
@@ -303,6 +629,8 @@ fn plan_road(world: &World, from: Cell, to: Cell, kind: RoadKind) -> Result<Plan
         upgraded,
         downgraded,
         cost,
+        pieces,
+        nodes,
     })
 }
 
@@ -371,9 +699,9 @@ fn plan_bulldoze(world: &World, rect: CellRect) -> Result<Plan, CommandError> {
     }
     let mut buildings = Vec::new();
     for (id, b) in &world.buildings {
-        if b.footprint.intersects(&rect) {
+        if b.footprint.rect().intersects(&rect) {
             buildings.push(id);
-            cells.extend(b.footprint.cells());
+            cells.extend(b.footprint.rect().cells());
         }
     }
     let cells: Vec<Cell> = cells.into_iter().collect();
@@ -390,16 +718,24 @@ fn plan_bulldoze(world: &World, rect: CellRect) -> Result<Plan, CommandError> {
 
 fn plan_zone(world: &World, rect: CellRect, zone: Option<Zone>) -> Result<Plan, CommandError> {
     let rect = rect.clamp_to_map().ok_or(CommandError::OutOfBounds)?;
-    let cells = rect
-        .cells()
+    Ok(zone_list(world, rect.cells().collect(), zone))
+}
+
+/// The eligible cells of a list.
+fn zone_list(world: &World, cells: Vec<Cell>, zone: Option<Zone>) -> Plan {
+    let mut cells: Vec<Cell> = cells
+        .into_iter()
         .filter(|&c| {
-            let cd = world.grid.get(c).expect("clamped");
-            cd.occupant == Occupant::Empty
-                && cd.zone != zone
-                && (zone.is_none() || world.grid.near_road(c, balance::ZONE_ROAD_REACH))
+            world.grid.get(c).is_some_and(|cd| {
+                cd.occupant == Occupant::Empty
+                    && cd.zone != zone
+                    && (zone.is_none() || world.grid.near_road(c, balance::ZONE_ROAD_REACH))
+            })
         })
         .collect();
-    Ok(Plan::Zone { cells, zone })
+    cells.sort_by_key(|c| (c.y, c.x));
+    cells.dedup();
+    Plan::Zone { cells, zone }
 }
 
 pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
@@ -466,7 +802,7 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             remove_pieces(world, &pieces);
             for id in &buildings {
                 if let Some(b) = world.buildings.remove(*id) {
-                    for c in b.footprint.cells() {
+                    for c in b.footprint.rect().cells() {
                         if let Some(cd) = world.grid.get_mut(c) {
                             cd.occupant = Occupant::Empty;
                         }
@@ -503,14 +839,7 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             world.traffic.control_version += 1;
         }
     }
-    Outcome {
-        cost: preview.cost,
-        cells: preview.cells,
-        new_pieces: preview.new_pieces,
-        upgraded: preview.upgraded,
-        downgraded: preview.downgraded,
-        junction: preview.junction,
-    }
+    preview
 }
 
 /// Remove unit road pieces (bulldoze), tidy the nodes at their ends and

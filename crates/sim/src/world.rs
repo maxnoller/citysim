@@ -65,6 +65,9 @@ pub struct World {
     /// Population bookkeeping: who lives and works where, counters, daily
     /// trip and life-event counts, city statistics (`people.stats`).
     pub people: People,
+    /// Zone blocks, lattices and cells (see [`crate::zoning`]).
+    #[serde(skip)]
+    pub zoning: crate::Zoning,
     /// Lazily rebuilt indices derived from the state above. Not saved,
     /// ignored by `==`.
     #[serde(skip)]
@@ -93,6 +96,7 @@ impl World {
             growth: GrowthState::default(),
             citizens: IdMap::new(),
             people: People::default(),
+            zoning: crate::Zoning::default(),
             cache: Derived::default(),
         };
         let start = World::highway_entry_cell();
@@ -107,6 +111,7 @@ impl World {
         traffic::sync_junctions(&mut world);
         stats::update(&mut world);
         demand::refresh(&mut world);
+        crate::zoning::mirror_grid(&mut world);
         world
     }
 
@@ -131,6 +136,7 @@ impl World {
             households::trip_ended(self, e);
         }
         stats::update(self);
+        crate::zoning::mirror_grid(self);
         if self.time.tick == 0 {
             // The clock never ran (a new game, paused from the start):
             // demand follows every command at once.
@@ -152,6 +158,7 @@ impl World {
         crate::errands::tick(self);
         traffic::tick(self);
         stats::update(self);
+        crate::zoning::mirror_grid(self);
     }
 
     pub fn save(&self) -> Vec<u8> {
@@ -291,7 +298,7 @@ impl World {
                     Occupant::Road => {}
                     _ if covered => return Err(format!("{c:?} has road but is not marked road")),
                     Occupant::Building(id) => match self.buildings.get(id) {
-                        Some(b) if b.footprint.contains(c) => {}
+                        Some(b) if b.footprint.rect().contains(c) => {}
                         _ => return Err(format!("{c:?} references bad building {id:?}")),
                     },
                     Occupant::Empty => {}

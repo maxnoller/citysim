@@ -113,7 +113,7 @@ fn enormous_dead_end_tree() {
     assert!(peak > 20 && done > 10, "peak {peak}, trips {done}");
     // Cut the trunk under the morning rush.
     bulldoze(&mut w, (13, 127), (13, 129));
-    let cut_off = |b: &Building| b.footprint.min.x > 16;
+    let cut_off = |b: &Building| b.footprint.rect().min.x > 16;
     assert!(w.buildings.values().any(cut_off));
     // Abandoned one in-game day (the grace period) after the cut.
     run(&mut w, DAY + 2 * HOUR);
@@ -209,7 +209,7 @@ fn disconnected_islands() {
     assert!(
         w.buildings
             .values()
-            .all(|b| b.footprint.min.x >= 30 && (100..=150).contains(&b.footprint.min.y))
+            .all(|b| b.footprint.rect().min.x >= 30 && (100..=150).contains(&b.footprint.rect().min.y))
     );
     // Cut it again under traffic.
     bulldoze(&mut w, (20, 127), (21, 129));

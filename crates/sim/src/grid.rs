@@ -5,18 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::zoning::Zone;
 use crate::{BuildingId, Cell, MAP_CELLS};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Zone {
-    Residential,
-    Commercial,
-    Industrial,
-}
-
-impl Zone {
-    pub const ALL: [Zone; 3] = [Zone::Residential, Zone::Commercial, Zone::Industrial];
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Occupant {

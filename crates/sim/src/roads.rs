@@ -1,9 +1,9 @@
 //! The road network: a general graph of nodes (metre positions) joined by
-//! straight segments.
+//! segments, each with a [`Curve`] centre line from its `a` node to its `b`
+//! node (straight roads are straight curves).
 //!
-//! Pathfinding, vehicles and rendering rely only on this graph, never on the
-//! grid, so other build tools (free-form, curved) can be added later by only
-//! changing how commands edit the graph. Segments are two-way.
+//! Pathfinding, vehicles and rendering rely only on this graph. Segments are
+//! two-way; lengths are arc lengths.
 
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
@@ -11,6 +11,7 @@ use slotmap::new_key_type;
 use crate::IdMap;
 
 use crate::balance;
+use crate::curve::{ArcTable, Curve, Pose};
 use crate::geom::{self, Cell};
 
 new_key_type! {
@@ -115,6 +116,33 @@ impl RoadKind {
         }
     }
 
+    /// Construction cost per metre (`cost_per_cell / CELL_SIZE`).
+    pub fn cost_per_m(self) -> f64 {
+        self.cost_per_cell() as f64 / crate::CELL_SIZE as f64
+    }
+
+    /// Daily upkeep per metre.
+    pub fn upkeep_per_m(self) -> f64 {
+        self.upkeep_per_cell() as f64 / crate::CELL_SIZE as f64
+    }
+
+    /// Tightest curve radius this kind may be built with, metres (centre
+    /// line). `Command::BuildCurve` refuses tighter curves.
+    pub fn min_radius_m(self) -> f32 {
+        match self {
+            RoadKind::Street => balance::STREET_MIN_RADIUS_M,
+            RoadKind::Avenue => balance::AVENUE_MIN_RADIUS_M,
+            RoadKind::Highway => balance::AVENUE_MIN_RADIUS_M,
+        }
+    }
+
+    /// Half the width zoning keeps clear of the centre line, metres (half a
+    /// cell for every kind, so a road on the cell lattice occupies exactly
+    /// one row of cells as it always has).
+    pub fn reserve_half_width_m(self) -> f32 {
+        crate::CELL_SIZE * 0.5
+    }
+
     /// Road class for priority rules: higher wins (Street 0, Avenue 1,
     /// Highway 2).
     pub fn rank(self) -> u8 {
@@ -134,12 +162,17 @@ pub struct RoadNode {
     pub segments: Vec<SegmentId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoadSegment {
     pub a: NodeId,
     pub b: NodeId,
     pub kind: RoadKind,
-    /// Metres. Straight for now: `dist(a.pos, b.pos)`.
+    /// Centre line from `a`'s position to `b`'s.
+    pub curve: Curve,
+    /// Build order: lower is older. Split halves keep their segment's
+    /// serial; zoning blocks of older roads win where blocks overlap.
+    pub serial: u64,
+    /// Metres along the centre line (`curve.length()`).
     pub length: f32,
     /// Metres per second.
     pub speed_limit: f32,
@@ -147,21 +180,57 @@ pub struct RoadSegment {
     /// [`RoadSegment::dir`]: `[a -> b, b -> a]`.
     pub capacity: [f32; 2],
     /// Vehicles currently on the segment per direction, `[a -> b, b -> a]`.
-    /// PHASE2: maintained by traffic.
     pub load: [f32; 2],
+    /// Arc-length table of `curve` (derived, rebuilt on load).
+    #[serde(skip)]
+    pub(crate) arc: ArcTable,
+}
+
+impl PartialEq for RoadSegment {
+    fn eq(&self, o: &Self) -> bool {
+        self.a == o.a
+            && self.b == o.b
+            && self.kind == o.kind
+            && self.curve == o.curve
+            && self.serial == o.serial
+            && self.length == o.length
+            && self.speed_limit == o.speed_limit
+            && self.capacity == o.capacity
+            && self.load == o.load
+    }
+}
+
+/// Speed limit of `kind` on `curve`: the kind's limit, lower on tight
+/// curves (lateral acceleration `balance::CORNER_ACCEL`).
+pub fn curve_speed_limit(kind: RoadKind, curve: &Curve) -> f32 {
+    let (r, _) = curve.min_radius();
+    let corner = (balance::CORNER_ACCEL * r).sqrt();
+    kind.speed_limit().min(corner.max(balance::JUNCTION_SPEED))
 }
 
 impl RoadSegment {
-    /// A segment of `kind` between two nodes `length` metres apart.
+    /// A straight segment of `kind` between two nodes `length` metres apart
+    /// (positions unknown: the curve is a placeholder until the network
+    /// sets it; prefer [`RoadNetwork::add_curve`]).
     pub fn new(a: NodeId, b: NodeId, kind: RoadKind, length: f32, load: [f32; 2]) -> RoadSegment {
+        RoadSegment::with_curve(a, b, kind, Curve::straight([0.0, 0.0], [length, 0.0]), 0, load)
+    }
+
+    /// A segment of `kind` along `curve` (from `a` to `b`).
+    pub fn with_curve(a: NodeId, b: NodeId, kind: RoadKind, curve: Curve, serial: u64, load: [f32; 2]) -> RoadSegment {
+        let arc = curve.arc_table();
+        let length = curve.length_with(&arc);
         RoadSegment {
             a,
             b,
             kind,
+            curve,
+            serial,
             length,
-            speed_limit: kind.speed_limit(),
+            speed_limit: curve_speed_limit(kind, &curve),
             capacity: capacity_for(kind, length),
             load,
+            arc,
         }
     }
 
@@ -169,8 +238,60 @@ impl RoadSegment {
     /// load.
     pub fn set_kind(&mut self, kind: RoadKind) {
         self.kind = kind;
-        self.speed_limit = kind.speed_limit();
+        self.speed_limit = curve_speed_limit(kind, &self.curve);
         self.capacity = capacity_for(kind, self.length);
+    }
+
+    /// Replace the centre line (length, speed limit and capacity follow).
+    pub(crate) fn set_curve(&mut self, curve: Curve) {
+        self.curve = curve;
+        self.arc = curve.arc_table();
+        self.length = curve.length_with(&self.arc);
+        self.speed_limit = curve_speed_limit(self.kind, &curve);
+        self.capacity = capacity_for(self.kind, self.length);
+    }
+
+    /// Rebuild the derived arc table (after loading).
+    pub(crate) fn refresh_table(&mut self) {
+        self.arc = self.curve.arc_table();
+    }
+
+    /// Pose `from_a` metres from `a` along the centre line, `offset` metres
+    /// to the right of the `a -> b` direction.
+    pub fn pose(&self, from_a: f32, offset: f32) -> Pose {
+        self.curve.pose_at_with(&self.arc, from_a, offset)
+    }
+
+    /// Pose for travel in direction `forward` (`a -> b` when true):
+    /// `progress` metres from the node it entered by, `offset` metres to the
+    /// right of travel; `dir` points along travel.
+    pub fn pose_dir(&self, forward: bool, progress: f32, offset: f32) -> Pose {
+        if forward {
+            self.pose(progress, offset)
+        } else {
+            let p = self.pose(self.length - progress, -offset);
+            Pose {
+                pos: p.pos,
+                dir: [-p.dir[0], -p.dir[1]],
+            }
+        }
+    }
+
+    /// Nearest point of the centre line to `p`: `(metres from a, distance,
+    /// point)`.
+    pub fn nearest(&self, p: [f32; 2]) -> (f32, f32, [f32; 2]) {
+        self.curve.nearest_with(&self.arc, p)
+    }
+
+    /// Unit direction away from node `n` (one of the ends) along the centre
+    /// line.
+    pub fn dir_from(&self, n: NodeId) -> [f32; 2] {
+        if n == self.a {
+            self.curve.start_dir()
+        } else {
+            let d = self.curve.end_dir();
+            [-d[0], -d[1]]
+        }
     }
 
     /// Lanes per direction.
@@ -221,6 +342,8 @@ pub struct RoadNetwork {
     pub segments: IdMap<SegmentId, RoadSegment>,
     /// Where newcomers arrive: the outer end of the highway stub.
     pub entry: Option<NodeId>,
+    /// Serial the next new segment gets.
+    pub next_serial: u64,
 }
 
 impl RoadNetwork {
@@ -248,10 +371,30 @@ impl RoadNetwork {
 
     /// Segment whose interior (not its ends) passes through `pos`.
     pub fn segment_through(&self, pos: [f32; 2]) -> Option<SegmentId> {
-        self.segments.keys().find(|&s| {
+        self.segments.keys().find(|&s| self.on_interior(s, pos))
+    }
+
+    /// Does the centre line of `s` pass through `pos` (within
+    /// `geom::POS_EPS`), away from its ends?
+    pub fn on_interior(&self, s: SegmentId, pos: [f32; 2]) -> bool {
+        self.on_curve(s, pos) && {
             let (a, b) = self.segment_ends(s);
-            geom::on_segment_interior(pos, a, b)
-        })
+            !geom::same_pos(pos, a) && !geom::same_pos(pos, b)
+        }
+    }
+
+    /// Does the centre line of `s` (ends included) pass through `pos`?
+    pub fn on_curve(&self, s: SegmentId, pos: [f32; 2]) -> bool {
+        let seg = &self.segments[s];
+        if seg.curve.is_straight() {
+            let (a, b) = self.segment_ends(s);
+            return geom::on_segment(pos, a, b);
+        }
+        let (lo, hi) = seg.curve.bounds();
+        if pos[0] < lo[0] - 0.01 || pos[0] > hi[0] + 0.01 || pos[1] < lo[1] - 0.01 || pos[1] > hi[1] + 0.01 {
+            return false;
+        }
+        seg.nearest(pos).1 < 0.01
     }
 
     /// Does any node or segment lie at `pos`?
@@ -262,10 +405,9 @@ impl RoadNetwork {
     /// A segment containing both points (closed). With no overlapping
     /// segments this is the road piece from `p` to `q`, if built.
     pub fn segment_containing(&self, p: [f32; 2], q: [f32; 2]) -> Option<SegmentId> {
-        self.segments.keys().find(|&s| {
-            let (a, b) = self.segment_ends(s);
-            geom::on_segment(p, a, b) && geom::on_segment(q, a, b)
-        })
+        self.segments
+            .keys()
+            .find(|&s| self.on_curve(s, p) && self.on_curve(s, q))
     }
 
     /// Segment directly joining two nodes.
@@ -291,12 +433,61 @@ impl RoadNetwork {
 
     /// Join two distinct nodes with a straight segment.
     pub fn add_segment(&mut self, a: NodeId, b: NodeId, kind: RoadKind) -> SegmentId {
+        let curve = Curve::straight(self.nodes[a].pos, self.nodes[b].pos);
+        self.add_curve(a, b, kind, curve)
+    }
+
+    /// Join two distinct nodes with a segment along `curve` (its ends are
+    /// moved exactly onto the nodes). It gets the next serial.
+    pub fn add_curve(&mut self, a: NodeId, b: NodeId, kind: RoadKind, curve: Curve) -> SegmentId {
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        self.add_curve_serial(a, b, kind, curve, serial)
+    }
+
+    fn add_curve_serial(&mut self, a: NodeId, b: NodeId, kind: RoadKind, curve: Curve, serial: u64) -> SegmentId {
         assert_ne!(a, b, "zero-length segment");
-        let length = geom::dist(self.nodes[a].pos, self.nodes[b].pos);
-        let s = self.segments.insert(RoadSegment::new(a, b, kind, length, [0.0; 2]));
+        let curve = curve.with_ends(self.nodes[a].pos, self.nodes[b].pos);
+        let s = self
+            .segments
+            .insert(RoadSegment::with_curve(a, b, kind, curve, serial, [0.0; 2]));
         self.nodes[a].segments.push(s);
         self.nodes[b].segments.push(s);
         s
+    }
+
+    /// The centre line of `s`.
+    pub fn curve(&self, s: SegmentId) -> &Curve {
+        &self.segments[s].curve
+    }
+
+    /// The segment whose centre line passes nearest to `pos` within
+    /// `max_dist` metres: `(segment, metres from a, distance)`; ties go to
+    /// the lower slot.
+    pub fn nearest_segment(&self, pos: [f32; 2], max_dist: f32) -> Option<(SegmentId, f32, f32)> {
+        let mut best: Option<(SegmentId, f32, f32)> = None;
+        for (s, seg) in self.segments.iter() {
+            let (lo, hi) = seg.curve.bounds();
+            if pos[0] < lo[0] - max_dist
+                || pos[0] > hi[0] + max_dist
+                || pos[1] < lo[1] - max_dist
+                || pos[1] > hi[1] + max_dist
+            {
+                continue;
+            }
+            let (d, dist, _) = seg.nearest(pos);
+            if dist <= max_dist && best.is_none_or(|b| dist < b.2) {
+                best = Some((s, d, dist));
+            }
+        }
+        best
+    }
+
+    /// Rebuild derived per-segment tables (after loading).
+    pub(crate) fn refresh_tables(&mut self) {
+        for seg in self.segments.values_mut() {
+            seg.refresh_table();
+        }
     }
 
     /// Remove a segment; its nodes stay (call [`Self::simplify_node`]).
@@ -325,21 +516,30 @@ impl RoadNetwork {
     /// Split `s` at interior point `pos`. `s` keeps its id and becomes the
     /// `a`-side half; a new segment is the `b`-side half.
     pub fn split_segment(&mut self, s: SegmentId, pos: [f32; 2]) -> NodeId {
-        let mid = self.add_node(pos);
+        let at = self.segments[s].nearest(pos).0;
+        self.split_at(s, at, Some(pos))
+    }
+
+    /// Split `s` at `from_a` metres from its `a` node (interior). The node
+    /// goes exactly to `pos` when given (a point on the curve), else to the
+    /// curve point. `s` keeps its id and becomes the `a`-side half.
+    pub fn split_at(&mut self, s: SegmentId, from_a: f32, pos: Option<[f32; 2]>) -> NodeId {
         let seg = self.segments[s].clone();
-        let len_a = geom::dist(self.nodes[seg.a].pos, pos);
-        let len_b = geom::dist(pos, self.nodes[seg.b].pos);
-        let frac_a = len_a / (len_a + len_b);
+        let (c1, c2) = seg.curve.split_at(from_a);
+        let p = pos.unwrap_or(c1.end());
+        let mid = self.add_node(p);
+        let (c1, c2) = (c1.with_ends(seg.curve.start(), p), c2.with_ends(p, seg.curve.end()));
+        let len_a = c1.length();
+        let frac_a = (len_a / seg.length.max(1e-6)).clamp(0.0, 1.0);
         {
             let first = &mut self.segments[s];
             first.b = mid;
-            first.length = len_a;
-            first.capacity = capacity_for(seg.kind, len_a);
+            first.set_curve(c1);
             first.load = seg.load.map(|l| l * frac_a);
         }
         self.nodes[seg.b].segments.retain(|&x| x != s);
         self.nodes[mid].segments.push(s);
-        let second = self.add_segment(mid, seg.b, seg.kind);
+        let second = self.add_curve_serial(mid, seg.b, seg.kind, c2, seg.serial);
         self.segments[second].load = seg.load.map(|l| l * (1.0 - frac_a));
         mid
     }
@@ -375,7 +575,7 @@ impl RoadNetwork {
                 let l1 = geom::dot(d1, d1).sqrt();
                 let l2 = geom::dot(d2, d2).sqrt();
                 let collinear = (geom::cross(d1, d2) / (l1 * l2)).abs() < 1e-4 && geom::dot(d1, d2) < 0.0;
-                if !collinear {
+                if !collinear || !seg1.curve.is_straight() || !seg2.curve.is_straight() {
                     return false;
                 }
                 // Keep s1, extend it to end2 through n; drop s2.
@@ -389,8 +589,11 @@ impl RoadNetwork {
                 } else {
                     first.b = end2;
                 }
-                first.length += seg2.length;
-                first.capacity = capacity_for(first.kind, first.length);
+                first.serial = first.serial.min(seg2.serial);
+                let (fa, fb) = (first.a, first.b);
+                let curve = Curve::straight(self.nodes[fa].pos, self.nodes[fb].pos);
+                let first = &mut self.segments[s1];
+                first.set_curve(curve);
                 // Add s2's load per direction, matching travel directions.
                 let (fa, fb) = (first.a, first.b);
                 let s1_dir = geom::sub(self.nodes[fb].pos, self.nodes[fa].pos);
@@ -423,7 +626,10 @@ impl RoadNetwork {
                 }
             }
             let (pa, pb) = self.segment_ends(s);
-            let d = geom::dist(pa, pb);
+            if !geom::same_pos(seg.curve.start(), pa) || !geom::same_pos(seg.curve.end(), pb) {
+                return Err(format!("{s:?} curve does not end at its nodes"));
+            }
+            let d = seg.curve.length();
             if d < geom::POS_EPS {
                 return Err(format!("{s:?} has zero length"));
             }
@@ -431,7 +637,7 @@ impl RoadNetwork {
                 return Err(format!("{s:?} length {} != {d}", seg.length));
             }
             for (n, node) in &self.nodes {
-                if geom::on_segment_interior(node.pos, pa, pb) {
+                if self.on_interior(s, node.pos) {
                     return Err(format!("{n:?} lies inside {s:?} (unsplit intersection/overlap)"));
                 }
             }

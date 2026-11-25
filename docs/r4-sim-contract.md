@@ -1,0 +1,143 @@
+# Simulation contract: free-form roads and zoning that follows them
+
+Branch `r4-roads` (crate `citysim_sim`). This page is the contract between the simulation and the graphics /
+interface work. Additions are appended freely; changes to anything already listed are recorded at the bottom under a
+dated heading.
+
+## The model in short
+
+- **Roads** are a graph of nodes joined by segments. Every segment has a **centre line** `RoadSegment::curve`, a
+  cubic Bézier in sim metres from its `a` node to its `b` node (a straight road is a straight `Curve`). Lengths are
+  arc lengths. Segments still split when another road joins or crosses them (the `a` half keeps the id), so segment
+  ids can still vanish on edits.
+- A road can start and end anywhere and run at any angle or curve (`Command::BuildCurve`). Ends near a node join it,
+  ends on a road split it into a T, crossings become junctions. Pieces of road are priced and kept up by the metre.
+- **Junctions** at any angle: every node's arms get stop lines from the real geometry of their neighbours; vehicles
+  take turn paths (`Movement::curve`) through the box; `junction_shape` publishes the outline polygon and the cut line
+  of every arm for meshing.
+- **Zoning** is no longer one world grid. 8 m cells live on **lattices** (grids at some origin and angle); each side of
+  each segment owns **blocks** (rectangles of cells, `BLOCK_DEPTH` = 2 deep, front row along the kerb). Roads whose
+  lattices line up share a lattice and its cells, so an ordinary right-angle grid city is exactly lattice 0, the
+  world grid you know (cell `(i, j)` of lattice 0 is `Cell (i, j)`). Curved roads get several straight blocks.
+  Where blocks of different lattices overlap, the older road keeps the cells.
+- **Buildings** stand on a rectangle of cells of one lattice: centre in metres, rotation, size in cells, the cells.
+  The front always faces the road it grew for.
+
+Coordinates are unchanged: sim `(x, y)` metres → Bevy `(x, 0, y)`; the right of a unit direction `d` is
+`(-d.y, d.x)` (traffic drives on the right).
+
+## New items and how to use them
+
+### Curves (`citysim_sim::curve`, re-exported `Curve`, `Pose`)
+- `Curve { p: [[f32; 2]; 4] }`: start, two handles, end. `Curve::straight(a, b)`, `Curve::new(..)`.
+- Tool constructors: `Curve::from_tangents(start, start_dir, end, end_dir) -> Option<Curve>` (arc fit; `None` for an
+  S-bend), `Curve::through_corner(start, corner, end)` (simple 3-point curve), `Curve::continuing(start, dir, end)`
+  (continue a road's direction), complex curve = `Curve::new` with the 4 points.
+- `length()`, `pose_at(d, offset) -> Pose { pos, dir }` (`d` metres along, `offset` metres to the right),
+  `point_at(d, offset)`, `nearest(p) -> (d, distance, point)`, `split_at(d)`, `sub(d0, d1)`, `reversed()`,
+  `intersections(&other) -> Vec<(d_self, d_other, point)>`, `self_intersection()`, `min_radius() -> (radius, d)`,
+  `total_turn()`, `start_dir()`, `end_dir()`, `is_straight()`, `bounds()`.
+- **Renderers:** `flatten(tol) -> Vec<[f32; 2]>` (centre line polyline within `tol` metres) and
+  `flatten_offset(offset, tol) -> Vec<(d, point)>` (kerbs, lane lines, sidewalks).
+
+### Roads (`roads`)
+- `RoadSegment::curve` (centre line `a -> b`), `RoadSegment::serial` (build order; lower = older; split halves keep
+  it). `RoadNetwork::next_serial`.
+- `RoadSegment::pose(from_a, offset)`, `pose_dir(forward, progress, offset)` (along travel), `nearest(p)`,
+  `dir_from(node)` (tangent away from a node). `RoadNetwork::curve(s)`, `nearest_segment(pos, max_dist) ->
+  Option<(segment, from_a, distance)>`, `add_curve(a, b, kind, curve)`, `split_at(s, from_a, pos)`.
+- `RoadKind::cost_per_m()`, `upkeep_per_m()`, `min_radius_m()` (street 12 m, avenue 24 m),
+  `reserve_half_width_m()` (4 m: what zoning keeps clear; drawn widths are still `half_width_m()`).
+- `roads::curve_speed_limit(kind, curve)`: `RoadSegment::speed_limit` is now lower on tight curves.
+
+### Commands (`command`)
+- `Command::BuildCurve { curve, kind }` — a road anywhere (see the model). Use `World::preview` while drawing.
+- `Command::SetRoadKind { segment, from_m, to_m, kind }` — upgrade / downgrade part or all (`0..=length`) of a
+  segment.
+- `Command::RemoveRoad { segment, from_m, to_m }` — remove part or all of a segment.
+- `Command::BulldozeArea { quad }` — road parts inside a convex quad (sim metres) and buildings overlapping it.
+- `Command::ZoneArea { quad, zone }` — zone / unzone the eligible cells whose centre is inside a convex quad.
+- `Command::ZoneCells { cells: Vec<CellRef>, zone }` — zone / unzone a list (frontage and paint tools).
+- `Command::SetNodeControl { node, control }` — junction control for a node anywhere.
+- `Preview` (= `Outcome`) new fields: `pieces: Vec<PlannedPiece { curve, kind, change: PieceChange::{New, Upgrade,
+  Downgrade} }>` (the road as it will be, split at its nodes), `nodes: Vec<PlannedNode { pos, change:
+  NodeChange::{End, Join, Split, Crossing} }>`, `length_m` (new metres), `removed: Vec<Curve>`, `buildings:
+  Vec<BuildingId>` (demolished), `zone_cells: Vec<CellRef>`.
+- New `CommandError`s, each with the place: `TooShort { at, length, min }`, `TooTight { at, radius, min }`,
+  `SharpAngle { at, degrees, min }`, `TooClose { at }` (along / beside another road), `SelfCrossing { at }`,
+  `BuildingInTheWay { at, building }`, `OffMap { at }`, `NoSuchRoad`, `NotANode`.
+  `CommandError::at() -> Option<[f32; 2]>` gives the position for any error that has one (draw it); `Display` gives
+  the reason.
+
+### Zoning (`zoning`, re-exported `Zoning`, `Lattice`, `LatticeId`, `CellRef`, `ZoneCell`, `Blocked`, `Block`,
+`Side`)
+- `world.zoning: Zoning { lattices: Vec<Option<Lattice>>, blocks: Vec<Block> }`. `LatticeId::WORLD` (0) is the map
+  grid.
+- `Lattice { origin, u, cells: BTreeMap<(i, j), ZoneCell> }`: `v()`, `angle()`, `cell_center(i, j)`,
+  `cell_corners(i, j)`, `cell_of(pos)`, `local(pos)`, `world_at(x, y)`, `dir(facing)`.
+- `CellRef { lattice, i, j }` names a cell; `CellRef::world(Cell)`.
+- `ZoneCell { zone, building, covered, blocked: Option<Blocked::{Road, Contested, Building}>, fronts }`:
+  `usable()` (covered and not blocked: draw these as zoneable land), `free()`, `fronts_on(facing)`.
+- `Block { segment, side: Side::{Left, Right}, lattice, min, max, front: Facing, priority }`: `cells()`,
+  `in_front_row(c)`, `depth_of(c)`; `Zoning::block_corners(&block)` (world corners), `Zoning::blocks_of(segment)`.
+- Queries, cheap for one target per frame: `zoning::cell_at(world, pos)` (or `world.zoning.cell_at(pos)`),
+  `world.zoning.cell(c)`, `cell_center(c)`, `cell_corners(c)`, `cells()`; `zoning::fill_area(world, pos, limit)`
+  (connected area for a fill tool), `zoning::frontage(world, segment, side, depth)` (front cells of one road side
+  between two junctions), `zoning::cells_in_quad(world, quad)`, `zoning::building_at(world, pos)`,
+  `zoning::in_quad(quad, p)`.
+- Draw zones from `world.zoning.cells()` (usable cells with a zone), keyed on `world.versions.grid`.
+
+### Buildings
+- `Building::footprint: Footprint { lattice, min, max, center, rotation, size: [width along the front, depth] }`.
+  Use `Building::center()`, `rotation()` (radians, direction the front faces, `atan2` in sim axes), `front_dir()`,
+  `size()` (now `(width along the front, depth)`), `corners()` (front-left, front-right, back-right, back-left),
+  `cells()`. `Footprint::world(CellRect, Facing)` builds a lattice-0 footprint.
+
+### Junctions
+- `junction::junction_shape(world, node, extra) -> Option<JunctionShape { node, pos, arms: Vec<ArmCut>, outline }>`:
+  `ArmCut { segment, setback, center, dir, left, right, half_width }` is where that arm's road surface ends (draw the
+  segment between its two cuts); `outline` is the junction surface polygon (counter-clockwise). `extra` widens the
+  kerbs beyond the carriageway (0 for asphalt, sidewalk width for the pavement). `None` for dead ends and smooth
+  continuations (draw the road straight through the node).
+- `Movement::curve` is the turn path (stop line to box edge, lane offsets included).
+
+### Version counters
+- `versions.roads` (graph, curves, kinds), `versions.grid` (any zone cell or block), `versions.buildings` — same
+  names, wider meaning.
+
+## Removed or changed meaning (and what to use instead)
+
+| Item | Now |
+|---|---|
+| `Command` is `Copy` | `Clone` only (`ZoneCells` holds a list). |
+| `Outcome` struct | `type Outcome = Preview` (same fields plus the new ones). |
+| `Preview::new_pieces / upgraded / downgraded` | Road length in cells (metres / 8, rounded), not unit pieces. |
+| `Preview::cells` | Still world cells; for zoning use `zone_cells` (cells may be on rotated lattices). |
+| `CommandError::DiagonalCrossing` | Never produced: crossings at any angle make junctions. |
+| `CommandError::NotStraight` | Only from the `BuildRoad` shorthand. |
+| `RoadSegment::length` | Arc length of `curve` (was the chord). |
+| `RoadSegment::new(a, b, kind, length, load)` | Placeholder curve; use `RoadNetwork::add_curve` / `add_segment`. |
+| `RoadSegment::speed_limit` | Kind's limit, lower on tight curves. |
+| `segment_ends(s)` | Still the node positions; draw `curve`, not the chord. |
+| `Movement::{p0, p1, p2}` (quadratic) | `Movement::curve` (cubic). |
+| `Arm::dir` | Tangent of the arm's curve at the node (was the chord). |
+| `world.grid`, `Grid`, `CellData`, `Occupant` | Going away (still present while zoning moves onto blocks): use `world.zoning` and its queries; `Occupant::Road` → `ZoneCell::blocked == Some(Blocked::Road)`, `Occupant::Building(b)` → `ZoneCell::building`. |
+| `Building::footprint: CellRect` | `Footprint` (lattice rectangle + centre, rotation, size). `footprint.rect()` is the lattice rectangle (world cells only for lattice 0). |
+| `Building::facing` | Relative to the building's lattice; use `rotation()` / `front_dir()` for drawing. |
+| `Building::size()` | `(width along the front, depth)` (was `(x, y)`). |
+| `growth::front_cells`, `growth::has_frontage` (`CellRect`) | Lattice-0 only; frontage is `ZoneCell::fronts`. |
+| `junction::junction_at(world, cell)` | Only finds junctions at cell centres; use node ids (`junction_nodes`, `world.roads.node_at`) and `SetNodeControl`. |
+| `derived::rect_center(CellRect)` | Takes a `Footprint` (returns its centre); `cell_rect_center(CellRect)` for rectangles. |
+| `Zone` | Lives in `zoning` (still re-exported as `citysim_sim::Zone` and `grid::Zone`). |
+
+## Status of the implementation
+
+The contract above is complete; behaviour lands in steps on this branch. At the first push:
+- Curves, segment curves and serials, vehicle poses along curves, turn paths as curves, junction shapes: done.
+- `BuildCurve` / `SetRoadKind` / `RemoveRoad` / `BulldozeArea` / `ZoneArea` / `ZoneCells` / `SetNodeControl` accept
+  straight lattice geometry (cell centres, 8-way) only and map onto the cell commands; other curves are refused with
+  `NotStraight` until the free-form builder lands.
+- `world.zoning` mirrors the world grid as lattice 0 (blocks for straight, axis-aligned lattice roads). Not saved
+  yet (rebuilt on load).
+
+## Changes after the first push

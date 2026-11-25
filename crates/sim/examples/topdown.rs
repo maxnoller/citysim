@@ -291,7 +291,7 @@ fn draw_world_opts(c: &mut Canvas, w: &World, v: &View, show_zones: bool, cars: 
         }
     }
     for b in w.buildings.values() {
-        let r = b.footprint;
+        let r = b.footprint.rect();
         if r.max.x < cx0 || r.min.x > cx1 || r.max.y < cy0 || r.min.y > cy1 {
             continue;
         }
@@ -689,7 +689,7 @@ fn lots(out: &str) {
     let without = w
         .buildings
         .values()
-        .filter(|b| !growth::has_frontage(&w, b.footprint, b.facing))
+        .filter(|b| !growth::has_frontage(&w, b.footprint.rect(), b.facing))
         .count();
     let empty_zoned = w
         .grid

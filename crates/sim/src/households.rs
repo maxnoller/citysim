@@ -24,7 +24,7 @@ use crate::citizens::{Activity, Citizen, CitizenId, HouseholdRole, LifeEvent, Li
 use crate::derived::rect_center;
 use crate::people::{self, habit};
 use crate::traffic::{self, Place, TripPurpose};
-use crate::{BuildingId, CellRect, VehicleId, World, Zone, balance};
+use crate::{BuildingId, VehicleId, World, Zone, balance};
 
 new_key_type! {
     /// Stable id of a [`Household`].
@@ -242,8 +242,8 @@ impl Household {
 }
 
 /// Can a building be reached from the highway?
-pub(crate) fn connected(world: &World, r: CellRect) -> bool {
-    world.cache.connected_near(r, balance::ZONE_ROAD_REACH + 1)
+pub(crate) fn connected(world: &World, f: crate::Footprint) -> bool {
+    crate::growth::footprint_connected(world, f)
 }
 
 pub(crate) fn place_of(world: &World, b: BuildingId) -> Option<Place> {

@@ -290,7 +290,7 @@ fn road_blocked_by_building() {
     road(&mut w, (0, 0), (10, 0)).unwrap();
     let id = w.buildings.insert(Building {
         kind: Zone::Residential,
-        footprint: CellRect::single(c(5, 1)),
+        footprint: citysim_sim::Footprint::world(CellRect::single(c(5, 1)), Facing::MinusY),
         level: 1,
         capacity: 4,
         occupied: 0,
@@ -605,7 +605,7 @@ fn bulldoze_removes_buildings_and_keeps_zone() {
     let fp = CellRect::from_corners(c(2, 1), c(3, 2));
     let id = w.buildings.insert(Building {
         kind: Zone::Residential,
-        footprint: fp,
+        footprint: citysim_sim::Footprint::world(fp, Facing::MinusY),
         level: 1,
         capacity: 8,
         occupied: 0,
@@ -734,7 +734,7 @@ fn save_load_round_trip() {
         to: c(40, 100),
         kind: citysim_sim::RoadKind::Street,
     };
-    assert_eq!(a.apply(cmd), b.apply(cmd));
+    assert_eq!(a.apply(cmd.clone()), b.apply(cmd));
     a.step();
     b.step();
     assert_eq!(a, b);
@@ -865,7 +865,7 @@ fn building_visual_fields_round_trip() {
     let mut w = blank();
     let id = w.buildings.insert(Building {
         kind: Zone::Commercial,
-        footprint: CellRect::from_corners(c(1, 1), c(2, 3)),
+        footprint: citysim_sim::Footprint::world(CellRect::from_corners(c(1, 1), c(2, 3)), Facing::MinusX),
         level: 3,
         capacity: 20,
         occupied: 5,
