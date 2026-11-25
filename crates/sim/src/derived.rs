@@ -68,6 +68,9 @@ pub(crate) struct Derived {
     /// venue (`ACCESS_TILE` cells per tile side).
     access_shop: Vec<f32>,
     access_venue: Vec<f32>,
+    /// Scratch for departures: segment slots this tick's departures start
+    /// on (all false between ticks).
+    pub depart_marks: Vec<bool>,
     /// Debug counters: front cars at the stop line refused entry, by reason
     /// `[conflict in box, no room beyond, signal, yielding]`.
     pub denials: [u64; 4],

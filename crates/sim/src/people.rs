@@ -332,6 +332,8 @@ pub(crate) fn hire(world: &mut World, id: CitizenId, workplace: BuildingId, shif
         });
         c.unemployed_days = 0;
         c.hopeless_commutes = 0;
+        // A new commute: estimated until the first trip there.
+        c.commute_ticks = 0;
         c.log(day, LifeEvent::GotJob(workplace));
     });
     world.people.events_today.hired += 1;

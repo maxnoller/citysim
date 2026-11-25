@@ -253,6 +253,9 @@ pub(crate) struct Ended {
     pub end: TripEnd,
     pub to: Place,
     pub to_building: Option<BuildingId>,
+    /// Where the car was when the trip ended (its people go on from there
+    /// when it was taken off the road).
+    pub at: Option<[f32; 2]>,
 }
 
 /// All traffic state that is not on the vehicles themselves.
@@ -423,7 +426,9 @@ fn queue_replan(traffic: &mut TrafficState, id: VehicleId, urgent: bool) {
 }
 
 pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, ended: &mut Vec<Ended>) {
-    let household = world.vehicles.remove(id).and_then(|v| v.household);
+    let car = world.vehicles.remove(id);
+    let at = car.as_ref().map(|v| v.pos);
+    let household = car.and_then(|v| v.household);
     if let Some(trip) = world.traffic.trips.remove(id) {
         if let TripEnd::Arrived(s) | TripEnd::GaveUp(s) = end {
             world.traffic.trips_today += 1;
@@ -444,6 +449,7 @@ pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, end
             end,
             to: trip.to,
             to_building: trip.to_building,
+            at,
         });
     }
 }
@@ -673,6 +679,8 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
 fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
     let mut tries = world.traffic.pending.len().min(balance::DEPARTURES_PER_TICK);
     let mut lanes: Option<Vec<(usize, f32)>> = None;
+    let mut marks = std::mem::take(&mut world.cache.depart_marks);
+    let mut marked: Vec<usize> = Vec::new();
     while tries > 0 && *budget > 0 {
         tries -= 1;
         let Some(dep) = world.traffic.pending.pop_front() else {
@@ -691,6 +699,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             end,
             to: dep.to,
             to_building: dep.to_building,
+            at: None,
         };
         let waited = world.time.tick.saturating_sub(dep.requested_tick);
         if waited > secs_to_ticks(balance::MAX_DEPARTURE_WAIT_S) {
@@ -704,10 +713,29 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         let from_seg = world.roads.segments[from.segment].clone();
         // Cars per lane, for the driveway check (built on first use).
         let lanes = lanes.get_or_insert_with(|| {
+            // Only the segments this tick's departures start on (the first
+            // `tries` in the queue; blocked ones go to its back).
+            marks.resize(world.roads.segments.slot_count(), false);
+            marked.push(key_index(from.segment));
+            for d in world.traffic.pending.iter().take(tries) {
+                if let Some(a) = resolve(world, d.from) {
+                    marked.push(key_index(a.segment));
+                }
+            }
+            for &i in &marked {
+                marks[i] = true;
+            }
             let mut l: Vec<(usize, f32)> = world
                 .vehicles
                 .values()
-                .filter_map(|v| v.segment.map(|s| (lane_of(s, v.forward), v.progress)))
+                .filter_map(|v| {
+                    let s = v.segment?;
+                    marks
+                        .get(key_index(s))
+                        .copied()
+                        .unwrap_or(false)
+                        .then(|| (lane_of(s, v.forward), v.progress))
+                })
                 .collect();
             l.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
             l
@@ -832,6 +860,10 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             h.vehicle = Some(id);
         }
     }
+    for i in marked {
+        marks[i] = false;
+    }
+    world.cache.depart_marks = marks;
 }
 
 /// The car of `driver` started: they and their passengers are in it.

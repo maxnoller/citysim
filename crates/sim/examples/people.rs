@@ -2,7 +2,7 @@
 //! some days, then one day recorded in detail.
 //!
 //! ```text
-//! cargo run -p citysim_sim --release --example people -- [days] [out_dir]
+//! cargo run -p citysim_sim --release --example people -- [days] [out_dir] [hierarchy]
 //! python3 crates/sim/examples/plot_people.py <out_dir> <shots_prefix>
 //! ```
 //!
@@ -42,7 +42,11 @@ fn main() {
     let out = args.get(1).cloned().unwrap_or_else(|| "target/people".into());
     std::fs::create_dir_all(&out).expect("out dir");
     let mut w = World::new(7);
-    let mut p = GridPlayer::new(&Zone::ALL);
+    // `hierarchy` as the third argument: the avenue city.
+    let mut p = match args.get(2).map(String::as_str) {
+        Some("hierarchy") => GridPlayer::hierarchy(),
+        _ => GridPlayer::new(&Zone::ALL),
+    };
     let mut daily = String::from(
         "day,population,children,teens,adults,seniors,a0,a10,a20,a30,a40,a50,a60,a70,a80,a90,\
          single,couple,family,seniors_hh,happiness,births,deaths,hh_arrived,hh_left,moved_out,couples,retired,avg_money,rent_burden,workforce,employed\n",
@@ -361,6 +365,8 @@ fn describe(w: &World, c: CitizenId) -> String {
 #[derive(Default)]
 struct Sanity {
     scans: u32,
+    /// Citizens looked at, all scans together.
+    looked: u64,
     counts: std::collections::BTreeMap<&'static str, u32>,
     examples: std::collections::BTreeMap<&'static str, Vec<String>>,
 }
@@ -376,6 +382,7 @@ impl Sanity {
 
     fn scan(&mut self, w: &World) {
         self.scans += 1;
+        self.looked += w.citizens.len() as u64;
         let h = w.time.hour();
         let day = w.time.day;
         for (id, c) in w.citizens.iter() {
@@ -532,8 +539,27 @@ impl Sanity {
     }
 
     fn report(&self) -> String {
-        let mut out = format!("sanity: {} scans of every citizen\n", self.scans);
-        for (k, n) in &self.counts {
+        let mut out = format!(
+            "sanity: {} scans of every citizen ({} citizen-samples; counts below are samples)\n",
+            self.scans, self.looked
+        );
+        let mut counts = self.counts.clone();
+        for k in [
+            "asleep away from home",
+            "shopping while the shops are shut",
+            "out for leisure in the small hours",
+            "working where they have no job",
+            "child alone away from home",
+            "travelling to a building that is gone",
+            "off shopping in the small hours",
+            "on a trip for more than 4 hours",
+            "journal names another job",
+            "journal out of order",
+            "car on the road with nobody in it",
+        ] {
+            counts.entry(k).or_default();
+        }
+        for (k, n) in &counts {
             let _ = writeln!(out, "  {k}: {n}");
             for e in self.examples.get(k).into_iter().flatten() {
                 let _ = writeln!(out, "      e.g. {e}");

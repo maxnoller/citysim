@@ -42,17 +42,17 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "hierarchy",
         about: "round 2: avenues as arterials, streets inside the blocks, grows to 10,000",
-        days: 12,
+        days: 15,
     },
     Scenario {
         name: "streets",
         about: "round 2: the same blocks with streets only, grows to 10,000",
-        days: 12,
+        days: 15,
     },
     Scenario {
         name: "single_artery",
         about: "round 2: the same blocks hanging off one spine, grows to 10,000",
-        days: 12,
+        days: 15,
     },
     Scenario {
         name: "grid",
@@ -179,6 +179,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
     let total = days as u64 * balance::TICKS_PER_DAY as u64;
     let (mut sum_ns, mut max_ns, mut n) = (0u128, 0u128, 0u64);
     let mut reached = [None::<u64>; 3];
+    let mut costs: Vec<citysim_sim::RunningCosts> = Vec::new();
     while w.time.tick < total {
         if let Some(p) = player.as_mut() {
             p.act(&mut w);
@@ -193,6 +194,9 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         max_ns = max_ns.max(dt);
         n += 1;
         sample(&w, &mut acc);
+        if w.time.tick_of_day == 0 {
+            costs.push(w.economy.last_day_costs);
+        }
         if w.time.tick_of_day.is_multiple_of(balance::TICKS_PER_HOUR) {
             hour_row(&w, &acc, &mut hours);
             acc = HourAcc::default();
@@ -204,13 +208,15 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         }
     }
     let mut daily = String::from(
-        "day,minutes,population,peak_vehicles,money,income,expenses,residential_tax,commercial_tax,industrial_tax,road_upkeep,services,road_cells\n",
+        "day,minutes,population,peak_vehicles,money,income,expenses,residential_tax,commercial_tax,industrial_tax,road_upkeep,services,road_cells,\
+         streets,avenues,highway,signals,signal_count,services_base,services_city_size,services_density\n",
     );
-    for h in &w.economy.history {
+    for (i, h) in w.economy.history.iter().enumerate() {
         let b = h.budget;
+        let c = costs.get(i).copied().unwrap_or_default();
         let _ = writeln!(
             daily,
-            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             h.day,
             minutes(h.day as u64 * balance::TICKS_PER_DAY as u64),
             h.population,
@@ -223,7 +229,15 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
             b.industrial_tax,
             b.road_upkeep,
             b.services,
-            h.road_cells
+            h.road_cells,
+            c.streets,
+            c.avenues,
+            c.highway,
+            c.signals,
+            c.signal_count,
+            c.services_base,
+            c.services_city_size,
+            c.services_density
         );
     }
     std::fs::write(format!("{out_dir}/{}_seed{seed}_days.csv", sc.name), daily).expect("write csv");

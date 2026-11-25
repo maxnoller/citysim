@@ -726,17 +726,32 @@ pub(crate) fn trip_ended(world: &mut World, e: Ended) {
     let riders = riders_of(world, id);
     let now = world.time.tick;
     match e.end {
-        TripEnd::Arrived(s) | TripEnd::GaveUp(s) => {
-            record_commute(world, id, j.purpose, s, matches!(e.end, TripEnd::GaveUp(_)));
+        TripEnd::Arrived(s) => {
+            record_commute(world, id, j.purpose, s, false);
             arrive(world, id);
             for r in riders {
                 arrive(world, r);
             }
         }
-        TripEnd::Vanished => {
-            arrive(world, id);
-            for r in riders {
-                arrive(world, r);
+        TripEnd::GaveUp(_) | TripEnd::Vanished => {
+            // The car was taken off the road (stuck too long, or its road
+            // was removed): its people make the rest of the way off screen,
+            // from where the car was.
+            if let TripEnd::GaveUp(s) = e.end {
+                record_commute(world, id, j.purpose, s, true);
+            }
+            let from = e.at.unwrap_or_else(|| pos_of(world, j.from));
+            let t = now + secs_to_ticks(estimate_s(from, pos_of(world, Some(j.to))));
+            for m in std::iter::once(id).chain(riders) {
+                if let Location::Travelling(mj) = world.citizens[m].location {
+                    let nj = Journey {
+                        vehicle: None,
+                        arrive_tick: Some(t),
+                        due_tick: t,
+                        ..mj
+                    };
+                    people::set_place(world, m, Activity::Travelling, Location::Travelling(nj), t);
+                }
             }
         }
         TripEnd::Cancelled => {

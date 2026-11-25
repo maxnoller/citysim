@@ -44,23 +44,24 @@
 // ---------------------------------------------------------------- money ----
 //
 // Targets (checked by the `headless` example and `tests/balance.rs`), over
-// a 30-minute game at 2.5x:
+// a game at 2.5x:
 //
 // * A sensible layout stays solvent however it is built. A town runs a
-//   small deficit only on its first day or two while it is still empty,
-//   then a clear and growing surplus. That holds for a whole two-district
-//   grid laid on day one (976 road cells, `scenarios::prebuilt`: never
-//   below ~$29k), for a player who spends most of the start money on a
-//   district on day one and then follows demand (`GridPlayer::build_ahead`),
-//   and for one who builds block by block (`GridPlayer`).
-// * Construction is the big expense, so money stays a constraint while the
-//   city expands: the block-by-block player holds at most ~$31-34k by
-//   5,000 residents (it used to be ~$110k and climbing), never waits for
-//   money, and never has less than 100 road cells' worth in hand. 100 road
-//   cells ($6.5k) are about one day of its net income at 5,000.
-// * Running costs (road upkeep + services) take ~40 % of tax income in a
-//   sensible city, but a network far bigger than its town needs (the
-//   pre-built `overbuilt` mesh, ~9,000 cells) loses money every day.
+//   small deficit only on its first day while it is still empty, then a
+//   clear and growing surplus. That holds for a whole two-district grid
+//   laid on day one (`scenarios::prebuilt`), for a player who spends most
+//   of the start money on a district on day one and then follows demand
+//   (`GridPlayer::build_ahead`), and for one who builds block by block
+//   (`GridPlayer`).
+// * Construction is the big expense, and running costs grow faster than
+//   the city (services cost more per resident in a bigger and denser city,
+//   avenues and traffic lights cost upkeep), so money stays a constraint
+//   for the whole game: the block-by-block player holds $20-40k before
+//   5,000 residents, the avenue city holds tens of thousands at 10,000
+//   (enough for the next district or an avenue upgrade, not hundreds of
+//   thousands), and the longest wait for money is a few real minutes.
+// * A network far bigger than its town needs (the pre-built `overbuilt`
+//   mesh, ~9,000 cells) loses money every day.
 
 /// Money at the start of a new game: the first 460 road cells.
 pub const STARTING_MONEY: i64 = 30_000;
