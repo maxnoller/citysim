@@ -1768,6 +1768,9 @@ pub fn site(key: ModelKey, stage: u8) -> MeshBuilder {
 pub fn generate(key: ModelKey, lod: bool) -> MeshBuilder {
     let mut m = MeshBuilder::with_ground_ao(0.32);
     m.lod = lod;
+    if lod {
+        m.tag = [Glow::Body as u32 as f32, 0.0];
+    }
     let w = key.cells.0 as f32 * citysim_sim::CELL_SIZE;
     let d = key.cells.1 as f32 * citysim_sim::CELL_SIZE;
     let lot = Rect {

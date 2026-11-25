@@ -90,6 +90,18 @@ struct Site {
     key: ModelKey,
     model_tf: Transform,
     stage: u8,
+    /// Sim tick the works started (built, or rebuilt for a level-up).
+    start: u64,
+}
+
+/// A level-up big enough to rebuild visibly (a site with scaffolding and,
+/// for tall buildings, a crane): to the top levels, or any level-up of a
+/// large (2x2) lot.
+fn rebuild_shows_site(old: ModelKey, new: ModelKey) -> bool {
+    new.kind == old.kind
+        && new.cells == old.cells
+        && new.level > old.level
+        && (new.level >= 3 || new.cells.0 >= 2 && new.cells.1 >= 2)
 }
 
 fn site_stage(age: u64) -> Option<u8> {
@@ -116,6 +128,9 @@ pub(super) struct Shrinking {
 struct Spawned {
     key: Option<((u64, u64), (u64, u64))>,
     entities: HashMap<BuildingId, (Entity, ModelKey, Facing, Inset)>,
+    /// Buildings rebuilt for a big level-up: sim tick the works started
+    /// (they show a building site again, with a crane when tall).
+    rebuilt: HashMap<BuildingId, u64>,
 }
 
 /// How a building model is shrunk away from a diagonal road: uniform
@@ -429,16 +444,31 @@ fn sync_buildings(
             squeeze: wide.squeeze,
         }
     };
+    let tick = world.time.tick;
+    let mut rebuilt: Vec<BuildingId> = Vec::new();
     spawned.entities.retain(|id, (e, k, f, i)| {
         let keep = buildings
             .get(*id)
             .is_some_and(|b| model_key(b) == *k && b.facing == *f && inset_of(b) == *i && !reloaded);
+        if !keep
+            && !reloaded
+            && let Some(b) = buildings.get(*id)
+            && rebuild_shows_site(*k, model_key(b))
+        {
+            rebuilt.push(*id);
+        }
         if !keep {
             commands.entity(*e).remove::<Growing>().insert(Shrinking { start: now });
             index.0.remove(id);
         }
         keep
     });
+    for id in rebuilt {
+        spawned.rebuilt.insert(id, tick);
+    }
+    spawned
+        .rebuilt
+        .retain(|id, t| buildings.contains_key(*id) && tick.saturating_sub(*t) < SITE_TICKS && !reloaded);
     for (id, b) in buildings.iter() {
         if spawned.entities.contains_key(&id) {
             continue;
@@ -452,7 +482,8 @@ fn sync_buildings(
         // scale the parent freely.
         let model_tf = Transform::from_translation(rot.inverse() * Vec3::new(inset.shift.x, 0.0, inset.shift.y))
             .with_scale(inset.local_scale(b.facing));
-        let age = world.time.tick.saturating_sub(b.created_tick);
+        let start = spawned.rebuilt.get(&id).copied().unwrap_or(b.created_tick);
+        let age = world.time.tick.saturating_sub(start);
         if !reloaded && let Some(stage) = site_stage(age) {
             let mesh = models.site(mk, stage, &mut meshes);
             let mut ec = commands.spawn((
@@ -463,6 +494,7 @@ fn sync_buildings(
                     key: mk,
                     model_tf,
                     stage,
+                    start,
                 },
                 tf,
             ));
@@ -521,10 +553,10 @@ fn advance_sites(
 ) {
     let world = &sim.world;
     for (e, mut site, mut tf, children) in &mut sites {
-        let Some(b) = world.buildings.get(site.id) else {
+        if !world.buildings.contains_key(site.id) {
             continue;
-        };
-        let stage = site_stage(world.time.tick.saturating_sub(b.created_tick));
+        }
+        let stage = site_stage(world.time.tick.saturating_sub(site.start));
         if stage == Some(site.stage) {
             continue;
         }

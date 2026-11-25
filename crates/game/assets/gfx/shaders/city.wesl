@@ -164,7 +164,16 @@ fn fragment(
         glow = base * 5.0;
     } else if kind == 8u {
         pbr_input.material.base_color = vec4<f32>(ground_color(base, wp), 1.0);
-    } else if kind == 7u {
+    } else if kind == 9u {
+        // Distant building body: at night scattered warm specks (a stand-in
+        // for windows that are under a pixel from far away), only when far.
+        let far = smoothstep(450.0, 1100.0, distance(view.world_position, wp));
+        let wall = 1.0 - abs(in.world_normal.y);
+        let h = hash21(floor(wp.xz / 2.6) + vec2<f32>(floor(wp.y / 2.6) * 7.3, 1.7));
+        if far > 0.0 && h < city.windows * (0.08 + 0.3 * wall) {
+            glow = vec3<f32>(1.0, 0.62, 0.3) * (2.0 * city.night * far);
+        }
+        } else if kind == 7u {
         glow = vec3<f32>(1.0, 0.8, 0.55) * (2.0 * city.night);
         pbr_input.material.base_color = vec4<f32>(base * (1.0 - 0.6 * city.night), 1.0);
     }

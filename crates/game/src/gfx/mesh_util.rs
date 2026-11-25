@@ -34,6 +34,10 @@ pub enum Glow {
     /// Not a light: the ground, which the shader gives grass detail,
     /// wildflowers near the camera and farmland beyond the map.
     Ground = 8,
+    /// Body of a distant building (far level of detail): at night it takes
+    /// on a faint warm glow by the share of lit windows, so a town zoomed
+    /// all the way out (windows a pixel or less) still reads as lit.
+    Body = 9,
 }
 
 /// Flat-shaded, vertex-coloured triangle soup.
