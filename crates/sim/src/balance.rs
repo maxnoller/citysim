@@ -20,6 +20,14 @@
 //! commuters drives on any given day ([`COMMUTE_DRIVE_SHARE`]), which keeps
 //! the number of cars proportional to, but much smaller than, the number of
 //! workers.
+//!
+//! **Citizens live on the calendar** (round 3). Their trips take calendar
+//! time (a drive of `s` vehicle seconds takes `s` times
+//! [`OFFSCREEN_CALENDAR_FACTOR`] calendar seconds), so a commute is a few
+//! in-game minutes to an hour. A trip drawn on the road still moves in real
+//! time: its people ride it until it arrives or their calendar arrival
+//! passes ([`MAX_TRIP_H`] at most), then the car finishes its drive on
+//! screen without them. Ages run on [`DAYS_PER_YEAR`].
 
 // ---------------------------------------------------------------- money ----
 //
@@ -84,6 +92,7 @@ pub const CRISIS_LEAVE_SHARE_PER_DAY: f32 = 0.12;
 pub const DEFAULT_TAX_RATE: f32 = 0.09;
 /// Highest tax rate `SetTaxRate` accepts (lowest is 0.0).
 pub const MAX_TAX_RATE: f32 = 0.30;
+/// Round 3: no longer used by the sim (the residential tax is taken from wages, [`WAGE_BY_TIER`]); kept for compatibility.
 /// Daily taxable value of one resident; income = value * tax rate.
 /// At the default 9 % a resident pays about $1.26 per day.
 pub const RESIDENT_TAX_BASE_PER_DAY: f32 = 14.0;
@@ -106,15 +115,20 @@ pub const TICKS_PER_HOUR: u32 = TICKS_PER_DAY / 24;
 /// Time of day a new game starts at, in ticks after midnight (06:00).
 pub const START_TICK_OF_DAY: u32 = TICKS_PER_DAY / 4;
 
+/// Round 3: no longer used by the sim (departures follow each worker's shift, [`INDUSTRY_START_H`] and below); kept for compatibility.
 /// Morning departures to work are spread from this hour ...
 pub const MORNING_DEPART_START_H: f32 = 3.5;
+/// Round 3: no longer used by the sim (departures follow each worker's shift); kept for compatibility.
 /// ... over this many hours (trapezoid distribution: the middle third of
 /// the window, about 06:30-09:30, gets 1.5x the average rate).
 pub const MORNING_DEPART_SPREAD_H: f32 = 9.0;
+/// Round 3: no longer used by the sim (a shift is skipped when less than [`MIN_WORK_H`] would be left); kept for compatibility.
 /// Households that have not left for work by this hour skip the day.
 pub const MORNING_DEPART_LATEST_H: f32 = 13.0;
+/// Round 3: no longer used by the sim (workers go home when their shift ends); kept for compatibility.
 /// Evening departures home, same idea (rush centred on 18:00).
 pub const EVENING_DEPART_START_H: f32 = 14.0;
+/// Round 3: no longer used by the sim (workers go home when their shift ends); kept for compatibility.
 pub const EVENING_DEPART_SPREAD_H: f32 = 9.0;
 /// Fraction of working households that take the car on a given day (decided
 /// per household per day, deterministic). The rest commute "off screen" and
@@ -283,18 +297,23 @@ pub const ACCESS_SEARCH_CELLS: i32 = 4;
 
 /// Errand traffic is generated every this many ticks.
 pub const ERRAND_INTERVAL_TICKS: u64 = 10;
+/// Round 3: no longer used by the sim (shopping trips come from households' goods, [`SHOP_BELOW_DAYS`]); kept for compatibility.
 /// One-way shopping runs per household per day (half home -> shop, half
 /// back), mostly 10:00-20:00.
 pub const SHOP_TRIPS_PER_HOUSEHOLD_PER_DAY: f32 = 0.15;
+/// Round 3: no longer used by the sim (deliveries follow shop sales, [`TRUCK_LOAD`]; exports: [`EXPORT_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY`]); kept for compatibility.
 /// Goods trips per filled industrial job per day, mostly 05:00-19:00.
 pub const GOODS_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY: f32 = 0.15;
+/// Round 3: no longer used by the sim (see [`GOODS_IMPORT_SHARE`]); kept for compatibility.
 /// Share of goods trips that leave for / come from the highway.
 pub const GOODS_VIA_HIGHWAY_SHARE: f32 = 0.2;
+/// Round 3: no longer used by the sim (see [`SHOP_SAMPLES`], [`DELIVERY_SAMPLES`]); kept for compatibility.
 /// Errand destinations: nearest of this many random candidates.
 pub const ERRAND_SAMPLES: usize = 3;
 
 // ----------------------------------------------------------- households ----
 
+/// Round 3: no longer used by the sim (households arrive by type, [`ARRIVAL_WEIGHTS`]); kept for compatibility.
 /// Household sizes 1..=4 are drawn with these weights (mean ~2.6).
 pub const HOUSEHOLD_SIZE_WEIGHTS: [u32; 4] = [20, 30, 25, 25];
 /// Every this many ticks unemployed households look for jobs ...
@@ -311,6 +330,7 @@ pub const MOVE_IN_MAX_PER_HOUR: f32 = 120.0;
 /// ... and only while the city's attractiveness (residential demand
 /// ignoring empty housing) is above this.
 pub const MOVE_IN_MIN_DEMAND: f32 = -0.25;
+/// Round 3: no longer used by the sim (jobless households leave when their money runs out, [`BROKE_LEAVE_DAYS`]); kept for compatibility.
 /// A household unemployed at this many consecutive midnights leaves town.
 pub const UNEMPLOYED_LEAVE_DAYS: u8 = 2;
 /// A car commute longer than this (vehicle seconds) is hopeless ...

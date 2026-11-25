@@ -2,7 +2,7 @@
 //! money, goods and cars.
 //!
 //! * Households arrive through the highway stub while there is free housing
-//!   and the city is attractive ([`arrivals`]): single adults, couples,
+//!   and the city is attractive (`arrivals`): single adults, couples,
 //!   families with children and seniors, in a mix that follows jobs,
 //!   rents and happiness. Their home is reserved on arrival at the city edge
 //!   and they drive in together.
@@ -609,7 +609,7 @@ pub(crate) fn expected_daily_costs(n: u32, rent: i64) -> i64 {
 
 /// Newcomers: every tick, pending arrivals accumulate with the free housing
 /// while the city is attractive; each arrival is one household of a type
-/// drawn from [`arrival_weights`], moving into a random free home it fits.
+/// drawn from `arrival_weights`, moving into a random free home it fits.
 pub(crate) fn arrivals(world: &mut World) {
     let free = world.stats.residential_capacity.saturating_sub(world.stats.population) as f32;
     let happy = world.people.stats.avg_happiness;

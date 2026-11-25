@@ -6,7 +6,9 @@
 //! cargo run -p citysim_sim --release --example topdown -- signal out.png
 //! cargo run -p citysim_sim --release --example topdown -- lots out.png
 //! cargo run -p citysim_sim --release --example topdown -- video out.mp4 [seconds]
+//! cargo run -p citysim_sim --release --example topdown -- day out.mp4 [seconds]
 //! ```
+//! `day`: a town through one whole day, cars coloured by trip purpose.
 //! PNG and MP4 are written through `ffmpeg` (must be on the PATH).
 
 use std::io::Write;
@@ -867,6 +869,151 @@ fn video(out: &str, seconds: u32) {
     assert!(child.wait().unwrap().success());
 }
 
+/// Trip purpose colours (the charts' categorical order).
+const PURPOSE_RGB: [Rgb; 7] = [
+    [0x2a, 0x78, 0xd6],
+    [0xeb, 0x68, 0x34],
+    [0x1b, 0xaf, 0x7a],
+    [0xed, 0xa1, 0x00],
+    [0xe8, 0x7b, 0xa4],
+    [0x00, 0xa3, 0x00],
+    [0x8a, 0x78, 0xf0],
+];
+const PURPOSE_LABEL: [&str; 7] = [
+    "TO WORK",
+    "HOME FROM WORK",
+    "MOVING IN",
+    "MOVING OUT",
+    "SHOPPING",
+    "GOODS",
+    "LEISURE",
+];
+
+/// Cars as small boxes coloured by trip purpose (trucks longer).
+fn draw_cars_by_purpose(c: &mut Canvas, w: &World, v: &View) {
+    for (id, car) in w.vehicles.iter() {
+        let Some(t) = w.traffic.trips.get(id) else { continue };
+        let (p, d) = drive::vehicle_pose(w, car);
+        let truck = t.purpose == TripPurpose::Goods;
+        let (len, wid) = if truck { (7.5, 2.8) } else { (5.0, 2.6) };
+        let r = junction::right_of(d);
+        let corner = |a: f32, b: f32| v.px([p[0] + d[0] * a + r[0] * b, p[1] + d[1] * a + r[1] * b]);
+        c.poly(
+            &[
+                corner(len / 2.0, -wid / 2.0),
+                corner(len / 2.0, wid / 2.0),
+                corner(-len / 2.0, wid / 2.0),
+                corner(-len / 2.0, -wid / 2.0),
+            ],
+            PURPOSE_RGB[t.purpose.index()],
+            1.0,
+        );
+    }
+}
+
+/// A town (the grid player, ~5,000 residents) through one whole day in
+/// `seconds` of video: cars coloured by trip purpose, the clock, and what
+/// the citizens are doing.
+fn day(out: &str, seconds: u32) {
+    let mut w = World::new(7);
+    let mut p = GridPlayer::new(&Zone::ALL);
+    let pop = std::env::var("CITYSIM_TOPDOWN_POP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5000u32);
+    while w.stats.population < pop && w.time.day < 60 {
+        p.act(&mut w);
+        w.step();
+    }
+    while w.time.tick_of_day != 0 {
+        p.act(&mut w);
+        w.step();
+    }
+    // Frame the built-up area.
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for b in w.buildings.values() {
+        let q = derived::rect_center(b.footprint);
+        for k in 0..2 {
+            lo[k] = lo[k].min(q[k]);
+            hi[k] = hi[k].max(q[k]);
+        }
+    }
+    let (wpx, hpx) = (1280usize, 720usize);
+    let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0 + 10.0];
+    let k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
+    let fps = 30;
+    let mut child = Proc::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s"])
+        .arg(format!("{wpx}x{hpx}"))
+        .args([
+            "-r",
+            &fps.to_string(),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "20",
+        ])
+        .arg(out)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("ffmpeg");
+    let mut pipe = child.stdin.take().unwrap();
+    let frames = seconds * fps;
+    let per_frame = balance::TICKS_PER_DAY as f32 / frames as f32;
+    let mut done = 0f32;
+    let view = View::centred(centre, wpx, hpx, k);
+    for f in 0..frames {
+        done += per_frame;
+        while (w.time.tick_of_day as f32) < done.min(balance::TICKS_PER_DAY as f32 - 1.0) && f + 1 < frames {
+            p.act(&mut w);
+            w.step();
+        }
+        let mut cv = Canvas::new(wpx, hpx, GRASS);
+        draw_world_opts(&mut cv, &w, &view, false, false);
+        draw_cars_by_purpose(&mut cv, &w, &view);
+        cv.rect(0.0, 0.0, wpx as f32, 34.0, [22, 24, 28]);
+        let a = inspect::activity_shares(&w);
+        cv.text(
+            10,
+            10,
+            &format!(
+                "DAY {}  {:02}:{:02}   POP {}   CARS {}   ASLEEP {:.0}%  HOME {:.0}%  WORK {:.0}%  SHOPS {:.0}%  OUT {:.0}%  TRAVEL {:.0}%",
+                w.time.day,
+                w.time.hour() as u32,
+                (w.time.hour().fract() * 60.0) as u32,
+                w.stats.population,
+                w.stats.vehicles_on_road,
+                a[0] * 100.0,
+                a[1] * 100.0,
+                a[2] * 100.0,
+                a[3] * 100.0,
+                a[4] * 100.0,
+                a[5] * 100.0,
+            ),
+            2,
+            [235, 235, 235],
+        );
+        // Legend.
+        cv.rect(0.0, hpx as f32 - 30.0, wpx as f32, 30.0, [22, 24, 28]);
+        let mut x = 12.0;
+        for (i, label) in PURPOSE_LABEL.iter().enumerate() {
+            if i == 3 {
+                continue;
+            }
+            cv.rect(x, hpx as f32 - 21.0, 14.0, 12.0, PURPOSE_RGB[i]);
+            cv.text(x as i32 + 20, hpx as i32 - 22, label, 2, [235, 235, 235]);
+            x += 30.0 + label.len() as f32 * 12.0;
+        }
+        pipe.write_all(&cv.px).unwrap();
+    }
+    drop(pipe);
+    assert!(child.wait().unwrap().success());
+}
+
 /// Frames of one spot of a scripted city, `every` ticks apart (debugging).
 fn watch(out: &str, args: &[String]) {
     let which = args.first().map(String::as_str).unwrap_or("hierarchy");
@@ -922,7 +1069,8 @@ fn main() {
         "signal" => signal_sheet(&out),
         "lots" => lots(&out),
         "video" => video(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
+        "day" => day(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
         "watch" => watch(&out, &args[2..]),
-        _ => panic!("modes: signal, lots, video"),
+        _ => panic!("modes: signal, lots, video, day, watch"),
     }
 }

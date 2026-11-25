@@ -3,7 +3,7 @@
 //! Copies of the round-2 definitions of every type whose layout changed in
 //! round 3 (households, departures, trips, the traffic state and the World
 //! itself); unchanged types are reused from the live crate. Never edit
-//! them. [`WorldV4::upgrade`] turns a decoded version-4 world into a live
+//! them. `WorldV4::upgrade` turns a decoded version-4 world into a live
 //! one whose households have no citizens yet: `households::adopt`
 //! generates them right after loading.
 

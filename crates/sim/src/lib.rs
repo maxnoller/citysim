@@ -4,6 +4,23 @@
 //! crate owns a [`World`], sends it [`Command`]s, calls [`World::step`] on a
 //! fixed timestep and draws what it reads from the World's public fields.
 //!
+//! # People (round 3)
+//!
+//! Every resident is a [`Citizen`] in a [`Household`]: an age on a
+//! compressed calendar (`balance::DAYS_PER_YEAR` days a year), a life stage,
+//! maybe a job of their own (workplace, wage by tier, shift), what they are
+//! doing and where they are (inside a building, or on a trip: in a car drawn
+//! on the road, waiting for it, or off screen), a leisure need, happiness
+//! with its components and a short journal. Households hold the members,
+//! money, rent, goods and one or two cars. The rules: `day` (each citizen's
+//! day: work shifts, shopping, leisure, sleep; their trips), `life`
+//! (payday, ageing, births, moving out, couples, deaths, happiness, leaving,
+//! the job search), `households` (arrivals by household type, leaving),
+//! `errands` (goods deliveries driven by shop sales), `people`
+//! (bookkeeping). Read API for the interface: [`inspect`]. Round-2 fields
+//! (`Household::job`, `Stats::population`, `Stats::workforce`, the budget)
+//! are derived from the citizens.
+//!
 //! Coordinates: the map is [`MAP_CELLS`] x [`MAP_CELLS`] cells of
 //! [`CELL_SIZE`] metres. Sim space is 2D in metres; the centre of cell
 //! `(x, y)` is `((x + 0.5) * CELL_SIZE, (y + 0.5) * CELL_SIZE)`.

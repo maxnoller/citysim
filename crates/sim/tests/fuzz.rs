@@ -172,6 +172,10 @@ struct FuzzOpts {
     /// Replace the world by `load(save())` with this chance per burst
     /// (per mille).
     reload_permille: u32,
+    /// Replace the world by a round-2 (format 4) save of it, loaded, with
+    /// this chance per burst (per mille): citizens are generated again, so
+    /// this breaks lockstep; only for consistency runs.
+    legacy_permille: u32,
     /// No random commands before this tick (lets a busy city grow first).
     calm_until: u64,
 }
@@ -204,6 +208,13 @@ fn fuzz(o: FuzzOpts, checkpoints: &[u64]) -> (World, Vec<Vec<u8>>) {
         }
         if o.check && burst > 0 {
             check_consistency(&w, true);
+        }
+        if o.legacy_permille > 0 && cmd_rng.below(1000) < o.legacy_permille {
+            let old = save::v4::save_as_v4(&w);
+            w = World::load(&old).expect("round-2 save of the fuzz city loads");
+            if o.check {
+                check_consistency(&w, false);
+            }
         }
         if cmd_rng.below(1000) < o.reload_permille {
             let bytes = w.save();
@@ -278,6 +289,12 @@ fn sanity(w: &World) {
         w.roads.segments.len(),
         w.economy.money
     );
+    eprintln!(
+        "  {} citizens, {} travelling",
+        w.citizens.len(),
+        w.people.activity_counts[Activity::Travelling.index()]
+    );
+    assert_eq!(w.citizens.len() as u32, w.stats.population);
 }
 
 #[test]
@@ -290,6 +307,7 @@ fn fuzz_commands_and_steps_keep_the_world_consistent() {
                 check: true,
                 full_every: 150,
                 reload_permille: 0,
+                legacy_permille: 40,
                 calm_until: 0,
             },
             &[],
@@ -319,6 +337,7 @@ fn fuzz_long() {
                 check: true,
                 full_every: 400,
                 reload_permille: 20,
+                legacy_permille: 0,
                 calm_until: 0,
             },
             &[],
@@ -349,6 +368,7 @@ fn fuzz_is_deterministic_and_save_load_keeps_lockstep() {
         check: false,
         full_every: 0,
         reload_permille: 0,
+        legacy_permille: 0,
         calm_until: 0,
     };
     let (a, sa) = fuzz(opts, &cps);
@@ -364,6 +384,7 @@ fn fuzz_is_deterministic_and_save_load_keeps_lockstep() {
     let (c, sc) = fuzz(
         FuzzOpts {
             reload_permille: 150,
+            legacy_permille: 0,
             ..opts
         },
         &cps,
@@ -387,6 +408,7 @@ fn fuzz_determinism_long() {
             check: false,
             full_every: 0,
             reload_permille: 0,
+            legacy_permille: 0,
             calm_until: 0,
         };
         let (_, sa) = fuzz(opts, &cps);
@@ -394,6 +416,7 @@ fn fuzz_determinism_long() {
         let (_, sc) = fuzz(
             FuzzOpts {
                 reload_permille: 200,
+                legacy_permille: 0,
                 ..opts
             },
             &cps,
@@ -416,6 +439,7 @@ fn fuzz_a_busy_city_through_rush_hour() {
             check: true,
             full_every: 60,
             reload_permille: 0,
+            legacy_permille: 0,
             calm_until: 2 * DAY + HOUR,
         },
         &[],
@@ -451,6 +475,7 @@ fn busy_city_save_load_lockstep() {
         check: false,
         full_every: 0,
         reload_permille: 0,
+        legacy_permille: 0,
         calm_until: 2 * DAY,
     };
     let (a, sa) = fuzz(opts, &cps);
@@ -459,6 +484,7 @@ fn busy_city_save_load_lockstep() {
     let (b, sb) = fuzz(
         FuzzOpts {
             reload_permille: 300,
+            legacy_permille: 0,
             ..opts
         },
         &cps,
@@ -480,6 +506,7 @@ fn fuzz_busy_cities_long() {
                 check: true,
                 full_every: 200,
                 reload_permille: 30,
+                legacy_permille: 0,
                 calm_until: 2 * DAY + seed % 8 * HOUR,
             },
             &[],
