@@ -211,7 +211,7 @@ def chart_week(people, out):
         label = about[i][1] if i < len(about) else f"citizen {i}"
         detail = about[i][2] if i < len(about) else ""
         style(ax, f"{label}: {detail}")
-        days = sorted(set(int(r["day"]) for r in rr))
+        days = sorted(set(int(r["day"]) for r in rr if int(r["day"]) <= 7))
         for d in days:
             dr = [r for r in rr if int(r["day"]) == d]
             for k in range(len(dr)):

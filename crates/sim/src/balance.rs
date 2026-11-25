@@ -689,7 +689,7 @@ pub const SHOP_SHORT_STOCK_M: f32 = 600.0;
 /// [`LEISURE_RESTORE_PER_HOUR`] by venue level `[1, 2, 3]`.
 pub const LEISURE_NEED_PER_HOUR: f32 = 0.009;
 pub const LEISURE_NEED_WORK_FACTOR: f32 = 1.5;
-pub const LEISURE_HOME_RESTORE_PER_HOUR: f32 = 0.01;
+pub const LEISURE_HOME_RESTORE_PER_HOUR: f32 = 0.0055;
 pub const LEISURE_RESTORE_PER_HOUR: [f32; 3] = [0.2, 0.3, 0.4];
 /// Citizens go out when their need is above this, between these hours,
 /// with at least [`LEISURE_FREE_H`] before their next shift.
@@ -733,7 +733,7 @@ pub const MAX_TRIP_H: f32 = 2.0;
 /// Trips to a place within this straight-line distance (metres) are walked
 /// instead of driven (off screen, about as long as the drive would take),
 /// unless the citizen has the car with them or drives children along.
-pub const WALK_MAX_M: f32 = 150.0;
+pub const WALK_MAX_M: f32 = 100.0;
 /// Without a free car a trip takes this many times as long (stands in for
 /// lifts, buses and walking until stage 3).
 pub const CARLESS_TIME_FACTOR: f32 = 1.8;

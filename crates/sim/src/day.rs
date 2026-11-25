@@ -60,8 +60,11 @@ pub(crate) fn expected_commute_ticks(world: &World, id: CitizenId) -> u64 {
     let t = if c.commute_ticks > 0 {
         c.commute_ticks as f32
     } else {
+        // Before the first trip: the free-flow estimate, but at least most
+        // of what a commute in this city takes these days.
         let home = world.households.get(c.household).map(|h| h.home);
-        secs_to_ticks(estimate_s(pos_of(world, home), pos_of(world, c.workplace()))) as f32
+        let est = secs_to_ticks(estimate_s(pos_of(world, home), pos_of(world, c.workplace()))) as f32;
+        est.max(world.traffic.avg_commute_s * 0.75 * TICKS_PER_SECOND as f32)
     };
     (t * balance::COMMUTE_TIME_MARGIN).min(MAX_PLANNED_TRIP_H * balance::TICKS_PER_HOUR as f32) as u64
 }

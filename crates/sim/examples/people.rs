@@ -198,7 +198,8 @@ fn main() {
                     ),
                     None => (String::new(), 0, String::new()),
                 };
-                let day = w.time.day - (start / balance::TICKS_PER_DAY as u64) as u32;
+                // Day of the recorded week, 1-7.
+                let day = w.time.day + 1 - days;
                 let _ = writeln!(timeline, "{i},{h:.3},{:?},{purpose},{road},{mode},{day}", v.activity());
             }
         }
