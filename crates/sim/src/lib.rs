@@ -13,6 +13,7 @@ pub mod buildings;
 pub mod command;
 pub mod demand;
 pub mod derived;
+pub mod drive;
 pub mod economy;
 pub mod errands;
 pub mod geom;

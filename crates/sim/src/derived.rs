@@ -44,6 +44,10 @@ pub(crate) struct Derived {
     avenue_key: Option<RoadsKey>,
     avenue_cells: u32,
     pub path: PathScratch,
+    /// Stop lines per segment slot (`drive::build_setbacks`), for
+    /// `traffic.junctions_version` `setbacks_key`.
+    pub setbacks: Vec<[f32; 2]>,
+    pub setbacks_key: Option<u64>,
 }
 
 impl PartialEq for Derived {
