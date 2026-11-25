@@ -80,8 +80,10 @@ impl Plugin for ShotsPlugin {
 }
 
 /// Where the synthetic pointer is and whether the left button is held.
-#[derive(Resource, Default, Clone, Copy)]
+#[derive(Resource, Default, Clone)]
 struct Pointer {
+    /// Road path corners to force with `Action::Path`.
+    path: Vec<Cell>,
     target: PointerTarget,
     hold: bool,
     /// Glide towards the target instead of jumping (tour mode).
@@ -166,6 +168,16 @@ fn find_building_where(world: &World, focus: Cell, pred: impl Fn(&Building) -> b
         .filter(|b| pred(b))
         .map(|b| b.footprint.min)
         .min_by_key(|c| c.chebyshev(focus))
+}
+
+/// Force a road path in progress with these placed corners.
+fn force_path(w: &mut World, corners: Vec<Cell>) {
+    let mut p = w.resource_mut::<Pointer>();
+    p.path = corners;
+    p.action = Some(Action::Path {
+        held: false,
+        dragged: false,
+    });
 }
 
 fn point_at(w: &mut World, c: Option<Cell>) {
@@ -370,7 +382,7 @@ fn steps() -> Vec<Step> {
                 p.focus = mid;
                 p.distance = 260.0;
                 w.resource_mut::<CameraOverride>().0 = Some(p);
-                w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
+                force_path(w, vec![start]);
                 w.resource_mut::<Pointer>().target = PointerTarget::Cell(end);
             },
         },
@@ -382,7 +394,7 @@ fn steps() -> Vec<Step> {
                 *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
                 let Some(b) = find_building(w) else { return };
                 let start = Cell::new(b.x, b.y - 8);
-                w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
+                force_path(w, vec![start]);
                 w.resource_mut::<Pointer>().target = PointerTarget::Cell(Cell::new(b.x, b.y + 3));
             },
         },
@@ -402,7 +414,7 @@ fn steps() -> Vec<Step> {
                 p.focus = mid;
                 p.distance = 260.0;
                 w.resource_mut::<CameraOverride>().0 = Some(p);
-                w.resource_mut::<Pointer>().action = Some(Action::Road { start, held: false });
+                force_path(w, vec![start]);
                 w.resource_mut::<Pointer>().target = PointerTarget::Cell(end);
             },
         },
@@ -605,6 +617,9 @@ fn drive_pointer(
         && tools.action != a
     {
         tools.action = a;
+        if matches!(a, Action::Path { .. }) {
+            tools.path = pointer.path.clone();
+        }
     }
     let Ok(mut win) = window.single_mut() else { return };
     let cell_pos = |c: Cell| {

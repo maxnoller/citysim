@@ -91,7 +91,12 @@ fn kind_style(kind: ToastKind) -> (char, Color) {
 
 /// Every rejected command as a toast in the sim's own terms; zoning that
 /// changed nothing says why (the sim accepts it as a no-op).
-fn command_toasts(last: Res<LastCommand>, sim: Res<SimWorld>, mut out: MessageWriter<Toast>) {
+fn command_toasts(
+    last: Res<LastCommand>,
+    sim: Res<SimWorld>,
+    tools: Res<super::tools::ToolState>,
+    mut out: MessageWriter<Toast>,
+) {
     if !last.is_changed() {
         return;
     }
@@ -99,7 +104,8 @@ fn command_toasts(last: Res<LastCommand>, sim: Res<SimWorld>, mut out: MessageWr
         Some((_, Err(e))) => {
             out.write(Toast::new(ToastKind::Error, error_text(e)));
         }
-        Some((Command::SetZone { min, max, zone }, Ok(o))) if o.cells.is_empty() => {
+        // A multi-command plan (frontage, fill, undo) is summarised by the tool.
+        Some((Command::SetZone { min, max, zone }, Ok(o))) if o.cells.is_empty() && !tools.batch_frame => {
             let (reason, color) = zone_noop_reason(&sim.world, CellRect::from_corners(*min, *max), *zone);
             let kind = if color == t::WARNING {
                 ToastKind::Warning

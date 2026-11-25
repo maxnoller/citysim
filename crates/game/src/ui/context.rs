@@ -11,12 +11,13 @@ use citysim_sim::{
 
 use super::UiState;
 use super::format;
+use super::snap::Snap;
 use super::theme::{self as t, UiFonts, icon};
-use super::tools::{Action, ToolState};
+use super::tools::{Action, Pending, ToolState};
 use super::widgets::{approach, label, layout, number, zone_icon, zone_name};
 use crate::shared::{
-    ActiveTool, CONGESTION_BUSY, CONGESTION_JAM, GameSet, HoveredCell, PointerOverUi, PreviewKind, SimWorld,
-    ToolPreview,
+    ActiveTool, BulldozeMode, CONGESTION_BUSY, CONGESTION_JAM, GameSet, HoveredCell, PointerOverUi, RoadChoice,
+    RoadMode, SimWorld, SnapTarget, ToolModes, ToolPreview, ZoneMode,
 };
 
 pub struct ContextPlugin;
@@ -310,81 +311,200 @@ pub fn kmh(mps: f32) -> String {
     format!("{} km/h", (mps * 3.6).round() as i64)
 }
 
+/// What the snap did, in the player's words (`None` for a plain point).
+pub fn snap_text(snap: &Snap, suspended: bool) -> Option<(String, Color)> {
+    if suspended {
+        return Some(("Snapping off (Alt)".into(), t::TEXT_FAINT));
+    }
+    let s = match snap.target {
+        SnapTarget::Node => "Joins the existing road".to_string(),
+        SnapTarget::Road => "Makes a junction on the road".into(),
+        SnapTarget::Extension => "Continues a road straight on".into(),
+        SnapTarget::Perpendicular => "Lined up with a junction".into(),
+        SnapTarget::Spacing => match snap.spacing {
+            Some(n) => format!("Same spacing as the next block · {n} cells"),
+            None => "Same spacing as the next block".into(),
+        },
+        SnapTarget::Parallel => match snap.spacing {
+            Some(n) => format!(
+                "Parallel · {} from the road",
+                plural(n.max(0) as usize, "cell", "cells")
+            ),
+            None => "Parallel to the road".into(),
+        },
+        SnapTarget::Angle | SnapTarget::Grid | SnapTarget::None => return None,
+    };
+    Some((s, t::ACCENT))
+}
+
+/// "Street" / "Avenue".
+pub fn road_kind_name(kind: RoadChoice) -> &'static str {
+    match kind {
+        RoadChoice::Street => "Street",
+        RoadChoice::Avenue => "Avenue",
+    }
+}
+
+/// Price of one cell of road of `kind`.
+pub fn road_price(kind: RoadChoice) -> i64 {
+    let _ = kind;
+    balance::ROAD_COST_PER_CELL
+}
+
+fn cost_text(cost: i64) -> String {
+    if cost > 0 { format::money(cost) } else { "free".into() }
+}
+
 /// Card for the current tool and preview; `None` hides it.
 pub fn tool_card(
     tool: ActiveTool,
-    action: Action,
+    modes: ToolModes,
+    kind: RoadChoice,
+    state: &ToolState,
     preview: &ToolPreview,
     world: &World,
     hovered: Option<Cell>,
 ) -> Option<Card> {
     let mut card = Card::new(icon::INSPECT, t::ACCENT);
-    let cost_text = |cost: i64| if cost > 0 { format::money(cost) } else { "free".into() };
     let money = world.economy.money;
+    let plan = &state.plan;
+    let action = state.action;
     match tool {
         ActiveTool::Inspect => return inspect_card(world, hovered?),
+        ActiveTool::Road if modes.road == RoadMode::Junction => {
+            let c = hovered?;
+            let mut card = inspect_card(world, c).filter(|_| state.road_cells.is_junction(c))?;
+            card.hint = "Junction control arrives with traffic lights".into();
+            return Some(card);
+        }
         ActiveTool::Road => {
             card.glyph = icon::ROAD;
-            match action {
-                Action::Road { held, .. } if preview.kind == PreviewKind::Road => {
-                    let n = preview.cells.len();
-                    if let Some(e) = &preview.error {
-                        card.title = "Can't build here".into();
-                        card.rows.push(Row::line(error_text(e), t::NEGATIVE));
-                    } else if preview.cost == 0 {
-                        card.title = "Road already built".into();
-                        card.rows.push(Row::line(plural(n, "cell", "cells"), t::TEXT_MUTED));
-                    } else {
-                        card.title = "Build road".into();
-                        card.rows.push(Row::line(
-                            format!("{} · {}", plural(n, "cell", "cells"), cost_text(preview.cost)),
-                            t::TEXT,
-                        ));
-                    }
-                    card.hint = if preview.error.is_some() {
-                        "Pick another end point · Right-click to cancel".into()
-                    } else if held {
-                        "Release to build · Right-click to cancel".into()
-                    } else {
-                        "Click to build · Right-click to cancel".into()
-                    };
-                }
-                Action::Road { .. } => {
-                    card.title = "Road".into();
-                    card.rows.push(Row::line("Move to the end point", t::TEXT));
-                    card.hint = "Right-click to cancel".into();
-                }
-                _ => {
-                    hovered?;
-                    card.title = "Road".into();
+            let name = road_kind_name(kind);
+            let snap_row = state
+                .snap
+                .as_ref()
+                .and_then(|s| snap_text(s, state.snap_off))
+                .map(|(s, c)| Row::line(s, c));
+            let Pending::Roads {
+                legs, placed, block, ..
+            } = &plan.pending
+            else {
+                hovered?;
+                card.title = if modes.road == RoadMode::Block {
+                    "Block of streets".into()
+                } else {
+                    name.into()
+                };
+                card.rows.push(Row::line(
+                    format!("{} per cell", format::money(road_price(kind))),
+                    t::TEXT_MUTED,
+                ));
+                if modes.road == RoadMode::Block {
                     card.rows.push(Row::line(
-                        format!("{} per cell", format::money(balance::ROAD_COST_PER_CELL)),
+                        match state.block_spacing() {
+                            Some(s) => format!("Blocks of {s} cells"),
+                            None => "Outline only".into(),
+                        },
+                        t::TEXT,
+                    ));
+                }
+                if money < road_price(kind) {
+                    card.rows
+                        .push(Row::line(format!("You have {}", format::money(money)), t::NEGATIVE));
+                }
+                card.rows.extend(snap_row);
+                card.hint = if modes.road == RoadMode::Block {
+                    "Drag a rectangle · [ ] block size · Tab mode".into()
+                } else {
+                    "Click corners, or drag one road · Tab mode".into()
+                };
+                return Some(card);
+            };
+            let cells: usize = plan.eval.cells.len();
+            if let Some(e) = plan.error() {
+                card.title = "Can't build here".into();
+                card.rows.push(Row::line(error_text(e), t::NEGATIVE));
+            } else if legs.is_empty() {
+                card.title = format!("Build {}", name.to_lowercase());
+                card.rows.push(Row::line("Move to the next corner", t::TEXT));
+            } else if plan.eval.cost == 0 {
+                card.title = "Road already built".into();
+                card.rows.push(Row::line(plural(cells, "cell", "cells"), t::TEXT_MUTED));
+            } else {
+                card.title = match block {
+                    Some(_) => format!("Build {}", plural(legs.len(), "street", "streets")),
+                    None if legs.len() > 1 => format!("Build {} · {} parts", name.to_lowercase(), legs.len()),
+                    None => format!("Build {}", name.to_lowercase()),
+                };
+                card.rows.push(Row::line(
+                    format!(
+                        "{} m · {}",
+                        format::group(plan.length_m.round() as u64),
+                        cost_text(plan.eval.cost)
+                    ),
+                    t::TEXT,
+                ));
+                if let Some(r) = block {
+                    card.rows.push(Row::line(
+                        format!("{} x {} cells", r.width(), r.height()),
                         t::TEXT_MUTED,
                     ));
-                    if money < balance::ROAD_COST_PER_CELL {
-                        card.rows
-                            .push(Row::line(format!("You have {}", format::money(money)), t::NEGATIVE));
-                    }
-                    card.hint = "Click a start point, or drag".into();
                 }
             }
+            card.rows.extend(snap_row);
+            card.hint = match (action, block) {
+                (_, Some(_)) => "Release to build · [ ] block size · Esc cancels".into(),
+                (
+                    Action::Path {
+                        held: true,
+                        dragged: true,
+                    },
+                    _,
+                ) if *placed <= 1 => "Release to build · Esc cancels".into(),
+                (
+                    Action::Path {
+                        held: true,
+                        dragged: true,
+                    },
+                    _,
+                ) => "Release to add a corner".into(),
+                _ if *placed >= 2 => "Enter or double-click builds · Backspace · Esc".into(),
+                _ => "Click: corner · double-click ends · Alt: free".into(),
+            };
         }
         ActiveTool::Zone(zone) => {
-            hovered.or(preview.rect.map(|r| r.max))?;
+            hovered.or(preview.rect.map(|r| r.max)).or(state.last_cell)?;
             card.glyph = zone_icon(zone);
             card.color = t::zone_color(zone);
-            card.title = match zone {
-                Some(_) => format!("Zone {}", zone_name(zone).to_lowercase()),
-                None => "Remove zoning".into(),
+            let zname = zone_name(zone).to_lowercase();
+            card.title = match (zone, modes.zone) {
+                (Some(_), ZoneMode::Rect) => format!("Zone {zname}"),
+                (Some(_), ZoneMode::Frontage) => format!("Zone {zname} along the road"),
+                (Some(_), ZoneMode::Fill) => format!("Fill the block: {zname}"),
+                (None, ZoneMode::Rect) => "Remove zoning".into(),
+                (None, ZoneMode::Frontage) => "Remove zoning along the road".into(),
+                (None, ZoneMode::Fill) => "Remove zoning in the block".into(),
             };
             let n = preview.cells.len();
-            let dragging = matches!(action, Action::Rect { .. });
+            let empty = match &plan.pending {
+                Pending::Zone { empty, .. } => *empty,
+                _ => None,
+            };
             if let Some(e) = &preview.error {
                 card.rows.push(Row::line(error_text(e), t::NEGATIVE));
+            } else if let Some(e) = empty {
+                card.rows.push(Row::line(e, t::TEXT_MUTED));
             } else if n == 0 {
                 let (s, c) = match preview.rect {
                     Some(r) => zone_noop_reason(world, r, zone),
-                    None => ("Nothing to zone here".into(), t::TEXT_MUTED),
+                    None => (
+                        if zone.is_some() {
+                            "Nothing to zone: already zoned or built on".into()
+                        } else {
+                            "Nothing zoned here".into()
+                        },
+                        t::TEXT_MUTED,
+                    ),
                 };
                 card.rows.push(Row::line(s, c));
             } else {
@@ -392,20 +512,31 @@ pub fn tool_card(
                 card.rows
                     .push(Row::line(format!("{} · {what}", plural(n, "cell", "cells")), t::TEXT));
             }
-            card.hint = if dragging {
-                "Release to apply · Right-click to cancel".into()
-            } else {
-                "Drag a rectangle · Z switches type".into()
+            let dragging = matches!(action, Action::Rect { .. } | Action::Along { .. });
+            card.hint = match (modes.zone, dragging) {
+                (_, true) => "Release to apply · Right-click cancels".into(),
+                (ZoneMode::Rect, false) => "Drag a rectangle · Z type · Tab mode".into(),
+                (ZoneMode::Frontage, false) => "Click: whole side · drag along a road".into(),
+                (ZoneMode::Fill, false) => "Click to fill the block · Tab mode".into(),
             };
         }
         ActiveTool::Bulldoze => {
-            hovered.or(preview.rect.map(|r| r.max))?;
+            hovered.or(preview.rect.map(|r| r.max)).or(state.last_cell)?;
             card.glyph = icon::BULLDOZE;
             card.color = t::NEGATIVE;
-            card.title = "Bulldoze".into();
+            card.title = match modes.bulldoze {
+                BulldozeMode::Rect => "Bulldoze".into(),
+                BulldozeMode::Road => "Remove road".into(),
+            };
             let n = preview.cells.len();
+            let empty = match &plan.pending {
+                Pending::Bulldoze { empty, .. } => *empty,
+                _ => None,
+            };
             if let Some(e) = &preview.error {
                 card.rows.push(Row::line(error_text(e), t::NEGATIVE));
+            } else if let Some(e) = empty {
+                card.rows.push(Row::line(e, t::TEXT_MUTED));
             } else if n == 0 {
                 card.rows.push(Row::line("Nothing to remove", t::TEXT_MUTED));
             } else {
@@ -413,19 +544,33 @@ pub fn tool_card(
                     format!("{} · {}", plural(n, "cell", "cells"), cost_text(preview.cost)),
                     t::TEXT,
                 ));
+                let (b, r) = (plan.doomed_buildings.len(), plan.doomed_road.len());
+                if b > 0 || r > 0 {
+                    let mut parts = Vec::new();
+                    if r > 0 {
+                        parts.push(plural(r, "road cell", "road cells"));
+                    }
+                    if b > 0 {
+                        parts.push(plural(b, "building", "buildings"));
+                    }
+                    card.rows
+                        .push(Row::line(format!("Removes {}", parts.join(" and ")), t::NEGATIVE));
+                }
             }
-            card.hint = if matches!(action, Action::Rect { .. }) {
-                "Release to clear · Right-click to cancel".into()
-            } else {
-                "Drag over roads and buildings".into()
+            let dragging = matches!(action, Action::Rect { .. } | Action::Along { .. });
+            card.hint = match (modes.bulldoze, dragging) {
+                (_, true) => "Release to remove · Right-click cancels".into(),
+                (BulldozeMode::Rect, false) => "Drag over roads and buildings · Tab mode".into(),
+                (BulldozeMode::Road, false) => "Click: stretch · drag along: part".into(),
             };
         }
     }
-    if preview.error.is_some() {
+    if plan.error().is_some() || preview.error.is_some() {
         card.title_color = t::NEGATIVE;
         card.color = t::NEGATIVE;
         card.glyph = icon::ALERT;
     }
+    card.rows.truncate(MAX_ROWS);
     Some(card)
 }
 
@@ -736,6 +881,8 @@ pub const JAM_CRAWL_MPS: f32 = 12.0 / 3.6;
 fn update_card(
     time: Res<Time<Real>>,
     tool: Res<ActiveTool>,
+    modes: Res<ToolModes>,
+    kind: Res<RoadChoice>,
     state: Res<ToolState>,
     preview: Res<ToolPreview>,
     hovered: Res<HoveredCell>,
@@ -768,15 +915,15 @@ fn update_card(
     // Rebuild the card only when what it describes changed, and a few
     // times a second for live numbers; texts are touched only on change.
     let hidden = ui.menu_open || over_ui.0 && !state.busy();
-    let key = (*tool, state.action, hovered.0, hidden, sim.generation);
+    let key = (*tool, *modes, *kind, state.action, hovered.0, hidden, sim.generation);
     cache.age += time.delta_secs();
-    if cache.key != Some(key) || preview.is_changed() || cache.age >= CARD_REFRESH_S {
+    if cache.key != Some(key) || preview.is_changed() || state.is_changed() || cache.age >= CARD_REFRESH_S {
         cache.key = Some(key);
         cache.age = 0.0;
         cache.card = if hidden {
             None
         } else {
-            tool_card(*tool, state.action, &preview, &sim.world, hovered.0)
+            tool_card(*tool, *modes, *kind, &state, &preview, &sim.world, hovered.0)
         };
     }
     let (Some(card), Some((cursor, win))) = (cache.card.clone(), cursor) else {
@@ -826,10 +973,12 @@ fn update_card(
     }
 }
 
+type CardKey = (ActiveTool, ToolModes, RoadChoice, Action, Option<Cell>, bool, u64);
+
 /// Last card built by `update_card` and what it was built from.
 #[derive(Default)]
 struct CardCache {
-    key: Option<(ActiveTool, Action, Option<Cell>, bool, u64)>,
+    key: Option<CardKey>,
     age: f32,
     card: Option<Card>,
     /// Card currently written into the entities.
@@ -971,10 +1120,24 @@ mod tests {
             to: Cell::new(20, 128),
         };
         let p = super::super::tools::compute_preview(&w, cmd);
-        let start = Cell::new(11, 128);
+        let mut state = ToolState::default();
+        state.path = vec![Cell::new(11, 128)];
+        state.action = Action::Path {
+            held: false,
+            dragged: false,
+        };
+        let pending = Pending::Roads {
+            points: vec![Cell::new(11, 128), Cell::new(20, 128)],
+            placed: 1,
+            legs: vec![(Cell::new(11, 128), Cell::new(20, 128))],
+            block: None,
+        };
+        state.plan = super::super::tools::evaluate(&w, &pending, RoadChoice::Street);
         let card = tool_card(
             ActiveTool::Road,
-            Action::Road { start, held: false },
+            ToolModes::default(),
+            RoadChoice::Street,
+            &state,
             &p,
             &w,
             Some(Cell::new(20, 128)),
@@ -992,7 +1155,17 @@ mod tests {
             zone,
         };
         let p = super::super::tools::compute_preview(w, cmd);
-        let card = tool_card(ActiveTool::Zone(zone), Action::Idle, &p, w, Some(cell)).expect("card");
+        let state = ToolState::default();
+        let card = tool_card(
+            ActiveTool::Zone(zone),
+            ToolModes::default(),
+            RoadChoice::Street,
+            &state,
+            &p,
+            w,
+            Some(cell),
+        )
+        .expect("card");
         card.rows[0].value.clone()
     }
 

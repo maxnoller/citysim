@@ -9,7 +9,7 @@ use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
     ActiveMark, ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, label, layout, panel, spawn_button,
 };
-use crate::shared::{ActiveTool, GameSet, OverlayMode};
+use crate::shared::{ActiveTool, GameSet, OverlayMode, RoadMode};
 
 pub struct ToolbarPlugin;
 
@@ -40,6 +40,7 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
             }),
         ))
         .with_children(|root| {
+            super::toolopts::spawn_opts(root, fonts);
             // Zone flyout.
             root.spawn((
                 ZoneFlyout,
@@ -98,7 +99,7 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::ROAD,
                     Tooltip {
                         title: "Road",
-                        desc: "Click a start and an end point, or drag. Straight or 45° only.",
+                        desc: "Click corners and double-click to build, or drag one straight road. Snaps to roads and grids; Alt for free placement. R again: street / avenue.",
                         key: Some("R"),
                         price: Some(format!("${} per cell", balance::ROAD_COST_PER_CELL)),
                     },
@@ -110,7 +111,7 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::ZONE,
                     Tooltip {
                         title: "Zone",
-                        desc: "Drag a rectangle next to a road. Buildings grow by demand.",
+                        desc: "Drag a rectangle, click a road side, or fill a block. Buildings grow by demand. Tab switches mode.",
                         key: Some("Z"),
                         price: Some("Free".into()),
                     },
@@ -122,9 +123,21 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::BULLDOZE,
                     Tooltip {
                         title: "Bulldoze",
-                        desc: "Drag over roads and buildings to remove them.",
+                        desc: "Drag over roads and buildings, or click a road to remove it between junctions. Tab switches mode.",
                         key: Some("B"),
                         price: Some(format!("${} per cleared cell", balance::BULLDOZE_COST_PER_CELL)),
+                    },
+                );
+                tool_button(
+                    bar,
+                    fonts,
+                    UiAction::RoadMode(RoadMode::Junction),
+                    icon::WAYPOINTS,
+                    Tooltip {
+                        title: "Junctions",
+                        desc: "Hover a junction to see its traffic lights or priority rules; click to switch them.",
+                        key: Some("J"),
+                        price: None,
                     },
                 );
                 bar.spawn(super::widgets::vdivider(26.0));

@@ -10,7 +10,10 @@ use citysim_sim::Zone;
 
 use super::UiState;
 use super::theme::{self as t, UiFonts};
-use crate::shared::{ActiveTool, GameSet, GraphicsQuality, OverlayMode, SimClock};
+use crate::shared::{
+    ActiveTool, BulldozeMode, GameSet, GraphicsQuality, OverlayMode, RoadChoice, RoadMode, SimClock, ToolModes,
+    ZoneMode,
+};
 
 /// Everything a click on the interface can ask for. Handled in `actions.rs`.
 #[derive(Message, Debug, Clone, Copy, PartialEq)]
@@ -34,6 +37,15 @@ pub enum UiAction {
     Quality(GraphicsQuality),
     Quit,
     DismissHint,
+    /// Undo the last road or zoning action (Ctrl+Z).
+    Undo,
+    /// Tool sub-modes and options (tool options bar).
+    RoadMode(RoadMode),
+    ZoneMode(ZoneMode),
+    BulldozeMode(BulldozeMode),
+    RoadKind(RoadChoice),
+    /// Step the block tool's block size by this many options.
+    BlockSize(i32),
 }
 
 /// Visual family of a button.
@@ -271,10 +283,13 @@ pub struct ActiveCtx<'a> {
     pub clock: &'a SimClock,
     pub quality: &'a GraphicsQuality,
     pub state: &'a UiState,
+    pub modes: &'a ToolModes,
+    pub kind: &'a RoadChoice,
 }
 
 pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
     match action {
+        UiAction::Tool(ActiveTool::Road) => *cx.tool == ActiveTool::Road && cx.modes.road != RoadMode::Junction,
         UiAction::Tool(tool) => *cx.tool == tool,
         UiAction::ZoneTool => matches!(cx.tool, ActiveTool::Zone(_)),
         UiAction::Overlay(o) => *cx.overlay == o,
@@ -282,6 +297,10 @@ pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
         UiAction::Speed(i) => !cx.clock.paused && cx.clock.speed == i,
         UiAction::ToggleBudget => cx.state.budget_open,
         UiAction::Quality(q) => *cx.quality == q,
+        UiAction::RoadMode(m) => *cx.tool == ActiveTool::Road && cx.modes.road == m,
+        UiAction::ZoneMode(m) => matches!(cx.tool, ActiveTool::Zone(_)) && cx.modes.zone == m,
+        UiAction::BulldozeMode(m) => *cx.tool == ActiveTool::Bulldoze && cx.modes.bulldoze == m,
+        UiAction::RoadKind(k) => *cx.kind == k,
         _ => false,
     }
 }
@@ -321,6 +340,8 @@ fn button_visuals(
     clock: Res<SimClock>,
     quality: Res<GraphicsQuality>,
     state: Res<UiState>,
+    modes: Res<ToolModes>,
+    kind: Res<RoadChoice>,
     mut buttons: Query<(
         Entity,
         &UiButton,
@@ -339,6 +360,8 @@ fn button_visuals(
         clock: &clock,
         quality: &quality,
         state: &state,
+        modes: &modes,
+        kind: &kind,
     };
     let k = approach(time.delta_secs(), 0.06);
     for (e, b, hovered, mut anim, mut bg, mut border, mut tf) in &mut buttons {
