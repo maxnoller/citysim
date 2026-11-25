@@ -204,8 +204,15 @@ pub struct Journey {
     /// Tick the trip started.
     pub departed_tick: u64,
     /// Off-screen trips: tick of arrival. `None` for trips by a car on the
-    /// road (or waiting to start), which end when the car arrives.
+    /// road (or waiting to start), which end when the car arrives or at
+    /// `due_tick`, whichever comes first.
     pub arrive_tick: Option<u64>,
+    /// Latest arrival on the calendar. A car drawn on the road moves in real
+    /// time (a minute's drive is hours of calendar time, see `balance`), so
+    /// its people get out at this tick at the latest
+    /// (`balance::TRIP_DUE_FACTOR`, `MIN_TRIP_H`, `MAX_TRIP_H`); the car
+    /// then finishes its drive on screen without them.
+    pub due_tick: u64,
 }
 
 /// Where a citizen is.

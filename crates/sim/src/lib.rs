@@ -38,6 +38,9 @@ pub mod time;
 pub mod traffic;
 pub mod world;
 
+#[cfg(test)]
+mod people_tests;
+
 pub use buildings::{Building, BuildingId, Facing};
 pub use citizens::{
     Activity, Citizen, CitizenId, Education, Happiness, HappinessPart, HouseholdRole, Job, JobTier, JournalEntry,

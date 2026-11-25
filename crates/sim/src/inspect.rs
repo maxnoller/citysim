@@ -152,7 +152,6 @@ fn accumulate(world: &World, a: &mut StatsAcc, k: usize, n: usize) {
         }
         i += n;
     }
-    let rate = world.economy.tax_rate;
     let mut i = k;
     while i < world.households.slot_count() {
         if let Some(hid) = world.households.key_at(i) {
@@ -165,16 +164,7 @@ fn accumulate(world: &World, a: &mut StatsAcc, k: usize, n: usize) {
             s.by_kind[h.kind.index()] += 1;
             a.money += h.money as f64;
             a.rent += h.rent as f64;
-            let income: i64 = h
-                .citizens
-                .iter()
-                .filter_map(|&m| world.citizens.get(m))
-                .map(|c| match (c.job, c.retired) {
-                    (Some(j), _) => j.wage as i64 - crate::people::tax_on(j.wage, rate),
-                    (None, true) => balance::PENSION_PER_DAY,
-                    _ => 0,
-                })
-                .sum();
+            let income = crate::life::daily_income(world, hid);
             let band = if income > 0 {
                 let b = h.rent as f32 / income as f32;
                 a.burden += b as f64;
@@ -434,8 +424,12 @@ pub struct VehicleView {
     /// The household it belongs to (none for trucks and cars of households
     /// that have left).
     pub household: Option<HouseholdId>,
-    /// The citizen driving (none for trucks).
+    /// The citizen driving (none for trucks, and once its people have
+    /// arrived on the calendar: see `Journey::due_tick`).
     pub driver: Option<CitizenId>,
+    /// The citizen whose trip this car draws, also after they got out (the
+    /// car is finishing the drive to where they now are).
+    pub owner: Option<CitizenId>,
     /// Citizens in the car, driver included.
     pub occupants: u8,
     pub origin: Place,
@@ -458,6 +452,7 @@ pub fn vehicle(world: &World, id: VehicleId) -> Option<VehicleView> {
         purpose: t.purpose,
         household: v.household,
         driver,
+        owner: t.owner.filter(|&c| world.citizens.contains_key(c)),
         occupants: occupants(world, id).count().min(u8::MAX as usize) as u8,
         origin: t.from,
         destination: t.to,

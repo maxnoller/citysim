@@ -88,9 +88,9 @@ pub const MAX_TAX_RATE: f32 = 0.30;
 /// At the default 9 % a resident pays about $1.26 per day.
 pub const RESIDENT_TAX_BASE_PER_DAY: f32 = 14.0;
 /// Daily taxable value of one filled commercial job.
-pub const COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 20.0;
+pub const COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 17.0;
 /// Daily taxable value of one filled industrial job.
-pub const INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 16.0;
+pub const INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY: f32 = 14.0;
 
 // --------------------------------------------------------------- zoning ----
 
@@ -446,11 +446,20 @@ pub const JOURNAL_CAP: usize = 8;
 // --------------------------------------------------------- households ----
 
 /// Household types arriving `[single, couple, family, seniors]` (relative
-/// weights before the city's own pull; see `households::arrivals`).
-pub const ARRIVAL_WEIGHTS: [f32; 4] = [16.0, 18.0, 44.0, 22.0];
+/// weights before the city's own pull; see `households::arrivals`). A new
+/// town draws people of working age and young families; seniors are about
+/// a tenth of newcomers, and their share grows as the town ages in place.
+pub const ARRIVAL_WEIGHTS: [f32; 4] = [30.0, 24.0, 38.0, 8.0];
 /// Free jobs per member of the workforce scale the working types by
-/// `0.5 + this * free share` (0.2..1.5).
+/// `0.6 + this * free share` (0.6..1.4).
 pub const ARRIVAL_JOBS_PULL: f32 = 4.0;
+/// Age ranges (years) of arriving heads of household, skewed to the young
+/// end: singles, couples, parents (their children are 0-17, mostly young),
+/// seniors.
+pub const ARRIVAL_SINGLE_YEARS: [u32; 2] = [19, 45];
+pub const ARRIVAL_COUPLE_YEARS: [u32; 2] = [21, 50];
+pub const ARRIVAL_PARENT_YEARS: [u32; 2] = [23, 45];
+pub const ARRIVAL_SENIOR_YEARS: [u32; 2] = [63, 82];
 /// Average size of an arriving household (sets the arrival rate per free
 /// home place, like round 2's 2.6 people per household).
 pub const ARRIVAL_AVG_SIZE: f32 = 2.6;
@@ -487,7 +496,7 @@ pub const ARRIVAL_HAPPINESS_WEIGHT: f32 = 1.5;
 // round 2's flat per-resident tax was (~$14 of taxable value per resident).
 
 /// Daily wage by job tier `[basic, skilled, professional]`.
-pub const WAGE_BY_TIER: [u32; 3] = [26, 31, 37];
+pub const WAGE_BY_TIER: [u32; 3] = [23, 28, 33];
 /// Daily wage of a teen's part-time job.
 pub const PART_TIME_WAGE: u32 = 9;
 /// Daily pension of a retiree (not taxed).
@@ -574,6 +583,8 @@ pub const SHOP_CLOSE_H: f32 = 21.0;
 /// ... when the household has less than this many days of goods; the
 /// shopper buys up to [`BUY_UP_TO_DAYS`] (essentials only in austerity).
 pub const SHOP_BELOW_DAYS: f32 = 1.0;
+/// (Each adult has a usual shopping time between [`SHOP_OPEN_H`] and an
+/// hour before [`SHOP_CLOSE_H`].)
 pub const BUY_UP_TO_DAYS: f32 = 3.0;
 pub const AUSTERITY_BUY_DAYS: f32 = 1.2;
 /// Shopping needs this much free time before the next shift, hours, and
@@ -594,6 +605,9 @@ pub const LEISURE_RESTORE_PER_HOUR: [f32; 3] = [0.2, 0.3, 0.4];
 /// Citizens go out when their need is above this, between these hours,
 /// with at least [`LEISURE_FREE_H`] before their next shift.
 pub const LEISURE_GO_NEED: f32 = 0.55;
+/// Each citizen has a usual time to go out between [`LEISURE_OPEN_H`] and
+/// two hours before [`LEISURE_CLOSE_H`]; above this need they go earlier.
+pub const LEISURE_URGENT_NEED: f32 = 0.85;
 pub const LEISURE_OPEN_H: f32 = 10.0;
 pub const LEISURE_CLOSE_H: f32 = 21.0;
 pub const LEISURE_FREE_H: f32 = 4.0;
@@ -620,6 +634,15 @@ pub const OFFSCREEN_BASE_S: f32 = 6.0;
 /// 10-minute trip. Cars on the road are different: they move in real time,
 /// so a drive drawn on screen takes far longer in calendar terms.
 pub const OFFSCREEN_CALENDAR_FACTOR: f32 = 5.0;
+/// Every trip ends on the calendar by its estimated time times
+/// [`TRIP_DUE_FACTOR`], at least [`MIN_TRIP_H`] and at most [`MAX_TRIP_H`]
+/// hours after it started. A car drawn on the road moves in real time (a
+/// one-minute drive is six calendar hours), so its people get out then and
+/// the car finishes its drive on screen without them; a car that has not
+/// started by then is dropped (a hopeless commute).
+pub const TRIP_DUE_FACTOR: f32 = 3.0;
+pub const MIN_TRIP_H: f32 = 0.5;
+pub const MAX_TRIP_H: f32 = 2.0;
 /// Without a free car a trip takes this many times as long (stands in for
 /// lifts, buses and walking until stage 3).
 pub const CARLESS_TIME_FACTOR: f32 = 1.8;
@@ -660,6 +683,9 @@ pub const BIRTH_MIN_YEARS: u32 = 20;
 pub const ROOMIER_HOME_RENT_FACTOR: f32 = 1.3;
 pub const BIRTH_MAX_YEARS: u32 = 42;
 pub const MAX_CHILDREN: u32 = 4;
+/// Couples put off having a child while city services are cut below this
+/// level (debt).
+pub const BIRTH_MIN_SERVICE_LEVEL: f32 = 0.8;
 /// Grown-up children from this age move out with this chance per day when
 /// a home is free (otherwise they stay and are unhappy about it).
 pub const MOVE_OUT_MIN_YEARS: u32 = 19;
@@ -693,10 +719,10 @@ pub const HAPPINESS_NEUTRAL: f32 = 0.88;
 /// Residential demand per unit of average happiness above neutral.
 pub const HAPPINESS_DEMAND_WEIGHT: f32 = 0.5;
 /// A citizen below this counts as unhappy (city statistics).
-pub const UNHAPPY_BELOW: f32 = 0.5;
+pub const UNHAPPY_BELOW: f32 = 0.65;
 /// A household whose average stays below this for this many midnights
 /// leaves the city.
-pub const UNHAPPY_LEAVE_BELOW: f32 = 0.35;
+pub const UNHAPPY_LEAVE_BELOW: f32 = 0.45;
 pub const UNHAPPY_LEAVE_DAYS: u8 = 3;
 /// Rent burden (rent / income) that is fine / unbearable.
 pub const RENT_BURDEN_OK: f32 = 0.25;

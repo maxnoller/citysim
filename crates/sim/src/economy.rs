@@ -10,9 +10,10 @@ use crate::{World, Zone, balance};
 /// `road_upkeep` and `services`; the day's net is `income() - expenses()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Budget {
-    /// Taxes paid by residents: the tax rate times each employed citizen's
-    /// daily wage (rounded per worker), taken from their household's money
-    /// at payday (`people::residential_tax`). Pensions are not taxed.
+    /// Taxes paid by residents: the tax rate times the daily wages of the
+    /// employed (rounded per household), taken from each household's money
+    /// at payday (`people::residential_tax` projects today's). Pensions are
+    /// not taxed.
     pub residential_tax: i64,
     /// Taxes paid per filled commercial job: filled jobs *
     /// `COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY` * tax rate.
@@ -234,7 +235,6 @@ pub(crate) fn end_of_day(world: &mut World) {
     // Wages, pensions, rent; the residential tax comes out of the wages.
     let tax = crate::life::payday(world);
     let mut b = budget_now(world);
-    debug_assert_eq!(b.residential_tax, tax);
     b.residential_tax = tax;
     let e = &mut world.economy;
     e.money += b.income() - b.expenses();

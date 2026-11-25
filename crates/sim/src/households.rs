@@ -517,7 +517,7 @@ fn arrival_weights(world: &World) -> [f32; 4] {
     let s = &world.stats;
     let jobs_free = s.vacant_jobs as f32 / (s.workforce as f32 + balance::DEMAND_SMALL_CITY);
     // Free jobs draw working households; no jobs leaves mostly retirees.
-    let work = (0.5 + jobs_free * balance::ARRIVAL_JOBS_PULL).clamp(0.2, 1.5);
+    let work = (0.6 + jobs_free * balance::ARRIVAL_JOBS_PULL).clamp(0.6, 1.4);
     w[HouseholdKind::Single.index()] *= work;
     w[HouseholdKind::Couple.index()] *= work;
     w[HouseholdKind::Family.index()] *= work;
@@ -544,35 +544,48 @@ fn pick(world: &mut World, w: &[f32]) -> usize {
 /// Ages in years of the members of a new household of `kind` (heads
 /// first, then children), fitting in `room` places.
 fn arrival_ages(world: &mut World, kind: HouseholdKind, room: u32) -> Vec<(u32, HouseholdRole)> {
-    let r = |world: &mut World, lo: u32, hi: u32| lo + world.rng.below(hi - lo + 1);
+    // Ages skewed to the young end of each range (the lower of two draws):
+    // people who move to a new town are mostly at the start of their
+    // working lives or have young families.
+    let young = |world: &mut World, lo: u32, hi: u32| {
+        let u = world.rng.next_f32().min(world.rng.next_f32());
+        lo + (u * (hi - lo + 1) as f32) as u32
+    };
+    let near = |world: &mut World, a: u32, lo: u32, hi: u32| {
+        (a as i32 + world.rng.below(7) as i32 - 3).clamp(lo as i32, hi as i32) as u32
+    };
     let head = HouseholdRole::Head;
+    let [s0, s1] = balance::ARRIVAL_SINGLE_YEARS;
+    let [c0, c1] = balance::ARRIVAL_COUPLE_YEARS;
+    let [f0, f1] = balance::ARRIVAL_PARENT_YEARS;
+    let [o0, o1] = balance::ARRIVAL_SENIOR_YEARS;
     let mut v = match kind {
-        HouseholdKind::Single => vec![(r(world, 19, 44), head)],
+        HouseholdKind::Single => vec![(young(world, s0, s1), head)],
         HouseholdKind::Couple => {
-            let a = r(world, 21, 52);
-            let b = (a as i32 + world.rng.below(9) as i32 - 4).clamp(19, 60) as u32;
+            let a = young(world, c0, c1);
+            let b = near(world, a, s0, c1 + 3);
             vec![(a, head), (b, head)]
         }
         HouseholdKind::Family => {
-            let a = r(world, 26, 46);
+            let a = young(world, f0, f1);
             let mut v = vec![(a, head)];
             if world.rng.next_f32() >= balance::SINGLE_PARENT_SHARE {
-                let b = (a as i32 + world.rng.below(7) as i32 - 3).clamp(20, 60) as u32;
+                let b = near(world, a, s0, f1 + 3);
                 v.push((b, head));
             }
             let kids = 1 + pick(world, &balance::FAMILY_CHILDREN_WEIGHTS) as u32;
             let oldest = (a - 19).min(17);
             for _ in 0..kids {
-                let k = world.rng.below(oldest + 1);
+                let k = young(world, 0, oldest);
                 v.push((k, HouseholdRole::Dependant));
             }
             v
         }
         HouseholdKind::Seniors => {
-            let a = r(world, 65, 84);
+            let a = young(world, o0, o1);
             let mut v = vec![(a, head)];
             if world.rng.next_f32() < balance::SENIOR_COUPLE_SHARE {
-                v.push(((a as i32 + world.rng.below(7) as i32 - 3).max(62) as u32, head));
+                v.push((near(world, a, o0 - 3, o1 + 3), head));
             }
             v
         }
@@ -861,6 +874,7 @@ fn populate(world: &mut World, hid: HouseholdId) {
             };
             if let Some(t) = world.traffic.trips.get_mut(v) {
                 t.citizen = Some(who);
+                t.owner = Some(who);
             }
             world.citizens[who].has_car = true;
             let j = crate::citizens::Journey {
@@ -872,6 +886,7 @@ fn populate(world: &mut World, hid: HouseholdId) {
                 vehicle: Some(v),
                 departed_tick: now,
                 arrive_tick: None,
+                due_tick: now + crate::day::due_after(world, Some(home), Some(home)),
             };
             people::set_place(world, who, Activity::Travelling, Location::Travelling(j), now + 200);
             if purpose == TripPurpose::MoveIn {

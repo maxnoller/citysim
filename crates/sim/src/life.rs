@@ -35,17 +35,16 @@ pub fn rent_for(world: &World, home: BuildingId, n: u32) -> i64 {
 
 /// Expected daily income of a household (wages after tax, pensions).
 pub fn daily_income(world: &World, hid: HouseholdId) -> i64 {
-    let rate = world.economy.tax_rate;
     let Some(h) = world.households.get(hid) else { return 0 };
-    h.citizens
-        .iter()
-        .filter_map(|&m| world.citizens.get(m))
-        .map(|c| match (c.job, c.retired) {
-            (Some(j), _) => j.wage as i64 - people::tax_on(j.wage, rate),
-            (None, true) => balance::PENSION_PER_DAY,
-            _ => 0,
-        })
-        .sum()
+    let (mut wages, mut pensions) = (0u32, 0i64);
+    for c in h.citizens.iter().filter_map(|&m| world.citizens.get(m)) {
+        match (c.job, c.retired) {
+            (Some(j), _) => wages += j.wage,
+            (None, true) => pensions += balance::PENSION_PER_DAY,
+            _ => {}
+        }
+    }
+    wages as i64 - people::tax_on(wages, world.economy.tax_rate) + pensions
 }
 
 /// Goods a household uses per day.
@@ -77,11 +76,11 @@ pub(crate) fn payday(world: &mut World) -> i64 {
             let Some(c) = world.citizens.get(m) else { continue };
             if let Some(j) = c.job {
                 wages += j.wage as i64;
-                tax += people::tax_on(j.wage, rate);
             } else if c.retired {
                 pensions += balance::PENSION_PER_DAY;
             }
         }
+        tax += people::tax_on(wages as u32, rate);
         let h = &mut world.households[hid];
         if h.citizens.is_empty() {
             continue;
@@ -314,7 +313,7 @@ fn review(world: &mut World, hid: HouseholdId) {
 }
 
 /// Ageing, stage changes and deaths in one household.
-fn age_household(world: &mut World, hid: HouseholdId) {
+pub(crate) fn age_household(world: &mut World, hid: HouseholdId) {
     let day = world.time.day;
     let members = world.households[hid].citizens.clone();
     let mut died = Vec::new();
@@ -637,7 +636,7 @@ fn move_money(world: &mut World, from: HouseholdId, to: HouseholdId, amount: i64
 }
 
 /// Births, moving out, couples.
-fn events(world: &mut World, hid: HouseholdId) {
+pub(crate) fn events(world: &mut World, hid: HouseholdId) {
     let day = world.time.day;
     let h = &world.households[hid];
     let home = h.home;
@@ -660,6 +659,7 @@ fn events(world: &mut World, hid: HouseholdId) {
         && parents_age
         && children < balance::MAX_CHILDREN as usize
         && world.households[hid].money >= 0
+        && world.economy.fiscal.service_level >= balance::BIRTH_MIN_SERVICE_LEVEL
         && world.rng.next_f32() < balance::BIRTH_CHANCE_PER_DAY;
     if wants_child && !room && everyone_home {
         // No room for a baby: move to a home with room for one more (rent

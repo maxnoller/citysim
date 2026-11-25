@@ -120,7 +120,12 @@ fn no_jobs_means_unemployment_and_people_leave() {
     let workers: Vec<HouseholdId> = w
         .households
         .iter()
-        .filter(|(_, h)| h.citizens.iter().any(|&c| w.citizens[c].in_workforce()))
+        .filter(|(_, h)| {
+            // Households that need a job: someone in the workforce and no
+            // pension coming in.
+            h.citizens.iter().any(|&c| w.citizens[c].in_workforce())
+                && h.citizens.iter().all(|&c| !w.citizens[c].retired)
+        })
         .map(|(id, _)| id)
         .collect();
     assert!(workers.len() > 5, "{}", workers.len());

@@ -161,6 +161,7 @@ pub(crate) fn trip_from(t: TripV4, here: [f32; 2]) -> Trip {
         needs_route: t.needs_route,
         queued: t.queued,
         citizen: None,
+        owner: None,
         from: Place::At(here),
     }
 }

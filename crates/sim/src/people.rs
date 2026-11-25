@@ -180,21 +180,19 @@ fn wage_count(world: &mut World, wage: u32, delta: i32) {
     }
 }
 
-/// Tax the city takes from one day's wages (whole dollars per worker).
-pub fn tax_on(wage: u32, rate: f32) -> i64 {
-    (wage as f64 * rate as f64).round() as i64
+/// Tax the city takes from one day's wages of a household (whole dollars,
+/// rounded on the household's total).
+pub fn tax_on(wages: u32, rate: f32) -> i64 {
+    (wages as f64 * rate as f64).round() as i64
 }
 
-/// Residential tax of one day if it ended now: every employed citizen's
-/// daily wage times the tax rate.
+/// Residential tax of one day if it ended now: the tax rate times all
+/// employed citizens' daily wages (rounded on the total; at payday each
+/// household's tax is rounded on its own wages, so the booked amount can
+/// differ by a few dollars).
 pub fn residential_tax(world: &World) -> i64 {
-    let rate = world.economy.tax_rate;
-    world
-        .people
-        .wage_counts
-        .iter()
-        .map(|&(w, n)| tax_on(w, rate) * n as i64)
-        .sum()
+    let wages: u64 = world.people.wage_counts.iter().map(|&(w, n)| w as u64 * n as u64).sum();
+    (wages as f64 * world.economy.tax_rate as f64).round() as i64
 }
 
 // --------------------------------------------------- citizen changes ----

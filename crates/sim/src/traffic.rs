@@ -167,9 +167,13 @@ pub struct Trip {
     pub needs_route: bool,
     /// In the re-plan queue.
     pub queued: bool,
-    /// The citizen driving (none for trucks and cars of households that
-    /// left). Passengers: `inspect::occupants`.
+    /// The citizen driving (none for trucks, cars of households that left,
+    /// and cars whose people already arrived on the calendar). Passengers:
+    /// `inspect::occupants`.
     pub citizen: Option<CitizenId>,
+    /// The citizen whose trip this car draws (stays set after they got out
+    /// at their calendar arrival; their commute statistics come from it).
+    pub owner: Option<CitizenId>,
     /// Where the trip started.
     pub from: Place,
 }
@@ -206,6 +210,7 @@ pub(crate) enum TripEnd {
 pub(crate) struct Ended {
     pub household: Option<HouseholdId>,
     pub citizen: Option<CitizenId>,
+    pub owner: Option<CitizenId>,
     pub purpose: TripPurpose,
     pub end: TripEnd,
     pub to: Place,
@@ -377,6 +382,7 @@ pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, end
         ended.push(Ended {
             household,
             citizen: trip.citizen,
+            owner: trip.owner,
             purpose: trip.purpose,
             end,
             to: trip.to,
@@ -622,6 +628,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         let gone = |end| Ended {
             household: dep.household,
             citizen: dep.citizen,
+            owner: dep.citizen,
             purpose: dep.purpose,
             end,
             to: dep.to,
@@ -749,6 +756,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 needs_route: false,
                 queued: false,
                 citizen: dep.citizen,
+                owner: dep.citizen,
                 from: dep.from,
             },
         );
