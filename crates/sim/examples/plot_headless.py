@@ -3,6 +3,9 @@
 
     python3 crates/sim/examples/plot_headless.py target/headless out.png [title] [before_dir]
 
+`PLOT_ONLY=hierarchy,streets,single_artery` limits the chart to those
+scenarios (the round-2 comparison).
+
 With `before_dir` (CSVs of an earlier run), the money panel also shows the
 earlier grid player's money as a dashed grey reference line.
 
@@ -26,6 +29,9 @@ GRID = "#e4e3df"
 # Validated categorical order (fixed, never cycled).
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
 SCENARIOS = [
+    ("hierarchy", "Hierarchy: avenues + streets", "hierarchy"),
+    ("streets", "Streets only", "streets only"),
+    ("single_artery", "Single artery", "single artery"),
     ("grid", "Grid player", "grid player"),
     ("res_only", "Residential only", "res only"),
     ("two_grid", "Two districts, grid streets", "good layout"),
@@ -60,6 +66,10 @@ def main():
         before_grid = load(os.path.join(before, "grid.csv"))
     data = {}
     daily = {}
+    only = os.environ.get("PLOT_ONLY")
+    if only:
+        keep = only.split(",")
+        SCENARIOS[:] = [s for s in SCENARIOS if s[0] in keep]
     for key, _, _ in SCENARIOS:
         p = os.path.join(src, key + ".csv")
         if os.path.exists(p):
@@ -70,6 +80,8 @@ def main():
     plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "text.color": TEXT, "text.parse_math": False})
     fig, axes = plt.subplots(3, 2, figsize=(14, 13), facecolor=SURFACE)
     for ax, (col, label, scale, fmt, source) in zip(axes.flat, PANELS):
+        if col == "money" and not before_grid:
+            label = "Money ($ thousands)"
         ax.set_facecolor(SURFACE)
         ax.grid(True, color=GRID, linewidth=0.8)
         ax.set_axisbelow(True)
