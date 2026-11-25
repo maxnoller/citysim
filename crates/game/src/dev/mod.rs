@@ -6,7 +6,7 @@
 //!   players and fast-forwarded before the first frame (see `scenario`).
 //! * `CITYSIM_AUTOSHOT=out.png` (or `--autoshot out.png`) — screenshot and
 //!   exit; `CITYSIM_SHOT_VIEW=wide|street|close`, `CITYSIM_SHOT_DELAY=secs`,
-//!   `CITYSIM_SHOT_OVERLAY=none|zones|traffic`.
+//!   `CITYSIM_SHOT_OVERLAY=none|zones|traffic`, `CITYSIM_SHOT_SIZE=1920x1080`.
 //! * `CITYSIM_LOG_FPS=1` — log frame time / FPS every second.
 //! * `CITYSIM_CONTROL=dir` — file control channel for scripted play-throughs
 //!   (`scripts/play.py`, see `control`).

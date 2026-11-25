@@ -142,6 +142,42 @@ pub fn organic(w: &mut World) -> Vec<String> {
     street(w, [790.0, 1250.0], [700.0, 1250.0], &mut log);
     street(w, [1010.0, 1250.0], [1120.0, 1320.0], &mut log);
 
+    // Odd angles east of the rotated grid: a five-arm junction, a street
+    // meeting the avenue at 30 degrees, and a T on the outside of a bend.
+    let star: P = [760.0, 560.0];
+    for deg in [10.0f32, 80.0, 150.0, 220.0, 290.0] {
+        let d = [deg.to_radians().cos(), deg.to_radians().sin()];
+        street(w, star, add(star, mul(d, 110.0)), &mut log);
+    }
+    // Leaves the avenue at 30 degrees to its direction there.
+    let (d30, _, foot) = av2.nearest([1000.0, 990.0]);
+    let tan = av2.pose_at(d30, 0.0).dir;
+    let a30 = 30f32.to_radians();
+    let dir = [
+        tan[0] * a30.cos() - tan[1] * a30.sin(),
+        tan[0] * a30.sin() + tan[1] * a30.cos(),
+    ];
+    street(w, foot, add(foot, mul(dir, 150.0)), &mut log);
+    // A bend, and a street meeting it on the outside.
+    let bend = Curve::new([1000.0, 520.0], [1100.0, 520.0], [1150.0, 560.0], [1150.0, 680.0]);
+    road(w, bend, RoadKind::Street, &mut log);
+    let (dm, _, _) = bend.nearest([1120.0, 540.0]);
+    let pose = bend.pose_at(dm, 0.0);
+    let outward = [pose.dir[1], -pose.dir[0]];
+    street(w, pose.pos, add(pose.pos, mul(outward, 90.0)), &mut log);
+    zone(
+        w,
+        [[690.0, 480.0], [880.0, 480.0], [880.0, 650.0], [690.0, 650.0]],
+        Zone::Residential,
+        &mut log,
+    );
+    zone(
+        w,
+        [[980.0, 440.0], [1200.0, 440.0], [1200.0, 700.0], [980.0, 700.0]],
+        Zone::Residential,
+        &mut log,
+    );
+
     // Zoning: houses in the rotated grid and the south grid, shops along
     // the avenue, works east of the ring.
     zone(

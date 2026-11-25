@@ -638,14 +638,27 @@ fn mesh_junction(m: &mut MeshBuilder, node: &NodeLayout) {
     m.fan_up(lift(node.pos, ROAD_Y), &ring3, asphalt_of(arms));
     // Zebra crossings just inside each arm's cut (the sim keeps its margin
     // between the stop line and the crossing carriageways free for them).
+    // Arms meeting at a narrow angle can leave no room: a crossing that
+    // would overlap another arm's is left out.
     if node.degree >= 3 {
         let white = lin(palette::MARKING);
-        for a in arms {
-            if a.style.highway {
-                continue;
-            }
-            let width = (citysim_sim::balance::JUNCTION_MARGIN_M - 0.75).min(2.4);
-            if width < 1.2 || a.setback < width + 1.0 {
+        let width = (citysim_sim::balance::JUNCTION_MARGIN_M - 0.75).min(2.4);
+        let zone = |a: &Arm| {
+            [
+                a.at(-0.4, -a.style.h),
+                a.at(-0.4 - width, -a.style.h),
+                a.at(-0.4 - width, a.style.h),
+                a.at(-0.4, a.style.h),
+            ]
+        };
+        let fits = |a: &Arm| !a.style.highway && width >= 1.2 && a.setback >= width + 1.0;
+        for (i, a) in arms.iter().enumerate() {
+            if !fits(a)
+                || arms
+                    .iter()
+                    .enumerate()
+                    .any(|(j, b)| j != i && fits(b) && quads_overlap(&zone(a), &zone(b)))
+            {
                 continue;
             }
             let zebra_w = 0.5;
@@ -662,6 +675,27 @@ fn mesh_junction(m: &mut MeshBuilder, node: &NodeLayout) {
             }
         }
     }
+}
+
+/// Two convex quads overlap (separating axis test).
+fn quads_overlap(a: &[Vec2; 4], b: &[Vec2; 4]) -> bool {
+    for q in [a, b] {
+        for k in 0..4 {
+            let e = q[(k + 1) % 4] - q[k];
+            let axis = Vec2::new(-e.y, e.x);
+            let span = |p: &[Vec2; 4]| {
+                p.iter()
+                    .map(|v| v.dot(axis))
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), d| (lo.min(d), hi.max(d)))
+            };
+            let (a0, a1) = span(a);
+            let (b0, b1) = span(b);
+            if a1 <= b0 + 1e-4 || b1 <= a0 + 1e-4 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Round cap at a dead end, with the sidewalk around it.

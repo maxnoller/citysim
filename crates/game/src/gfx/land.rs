@@ -246,9 +246,15 @@ impl Inset {
 /// then its back, each only as far as needed (never below
 /// `MIN_INSET_SCALE` of the size).
 pub fn fit(lot: Lot, edges: &RoadEdges) -> Inset {
+    fit_checked(lot, edges).0
+}
+
+/// `fit`, and whether the fitted rectangle really is clear (it may not be
+/// when a road runs through the middle of it).
+pub fn fit_checked(lot: Lot, edges: &RoadEdges) -> (Inset, bool) {
     let near = edges.local_lines(&lot);
     if near.is_empty() {
-        return Inset::NONE;
+        return (Inset::NONE, true);
     }
     let clear = |min: Vec2, max: Vec2| {
         near.iter().all(|(pts, keep)| {
@@ -261,7 +267,7 @@ pub fn fit(lot: Lot, edges: &RoadEdges) -> Inset {
     };
     let (mut lo, mut hi) = (-lot.half, lot.half);
     if clear(lo, hi) {
-        return Inset::NONE;
+        return (Inset::NONE, true);
     }
     let size = hi - lo;
     // Largest share `s` of the full extent for which `ok(s)` holds.
@@ -295,10 +301,13 @@ pub fn fit(lot: Lot, edges: &RoadEdges) -> Inset {
     }
     let s = largest(&|s| clear(Vec2::new(lo.x, hi.y - size.y * s), hi));
     lo.y = hi.y - size.y * s;
-    Inset {
-        scale: Vec3::new((hi.x - lo.x) / size.x, 1.0, (hi.y - lo.y) / size.y),
-        shift: (lo + hi) * 0.5,
-    }
+    (
+        Inset {
+            scale: Vec3::new((hi.x - lo.x) / size.x, 1.0, (hi.y - lo.y) / size.y),
+            shift: (lo + hi) * 0.5,
+        },
+        clear(lo, hi),
+    )
 }
 
 /// The lot frame of zoning cell `(i, j)` of `l`: local x along the
@@ -351,7 +360,7 @@ impl CellView {
 #[derive(Default)]
 pub struct FitCache {
     key: Option<(u64, u64)>,
-    quads: HashMap<CellRef, [Vec2; 4]>,
+    quads: HashMap<CellRef, Option<[Vec2; 4]>>,
 }
 
 /// Usable zoning cells (`ZoneCell::usable`) that `keep` accepts, fitted
@@ -376,10 +385,14 @@ pub fn cells_by_chunk(
             }
             let lot = cell_lot(l, i, j);
             let cell = CellRef::new(id, i, j);
-            let quad = *cache
-                .quads
-                .entry(cell)
-                .or_insert_with(|| corners(&lot, &fit(lot, edges)));
+            // Cells a road runs through, or that only a sliver of is left
+            // of, are not drawn as land.
+            let Some(quad) = *cache.quads.entry(cell).or_insert_with(|| {
+                let (inset, ok) = fit_checked(lot, edges);
+                (ok && inset.scale.x * inset.scale.z > 0.3).then(|| corners(&lot, &inset))
+            }) else {
+                continue;
+            };
             out.entry(road_geom::chunk_of(lot.c, chunk))
                 .or_default()
                 .push(CellView {
