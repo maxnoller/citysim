@@ -522,6 +522,11 @@ fn rect(m: &mut MeshBuilder, a: Vec2, dir: Vec2, n: Vec2, t0: f32, t1: f32, o0: 
 
 /// Straight part of a segment between its two junction setbacks.
 pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
+    mesh_segment_with(m, s, true);
+}
+
+/// `mesh_segment`, optionally without lamps and gantries (tool ghosts).
+pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
     let len = s.len();
     let dir = s.dir();
     let n = perp(dir);
@@ -561,9 +566,9 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
             guardrail(m, s.a, dir, n * side, h + 0.9, t0, t1);
         }
     }
-    if st.walk > 0.0 {
+    if furniture && st.walk > 0.0 {
         street_lamps(m, s);
-    } else if s.id.is_none() {
+    } else if furniture && s.id.is_none() {
         // The road out of town: a sign gantry just past the map edge.
         sign_gantry(m, s.b - dir * 35.0, dir, h);
     }

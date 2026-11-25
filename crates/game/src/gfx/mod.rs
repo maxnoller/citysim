@@ -15,6 +15,7 @@ mod overlay;
 mod palette;
 mod props;
 mod road_geom;
+mod road_ghost;
 mod roads;
 mod scene;
 mod signals;

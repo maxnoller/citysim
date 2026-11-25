@@ -98,27 +98,16 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     commands.insert_resource(mats);
 }
 
-fn guide_color(k: GuideKind) -> Color {
-    match k {
-        GuideKind::Angle => Color::srgb(0.95, 0.97, 1.0),
-        GuideKind::Extension => Color::srgb(0.45, 0.85, 1.0),
-        GuideKind::Perpendicular => Color::srgb(1.0, 0.55, 0.85),
-        GuideKind::Parallel => Color::srgb(0.5, 1.0, 0.6),
-        GuideKind::Spacing => Color::srgb(1.0, 0.84, 0.3),
-    }
+/// Guides are muted white whatever the rule (the marker glyph says which).
+fn guide_color(_: GuideKind) -> Color {
+    Color::srgba(0.92, 0.94, 0.97, 0.7)
 }
 
-fn snap_color(t: SnapTarget) -> Color {
-    match t {
-        SnapTarget::None | SnapTarget::Grid => Color::srgb(0.9, 0.94, 1.0),
-        SnapTarget::Node => Color::srgb(0.35, 0.95, 0.55),
-        SnapTarget::Road => Color::srgb(0.4, 0.8, 1.0),
-        SnapTarget::Angle => guide_color(GuideKind::Angle),
-        SnapTarget::Perpendicular => guide_color(GuideKind::Perpendicular),
-        SnapTarget::Parallel => guide_color(GuideKind::Parallel),
-        SnapTarget::Extension => guide_color(GuideKind::Extension),
-        SnapTarget::Spacing => guide_color(GuideKind::Spacing),
-    }
+/// The interface accent blue (ui theme `ACCENT`).
+const ACCENT: Color = Color::srgb(0.302, 0.639, 0.941);
+
+fn snap_color(_: SnapTarget) -> Color {
+    ACCENT
 }
 
 fn v3(p: Vec2, y: f32) -> Vec3 {

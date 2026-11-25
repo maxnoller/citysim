@@ -97,65 +97,67 @@ fn tool_demo(
     use crate::shared::*;
     let world = &sim.world;
     tool.set_if_neq(ActiveTool::Road);
-    let mut p = ToolPreview {
-        kind: PreviewKind::Road,
-        line: Some((Cell::new(52, 140), Cell::new(58, 146))),
-        ..default()
+    let case: u32 = std::env::var("CITYSIM_GFX_TOOLDEMO")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let leg = |a: (i32, i32), b: (i32, i32), ok: bool| PathLeg {
+        from: Cell::new(a.0, a.1),
+        to: Cell::new(b.0, b.1),
+        error: (!ok).then_some(citysim_sim::CommandError::OutOfBounds),
+        upgrade_cells: vec![],
     };
-    p.cells.clear();
-    preview.set_if_neq(p);
-    let legs = vec![
-        PathLeg {
-            from: Cell::new(46, 140),
-            to: Cell::new(52, 140),
-            error: None,
-            upgrade_cells: vec![],
-        },
-        PathLeg {
-            from: Cell::new(52, 140),
-            to: Cell::new(58, 146),
-            error: None,
-            upgrade_cells: vec![],
-        },
-        PathLeg {
-            from: Cell::new(58, 146),
-            to: Cell::new(58, 152),
-            error: Some(citysim_sim::CommandError::OutOfBounds),
-            upgrade_cells: vec![],
-        },
-    ];
+    // 1: a street from a dead end; 2: an avenue from a street to the main
+    // avenue (two T junctions); 3: a path whose last leg is refused.
+    let (kind, pts, legs): (RoadChoice, Vec<(i32, i32)>, Vec<PathLeg>) = match case {
+        2 => (
+            RoadChoice::Avenue,
+            vec![(45, 140), (58, 140), (58, 128)],
+            vec![leg((45, 140), (58, 140), true), leg((58, 140), (58, 128), true)],
+        ),
+        3 => (
+            RoadChoice::Street,
+            vec![(60, 150), (70, 150), (76, 144)],
+            vec![leg((60, 150), (70, 150), true), leg((70, 150), (76, 144), false)],
+        ),
+        _ => (
+            RoadChoice::Street,
+            vec![(30, 156), (30, 166), (40, 176)],
+            vec![leg((30, 156), (30, 166), true), leg((30, 166), (40, 176), true)],
+        ),
+    };
+    let last = *pts.last().expect("points");
+    let error = legs.iter().find_map(|l| l.error.clone());
+    preview.set_if_neq(ToolPreview {
+        kind: PreviewKind::Road,
+        line: Some((
+            Cell::new(pts[pts.len() - 2].0, pts[pts.len() - 2].1),
+            Cell::new(last.0, last.1),
+        )),
+        error: error.clone(),
+        ..default()
+    });
     path.set_if_neq(PathPreview {
-        kind: RoadChoice::Avenue,
-        points: vec![
-            Cell::new(46, 140),
-            Cell::new(52, 140),
-            Cell::new(58, 146),
-            Cell::new(58, 152),
-        ],
-        placed: 3,
+        kind,
+        points: pts.iter().map(|p| Cell::new(p.0, p.1)).collect(),
+        placed: pts.len() - 1,
         legs,
         length_m: 120.0,
         cost: 10_000,
-        error: None,
+        error: error.clone(),
     });
-    let end = Cell::new(58, 152).center();
+    let end = Cell::new(last.0, last.1);
+    let prev = pts[pts.len() - 2];
     snap.set_if_neq(SnapFeedback {
-        point: Some(end),
-        cell: Some(Cell::new(58, 152)),
-        target: SnapTarget::Perpendicular,
-        matched: vec![SnapTarget::Perpendicular, SnapTarget::Grid],
-        guides: vec![
-            Guide {
-                from: Cell::new(58, 146).center(),
-                to: Cell::new(58, 170).center(),
-                kind: GuideKind::Angle,
-            },
-            Guide {
-                from: Cell::new(45, 152).center(),
-                to: Cell::new(66, 152).center(),
-                kind: GuideKind::Perpendicular,
-            },
-        ],
+        point: Some(end.center()),
+        cell: Some(end),
+        target: if case == 2 { SnapTarget::Road } else { SnapTarget::Angle },
+        matched: vec![SnapTarget::Angle, SnapTarget::Grid],
+        guides: vec![Guide {
+            from: Cell::new(prev.0, prev.1).center(),
+            to: Cell::new(last.0 + (last.0 - prev.0), last.1 + (last.1 - prev.1)).center(),
+            kind: GuideKind::Angle,
+        }],
         spacing_cells: None,
         suspended: false,
     });
