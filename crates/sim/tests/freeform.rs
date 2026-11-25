@@ -300,3 +300,103 @@ fn grown_buildings_front_their_road() {
         assert_eq!(b.cells().count() as u32, b.footprint.area());
     }
 }
+
+/// No car body ever overlaps another (oriented rectangles at the exact
+/// drawing poses) on a curved approach to a signal, at a crossing at 35
+/// degrees and at a five-arm junction, with heavy traffic.
+#[test]
+fn car_bodies_never_overlap_on_curves_and_odd_angles() {
+    let mut w = W::new(3);
+    w.economy.money = 10_000_000;
+    let b = |w: &mut W, c: Curve, k: RoadKind| w.apply(Command::BuildCurve { curve: c, kind: k }).unwrap();
+    // Crossing of avenues with a quarter-circle south arm.
+    b(
+        &mut w,
+        Curve::straight([440.0, 640.0], [840.0, 640.0]),
+        RoadKind::Avenue,
+    );
+    b(
+        &mut w,
+        Curve::straight([640.0, 440.0], [640.0, 640.0]),
+        RoadKind::Avenue,
+    );
+    b(
+        &mut w,
+        Curve::from_tangents([470.0, 800.0], [1.0, 0.0], [640.0, 640.0], [0.0, -1.0]).unwrap(),
+        RoadKind::Avenue,
+    );
+    // A street across the east arm at 35 degrees, and a five-arm junction.
+    let d = [35f32.to_radians().cos(), 35f32.to_radians().sin()];
+    b(
+        &mut w,
+        Curve::straight(
+            [760.0 - 80.0 * d[0], 640.0 - 80.0 * d[1]],
+            [760.0 + 80.0 * d[0], 640.0 + 80.0 * d[1]],
+        ),
+        RoadKind::Street,
+    );
+    let hub = [640.0, 360.0];
+    b(&mut w, Curve::straight([640.0, 440.0], hub), RoadKind::Street);
+    for deg in [0.0f32, 150.0, 215.0, 290.0] {
+        let r = deg.to_radians();
+        b(
+            &mut w,
+            Curve::straight(hub, [hub[0] + 70.0 * r.cos(), hub[1] + 70.0 * r.sin()]),
+            RoadKind::Street,
+        );
+    }
+    let ends = [
+        [470.0, 800.0],
+        [450.0, 640.0],
+        [830.0, 640.0],
+        [hub[0] + 65.0, hub[1]],
+        [760.0 - 75.0 * d[0], 640.0 - 75.0 * d[1]],
+        [760.0 + 75.0 * d[0], 640.0 + 75.0 * d[1]],
+        [
+            hub[0] + 65.0 * 150f32.to_radians().cos(),
+            hub[1] + 65.0 * 150f32.to_radians().sin(),
+        ],
+    ];
+    let mut k = 0usize;
+    let mut worst = 0;
+    let mut max_cars = 0;
+    for t in 0..6 * 60 * citysim_sim::TICKS_PER_SECOND {
+        if t % 6 == 0 {
+            let (a, z) = (ends[k % ends.len()], ends[(k * 3 + 1) % ends.len()]);
+            if a != z {
+                citysim_sim::traffic::debug_request(&mut w, a, z);
+            }
+            k += 1;
+        }
+        w.step();
+        let bodies = citysim_sim::traffic::car_bodies(&w);
+        max_cars = max_cars.max(bodies.len());
+        let hits = citysim_sim::traffic::overlapping_bodies(&bodies, 0.02);
+        worst = worst.max(hits.len());
+        if let Some(&(a, b, depth)) = hits.first() {
+            let show = |i: usize| {
+                let v = &w.vehicles[bodies[i].0];
+                format!(
+                    "seg {:?} fwd {} lane {} shift {:.2} prog {:.2} v {:.1} box {:?} pos {:?}",
+                    v.segment,
+                    v.forward,
+                    v.lane,
+                    v.lane_shift,
+                    v.progress,
+                    v.speed,
+                    v.junction
+                        .map(|j| (j.node, j.movement, j.turn, j.distance, j.from_lane, j.to_lane)),
+                    v.pos
+                )
+            };
+            panic!(
+                "tick {t}: {} overlapping pairs, depth {depth:.2}: {} / {}",
+                hits.len(),
+                show(a),
+                show(b)
+            );
+        }
+    }
+    assert!(max_cars > 40, "{max_cars}");
+    let _ = worst;
+}

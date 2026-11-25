@@ -805,3 +805,8 @@ pub const MAX_BLOCK_DEPTH: u8 = 6;
 /// whole number of cells within this fraction of a cell.
 pub const LATTICE_ANGLE_TOL_DEG: f32 = 1.0;
 pub const LATTICE_OFFSET_TOL: f32 = 0.02;
+/// Car and truck body sizes the traffic rules keep apart (length, width),
+/// metres; renderers should draw vehicles within them. Queues keep
+/// `MIN_GAP_M` between centres, so no body may be longer than that.
+pub const CAR_BODY_M: [f32; 2] = [4.4, 1.9];
+pub const TRUCK_BODY_M: [f32; 2] = [5.3, 2.2];

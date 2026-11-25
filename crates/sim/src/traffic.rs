@@ -906,3 +906,96 @@ pub fn destination_pos(world: &World, id: VehicleId) -> Option<[f32; 2]> {
     let d = world.traffic.trips.get(id)?.dest?;
     access_pos(&world.roads, d)
 }
+
+/// Every car's body as an oriented rectangle at its exact drawing pose
+/// (`drive::vehicle_pose`), corners in order.
+pub fn car_bodies(world: &World) -> Vec<(VehicleId, [[f32; 2]; 4])> {
+    world
+        .vehicles
+        .iter()
+        .map(|(id, v)| {
+            let (p, d) = crate::drive::vehicle_pose(world, v);
+            let truck = world
+                .traffic
+                .trips
+                .get(id)
+                .is_some_and(|t| t.purpose == TripPurpose::Goods);
+            let [l, w] = if truck {
+                balance::TRUCK_BODY_M
+            } else {
+                balance::CAR_BODY_M
+            };
+            let r = [-d[1], d[0]];
+            let c = |a: f32, b: f32| [p[0] + d[0] * a + r[0] * b, p[1] + d[1] * a + r[1] * b];
+            (
+                id,
+                [
+                    c(l / 2.0, -w / 2.0),
+                    c(l / 2.0, w / 2.0),
+                    c(-l / 2.0, w / 2.0),
+                    c(-l / 2.0, -w / 2.0),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// Pairs of bodies (indices) overlapping by more than `tol` metres, with
+/// the depth of the overlap.
+pub fn overlapping_bodies(bodies: &[(VehicleId, [[f32; 2]; 4])], tol: f32) -> Vec<(usize, usize, f32)> {
+    let mut grid: std::collections::BTreeMap<(i32, i32), Vec<usize>> = Default::default();
+    let cell = 8.0;
+    for (k, (_, q)) in bodies.iter().enumerate() {
+        let c = [(q[0][0] + q[2][0]) * 0.5, (q[0][1] + q[2][1]) * 0.5];
+        grid.entry(((c[0] / cell).floor() as i32, (c[1] / cell).floor() as i32))
+            .or_default()
+            .push(k);
+    }
+    let depth = |a: &[[f32; 2]; 4], b: &[[f32; 2]; 4]| -> f32 {
+        let mut best = f32::INFINITY;
+        for poly in [a, b] {
+            for k in 0..4 {
+                let e = geom::sub(poly[(k + 1) % 4], poly[k]);
+                let l = geom::dot(e, e).sqrt().max(1e-6);
+                let n = [-e[1] / l, e[0] / l];
+                let proj = |q: &[[f32; 2]; 4]| {
+                    q.iter()
+                        .map(|p| geom::dot(*p, n))
+                        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)))
+                };
+                let (alo, ahi) = proj(a);
+                let (blo, bhi) = proj(b);
+                best = best.min(ahi.min(bhi) - alo.max(blo));
+            }
+        }
+        best
+    };
+    let mut out = Vec::new();
+    for (&(gx, gy), list) in &grid {
+        for &i in list {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let Some(other) = grid.get(&(gx + dx, gy + dy)) else {
+                        continue;
+                    };
+                    for &j in other {
+                        if j <= i {
+                            continue;
+                        }
+                        let d = depth(&bodies[i].1, &bodies[j].1);
+                        if d > tol {
+                            out.push((i, j, d));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Debug: wall-clock time the last zone-block regeneration took, ns (not
+/// saved; for benchmarks).
+pub fn debug_last_block_sync_ns(world: &World) -> u64 {
+    world.cache.last_block_sync_ns
+}

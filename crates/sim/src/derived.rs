@@ -32,7 +32,9 @@ pub(crate) struct Derived {
     /// `(zoning.roads_version, roads key)` the connected-cell sets were
     /// built for.
     zoning_key: Option<(u64, RoadsKey)>,
-    /// Cells of blocks whose road is connected to the entry.
+    /// Cells of blocks whose road is connected to the entry: world-lattice
+    /// cells in a dense map, the others in a set.
+    conn_world: Vec<bool>,
     conn_cells: std::collections::BTreeSet<CellRef>,
     /// Front-row cells of such blocks with the side the road is on.
     conn_fronts: Vec<(CellRef, u8)>,
@@ -89,6 +91,8 @@ pub(crate) struct Derived {
     /// and the reasons of the cars that gave up.
     pub last_denial: Vec<u8>,
     pub gave_up_reasons: [u32; 5],
+    /// Debug: wall-clock time of the last zone-block regeneration, ns.
+    pub last_block_sync_ns: u64,
 }
 
 impl PartialEq for Derived {
@@ -234,6 +238,8 @@ impl Derived {
         }
         self.zoning_key = Some(key);
         self.conn_cells.clear();
+        self.conn_world.clear();
+        self.conn_world.resize((MAP_CELLS * MAP_CELLS) as usize, false);
         let mut fronts = std::collections::BTreeSet::new();
         for b in &zoning.blocks {
             let connected = self.node_connected_seg(b.segment);
@@ -241,7 +247,12 @@ impl Derived {
                 continue;
             }
             for c in b.cells() {
-                self.conn_cells.insert(c);
+                match cell_index(Cell::new(c.i, c.j)).filter(|_| c.lattice == crate::LatticeId::WORLD) {
+                    Some(k) => self.conn_world[k] = true,
+                    None => {
+                        self.conn_cells.insert(c);
+                    }
+                }
                 if b.in_front_row(c) {
                     fronts.insert((c, b.front as u8));
                 }
@@ -261,7 +272,10 @@ impl Derived {
     /// Is cell `c` in a block whose road is connected to the entry?
     /// Requires `ensure_zoning`.
     pub fn cell_connected(&self, c: CellRef) -> bool {
-        self.conn_cells.contains(&c)
+        match cell_index(Cell::new(c.i, c.j)).filter(|_| c.lattice == crate::LatticeId::WORLD) {
+            Some(k) => self.conn_world.get(k).copied().unwrap_or(false),
+            None => self.conn_cells.contains(&c),
+        }
     }
 
     /// Is `c` in the front row of such a block on side `f`?
