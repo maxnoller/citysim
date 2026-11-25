@@ -45,11 +45,13 @@ fn aspect_index(a: Aspect) -> usize {
     }
 }
 
-/// One signal head showing the aspect of `segment`'s approach.
+/// One signal head showing the aspect of `segment`'s approach (`left`:
+/// the head over an avenue's left lane, showing the left-turn aspect).
 #[derive(Component)]
 struct SignalHead {
     node: NodeId,
     segment: SegmentId,
+    left: bool,
     shown: Option<usize>,
 }
 
@@ -163,12 +165,13 @@ fn tri2(m: &mut MeshBuilder, a: Vec2, b: Vec2, c: Vec2, y: f32, col: [f32; 4]) {
 }
 
 /// Static furniture of one junction, and where its heads go:
-/// (segment, centre, facing).
+/// (segment, centre, facing, left-lane head).
+#[allow(clippy::type_complexity)]
 fn furniture(
     node: &NodeLayout,
     control: JunctionControl,
     major: &HashMap<SegmentId, bool>,
-) -> (MeshBuilder, Vec<(SegmentId, Vec3, Vec2)>) {
+) -> (MeshBuilder, Vec<(SegmentId, Vec3, Vec2, bool)>) {
     let mut m = MeshBuilder::new();
     let mut heads = Vec::new();
     let pole = palette::LAMP;
@@ -208,7 +211,7 @@ fn furniture(
                 let face = arm.dir;
                 let c = Vec3::new(base.x, POLE_HEAD_Y, base.y) + Vec3::new(face.x, 0.0, face.y) * 0.18;
                 housing(&mut m, c, face);
-                heads.push((arm.seg, c, face));
+                heads.push((arm.seg, c, face, false));
                 if avenue {
                     // Mast arm over the approach lanes.
                     let tip = node.pos + arm.dir * (stop + 0.9).max(arm.setback + 0.4) + right * (st.h * 0.42);
@@ -224,7 +227,7 @@ fn furniture(
                     );
                     let c = Vec3::new(tip.x, MAST_HEAD_Y, tip.y);
                     housing(&mut m, c, face);
-                    heads.push((arm.seg, c, face));
+                    heads.push((arm.seg, c, face, true));
                 }
             }
             JunctionControl::Priority => {
@@ -340,12 +343,13 @@ fn sync_junctions(
             .id();
         let heads = head_spots
             .into_iter()
-            .map(|(seg, c, face)| {
+            .map(|(seg, c, face, left)| {
                 commands
                     .spawn((
                         SignalHead {
                             node: n,
                             segment: seg,
+                            left,
                             shown: Some(0),
                         },
                         Mesh3d(assets.lens[0].clone()),
@@ -369,15 +373,38 @@ fn sync_junctions(
     }
 }
 
-/// Show each head's current aspect.
+/// Show each head's current aspect (main or left-turn), as the sim
+/// reports it per approach.
 fn update_aspects(
     sim: Res<SimWorld>,
     assets: Res<SignalAssets>,
     mut heads: Query<(&mut SignalHead, &mut Mesh3d, &mut MeshMaterial3d<CityMaterial>)>,
+    mut views: Local<HashMap<NodeId, junction::JunctionView>>,
+    mut tick: Local<u64>,
 ) {
     let world = &sim.world;
+    if *tick != world.time.tick {
+        *tick = world.time.tick;
+        views.clear();
+    }
     for (mut head, mut mesh, mut mat) in &mut heads {
-        let a = junction::signal_aspect(world, head.node, head.segment).map(aspect_index);
+        let view = views.entry(head.node).or_insert_with(|| {
+            junction::junction_view(world, head.node).unwrap_or(junction::JunctionView {
+                node: head.node,
+                control: JunctionControl::Priority,
+                setting: Default::default(),
+                approaches: Vec::new(),
+                phase: None,
+                phase_count: 0,
+                peak_per_minute: 0,
+            })
+        });
+        let a = view
+            .approaches
+            .iter()
+            .find(|a| a.segment == head.segment)
+            .and_then(|a| if head.left { a.left_aspect } else { a.aspect })
+            .map(aspect_index);
         if a == head.shown {
             continue;
         }
