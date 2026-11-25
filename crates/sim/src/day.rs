@@ -128,13 +128,25 @@ fn pos_of(world: &World, b: Option<BuildingId>) -> [f32; 2] {
 pub(crate) fn tick(world: &mut World) {
     let buckets = balance::THINK_BUCKETS;
     let now = world.time.tick;
-    let mut i = (now % buckets) as usize;
     let n = world.citizens.slot_count();
+    if !world.cache.until_ok || world.cache.until.len() < n {
+        let mut v = vec![u64::MAX; n];
+        for (id, c) in world.citizens.iter() {
+            v[crate::idmap::key_index(id)] = c.until_tick;
+        }
+        world.cache.until = v;
+        world.cache.until_ok = true;
+    }
+    let mut i = (now % buckets) as usize;
     while i < n {
-        if let Some(id) = world.citizens.key_at(i)
-            && world.citizens[id].until_tick <= now
+        if world.cache.until[i] <= now
+            && let Some(id) = world.citizens.key_at(i)
         {
-            decide(world, id);
+            if world.citizens[id].until_tick <= now {
+                decide(world, id);
+            } else {
+                world.cache.until[i] = world.citizens[id].until_tick;
+            }
         }
         i += buckets as usize;
     }

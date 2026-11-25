@@ -236,62 +236,81 @@ pub(crate) fn match_jobs(world: &mut World) {
 
 // ----------------------------------------------------------- midnight ----
 
-/// Life events, money rules, happiness and leaving, once a day.
-pub(crate) fn midnight(world: &mut World) {
-    let p = &mut world.people;
-    p.events_yesterday = p.events_today;
-    p.events_today = Default::default();
-    p.trips_yesterday = p.trips_today;
-    p.trips_today = Default::default();
-    p.trips_by_hour_yesterday = p.trips_by_hour;
-    p.trips_by_hour = Default::default();
-    for pl in p.places.values_mut() {
-        pl.sold_yesterday = pl.sold_today;
-        pl.sold_today = 0.0;
+/// Life events, money rules, happiness and leaving, once a day: the
+/// counters roll over at midnight, then every household is reviewed, in
+/// `balance::NIGHT_CHUNKS` slices over the first ticks of the day (a single
+/// pass over a big city would stall one step).
+pub(crate) fn night(world: &mut World) {
+    let tod = world.time.tick_of_day;
+    if tod == 0 {
+        let p = &mut world.people;
+        p.events_yesterday = p.events_today;
+        p.events_today = Default::default();
+        p.trips_yesterday = p.trips_today;
+        p.trips_today = Default::default();
+        p.trips_by_hour_yesterday = p.trips_by_hour;
+        p.trips_by_hour = Default::default();
+        for pl in p.places.values_mut() {
+            pl.sold_yesterday = pl.sold_today;
+            pl.sold_today = 0.0;
+        }
+        world.people.night = world.households.keys().collect();
+        let s = &world.people.stats;
+        let day = crate::people::PeopleDay {
+            day: world.time.day.saturating_sub(1),
+            population: world.citizens.len() as u32,
+            by_stage: s.by_stage,
+            by_kind: s.by_kind,
+            avg_happiness: s.avg_happiness,
+            avg_money: s.avg_money,
+            events: world.people.events_yesterday,
+            trips: world.people.trips_yesterday,
+        };
+        world.people.history.push(day);
+    }
+    let chunks = balance::NIGHT_CHUNKS;
+    if tod >= chunks || world.people.night.is_empty() {
+        return;
     }
     world.cache.ensure_access(&world.buildings, world.versions.buildings);
-    let ids: Vec<HouseholdId> = world.households.keys().collect();
-    let mut leaving: Vec<HouseholdId> = Vec::new();
-    for &hid in &ids {
-        if !world.households.contains_key(hid) || world.households[hid].citizens.is_empty() {
-            continue;
-        }
-        age_household(world, hid);
-        if !world.households.contains_key(hid) {
-            continue;
-        }
-        if let Some(leave) = household_day(world, hid) {
-            if leave {
-                leaving.push(hid);
-            }
-            continue;
-        }
-        events(world, hid);
-    }
-    for hid in leaving {
-        households::leave(world, hid, balance::MOVE_OUT_DRIVES);
-    }
-    // Fresh job-seeker queue (drops duplicates and stale ids).
-    let seekers: Vec<CitizenId> = world
-        .citizens
+    let todo: Vec<HouseholdId> = world
+        .people
+        .night
         .iter()
-        .filter(|(_, c)| c.job_seeker())
-        .map(|(id, _)| id)
+        .enumerate()
+        .filter(|(i, _)| *i as u32 % chunks == tod)
+        .map(|(_, &h)| h)
         .collect();
-    world.people.seekers = seekers.into();
-    crate::inspect::refresh(world);
-    let s = &world.people.stats;
-    let day = crate::people::PeopleDay {
-        day: world.time.day.saturating_sub(1),
-        population: world.citizens.len() as u32,
-        by_stage: s.by_stage,
-        by_kind: s.by_kind,
-        avg_happiness: s.avg_happiness,
-        avg_money: s.avg_money,
-        events: world.people.events_yesterday,
-        trips: world.people.trips_yesterday,
-    };
-    world.people.history.push(day);
+    for hid in todo {
+        review(world, hid);
+    }
+    if tod + 1 == chunks {
+        world.people.night.clear();
+        // Fresh job-seeker queue (drops duplicates and stale ids).
+        let seekers: Vec<CitizenId> = world
+            .citizens
+            .iter()
+            .filter(|(_, c)| c.job_seeker())
+            .map(|(id, _)| id)
+            .collect();
+        world.people.seekers = seekers.into();
+    }
+}
+
+/// One household's day: ageing, money, happiness, leaving, life events.
+fn review(world: &mut World, hid: HouseholdId) {
+    if !world.households.contains_key(hid) || world.households[hid].citizens.is_empty() {
+        return;
+    }
+    age_household(world, hid);
+    if !world.households.contains_key(hid) {
+        return;
+    }
+    match household_day(world, hid) {
+        Some(true) => households::leave(world, hid, balance::MOVE_OUT_DRIVES),
+        Some(false) => {}
+        None => events(world, hid),
+    }
 }
 
 /// Ageing, stage changes and deaths in one household.

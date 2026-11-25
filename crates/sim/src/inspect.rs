@@ -106,98 +106,150 @@ pub fn trips_today(world: &World) -> &[u32; TripPurpose::COUNT] {
     &world.people.trips_today
 }
 
-/// Recompute [`CityPeople`].
-pub(crate) fn refresh(world: &mut World) {
-    let mut s = CityPeople {
-        tick: world.time.tick,
-        population: world.citizens.len() as u32,
-        households: world.households.len() as u32,
-        workforce: world.people.workforce,
-        ..CityPeople::default()
-    };
-    let mut parts = [0f64; 7];
-    let mut happy = 0f64;
-    let mut need = 0f64;
-    for c in world.citizens.values() {
-        s.by_stage[c.stage.index()] += 1;
-        s.age_pyramid[(c.age_years() / 10).min(AGE_BANDS as u32 - 1) as usize] += 1;
-        if let Some(j) = c.job {
-            s.employed += 1;
-            s.employed_by_tier[j.tier.index()] += 1;
-            s.part_time += u32::from(j.part_time);
-        }
-        s.retired += u32::from(c.retired);
-        s.homemakers += u32::from(c.homemaker);
-        let h = &c.happiness;
-        happy += h.total as f64;
-        for p in HappinessPart::ALL {
-            parts[p.index()] += h.part(p) as f64;
-        }
-        if h.total < balance::UNHAPPY_BELOW {
-            s.unhappy += 1;
-            if let Some(p) = h.worst() {
-                s.unhappy_reasons[p.index()] += 1;
+/// City statistics being gathered, slice by slice (sums and counts).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct StatsAcc {
+    stats: CityPeople,
+    parts: [f64; 7],
+    happy: f64,
+    need: f64,
+    money: f64,
+    rent: f64,
+    burden: f64,
+    with_income: u32,
+    households: u32,
+}
+
+/// Add the citizens and households of slots `i % n == k` to `a`.
+fn accumulate(world: &World, a: &mut StatsAcc, k: usize, n: usize) {
+    let s = &mut a.stats;
+    let mut i = k;
+    while i < world.citizens.slot_count() {
+        if let Some(id) = world.citizens.key_at(i) {
+            let c = &world.citizens[id];
+            s.population += 1;
+            s.by_stage[c.stage.index()] += 1;
+            s.age_pyramid[(c.age_years() / 10).min(AGE_BANDS as u32 - 1) as usize] += 1;
+            if let Some(j) = c.job {
+                s.employed += 1;
+                s.employed_by_tier[j.tier.index()] += 1;
+                s.part_time += u32::from(j.part_time);
             }
+            s.retired += u32::from(c.retired);
+            s.homemakers += u32::from(c.homemaker);
+            let h = &c.happiness;
+            a.happy += h.total as f64;
+            for p in HappinessPart::ALL {
+                a.parts[p.index()] += h.part(p) as f64;
+            }
+            if h.total < balance::UNHAPPY_BELOW {
+                s.unhappy += 1;
+                if let Some(p) = h.worst() {
+                    s.unhappy_reasons[p.index()] += 1;
+                }
+            }
+            a.need += c.leisure_need as f64;
         }
-        need += c.leisure_need as f64;
+        i += n;
     }
+    let rate = world.economy.tax_rate;
+    let mut i = k;
+    while i < world.households.slot_count() {
+        if let Some(hid) = world.households.key_at(i) {
+            let h = &world.households[hid];
+            i += n;
+            if h.citizens.is_empty() {
+                continue;
+            }
+            a.households += 1;
+            s.by_kind[h.kind.index()] += 1;
+            a.money += h.money as f64;
+            a.rent += h.rent as f64;
+            let income: i64 = h
+                .citizens
+                .iter()
+                .filter_map(|&m| world.citizens.get(m))
+                .map(|c| match (c.job, c.retired) {
+                    (Some(j), _) => j.wage as i64 - crate::people::tax_on(j.wage, rate),
+                    (None, true) => balance::PENSION_PER_DAY,
+                    _ => 0,
+                })
+                .sum();
+            let band = if income > 0 {
+                let b = h.rent as f32 / income as f32;
+                a.burden += b as f64;
+                a.with_income += 1;
+                BURDEN_BANDS.iter().filter(|&&x| b >= x).count()
+            } else {
+                BURDEN_BANDS.len()
+            };
+            s.burden_hist[band] += 1;
+            let mband = if h.money < 0 {
+                0
+            } else {
+                MONEY_BANDS.iter().filter(|&&x| h.money >= x).count()
+            };
+            s.money_hist[mband] += 1;
+            s.austerity += u32::from(h.austerity);
+            s.broke += u32::from(h.money < 0);
+        } else {
+            i += n;
+        }
+    }
+}
+
+/// Averages from the sums.
+fn finish(world: &World, a: StatsAcc) -> CityPeople {
+    let mut s = a.stats;
+    s.tick = world.time.tick;
+    s.households = world.households.len() as u32;
+    s.workforce = world.people.workforce;
     if s.population > 0 {
         let n = s.population as f64;
-        s.avg_happiness = (happy / n) as f32;
-        for (a, p) in s.avg_parts.iter_mut().zip(parts) {
-            *a = (p / n) as f32;
+        s.avg_happiness = (a.happy / n) as f32;
+        for (x, p) in s.avg_parts.iter_mut().zip(a.parts) {
+            *x = (p / n) as f32;
         }
-        s.avg_leisure_need = (need / n) as f32;
+        s.avg_leisure_need = (a.need / n) as f32;
     } else {
         s.avg_happiness = balance::HAPPINESS_START;
         s.avg_parts = [balance::HAPPINESS_START; 7];
     }
-    let (mut money, mut rent, mut burden, mut with_income) = (0f64, 0f64, 0f64, 0u32);
-    let rate = world.economy.tax_rate;
-    for h in world.households.values() {
-        if h.citizens.is_empty() {
-            continue;
-        }
-        s.by_kind[h.kind.index()] += 1;
-        money += h.money as f64;
-        rent += h.rent as f64;
-        let income: i64 = h
-            .citizens
-            .iter()
-            .filter_map(|&m| world.citizens.get(m))
-            .map(|c| match (c.job, c.retired) {
-                (Some(j), _) => j.wage as i64 - crate::people::tax_on(j.wage, rate),
-                (None, true) => balance::PENSION_PER_DAY,
-                _ => 0,
-            })
-            .sum();
-        let band = if income > 0 {
-            let b = h.rent as f32 / income as f32;
-            burden += b as f64;
-            with_income += 1;
-            BURDEN_BANDS.iter().filter(|&&x| b >= x).count()
-        } else {
-            BURDEN_BANDS.len()
-        };
-        s.burden_hist[band] += 1;
-        let mband = if h.money < 0 {
-            0
-        } else {
-            MONEY_BANDS.iter().filter(|&&x| h.money >= x).count()
-        };
-        s.money_hist[mband] += 1;
-        s.austerity += u32::from(h.austerity);
-        s.broke += u32::from(h.money < 0);
+    if a.households > 0 {
+        s.avg_money = (a.money / a.households as f64) as f32;
+        s.avg_rent = (a.rent / a.households as f64) as f32;
     }
-    let nh = s.by_kind.iter().sum::<u32>();
-    if nh > 0 {
-        s.avg_money = (money / nh as f64) as f32;
-        s.avg_rent = (rent / nh as f64) as f32;
+    if a.with_income > 0 {
+        s.avg_rent_burden = (a.burden / a.with_income as f64) as f32;
     }
-    if with_income > 0 {
-        s.avg_rent_burden = (burden / with_income as f64) as f32;
+    s
+}
+
+/// Gather one slice of the city statistics; publish them when the sweep
+/// is complete (every `balance::PEOPLE_STATS_INTERVAL_TICKS`).
+pub(crate) fn gather(world: &mut World) {
+    let k = world.time.tick % balance::PEOPLE_STATS_INTERVAL_TICKS;
+    let n = balance::PEOPLE_STATS_CHUNKS;
+    if k >= n {
+        return;
     }
-    world.people.stats = s;
+    if k == 0 {
+        world.people.stats_acc = StatsAcc::default();
+    }
+    let mut a = std::mem::take(&mut world.people.stats_acc);
+    accumulate(world, &mut a, k as usize, n as usize);
+    if k + 1 == n {
+        world.people.stats = finish(world, a);
+    } else {
+        world.people.stats_acc = a;
+    }
+}
+
+/// Recompute [`CityPeople`] at once.
+pub(crate) fn refresh(world: &mut World) {
+    let mut a = StatsAcc::default();
+    accumulate(world, &mut a, 0, 1);
+    world.people.stats = finish(world, a);
 }
 
 // ---------------------------------------------------------- citizens ----

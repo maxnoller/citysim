@@ -60,6 +60,10 @@ pub(crate) struct Derived {
     pub shops: Vec<crate::BuildingId>,
     pub factories: Vec<crate::BuildingId>,
     access_key: Option<(u64, usize)>,
+    /// `Citizen::until_tick` by citizen slot (a compact copy for the
+    /// decision buckets); rebuilt when `until_ok` is false.
+    pub until: Vec<u64>,
+    pub until_ok: bool,
     /// Distance (m) from each access tile to the nearest shop / leisure
     /// venue (`ACCESS_TILE` cells per tile side).
     access_shop: Vec<f32>,

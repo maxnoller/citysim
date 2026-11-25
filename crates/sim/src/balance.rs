@@ -709,5 +709,10 @@ pub const ACCESS_BAD_M: f32 = 1800.0;
 /// A small (level-1) venue counts as this much farther for leisure access.
 pub const ACCESS_SMALL_VENUE_M: f32 = 250.0;
 
-/// City statistics (`people.stats`) are recomputed this often (ticks).
+/// City statistics (`people.stats`) are recomputed this often (ticks),
+/// gathered over the first [`PEOPLE_STATS_CHUNKS`] ticks of each interval.
 pub const PEOPLE_STATS_INTERVAL_TICKS: u64 = 100;
+pub const PEOPLE_STATS_CHUNKS: u64 = 20;
+/// The nightly household review is spread over this many ticks after
+/// midnight (~14 in-game minutes).
+pub const NIGHT_CHUNKS: u32 = 48;

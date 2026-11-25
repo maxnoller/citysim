@@ -107,6 +107,12 @@ pub struct People {
     pub stats: CityPeople,
     /// One entry per finished day.
     pub history: Vec<PeopleDay>,
+    /// Households still to be reviewed tonight (the nightly pass is spread
+    /// over the first `balance::NIGHT_CHUNKS` ticks after midnight).
+    pub night: Vec<HouseholdId>,
+    /// City statistics being gathered (one slice of citizens per tick,
+    /// published to `stats` when complete).
+    pub stats_acc: crate::inspect::StatsAcc,
 }
 
 // ------------------------------------------------------------ helpers ----
@@ -244,6 +250,7 @@ pub(crate) fn set_place(world: &mut World, id: CitizenId, activity: Activity, lo
     c.activity = activity;
     c.location = location;
     c.until_tick = until;
+    note_until(world, id, until);
     presence(world, activity, &location, 1);
     refresh_household(world, hid);
 }
@@ -252,7 +259,21 @@ pub(crate) fn set_place(world: &mut World, id: CitizenId, activity: Activity, lo
 pub(crate) fn set_until(world: &mut World, id: CitizenId, until: u64) {
     if let Some(c) = world.citizens.get_mut(id) {
         c.until_tick = until;
+        note_until(world, id, until);
     }
+}
+
+/// Keep the decision buckets' compact copy of `until_tick` in step.
+fn note_until(world: &mut World, id: CitizenId, until: u64) {
+    let cache = &mut world.cache;
+    if !cache.until_ok {
+        return;
+    }
+    let i = crate::idmap::key_index(id);
+    if cache.until.len() <= i {
+        cache.until.resize(i + 1, u64::MAX);
+    }
+    cache.until[i] = until;
 }
 
 /// Give `id` a job at `workplace` (which must have room).

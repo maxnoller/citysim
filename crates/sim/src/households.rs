@@ -712,17 +712,13 @@ pub(crate) fn tick(world: &mut World) {
     if world.people.known_households != world.households.len() {
         adopt(world);
     }
-    if world.time.tick_of_day == 0 {
-        crate::life::midnight(world);
-    }
+    crate::life::night(world);
     if world.time.tick.is_multiple_of(balance::JOB_MATCH_INTERVAL_TICKS) {
         crate::life::match_jobs(world);
     }
     arrivals(world);
     crate::day::tick(world);
-    if world.time.tick.is_multiple_of(balance::PEOPLE_STATS_INTERVAL_TICKS) {
-        crate::inspect::refresh(world);
-    }
+    crate::inspect::gather(world);
     // Nobody left to commute: the average describes a city that is gone.
     // Forget it (0 = no data) so it cannot pin demand at the bottom with no
     // commute ever finishing to correct it.
