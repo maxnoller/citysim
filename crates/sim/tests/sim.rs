@@ -130,13 +130,26 @@ fn no_jobs_means_unemployment_and_people_leave() {
         .collect();
     assert!(workers.len() > 5, "{}", workers.len());
     assert!(w.stats.unemployment > 0.99);
+    let people: Vec<CitizenId> = workers.iter().flat_map(|&h| w.households[h].citizens.clone()).collect();
+    // Follow the people, not the household: two jobless singles may move in
+    // together (a couple), which dissolves one household into the other.
+    let mut tracked: std::collections::BTreeSet<HouseholdId> = workers.iter().copied().collect();
     let mut austerity = std::collections::BTreeSet::new();
     let mut broke = std::collections::BTreeSet::new();
+    let mut left = std::collections::BTreeSet::new();
+    let mut gone = std::collections::BTreeSet::new();
+    let mut last_members: std::collections::BTreeMap<HouseholdId, Vec<CitizenId>> = Default::default();
     while w.time.tick < 3 * DAY {
         let t = w.time.tick + 1;
         run_to(&mut w, &mut p, t);
-        for &h in &workers {
+        for &c in &people {
+            if let Some(ci) = w.citizens.get(c) {
+                tracked.insert(ci.household);
+            }
+        }
+        for &h in &tracked {
             if let Some(hh) = w.households.get(h) {
+                last_members.insert(h, hh.citizens.clone());
                 if hh.austerity {
                     austerity.insert(h);
                 }
@@ -144,15 +157,25 @@ fn no_jobs_means_unemployment_and_people_leave() {
                 if hh.money < 2 * hh.rent.max(1) {
                     broke.insert(h);
                 }
+            } else if gone.insert(h)
+                && last_members
+                    .get(&h)
+                    .is_none_or(|m| m.iter().all(|&c| !w.citizens.contains_key(c)))
+            {
+                // Gone with all its members (not merged into a partner's).
+                left.insert(h);
             }
         }
     }
     assert!(
-        workers.iter().all(|h| !w.households.contains_key(*h)),
+        people.iter().all(|c| !w.citizens.contains_key(*c)),
         "jobless households left within three midnights"
     );
-    assert_eq!(austerity.len(), workers.len(), "every one of them cut spending first");
-    assert_eq!(broke.len(), workers.len(), "their money ran out");
+    assert!(left.len() * 2 >= workers.len(), "{} of {}", left.len(), workers.len());
+    for h in &left {
+        assert!(austerity.contains(h), "{h:?} cut spending before it left");
+        assert!(broke.contains(h), "{h:?} left when its money ran out");
+    }
     w.check_sim_invariants().unwrap();
 }
 
