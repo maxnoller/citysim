@@ -356,7 +356,7 @@ fn apply_materials(
     if let Some(pools) = pools
         && let Some(mut m) = std_mats.get_mut(&pools.material)
     {
-        let k = light.night * 0.55;
+        let k = light.night * 0.42;
         m.base_color = Color::linear_rgb(1.0 * k, 0.72 * k, 0.4 * k);
     }
     for h in mats.city_handles() {

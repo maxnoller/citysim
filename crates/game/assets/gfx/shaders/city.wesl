@@ -146,7 +146,10 @@ fn fragment(
             let cool = vec3<f32>(0.92, 0.86, 0.72);
             let tint = mix(warm, cool, step(0.72, fract(in.uv.y * 13.7)));
             let k = 0.7 + 0.5 * fract(in.uv.y * 29.3);
-            glow = tint * (2.6 * k * city.night);
+            // Brighter from afar so a town at night still sparkles when
+            // zoomed out (windows are only a pixel or two there).
+            let far = clamp(distance(view.world_position, wp) / 500.0, 0.0, 2.5);
+            glow = tint * (2.6 * k * city.night * (1.0 + far));
             pbr_input.material.base_color = vec4<f32>(base * (1.0 - 0.7 * city.night), 1.0);
         }
     } else if kind == 2u {

@@ -1025,8 +1025,16 @@ fn street_lamps(m: &mut MeshBuilder, s: &SegLayout) {
 pub fn light_pool(m: &mut MeshBuilder, p: Vec2, r: f32, y: f32, color: Color) {
     let c = lin(color);
     let with_a = |a: f32| [c[0] * a, c[1] * a, c[2] * a, a];
-    let rings = [(0.0f32, 1.0f32), (0.35, 0.62), (0.7, 0.2), (1.0, 0.0)];
-    let seg = 14;
+    let rings = [
+        (0.0f32, 1.0f32),
+        (0.18, 0.9),
+        (0.36, 0.68),
+        (0.54, 0.42),
+        (0.72, 0.2),
+        (0.86, 0.07),
+        (1.0, 0.0),
+    ];
+    let seg = 16;
     let at = |k: usize, i: usize| {
         let ang = i as f32 / seg as f32 * TAU;
         lift(p + Vec2::new(ang.cos(), ang.sin()) * r * rings[k].0, y)
