@@ -12,8 +12,13 @@ use bevy::pbr::{DistanceFog, FogFalloff, ScreenSpaceAmbientOcclusion, ScreenSpac
 use bevy::prelude::*;
 use citysim_sim::MAP_SIZE_M;
 
-use bevy::camera::Hdr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use bevy::camera::{Hdr, RenderTarget};
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
+use bevy::render::render_resource::{PipelineCache, TextureFormat};
+use bevy::render::{Render, RenderApp, RenderSystems};
 
 use super::camera::CameraRig;
 use super::city_material::{CityMaterial, SkyExt, SkyMaterial, city_material};
@@ -71,6 +76,18 @@ pub struct Bounce;
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
+    fn finish(&self, app: &mut App) {
+        let pending = app.world().get_resource::<PendingPipelines>().cloned();
+        if let (Some(pending), Some(render)) = (pending, app.get_sub_app_mut(RenderApp)) {
+            render
+                .insert_resource(pending)
+                .add_systems(Render, count_pending_pipelines.in_set(RenderSystems::Cleanup));
+        } else {
+            // No renderer (tests): quality applies at once.
+            app.world_mut().remove_resource::<PendingPipelines>();
+        }
+    }
+
     fn build(&self, app: &mut App) {
         app.insert_resource(ClearColor(palette::SKY_HORIZON))
             .insert_resource(GlobalAmbientLight {
@@ -79,6 +96,7 @@ impl Plugin for ScenePlugin {
                 ..default()
             })
             .insert_resource(DirectionalLightShadowMap { size: 4096 })
+            .init_resource::<PendingPipelines>()
             .add_systems(PreStartup, init_materials)
             .add_systems(Startup, setup_scene)
             .add_systems(
@@ -390,63 +408,161 @@ pub fn camera_look() -> impl Bundle {
     )
 }
 
+/// Pipelines the renderer is still compiling (written by the render world).
+#[derive(Resource, Clone, Default)]
+struct PendingPipelines(Arc<AtomicUsize>);
+
+fn count_pending_pipelines(cache: Res<PipelineCache>, pending: Res<PendingPipelines>) {
+    pending.0.store(cache.waiting_pipelines().count(), Ordering::Relaxed);
+}
+
+/// Hidden camera that renders the scene with the requested quality into a
+/// small image so its pipelines compile before the main camera switches.
+#[derive(Component)]
+struct WarmUpCamera;
+
+struct WarmUp {
+    entity: Entity,
+    quality: GraphicsQuality,
+    started: f32,
+    frames: u32,
+    calm: u32,
+}
+
+#[derive(Default)]
+struct QualityState {
+    camera: Option<Entity>,
+    applied: Option<GraphicsQuality>,
+    warm: Option<WarmUp>,
+}
+
+/// Put the per-quality camera components on `ec`.
+fn insert_quality(ec: &mut EntityCommands, s: &QualitySettings) {
+    ec.insert(s.msaa);
+    if s.ssao {
+        ec.insert(ScreenSpaceAmbientOcclusion {
+            quality_level: ScreenSpaceAmbientOcclusionQualityLevel::Medium,
+            radius: 1.6,
+            ..default()
+        });
+    } else {
+        ec.remove::<ScreenSpaceAmbientOcclusion>();
+    }
+    if s.smaa {
+        ec.insert(Smaa {
+            preset: SmaaPreset::High,
+        });
+    } else {
+        ec.remove::<Smaa>();
+    }
+    if s.fxaa {
+        ec.insert(Fxaa::default());
+    } else {
+        ec.remove::<Fxaa>();
+    }
+    if s.bloom {
+        ec.insert(Bloom {
+            intensity: 0.12,
+            low_frequency_boost: 0.6,
+            prefilter: BloomPrefilter {
+                threshold: 1.1,
+                threshold_softness: 0.5,
+            },
+            composite_mode: BloomCompositeMode::Additive,
+            ..Bloom::NATURAL
+        });
+    } else {
+        ec.remove::<Bloom>();
+    }
+}
+
+/// Apply `GraphicsQuality` to the world camera. Changing MSAA / SSAO makes
+/// the renderer re-specialise every pipeline, and while they compile nothing
+/// is drawn (round 1 showed a white frame for seconds). So a switch first
+/// renders the new settings on a hidden warm-up camera and moves the main
+/// camera over only once no pipeline is pending any more.
+#[allow(clippy::too_many_arguments)]
 fn apply_quality(
     quality: Res<GraphicsQuality>,
     mut commands: Commands,
-    cams: Query<Entity, Added<WorldCamera>>,
-    all_cams: Query<Entity, With<WorldCamera>>,
+    cams: Query<(Entity, &Transform, &Projection), (With<WorldCamera>, Without<WarmUpCamera>)>,
+    mut warm_cams: Query<&mut Transform, (With<WarmUpCamera>, Without<WorldCamera>)>,
     mut shadow_map: ResMut<DirectionalLightShadowMap>,
+    pending: Option<Res<PendingPipelines>>,
+    mut images: ResMut<Assets<Image>>,
+    time: Res<Time<Real>>,
+    mut state: Local<QualityState>,
 ) {
-    let targets: Vec<Entity> = if quality.is_changed() {
-        all_cams.iter().collect()
-    } else {
-        cams.iter().collect()
+    let Ok((cam, cam_tf, proj)) = cams.single() else {
+        return;
     };
-    if targets.is_empty() {
+    let want = *quality;
+    let now = time.elapsed_secs();
+    let apply = |commands: &mut Commands, shadow_map: &mut DirectionalLightShadowMap, q: GraphicsQuality| {
+        let s = quality_settings(q);
+        if shadow_map.size != s.shadow_map {
+            shadow_map.size = s.shadow_map;
+        }
+        insert_quality(&mut commands.entity(cam), &s);
+    };
+    // A new camera (or the very first frame): apply at once.
+    if state.camera != Some(cam) || pending.is_none() {
+        state.camera = Some(cam);
+        if state.applied != Some(want) || pending.is_none() {
+            apply(&mut commands, &mut shadow_map, want);
+        }
+        state.applied = Some(want);
         return;
     }
-    let s = quality_settings(*quality);
-    if shadow_map.size != s.shadow_map {
-        shadow_map.size = s.shadow_map;
+    if state.applied == Some(want) {
+        if let Some(w) = state.warm.take() {
+            commands.entity(w.entity).despawn();
+        }
+        return;
     }
-    for e in targets {
-        let mut ec = commands.entity(e);
-        ec.insert(s.msaa);
-        if s.ssao {
-            ec.insert(ScreenSpaceAmbientOcclusion {
-                quality_level: ScreenSpaceAmbientOcclusionQualityLevel::Medium,
-                radius: 1.6,
+    // Start (or restart) warming up the requested quality.
+    if state.warm.as_ref().is_none_or(|w| w.quality != want) {
+        if let Some(w) = state.warm.take() {
+            commands.entity(w.entity).despawn();
+        }
+        let image = images.add(Image::new_target_texture(320, 180, TextureFormat::Bgra8UnormSrgb, None));
+        let mut ec = commands.spawn((
+            Name::new("Quality warm-up camera"),
+            WarmUpCamera,
+            Camera3d::default(),
+            Camera {
+                order: -10,
                 ..default()
-            });
-        } else {
-            ec.remove::<ScreenSpaceAmbientOcclusion>();
-        }
-        if s.smaa {
-            ec.insert(Smaa {
-                preset: SmaaPreset::High,
-            });
-        } else {
-            ec.remove::<Smaa>();
-        }
-        if s.fxaa {
-            ec.insert(Fxaa::default());
-        } else {
-            ec.remove::<Fxaa>();
-        }
-        if s.bloom {
-            ec.insert(Bloom {
-                intensity: 0.12,
-                low_frequency_boost: 0.6,
-                prefilter: BloomPrefilter {
-                    threshold: 1.1,
-                    threshold_softness: 0.5,
-                },
-                composite_mode: BloomCompositeMode::Additive,
-                ..Bloom::NATURAL
-            });
-        } else {
-            ec.remove::<Bloom>();
-        }
+            },
+            RenderTarget::Image(image.into()),
+            proj.clone(),
+            *cam_tf,
+            camera_look(),
+        ));
+        insert_quality(&mut ec, &quality_settings(want));
+        state.warm = Some(WarmUp {
+            entity: ec.id(),
+            quality: want,
+            started: now,
+            frames: 0,
+            calm: 0,
+        });
+        return;
+    }
+    let Some(w) = state.warm.as_mut() else { return };
+    if let Ok(mut t) = warm_cams.get_mut(w.entity) {
+        *t = *cam_tf;
+    }
+    w.frames += 1;
+    let waiting = pending.map_or(0, |p| p.0.load(Ordering::Relaxed));
+    w.calm = if waiting == 0 { w.calm + 1 } else { 0 };
+    if (w.frames >= 4 && w.calm >= 3) || now - w.started > 20.0 {
+        let entity = w.entity;
+        info!("graphics quality {want:?} applied after {} warm-up frames", w.frames);
+        state.warm = None;
+        commands.entity(entity).despawn();
+        apply(&mut commands, &mut shadow_map, want);
+        state.applied = Some(want);
     }
 }
 
