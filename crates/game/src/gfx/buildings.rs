@@ -504,6 +504,7 @@ mod tests {
             w.apply(Command::BuildRoad {
                 from: Cell::new(a.0, a.1),
                 to: Cell::new(b.0, b.1),
+                kind: citysim_sim::RoadKind::Street,
             })
             .expect("road");
         }

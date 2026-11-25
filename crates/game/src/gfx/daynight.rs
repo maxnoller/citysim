@@ -314,6 +314,7 @@ fn lin4(c: Color, a: f32) -> Vec4 {
     Vec4::new(l.red, l.green, l.blue, a)
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn apply_materials(
     light: Res<DayLight>,
     quality: Res<GraphicsQuality>,

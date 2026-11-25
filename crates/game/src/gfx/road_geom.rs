@@ -108,6 +108,54 @@ pub struct Arm {
     pub len: f32,
     /// Where the straight segment geometry starts, metres from the node.
     pub setback: f32,
+    /// Where the sim's stop line is, metres from the node (junctions with
+    /// three or more arms; 0 otherwise).
+    pub stop: f32,
+}
+
+/// Stop line distances for the arms of one node, exactly as the sim lays
+/// out its junction boxes (`citysim_sim::junction`): clear of the other
+/// arms' carriageways plus the sim's margin, capped for short segments.
+fn sim_stops(arms: &[Arm], kinds: &[RoadKind]) -> Vec<f32> {
+    let n = arms.len();
+    if n < 3 {
+        return vec![0.0; n];
+    }
+    // Opposite pairs, greedily by straightness (as the sim pairs them).
+    let mut opposite: Vec<Option<usize>> = vec![None; n];
+    let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+    for i in 0..n {
+        for j in i + 1..n {
+            let d = arms[i].dir.dot(arms[j].dir);
+            if d < -0.85 {
+                pairs.push((d, i, j));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, i, j) in pairs {
+        if opposite[i].is_none() && opposite[j].is_none() {
+            opposite[i] = Some(j);
+            opposite[j] = Some(i);
+        }
+    }
+    let widest = kinds.iter().map(|k| k.half_width_m()).fold(0.0, f32::max);
+    (0..n)
+        .map(|i| {
+            let mut sb: f32 = 0.0;
+            for j in 0..n {
+                if i == j || opposite[i] == Some(j) {
+                    continue;
+                }
+                let (di, dj) = (arms[i].dir, arms[j].dir);
+                let sin = di.perp_dot(dj).abs().max(0.3);
+                let cos = di.dot(dj).abs();
+                let need = (kinds[j].half_width_m() + kinds[i].half_width_m() * cos) / sin;
+                sb = sb.max(need + citysim_sim::balance::JUNCTION_MARGIN_M);
+            }
+            sb.min(3.0 * widest + 2.0).min(arms[i].len * 0.4)
+        })
+        .collect()
 }
 
 /// Rounded inner corner between two arms.
@@ -151,6 +199,9 @@ pub struct SegLayout {
     pub style: Style,
     pub s_a: f32,
     pub s_b: f32,
+    /// Stop line distance from each end node (0 where no junction).
+    pub stop_a: f32,
+    pub stop_b: f32,
     /// Number of segments at each end node.
     pub deg_a: usize,
     pub deg_b: usize,
@@ -206,6 +257,7 @@ pub fn layout(roads: &RoadNetwork) -> RoadLayout {
     let mut out = RoadLayout::default();
     let mut setbacks: HashMap<(SegmentId, NodeId), f32> = HashMap::new();
     let mut straight: HashMap<(SegmentId, NodeId), bool> = HashMap::new();
+    let mut stop_at: HashMap<(SegmentId, NodeId), f32> = HashMap::new();
     for (nid, node) in roads.nodes.iter() {
         let pos = Vec2::from(node.pos);
         let mut arms: Vec<Arm> = node
@@ -222,9 +274,19 @@ pub fn layout(roads: &RoadNetwork) -> RoadLayout {
                     style: style(seg.kind),
                     len,
                     setback: 0.0,
+                    stop: 0.0,
                 })
             })
             .collect();
+        let kinds: Vec<RoadKind> = arms
+            .iter()
+            .map(|a| roads.segments.get(a.seg).map_or(RoadKind::Street, |s| s.kind))
+            .collect();
+        let stops = sim_stops(&arms, &kinds);
+        for (a, st) in arms.iter_mut().zip(stops) {
+            a.stop = st;
+            stop_at.insert((a.seg, nid), st);
+        }
         if arms.is_empty() {
             continue;
         }
@@ -273,6 +335,8 @@ pub fn layout(roads: &RoadNetwork) -> RoadLayout {
             style: style(seg.kind),
             s_a: setbacks.get(&(sid, seg.a)).copied().unwrap_or(0.0),
             s_b: setbacks.get(&(sid, seg.b)).copied().unwrap_or(0.0),
+            stop_a: stop_at.get(&(sid, seg.a)).copied().unwrap_or(0.0),
+            stop_b: stop_at.get(&(sid, seg.b)).copied().unwrap_or(0.0),
             deg_a: degree(seg.a),
             deg_b: degree(seg.b),
             straight_a: straight.get(&(sid, seg.a)).copied().unwrap_or(false),
@@ -291,6 +355,8 @@ pub fn layout(roads: &RoadNetwork) -> RoadLayout {
                 style: arm.style,
                 s_a: 0.0,
                 s_b: 0.0,
+                stop_a: 0.0,
+                stop_b: 0.0,
                 deg_a: 2,
                 deg_b: 2,
                 straight_a: true,
@@ -321,7 +387,7 @@ pub fn hash_node<H: Hasher>(n: &NodeLayout, h: &mut H) {
 }
 
 pub fn hash_seg<H: Hasher>(s: &SegLayout, h: &mut H) {
-    for v in [s.a.x, s.a.y, s.b.x, s.b.y, s.s_a, s.s_b] {
+    for v in [s.a.x, s.a.y, s.b.x, s.b.y, s.s_a, s.s_b, s.stop_a, s.stop_b] {
         hf(h, v);
     }
     (s.deg_a, s.deg_b, s.straight_a, s.straight_b, s.style.highway).hash(h);
@@ -625,41 +691,43 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
     } else {
         dashes(m, s.a, dir, 0.0, m0, m1, 2.6, 2.4, 0.16, white);
     }
-    // Crosswalks and stop lines where a junction (3+ arms) ends the segment.
+    // A zebra crossing between the sim's stop line and the junction box
+    // where the box leaves room for one.
     if !st.highway {
-        for (at_a, deg) in [(true, s.deg_a), (false, s.deg_b)] {
-            if deg < 3 || t1 - t0 < 2.0 * JUNCTION_MARGIN + 1.0 {
+        for (at_a, deg, stop, edge) in [(true, s.deg_a, s.stop_a, s.s_a), (false, s.deg_b, s.stop_b, s.s_b)] {
+            if deg < 3 || stop <= 0.0 {
                 continue;
             }
-            // Work in the frame of the end: `e` is the junction edge param and
-            // `inward` points away from the junction.
-            let (e, inward) = if at_a { (t0, 1.0) } else { (t1, -1.0) };
-            let along = |d: f32| e + inward * d;
-            let zebra_w = 0.5;
-            let mut o = -h + 0.45;
-            while o + zebra_w <= h - 0.45 + 1e-3 {
-                let (ta, tb) = (along(0.5), along(2.6));
-                rect(m, s.a, dir, n, ta.min(tb), ta.max(tb), o, o + zebra_w, MARK_Y, white);
-                o += zebra_w * 2.0;
+            // Params along the segment from its `a` end; `out` points away
+            // from the junction.
+            let (base, out) = if at_a { (0.0, 1.0) } else { (len, -1.0) };
+            let along = |d: f32| base + out * d;
+            // (The stop line itself depends on the junction's control and
+            // is drawn with its furniture, `signals`.)
+            // Room for a crossing: from the kerb line of the junction box
+            // (the straight road's edge `edge`, or close to the crossing
+            // carriageway) out to just before the stop line.
+            let inner = (edge - 2.4).max(stop * 0.55);
+            if stop - 0.4 - inner >= 2.2 {
+                let zebra_w = 0.5;
+                let mut o = -h + 0.45;
+                while o + zebra_w <= h - 0.45 + 1e-3 {
+                    let (za, zb) = (along(stop - 0.4), along(stop - 0.4 - 2.1));
+                    rect(
+                        m,
+                        s.a,
+                        dir,
+                        n,
+                        za.min(zb),
+                        za.max(zb),
+                        o,
+                        o + zebra_w,
+                        MARK_Y + 0.002,
+                        white,
+                    );
+                    o += zebra_w * 2.0;
+                }
             }
-            // Stop line across the lane arriving at this junction: right of
-            // travel, which is `perp(dir)` (+n) when arriving at b and -n
-            // when arriving at a (`lane_offset` / vehicles use the same).
-            let (ta, tb) = (along(3.0), along(3.35));
-            let side = if at_a { -1.0 } else { 1.0 };
-            let (oa, ob) = (side * (st.median + 0.15), side * (h - 0.25));
-            rect(
-                m,
-                s.a,
-                dir,
-                n,
-                ta.min(tb),
-                ta.max(tb),
-                oa.min(ob),
-                oa.max(ob),
-                MARK_Y,
-                white,
-            );
         }
     }
 }
@@ -914,6 +982,7 @@ mod tests {
         Command::BuildRoad {
             from: Cell::new(a.0, a.1),
             to: Cell::new(b.0, b.1),
+            kind: citysim_sim::RoadKind::Street,
         }
     }
 

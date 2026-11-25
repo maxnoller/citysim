@@ -251,6 +251,7 @@ fn dashed(m: &mut MeshBuilder, a: Vec2, b: Vec2, w: f32, y: f32, col: [f32; 4]) 
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn draw_snap(
     mut commands: Commands,
     snap: Res<SnapFeedback>,
@@ -304,6 +305,7 @@ fn pulse_marker(time: Res<Time<Real>>, mut q: Query<&mut Transform, With<SnapMar
     }
 }
 
+#[allow(clippy::type_complexity)]
 #[derive(Default)]
 struct HighlightState {
     key: Option<(

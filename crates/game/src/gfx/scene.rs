@@ -481,7 +481,7 @@ fn insert_quality(ec: &mut EntityCommands, s: &QualitySettings) {
 /// is drawn (round 1 showed a white frame for seconds). So a switch first
 /// renders the new settings on a hidden warm-up camera and moves the main
 /// camera over only once no pipeline is pending any more.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn apply_quality(
     quality: Res<GraphicsQuality>,
     mut commands: Commands,

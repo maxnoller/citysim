@@ -180,10 +180,26 @@ fn furniture(
         // Travel towards the node is -dir; its right is (dir.y, -dir.x)
         // in sim space (traffic drives on the right).
         let right = Vec2::new(arm.dir.y, -arm.dir.x);
-        let stop = arm.setback + 3.0;
-        let base = node.pos + arm.dir * (stop + 0.4) + right * (st.h + 0.55);
+        // The sim's stop line, and the pole just behind it on the
+        // sidewalk (beyond the kerb corner).
+        let stop = if arm.stop > 0.0 { arm.stop } else { arm.setback };
+        let base = node.pos + arm.dir * (stop + 0.9).max(arm.setback + 0.4) + right * (st.h + 0.55);
+        let white = lin(palette::MARKING);
+        let lane_lo = st.median + 0.15;
+        let lane_hi = st.h - 0.25;
+        let across = |m: &mut MeshBuilder, t0: f32, t1: f32, o0: f32, o1: f32| {
+            let q = [
+                node.pos + arm.dir * t0 + right * o0,
+                node.pos + arm.dir * t1 + right * o0,
+                node.pos + arm.dir * t1 + right * o1,
+                node.pos + arm.dir * t0 + right * o1,
+            ];
+            m.quad_up(q.map(|p| Vec3::new(p.x, MARK_Y + 0.004, p.y)), white);
+        };
         match control {
             JunctionControl::Signal => {
+                // Solid stop line across the arriving lanes.
+                across(&mut m, stop, stop + 0.4, lane_lo, lane_hi);
                 let foot = Vec3::new(base.x, WALK_Y, base.y);
                 let avenue = st.median > 0.0;
                 let top = if avenue { MAST_HEAD_Y + 0.7 } else { POLE_HEAD_Y + 0.65 };
@@ -195,7 +211,7 @@ fn furniture(
                 heads.push((arm.seg, c, face));
                 if avenue {
                     // Mast arm over the approach lanes.
-                    let tip = node.pos + arm.dir * (stop + 0.4) + right * (st.h * 0.42);
+                    let tip = node.pos + arm.dir * (stop + 0.9).max(arm.setback + 0.4) + right * (st.h * 0.42);
                     let mid = (base + tip) * 0.5;
                     let d = tip - base;
                     let yaw = -d.y.atan2(d.x);
@@ -215,14 +231,17 @@ fn furniture(
                 if major.get(&arm.seg).copied().unwrap_or(true) {
                     continue;
                 }
-                // Give-way triangles ("shark teeth") across the arriving
-                // lanes, just behind where the stop line would be.
-                let white = lin(palette::MARKING);
-                let lo = st.median + 0.3;
-                let hi = st.h - 0.3;
+                // Give-way line (dashed) with triangles ("shark teeth")
+                // behind it, across the arriving lanes.
+                let mut o = lane_lo;
+                while o + 0.5 <= lane_hi + 1e-3 {
+                    across(&mut m, stop, stop + 0.3, o, o + 0.5);
+                    o += 0.9;
+                }
+                let (lo, hi) = (lane_lo + 0.1, lane_hi - 0.1);
                 let mut o = lo;
                 while o + 0.45 <= hi + 1e-3 {
-                    let a = node.pos + arm.dir * (stop - 0.1) + right * o;
+                    let a = node.pos + arm.dir * (stop + 0.6) + right * o;
                     let b = a + right * 0.45;
                     let tip = (a + b) * 0.5 + arm.dir * 0.65;
                     // Point towards the arriving driver.
