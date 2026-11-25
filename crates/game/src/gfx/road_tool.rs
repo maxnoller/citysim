@@ -9,7 +9,8 @@
 //! Drawn from [`CurveToolView`], gfx's own description of the tool state.
 //! It is filled by the interface through `shared` once that publishes the
 //! free-form tool; until then `CITYSIM_GFX_TOOLDEMO=4|5|6` fills it from
-//! real `World::preview` results on the organic demo town (`4`: a curved
+//! real `World::preview` results on the road-shape demo town
+//! (`CITYSIM_DEMO=shapes`) (`4`: a curved
 //! street from the avenue across a street into another, `5`: an avenue
 //! bending too tightly, `6`: a road the sim refuses for running along
 //! another).
@@ -415,7 +416,7 @@ pub fn view_of(world: &citysim_sim::World, curve: Curve, kind: RoadKind, handles
     v
 }
 
-/// `CITYSIM_GFX_TOOLDEMO=4|5|6`: sample tool states on the organic town.
+/// `CITYSIM_GFX_TOOLDEMO=4|5|6`: sample tool states on the shapes town.
 fn sample(sim: Res<SimWorld>, mut view: ResMut<CurveToolView>, mut done: Local<Option<(u64, u64)>>) {
     let key = sim.key(sim.world.versions.roads);
     if *done == Some(key) {

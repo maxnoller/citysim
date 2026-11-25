@@ -6,8 +6,9 @@
 //! * `city` — `GridPlayer` until ~5,000 residents (streets only).
 //! * `hierarchy` — `GridPlayer::hierarchy` (avenues as arterials) until
 //!   ~10,000 residents (about 20 s of fast-forward in a release build).
-//! * `organic` — the free-form sample town of `organic` (curves, a rotated
-//!   grid, a ring) until ~3,000 residents.
+//! * `organic` — the sim's free-form town (`scenarios::organic`) until
+//!   ~3,800 residents.
+//! * `shapes` — gfx's road-shape test town (`shapes`) until ~3,000.
 //! * `jam`  — the deliberately bad `two_districts(grid = false)` layout
 //!   (every commuter through one junction) on its third day.
 //!
@@ -33,7 +34,8 @@ pub fn focus(kind: DemoKind) -> (Cell, f32) {
         DemoKind::Jam => (Cell::new(48, 128), 560.0),
         DemoKind::City => (Cell::new(62, 128), 900.0),
         DemoKind::Hierarchy => (Cell::new(70, 128), 1100.0),
-        DemoKind::Organic => (Cell::new(80, 125), 1000.0),
+        DemoKind::Organic => (Cell::new(88, 118), 1000.0),
+        DemoKind::Shapes => (Cell::new(80, 125), 1000.0),
         _ => (Cell::new(45, 128), 560.0),
     }
 }
@@ -42,7 +44,8 @@ pub fn focus(kind: DemoKind) -> (Cell, f32) {
 pub fn street(kind: DemoKind) -> Cell {
     match kind {
         DemoKind::Jam => Cell::new(22, 126),
-        DemoKind::Organic => Cell::new(52, 115),
+        DemoKind::Organic => Cell::new(68, 119),
+        DemoKind::Shapes => Cell::new(52, 115),
         _ => Cell::new(30, 128),
     }
 }
@@ -76,12 +79,22 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
             }
             run_to_hour(&mut w, hour, |_| {});
         }
-        DemoKind::Organic => {
-            let target = env::<u32>("CITYSIM_DEMO_POP").unwrap_or(3_000);
+        DemoKind::Organic | DemoKind::Shapes => {
+            let target =
+                env::<u32>("CITYSIM_DEMO_POP").unwrap_or(if kind == DemoKind::Organic { 3_800 } else { 3_000 });
             let mut refused = Vec::new();
-            scenarios::prebuilt(&mut w, |w| refused = super::organic::organic(w));
+            if kind == DemoKind::Organic {
+                scenarios::prebuilt(&mut w, |w| {
+                    refused = scenarios::organic(w)
+                        .into_iter()
+                        .map(|(c, e)| format!("{e}: {c:?}"))
+                        .collect()
+                });
+            } else {
+                scenarios::prebuilt(&mut w, |w| refused = super::shapes::shapes(w));
+            }
             for r in refused {
-                warn!("organic demo: refused {r}");
+                warn!("{kind:?} demo: refused {r}");
             }
             while w.stats.population < target && w.time.day <= MAX_DAYS {
                 w.step();

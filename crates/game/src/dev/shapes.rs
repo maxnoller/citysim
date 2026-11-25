@@ -1,8 +1,10 @@
-//! A free-form sample town built through ordinary commands (`BuildCurve`,
-//! `ZoneArea`): a curved avenue from the highway, a grid rotated 25 degrees
-//! north of it meeting a straight grid south of it, a ring road with a
-//! street through it, and curved cul-de-sacs. Used by `CITYSIM_DEMO=organic`
-//! until the sim's own `scenarios::organic` exists.
+//! `CITYSIM_DEMO=shapes`: a free-form test town for the road and junction
+//! drawing, built through ordinary commands (`BuildCurve`, `ZoneArea`): a
+//! curved avenue from the highway, a grid rotated 25 degrees north of it
+//! meeting a straight grid south of it, a ring road with a street through
+//! it, curved cul-de-sacs, a five-arm junction, a street leaving the avenue
+//! at 30 degrees and a T on the outside of a bend. The free-form tool
+//! samples (`CITYSIM_GFX_TOOLDEMO=4..7`) are placed on it.
 
 use citysim_sim::{Command, Curve, RoadKind, World, Zone};
 
@@ -56,7 +58,7 @@ fn at_x(curve: &Curve, x: f32) -> P {
 }
 
 /// Build the layout and zone it. Returns the refused commands.
-pub fn organic(w: &mut World) -> Vec<String> {
+pub fn shapes(w: &mut World) -> Vec<String> {
     let mut log = Vec::new();
     // The inner end of the highway stub.
     let entry = w
