@@ -25,7 +25,7 @@ use super::tools::{Press, ToolState};
 use super::widgets::{UiAction, UiButton};
 use crate::shared::{
     ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, RoadChoice, RoadMode, SimClock,
-    SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, WorldTarget, ZoneMode, sim_to_world,
+    SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
 };
 
 /// The scenario's world while a step shows a modified copy (broke, day 1);
@@ -412,14 +412,16 @@ fn steps() -> Vec<Step> {
             wait: 1.2,
             setup: |w| {
                 reset(w);
-                let Some((p, d)) = street_spot(w, false) else { return };
-                let r = right_of(d);
-                let a = add(p, d, -20.0);
-                let corner = add(a, r, 110.0);
+                let Some(o) = open_land(w, 150.0) else { return };
+                // Start, corner placed; the end near the right angle from
+                // the corner, so its guide shows.
+                let a = add(o, [-1.0, 0.0], 130.0);
+                let corner = add(o, [0.0, -1.0], 40.0);
+                let d = super::fsnap::rotate(citysim_sim::curve::unit([corner[0] - a[0], corner[1] - a[1]]), 90.0);
                 drawing(w, RoadMode::Curve, Shape::Curve, &[a, corner], &[]);
                 *w.resource_mut::<RoadChoice>() = RoadChoice::Avenue;
-                point(w, Some(add(corner, d, 120.0)));
-                look(w, add(corner, d, 30.0), 300.0);
+                point(w, Some(add(add(corner, d, 110.0), [d[1], -d[0]], 3.0)));
+                look(w, add(o, [-1.0, 0.0], 30.0), 380.0);
             },
         },
         Step {
@@ -432,8 +434,10 @@ fn steps() -> Vec<Step> {
                 let c1 = Curve::continuing(a, [1.0, 0.3], add(o, [-0.3, -1.0], 30.0));
                 let c2 = Curve::continuing(c1.end(), c1.end_dir(), add(o, [1.0, -0.2], 70.0));
                 drawing(w, RoadMode::Continuous, Shape::Continuous, &[c2.end()], &[c1, c2]);
-                point(w, Some(add(o, [0.8, 1.0], 90.0)));
-                look(w, o, 330.0);
+                // Near straight on from the last piece: its guide shows.
+                let dir = c2.end_dir();
+                point(w, Some(add(add(c2.end(), dir, 72.0), right_of(dir), 3.0)));
+                look(w, add(o, dir, 30.0), 360.0);
             },
         },
         Step {
@@ -627,12 +631,10 @@ fn steps() -> Vec<Step> {
             wait: 1.5,
             setup: |w| {
                 reset(w);
-                let Some(id) = building_where(w, |b| b.kind == Zone::Commercial && b.occupied > 0) else {
-                    return;
-                };
-                w.resource_mut::<WorldHighlight>().selected = Some(WorldTarget::Building(id));
-                let p = building_pos(w, Some(id)).unwrap_or_default();
-                look(w, p, 200.0);
+                let Some((p, _)) = street_spot(w, false) else { return };
+                let t = super::tools::target_at(sim(w), p, 6.0);
+                w.resource_mut::<WorldHighlight>().selected = t;
+                look(w, p, 220.0);
             },
         },
         Step {
