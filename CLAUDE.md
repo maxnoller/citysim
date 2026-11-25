@@ -84,7 +84,11 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `ui/snap.rs`. `scripts/play.py road` presses Enter to build its two-corner path.
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
-  `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`).
+  `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`), `CITYSIM_GFX_HOUR=h` (pin the drawn time of
+  day), `CITYSIM_GFX_TOOLDEMO=1|2|3` (gfx-only build: sample road-tool feedback), `CITYSIM_DEMO_AVENUES=1` (demo main
+  road upgraded to an avenue).
+- gfx shaders: `assets/gfx/shaders/city.wesl` (the shared `CityMaterial`: night glow by the vertex `uv.x` tag
+  `mesh_util::Glow`, cloud shadows, ground detail) and `sky.wesl`. Day/night lives in `gfx/daynight.rs`.
 - gfx look: one palette (`gfx/palette.rs`), one shared vertex-coloured material for buildings/roads/trees/cars; models
   are generated in code (`building_gen`, `vehicle_gen`, `props`) and cached; LOD via `VisibilityRange` (mesh origin
   must be near the geometry: the cross-fade dither is measured from the entity origin).
