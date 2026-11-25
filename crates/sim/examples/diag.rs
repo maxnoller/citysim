@@ -83,7 +83,7 @@ fn main() {
         let mut line = String::new();
         for x in x0..x1 {
             let c = Cell::new(x, y);
-            let cd = w.grid.get(c).unwrap();
+            let cd = w.grid_view().get(c).unwrap();
             let ch = match cd.occupant {
                 Occupant::Road => {
                     let cong = w

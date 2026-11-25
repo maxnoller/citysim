@@ -290,8 +290,12 @@ pub struct Zoning {
     /// By `LatticeId`; `None` for a freed slot (reused lowest first).
     /// Slot 0 is always the world grid.
     pub lattices: Vec<Option<Lattice>>,
-    /// Every block, sorted by segment slot, side, then position along it.
+    /// Every block, sorted by segment, side, then position along it.
     pub blocks: Vec<Block>,
+    /// The centre line and serial each segment's blocks were made for.
+    pub(crate) built_for: BTreeMap<SegmentId, (crate::Curve, u64)>,
+    /// `versions.roads` the blocks were made for.
+    pub(crate) roads_version: u64,
 }
 
 impl Default for Zoning {
@@ -299,6 +303,8 @@ impl Default for Zoning {
         Zoning {
             lattices: vec![Some(Lattice::world())],
             blocks: Vec::new(),
+            built_for: BTreeMap::new(),
+            roads_version: 0,
         }
     }
 }
@@ -308,7 +314,6 @@ impl Zoning {
         self.lattices.get(id.0 as usize).and_then(|l| l.as_ref())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn lattice_mut(&mut self, id: LatticeId) -> Option<&mut Lattice> {
         self.lattices.get_mut(id.0 as usize).and_then(|l| l.as_mut())
     }
@@ -325,7 +330,6 @@ impl Zoning {
         self.lattice(c.lattice)?.cells.get(&(c.i, c.j))
     }
 
-    #[allow(dead_code)]
     pub(crate) fn cell_mut(&mut self, c: CellRef) -> Option<&mut ZoneCell> {
         self.lattice_mut(c.lattice)?.cells.get_mut(&(c.i, c.j))
     }
@@ -579,102 +583,132 @@ pub fn building_at(world: &World, pos: [f32; 2]) -> Option<BuildingId> {
     None
 }
 
-// ---------------------------------------------------- world-grid mirror ----
+// ------------------------------------------------------------- invariants ----
 
-/// Interim: rebuild lattice 0 from the world grid (roads on the cell
-/// lattice), when the grid or the roads changed.
-pub(crate) fn mirror_grid(world: &mut World) {
-    let key = (world.versions.grid, world.versions.roads, world.versions.buildings);
-    if world.cache.zoning_key == Some(key) {
-        return;
+/// Zoning invariants (`World::check_invariants`): blocks made for the
+/// current roads, cells pointing at buildings that stand on them, no zone
+/// under a road, every covered cell inside a block, buildings holding all
+/// their cells, and usable
+/// cells of different lattices never overlapping.
+pub(crate) fn check(world: &World) -> Result<(), String> {
+    let z = &world.zoning;
+    if z.lattice(LatticeId::WORLD).is_none() {
+        return Err("world lattice missing".into());
     }
-    world.cache.zoning_key = Some(key);
-    use crate::grid::Occupant;
-    let reach = crate::balance::ZONE_ROAD_REACH;
-    let mut cells = BTreeMap::new();
-    let g = &world.grid;
-    for y in 0..crate::MAP_CELLS {
-        for x in 0..crate::MAP_CELLS {
-            let c = Cell::new(x, y);
-            let cd = g.get(c).expect("in bounds");
-            let road = cd.occupant == Occupant::Road;
-            let near = !road && g.near_road(c, reach);
-            let building = match cd.occupant {
-                Occupant::Building(b) => Some(b),
-                _ => None,
-            };
-            if !near && !road && cd.zone.is_none() && building.is_none() {
-                continue;
+    if z.roads_version != world.versions.roads {
+        return Err(format!(
+            "blocks made for roads version {} but roads are at {}",
+            z.roads_version, world.versions.roads
+        ));
+    }
+    for (s, _) in world.roads.segments.iter() {
+        if !z.built_for.contains_key(&s) {
+            return Err(format!("{s:?} has no blocks"));
+        }
+    }
+    for b in &z.blocks {
+        if !world.roads.segments.contains_key(b.segment) {
+            return Err(format!("block of missing {:?}", b.segment));
+        }
+        if z.lattice(b.lattice).is_none() {
+            return Err(format!("block on missing {:?}", b.lattice));
+        }
+    }
+    let mut in_blocks: std::collections::BTreeSet<CellRef> = std::collections::BTreeSet::new();
+    for b in &z.blocks {
+        in_blocks.extend(b.cells());
+    }
+    for (c, cell) in z.cells() {
+        if let Some(b) = cell.building {
+            match world.buildings.get(b) {
+                Some(bb) if bb.footprint.contains(c) => {}
+                _ => return Err(format!("{c:?} references bad building {b:?}")),
             }
-            let mut fronts = 0;
-            for f in Facing::ALL {
-                let (dx, dy) = f.offset();
-                if g.is_road(c.offset(dx, dy)) {
-                    fronts |= facing_bit(f);
+        }
+        if cell.blocked == Some(Blocked::Road) && cell.zone.is_some() {
+            return Err(format!("{c:?} is under a road and zoned"));
+        }
+        let in_block = in_blocks.contains(&c);
+        if cell.covered != in_block {
+            return Err(format!("{c:?} covered {} but in a block: {in_block}", cell.covered));
+        }
+        if !cell.covered && cell.zone.is_none() && cell.building.is_none() {
+            return Err(format!("{c:?} is an empty leftover"));
+        }
+    }
+    for (id, b) in world.buildings.iter() {
+        let fp = &b.footprint;
+        for c in fp.cells() {
+            if z.cell(c).and_then(|x| x.building) != Some(id) {
+                return Err(format!("{id:?} does not hold {c:?}"));
+            }
+        }
+    }
+    // Usable cells of different lattices do not overlap.
+    let usable: Vec<(CellRef, [[f32; 2]; 4])> = z
+        .cells()
+        .filter(|(_, x)| x.usable() || x.building.is_some())
+        .map(|(c, _)| {
+            let l = z.lattice(c.lattice).expect("lattice");
+            let k = 0.5 / CELL_SIZE;
+            let (x, y) = (c.i as f32, c.j as f32);
+            (
+                c,
+                [
+                    l.world_at(x + k, y + k),
+                    l.world_at(x + 1.0 - k, y + k),
+                    l.world_at(x + 1.0 - k, y + 1.0 - k),
+                    l.world_at(x + k, y + 1.0 - k),
+                ],
+            )
+        })
+        .collect();
+    if z.lattices().nth(1).is_some() {
+        let mut tiles: BTreeMap<(i32, i32), Vec<usize>> = BTreeMap::new();
+        for (k, (_, q)) in usable.iter().enumerate() {
+            let t = Cell::from_pos(q[0]);
+            tiles.entry((t.x, t.y)).or_default().push(k);
+        }
+        for (k, (c, q)) in usable.iter().enumerate() {
+            let t = Cell::from_pos(q[0]);
+            for dy in -2..=2 {
+                for dx in -2..=2 {
+                    for &o in tiles.get(&(t.x + dx, t.y + dy)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                        let (oc, oq) = &usable[o];
+                        if o > k && oc.lattice != c.lattice && crate::blocks::quads_overlap(q, oq) {
+                            return Err(format!("{c:?} overlaps {oc:?}"));
+                        }
+                    }
                 }
             }
-            cells.insert(
-                (x, y),
-                ZoneCell {
-                    zone: cd.zone,
-                    building,
-                    covered: near || road,
-                    blocked: road.then_some(Blocked::Road),
-                    fronts: if road { 0 } else { fronts },
-                },
-            );
         }
     }
-    let mut blocks = Vec::new();
-    let mut segs: Vec<(SegmentId, &crate::RoadSegment)> = world.roads.segments.iter().collect();
-    segs.sort_by_key(|(s, _)| crate::idmap::key_index(*s));
-    let depth = crate::balance::BLOCK_DEPTH as i32;
-    for (s, seg) in segs {
-        let (pa, pb) = (seg.curve.start(), seg.curve.end());
-        let (ca, cb) = (Cell::from_pos(pa), Cell::from_pos(pb));
-        if !geom::same_pos(ca.center(), pa) || !geom::same_pos(cb.center(), pb) {
-            continue;
-        }
-        let (dx, dy) = ((cb.x - ca.x).signum(), (cb.y - ca.y).signum());
-        if dx != 0 && dy != 0 {
-            continue;
-        }
-        let (lo, hi) = (
-            Cell::new(ca.x.min(cb.x), ca.y.min(cb.y)),
-            Cell::new(ca.x.max(cb.x), ca.y.max(cb.y)),
-        );
-        // Right of travel a -> b is (-dy, dx).
-        for side in [Side::Left, Side::Right] {
-            let (nx, ny) = if side == Side::Right { (-dy, dx) } else { (dy, -dx) };
-            let (min, max) = if nx != 0 {
-                let x0 = if nx > 0 { lo.x + 1 } else { lo.x - depth };
-                ([x0, lo.y], [x0 + depth - 1, hi.y])
-            } else {
-                let y0 = if ny > 0 { lo.y + 1 } else { lo.y - depth };
-                ([lo.x, y0], [hi.x, y0 + depth - 1])
-            };
-            let front = match (nx, ny) {
-                (1, 0) => Facing::MinusX,
-                (-1, 0) => Facing::PlusX,
-                (0, 1) => Facing::MinusY,
-                _ => Facing::PlusY,
-            };
-            blocks.push(Block {
-                segment: s,
-                side,
-                lattice: LatticeId::WORLD,
-                min,
-                max,
-                front,
-                priority: (seg.serial, 0),
-            });
+    Ok(())
+}
+
+/// After loading an older save: zones and buildings of its world grid move
+/// onto the blocks of their roads (the world lattice; a zoned cell no block
+/// covers stays as an uncovered cell, so zoning survives).
+pub(crate) fn adopt_grid(world: &mut World, zones: &[(Cell, Zone)]) {
+    world.zoning = Zoning::default();
+    let doomed = crate::blocks::sync(world);
+    debug_assert!(doomed.is_empty());
+    for &(c, zone) in zones {
+        let l = world.zoning.lattice_mut(LatticeId::WORLD).expect("world lattice");
+        let e = l.cells.entry((c.x, c.y)).or_default();
+        if e.blocked != Some(Blocked::Road) {
+            e.zone = Some(zone);
         }
     }
-    world.zoning = Zoning {
-        lattices: vec![Some(Lattice {
-            cells,
-            ..Lattice::world()
-        })],
-        blocks,
-    };
+    let ids: Vec<BuildingId> = world.buildings.keys().collect();
+    for id in ids {
+        let cells: Vec<CellRef> = world.buildings[id].footprint.cells().collect();
+        crate::growth::claim(world, cells.into_iter(), Some(id));
+    }
+    // Other lattices (diagonal roads) give way to the buildings.
+    if world.zoning.lattices().nth(1).is_some() {
+        let doomed = crate::blocks::refresh_boxes(world, &[([0.0, 0.0], [crate::MAP_SIZE_M, crate::MAP_SIZE_M])]);
+        debug_assert!(doomed.is_empty());
+    }
+    world.versions.grid += 1;
 }

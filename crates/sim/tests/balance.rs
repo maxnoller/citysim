@@ -195,7 +195,7 @@ fn buildings_cut_off_for_good_are_abandoned_after_the_grace_period() {
         );
         // The zoning stays; the buildings near the stub are untouched.
         assert!(!w.buildings.is_empty());
-        assert_eq!(w.grid.get(c(30, 127)).unwrap().zone, Some(Zone::Residential));
+        assert_eq!(w.grid_view().get(c(30, 127)).unwrap().zone, Some(Zone::Residential));
     }
 }
 

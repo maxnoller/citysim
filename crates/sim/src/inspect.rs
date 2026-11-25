@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::citizens::{Activity, Citizen, CitizenId, HappinessPart, JobTier, LifeStage, Location, TravelMode};
 use crate::households::{Household, HouseholdKind};
 use crate::traffic::{Place, TripPurpose};
-use crate::{BuildingId, Cell, HouseholdId, VehicleId, World, Zone, balance};
+use crate::{BuildingId, HouseholdId, VehicleId, World, Zone, balance};
 
 /// Age bands of the pyramid, years: `0-9, 10-19, ..., 80-89, 90+`.
 pub const AGE_BANDS: usize = 10;
@@ -409,10 +409,7 @@ pub fn residents(world: &World, id: BuildingId) -> impl Iterator<Item = CitizenI
 
 /// Building at a point (sim metres), if any.
 pub fn building_at(world: &World, pos: [f32; 2]) -> Option<BuildingId> {
-    match world.grid.get(Cell::from_pos(pos))?.occupant {
-        crate::grid::Occupant::Building(b) => Some(b),
-        _ => None,
-    }
+    crate::zoning::building_at(world, pos)
 }
 
 // ---------------------------------------------------------- vehicles ----

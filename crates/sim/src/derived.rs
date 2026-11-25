@@ -9,11 +9,11 @@
 
 use std::fmt;
 
-use crate::geom::{self, Cell, CellRect};
-use crate::grid::{Grid, Occupant, Zone};
+use crate::geom::{Cell, CellRect};
 use crate::idmap::key_index;
 use crate::path::PathScratch;
 use crate::roads::{NodeId, RoadNetwork, SegmentId};
+use crate::zoning::{CellRef, Zone, Zoning};
 use crate::{CELL_SIZE, MAP_CELLS, balance};
 
 /// A point on the road network: `from_a` metres along `segment` from its
@@ -29,19 +29,24 @@ type RoadsKey = (u64, usize, usize);
 #[derive(Clone, Default)]
 pub(crate) struct Derived {
     roads_key: Option<RoadsKey>,
-    /// Versions `zoning::mirror_grid` last ran for.
-    pub zoning_key: Option<(u64, u64, u64)>,
+    /// `(zoning.roads_version, roads key)` the connected-cell sets were
+    /// built for.
+    zoning_key: Option<(u64, RoadsKey)>,
+    /// Cells of blocks whose road is connected to the entry.
+    conn_cells: std::collections::BTreeSet<CellRef>,
+    /// Front-row cells of such blocks with the side the road is on.
+    conn_fronts: Vec<(CellRef, u8)>,
     /// Cell -> segments passing through it (CSR layout over all map cells).
     cell_start: Vec<u32>,
     cell_segs: Vec<SegmentId>,
     /// By node slot: in the same connected piece of road as the entry.
     node_connected: Vec<bool>,
-    /// By cell: some road connected to the entry passes through it.
-    road_cell_connected: Vec<bool>,
-    cand_key: Option<(u64, RoadsKey)>,
-    /// Zoned, empty cells with road access to the entry, per zone, row-major.
-    candidates: [Vec<Cell>; 3],
-    road_cells_key: Option<u64>,
+    /// By segment slot: its `a` node.
+    seg_a: Vec<Option<NodeId>>,
+    cand_key: Option<(u64, (u64, RoadsKey))>,
+    /// Zoned, empty front cells with road access to the entry, per zone.
+    candidates: [Vec<CellRef>; 3],
+    road_cells_key: Option<RoadsKey>,
     road_cells: u32,
     avenue_key: Option<RoadsKey>,
     avenue_cells: u32,
@@ -155,12 +160,10 @@ impl Derived {
         }
         self.cell_segs = pairs.iter().map(|&(_, s)| s).collect();
 
-        self.road_cell_connected.clear();
-        self.road_cell_connected.resize(ncells, false);
-        for &(i, s) in &pairs {
-            if self.segment_connected(roads, s) {
-                self.road_cell_connected[i as usize] = true;
-            }
+        self.seg_a.clear();
+        self.seg_a.resize(roads.segments.slot_count(), None);
+        for (s, seg) in roads.segments.iter() {
+            self.seg_a[key_index(s)] = Some(seg.a);
         }
     }
 
@@ -178,22 +181,9 @@ impl Derived {
         self.node_connected.get(key_index(n)).copied().unwrap_or(false)
     }
 
+    #[allow(dead_code)]
     pub fn segment_connected(&self, roads: &RoadNetwork, s: SegmentId) -> bool {
         roads.segments.get(s).is_some_and(|seg| self.node_connected(seg.a))
-    }
-
-    /// Is a road connected to the entry within `reach` cells of `rect`?
-    pub fn connected_near(&self, rect: CellRect, reach: i32) -> bool {
-        for y in rect.min.y - reach..=rect.max.y + reach {
-            for x in rect.min.x - reach..=rect.max.x + reach {
-                if let Some(i) = cell_index(Cell::new(x, y))
-                    && self.road_cell_connected.get(i).copied().unwrap_or(false)
-                {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Nearest point on the road network to `pos` within
@@ -226,35 +216,71 @@ impl Derived {
         best.map(|b| b.3)
     }
 
-    /// Is `c` a road cell (grid says road) connected to the entry?
-    pub fn connected_road_cell(&self, grid: &Grid, c: Cell) -> bool {
-        grid.is_road(c) && cell_index(c).is_some_and(|i| self.road_cell_connected.get(i).copied().unwrap_or(false))
+    /// Rebuild the connected-cell sets if the blocks or the road
+    /// connectivity changed. Requires `ensure_roads`.
+    pub fn ensure_zoning(&mut self, zoning: &Zoning) {
+        let key = (zoning.roads_version, self.roads_key.unwrap_or_default());
+        if self.zoning_key == Some(key) {
+            return;
+        }
+        self.zoning_key = Some(key);
+        self.conn_cells.clear();
+        let mut fronts = std::collections::BTreeSet::new();
+        for b in &zoning.blocks {
+            let connected = self.node_connected_seg(b.segment);
+            if !connected {
+                continue;
+            }
+            for c in b.cells() {
+                self.conn_cells.insert(c);
+                if b.in_front_row(c) {
+                    fronts.insert((c, b.front as u8));
+                }
+            }
+        }
+        self.conn_fronts = fronts.into_iter().collect();
     }
 
-    /// Growth candidates for zone `z`: zoned, empty *frontage* cells (a
-    /// side touches a road cell connected to the entry). Requires
-    /// `ensure_roads`.
-    pub fn candidates(&mut self, grid: &Grid, grid_version: u64, z: Zone) -> &[Cell] {
-        let key = (grid_version, self.roads_key.unwrap_or_default());
+    fn node_connected_seg(&self, s: SegmentId) -> bool {
+        self.seg_a
+            .get(key_index(s))
+            .copied()
+            .flatten()
+            .is_some_and(|n| self.node_connected(n))
+    }
+
+    /// Is cell `c` in a block whose road is connected to the entry?
+    /// Requires `ensure_zoning`.
+    pub fn cell_connected(&self, c: CellRef) -> bool {
+        self.conn_cells.contains(&c)
+    }
+
+    /// Is `c` in the front row of such a block on side `f`?
+    pub fn front_connected(&self, c: CellRef, f: crate::Facing) -> bool {
+        self.conn_fronts.binary_search(&(c, f as u8)).is_ok()
+    }
+
+    /// Growth candidates for zone `z`: zoned, empty, usable front cells
+    /// of blocks whose road is connected to the entry. Requires
+    /// `ensure_zoning`.
+    pub fn candidates(&mut self, zoning: &Zoning, grid_version: u64, z: Zone) -> &[CellRef] {
+        let key = (grid_version, self.zoning_key.unwrap_or_default());
         if self.cand_key != Some(key) {
             self.cand_key = Some(key);
             for v in &mut self.candidates {
                 v.clear();
             }
-            for y in 0..MAP_CELLS {
-                for x in 0..MAP_CELLS {
-                    let cd = &grid.cells[(y * MAP_CELLS + x) as usize];
-                    if let Some(zone) = cd.zone
-                        && cd.occupant == Occupant::Empty
-                    {
-                        let c = Cell::new(x, y);
-                        let front = [(1, 0), (0, 1), (-1, 0), (0, -1)]
-                            .iter()
-                            .any(|&(dx, dy)| self.connected_road_cell(grid, c.offset(dx, dy)));
-                        if front {
-                            self.candidates[zone_index(zone)].push(c);
-                        }
-                    }
+            let mut last: Option<CellRef> = None;
+            for &(c, _) in &self.conn_fronts {
+                if last == Some(c) {
+                    continue;
+                }
+                last = Some(c);
+                if let Some(x) = zoning.cell(c)
+                    && x.free()
+                    && let Some(zone) = x.zone
+                {
+                    self.candidates[zone_index(zone)].push(c);
                 }
             }
         }
@@ -266,16 +292,13 @@ impl Derived {
         let key = Self::roads_key(roads, version);
         if self.avenue_key != Some(key) {
             self.avenue_key = Some(key);
-            self.avenue_cells = roads
+            let m: f64 = roads
                 .segments
-                .iter()
-                .filter(|(_, s)| s.kind == crate::RoadKind::Avenue)
-                .map(|(id, _)| {
-                    let (a, b) = roads.segment_ends(id);
-                    let d = geom::sub(b, a);
-                    (d[0].abs().max(d[1].abs()) / CELL_SIZE).round() as u32
-                })
+                .values()
+                .filter(|s| s.kind == crate::RoadKind::Avenue)
+                .map(|s| s.length as f64)
                 .sum();
+            self.avenue_cells = (m / CELL_SIZE as f64).round() as u32;
         }
         self.avenue_cells
     }
@@ -355,11 +378,14 @@ impl Derived {
         )
     }
 
-    /// Number of road cells (cached per grid version).
-    pub fn road_cells(&mut self, grid: &Grid, grid_version: u64) -> u32 {
-        if self.road_cells_key != Some(grid_version) {
-            self.road_cells_key = Some(grid_version);
-            self.road_cells = grid.cells.iter().filter(|c| c.occupant == Occupant::Road).count() as u32;
+    /// Road length in cells (metres / `CELL_SIZE`, rounded; cached per
+    /// road version).
+    pub fn road_cells(&mut self, roads: &RoadNetwork, version: u64) -> u32 {
+        let key = Self::roads_key(roads, version);
+        if self.road_cells_key != Some(key) {
+            self.road_cells_key = Some(key);
+            let m: f64 = roads.segments.values().map(|s| s.length as f64).sum();
+            self.road_cells = (m / CELL_SIZE as f64).round() as u32;
         }
         self.road_cells
     }

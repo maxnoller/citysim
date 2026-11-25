@@ -92,7 +92,7 @@ pub(crate) fn labour(world: &World) -> (u32, u32, u32) {
 
 /// Recompute what can be derived cheaply from state.
 pub(crate) fn update(world: &mut World) {
-    let road_cells = world.cache.road_cells(&world.grid, world.versions.grid);
+    let road_cells = world.cache.road_cells(&world.roads, world.versions.roads);
     let avenue_cells = world.cache.avenue_cells(&world.roads, world.versions.roads);
     let mut s = Stats {
         road_cells,

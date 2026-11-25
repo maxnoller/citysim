@@ -363,7 +363,6 @@ impl WorldV3 {
         w.rng = self.rng;
         w.time = self.time;
         w.roads = roads;
-        w.grid = self.grid.upgrade();
         w.buildings = upgrade_buildings(self.buildings);
         w.households = self.households.map_values(|h| h.upgrade(day));
         w.vehicles = vehicles;
@@ -374,6 +373,7 @@ impl WorldV3 {
         w.traffic = traffic;
         w.growth = growth;
         w.cache = Default::default();
+        crate::zoning::adopt_grid(&mut w, &self.grid.zones());
         w
     }
 }
@@ -528,7 +528,7 @@ pub fn save_as_v3(w: &World) -> Vec<u8> {
         rng: w.rng.clone(),
         time: w.time.clone(),
         roads,
-        grid: GridV5::of(&w.grid),
+        grid: GridV5::of_world(w),
         buildings: super::v4::legacy_buildings(w),
         households: w.households.clone().map_values(|h| HouseholdV4::of(&h)),
         vehicles,

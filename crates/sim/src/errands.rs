@@ -8,7 +8,7 @@
 
 use crate::derived::rect_center;
 use crate::traffic::{self, Place, TripPurpose};
-use crate::{Building, BuildingId, Cell, World, Zone, balance, geom, households, people};
+use crate::{Building, BuildingId, World, Zone, balance, geom, households, people};
 
 /// Relative goods traffic by hour of day.
 fn goods_profile(h: f32) -> f32 {
@@ -132,11 +132,7 @@ fn exports(world: &mut World) {
 /// destination gets a truckload.
 pub(crate) fn delivered(world: &mut World, to: Place) {
     let Place::At(p) = to else { return };
-    let Some(crate::grid::CellData {
-        occupant: crate::grid::Occupant::Building(b),
-        ..
-    }) = world.grid.get(Cell::from_pos(p)).copied()
-    else {
+    let Some(b) = crate::zoning::building_at(world, p) else {
         return;
     };
     let Some(cap) = world.buildings.get(b).map(stock_cap) else {

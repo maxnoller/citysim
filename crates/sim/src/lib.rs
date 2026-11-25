@@ -26,6 +26,7 @@
 //! `(x, y)` is `((x + 0.5) * CELL_SIZE, (y + 0.5) * CELL_SIZE)`.
 
 pub mod balance;
+pub(crate) mod blocks;
 pub(crate) mod build;
 pub mod buildings;
 pub mod citizens;
@@ -74,7 +75,7 @@ pub use demand::Demand;
 pub use derived::Access;
 pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus};
 pub use geom::{Cell, CellRect};
-pub use grid::{CellData, Grid, Occupant, Zone};
+pub use grid::{CellData, GridView, Occupant, Zone};
 pub use growth::{BuildingMeta, GrowthState};
 pub use households::{Household, HouseholdId, HouseholdKind, HouseholdState, Ledger};
 pub use idmap::IdMap;
