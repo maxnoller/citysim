@@ -225,10 +225,9 @@ fn chunk_hashes(world: &World) -> HashMap<IVec2, u64> {
         }
         let Some(p) = world.zoning.cell_center(c) else { continue };
         let p = Vec2::from(p);
-        add(p - 6.0, p + 6.0, &|h| {
-            c.hash(h);
-            (zc.zone, zc.building.is_some()).hash(h);
-        });
+        // Only whether the cell is taken matters (a building on an
+        // already zoned cell changes nothing for the trees).
+        add(p - 6.0, p + 6.0, &|h| c.hash(h));
     }
     for (_, seg) in world.roads.segments.iter() {
         let (lo, hi) = seg.curve.bounds();

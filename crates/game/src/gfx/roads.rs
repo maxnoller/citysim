@@ -125,7 +125,11 @@ fn rebuild_roads(
     if state.layout.as_ref().is_none_or(|(k, _)| *k != roads_key) {
         state.layout = Some((roads_key, road_geom::layout(&sim.world)));
     }
-    let mut layout = state.layout.as_ref().expect("layout").1.clone();
+    // Borrowed out of the state while the chunks are updated.
+    let (layout_key, mut layout) = state.layout.take().expect("layout");
+    for seg in &mut layout.segs {
+        seg.avoid.clear();
+    }
     assign_driveways(&mut layout, &mouths.points);
     // Bucket pieces and hash each chunk's content.
     let mut nodes: HashMap<IVec2, Vec<usize>> = HashMap::new();
@@ -217,4 +221,5 @@ fn rebuild_roads(
         }
     }
     debug!("roads: rebuilt {rebuilt} of {} chunks", state.chunks.len());
+    state.layout = Some((layout_key, layout));
 }
