@@ -512,6 +512,7 @@ pub(crate) fn sync(world: &mut World) -> Vec<BuildingId> {
     if changed.is_empty() {
         return Vec::new();
     }
+    let started = std::time::Instant::now();
     let depth = balance::BLOCK_DEPTH.min(balance::MAX_BLOCK_DEPTH) as i32;
     let mut boxes: Vec<([f32; 2], [f32; 2])> = Vec::new();
     // Old blocks and old road reserves go.
@@ -564,6 +565,7 @@ pub(crate) fn sync(world: &mut World) -> Vec<BuildingId> {
     let doomed = resolve(world, &boxes);
     gc_lattices(&mut world.zoning);
     world.versions.grid += 1;
+    world.cache.last_block_sync_ns = started.elapsed().as_nanos() as u64;
     doomed
 }
 

@@ -211,9 +211,6 @@ struct Front {
     permit: bool,
     /// Reaches the stop line this tick.
     reaches: bool,
-    /// Its out-lane has room for it now (signals ignore cars that could
-    /// not use a green).
-    exit_ok: bool,
 }
 
 /// Precedence class of a front (higher goes first, lower yields).
@@ -394,7 +391,6 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             exit_stop,
             permit: false,
             reaches: d_line <= reach,
-            exit_ok: true,
         });
     }
     fronts.sort_by_key(|f| (key_index(f.node), f.idx));
@@ -403,10 +399,6 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         front_of[f.idx] = p;
     }
 
-    for f in fronts.iter_mut() {
-        let ok = exit_room(roads, f, &rear, &rear_speed, &on_lane, &inbox);
-        f.exit_ok = ok;
-    }
     // Signals.
     tick_signals(traffic, roads, &fronts, &boxed, now);
     // Lanes whose front car waits at a red light: waiting there is normal
@@ -878,7 +870,9 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             });
         if v.speed >= balance::WAIT_SPEED {
             t.wait_ticks = 0;
-        } else if !at_red {
+        } else if !at_red || now % 2 == 0 {
+            // At a red light the timer runs at half speed: giving up takes
+            // twice `STUCK_REMOVE_AFTER_S`, longer than any signal cycle.
             t.wait_ticks += 1;
         }
         if v.junction.is_some() && t.wait_ticks >= box_stuck_ticks {
@@ -964,7 +958,6 @@ fn tick_signals(
         while kk < fronts.len() && fronts[kk].node == n {
             let f = &fronts[kk];
             if f.d_line <= balance::SIGNAL_DETECT_M
-                && f.exit_ok
                 && let Some(d) = per_arm.get_mut(f.arm as usize)
             {
                 if matches!(f.turn, Turn::Left | Turn::UTurn) {

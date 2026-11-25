@@ -993,3 +993,9 @@ pub fn overlapping_bodies(bodies: &[(VehicleId, [[f32; 2]; 4])], tol: f32) -> Ve
     }
     out
 }
+
+/// Debug: wall-clock time the last zone-block regeneration took, ns (not
+/// saved; for benchmarks).
+pub fn debug_last_block_sync_ns(world: &World) -> u64 {
+    world.cache.last_block_sync_ns
+}
