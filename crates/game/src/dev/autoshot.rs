@@ -149,6 +149,15 @@ fn run_autoshot(
     // Ignore wherever the real mouse is, for reproducible shots.
     if let Ok(mut w) = window.single_mut() {
         w.set_cursor_position(None);
+        // `CITYSIM_SHOT_SIZE=1920x1080`: the window size for the shot.
+        if first
+            && let Some((x, y)) = std::env::var("CITYSIM_SHOT_SIZE").ok().and_then(|s| {
+                let (a, b) = s.split_once('x')?;
+                Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))
+            })
+        {
+            w.resolution.set_physical_resolution(x, y);
+        }
     }
     if state.t > state.shot.delay + 60.0 {
         error!("autoshot timed out");

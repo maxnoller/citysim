@@ -19,13 +19,14 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use citysim_sim::{RoadKind, TripPurpose, Vehicle, VehicleId, World};
 
-use super::city_material::CityMaterial;
+use super::city_material::TAG_BRAKE;
 use super::noise::hash;
 use super::palette;
 use super::road_geom::{ROAD_Y, lane_offset};
 use super::scene::WorldMaterials;
 use super::vehicle_gen::{self, SHAPES};
 use crate::shared::{GameSet, SimWorld, WorldCamera};
+use bevy::mesh::MeshTag;
 
 /// If a vehicle moves further than this in one tick it teleported.
 const TELEPORT_M: f32 = 30.0;
@@ -131,7 +132,6 @@ impl VehicleVisual {
 
 /// Centre and heading of a vehicle's body whose front is at the sim's point.
 fn place(world: &World, v: &Vehicle, half: f32) -> (Vec2, f32) {
-    let right = |d: Vec2| Vec2::new(-d.y, d.x);
     if let Some(jm) = &v.junction
         && let Some(m) = world
             .traffic
@@ -154,11 +154,13 @@ fn place(world: &World, v: &Vehicle, half: f32) -> (Vec2, f32) {
     if let Some(s) = v.segment
         && let Some(seg) = world.roads.segments.get(s)
     {
-        let (pa, pb) = world.roads.segment_ends(s);
-        let (from, to) = if v.forward { (pa, pb) } else { (pb, pa) };
-        let (from, to) = (Vec2::from(from), Vec2::from(to));
-        let dir = (to - from).normalize_or(Vec2::X);
-        let p = from + dir * (v.progress - half) + right(dir) * vehicle_offset(seg.kind, v);
+        // Along the segment's curve, in the sim's lane; the rear of a car
+        // that has only just left a junction continues straight back.
+        let off = vehicle_offset(seg.kind, v);
+        let d = v.progress - half;
+        let pose = seg.pose_dir(v.forward, d.clamp(0.0, seg.length), off);
+        let dir = Vec2::from(pose.dir);
+        let p = Vec2::from(pose.pos) + dir * (d - d.clamp(0.0, seg.length));
         return (p, dir.y.atan2(dir.x));
     }
     let dir = Vec2::from_angle(v.heading);
@@ -285,12 +287,7 @@ fn sync_vehicles(
     mats: Res<WorldMaterials>,
     mut state: Local<SyncState>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
-    mut q: Query<(
-        &mut VehicleVisual,
-        &mut Transform,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<CityMaterial>,
-    )>,
+    mut q: Query<(&mut VehicleVisual, &mut Transform, &mut Mesh3d, &mut MeshTag)>,
 ) {
     let cam = cams.single().map_or(Vec3::ZERO, |c| c.translation());
     let world = &sim.world;
@@ -348,6 +345,7 @@ fn sync_vehicles(
                         vis,
                         Mesh3d(mesh),
                         MeshMaterial3d(mats.lit.clone()),
+                        MeshTag::new(0),
                         Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(-h)),
                     ))
                     .id();
@@ -355,14 +353,12 @@ fn sync_vehicles(
             }
         }
     }
-    for (mut vis, mut t, mut mesh, mut mat) in &mut q {
+    for (mut vis, mut t, mut mesh, mut tag) in &mut q {
         if vis.shown_brake != Some(vis.brake) {
             vis.shown_brake = Some(vis.brake);
-            mat.0 = if vis.brake {
-                mats.lit_brake.clone()
-            } else {
-                mats.lit.clone()
-            };
+            // A tag, not a second material: swapping materials would make
+            // the renderer re-specialise the car.
+            *tag = MeshTag::new(if vis.brake { TAG_BRAKE } else { 0 });
         }
         let p = vis.prev.0.lerp(vis.cur.0, alpha);
         let h = lerp_angle(vis.prev.1, vis.cur.1, alpha);

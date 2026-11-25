@@ -16,8 +16,8 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use citysim_sim::{
-    BuildingId, CELL_SIZE, Cell, CellRect, Command, CommandError, NodeId, Outcome, SegmentId, TICKS_PER_SECOND, World,
-    Zone,
+    BuildingId, CELL_SIZE, Cell, CellRect, CellRef, Command, CommandError, NodeId, Outcome, SegmentId,
+    TICKS_PER_SECOND, World, Zone,
 };
 
 // ---------------------------------------------------------------- ordering
@@ -90,7 +90,7 @@ impl SimClock {
 }
 
 /// A command for the sim; applied in `GameSet::Sim`, result in `LastCommand`.
-#[derive(Message, Debug, Clone, Copy)]
+#[derive(Message, Debug, Clone)]
 pub struct SimCommand(pub Command);
 
 /// Result of the most recently applied `SimCommand`.
@@ -119,6 +119,16 @@ pub enum ActiveTool {
 /// over UI (`PointerOverUi`). Computed by shared from the `WorldCamera` ray.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HoveredCell(pub Option<Cell>);
+
+/// The ground point under the mouse (sim metres) and the zoning cell there
+/// (on whatever lattice owns that spot; `None` where there is no zoning
+/// cell). `None` under the same conditions as [`HoveredCell`]. Computed by
+/// shared together with it.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct HoveredPoint {
+    pub pos: Option<[f32; 2]>,
+    pub zone_cell: Option<CellRef>,
+}
 
 /// True while the mouse is over a UI element (written by ui).
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -159,6 +169,10 @@ pub struct ToolPreview {
     /// Affected cells (valid: from the preview; invalid road: the straight
     /// line's cells if it is straight, else empty).
     pub cells: Vec<Cell>,
+    /// Zoning tools: the zoning cells that would change, on any lattice
+    /// (`Preview::zone_cells`). When not empty gfx draws these (rotated
+    /// along their roads) instead of `cells`.
+    pub zone_cells: Vec<CellRef>,
     /// `None` when the command would succeed.
     pub error: Option<CommandError>,
     /// Money it would cost.
@@ -485,6 +499,18 @@ pub fn world_to_cell(v: Vec3) -> Cell {
     Cell::from_pos(world_to_sim(v))
 }
 
+/// Corners of a zoning cell on any lattice (inset by `inset` metres) at
+/// `height`, in order around the edge; `None` for an unknown lattice.
+pub fn zone_cell_corners(world: &World, c: CellRef, inset: f32, height: f32) -> Option<[Vec3; 4]> {
+    let q = world.zoning.cell_corners(c)?;
+    let center = q.iter().fold(Vec2::ZERO, |a, p| a + Vec2::from(*p)) * 0.25;
+    Some(q.map(|p| {
+        let p = Vec2::from(p);
+        let p = p + (center - p).normalize_or_zero() * inset * std::f32::consts::SQRT_2;
+        Vec3::new(p.x, height, p.y)
+    }))
+}
+
 /// Corners of a cell (inset by `inset` metres) at `height`, in order around
 /// the edge.
 pub fn cell_corners(c: Cell, inset: f32, height: f32) -> [Vec3; 4] {
@@ -525,6 +551,7 @@ impl Plugin for SharedPlugin {
         .init_resource::<LastCommand>()
         .init_resource::<ActiveTool>()
         .init_resource::<HoveredCell>()
+        .init_resource::<HoveredPoint>()
         .init_resource::<PointerOverUi>()
         .init_resource::<CameraInputBlocked>()
         .init_resource::<ToolPreview>()
@@ -570,11 +597,11 @@ fn apply_commands(
     time: Res<Time<Real>>,
 ) {
     for SimCommand(cmd) in cmds.read() {
-        let res = sim.world.apply(*cmd);
+        let res = sim.world.apply(cmd.clone());
         if let Err(e) = &res {
             debug!("command {cmd:?} rejected: {e}");
         }
-        last.result = Some((*cmd, res));
+        last.result = Some((cmd.clone(), res));
         last.at = time.elapsed_secs();
     }
 }
@@ -583,9 +610,12 @@ fn compute_hover(
     window: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     over_ui: Res<PointerOverUi>,
+    sim: Res<SimWorld>,
     mut hovered: ResMut<HoveredCell>,
+    mut point: ResMut<HoveredPoint>,
 ) {
     let mut cell = None;
+    let mut ground = None;
     if !over_ui.0
         && let Ok(window) = window.single()
         && let Some(pos) = window.cursor_position()
@@ -595,6 +625,11 @@ fn compute_hover(
     {
         let c = world_to_cell(hit);
         cell = c.in_bounds().then_some(c);
+        ground = cell.map(|_| world_to_sim(hit));
     }
     hovered.set_if_neq(HoveredCell(cell));
+    point.set_if_neq(HoveredPoint {
+        pos: ground,
+        zone_cell: ground.and_then(|p| sim.world.zoning.cell_at(p)),
+    });
 }

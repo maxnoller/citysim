@@ -1,6 +1,7 @@
 //! GFX: everything drawn in 3D, and the camera. Talks to the rest of the
 //! game only through `crate::shared` (never import from `crate::ui`).
 
+mod bench;
 mod building_gen;
 mod buildings;
 mod camera;
@@ -8,6 +9,7 @@ mod city_material;
 mod cursor;
 mod daynight;
 mod guides;
+mod land;
 mod loading;
 mod lot_props;
 mod lots;
@@ -16,8 +18,10 @@ mod noise;
 mod overlay;
 mod palette;
 mod props;
+mod record;
 mod road_geom;
 mod road_ghost;
+mod road_tool;
 mod roads;
 mod scene;
 mod signals;
@@ -61,6 +65,10 @@ impl Plugin for GfxPlugin {
             guides::GuidesPlugin,
             smoke::SmokePlugin,
             loading::LoadingPlugin,
+            land::LandPlugin,
+            road_tool::RoadToolPlugin,
+            bench::BenchPlugin,
+            record::RecordPlugin,
         ));
     }
 }
@@ -112,6 +120,7 @@ mod reload_tests {
             .insert_resource(OverlayMode::Zones)
             .insert_resource(ActiveTool::Inspect)
             .add_plugins((
+                super::land::LandPlugin,
                 super::roads::RoadsPlugin,
                 super::zones::ZonesPlugin,
                 super::buildings::BuildingsPlugin,
@@ -121,12 +130,15 @@ mod reload_tests {
         let lit = app
             .world_mut()
             .resource_mut::<Assets<super::city_material::CityMaterial>>()
-            .add(super::city_material::city_material(StandardMaterial::default()));
+            .add(super::city_material::city_material(
+                StandardMaterial::default(),
+                Handle::default(),
+            ));
         app.insert_resource(WorldMaterials {
             lit: lit.clone(),
-            lit_brake: lit.clone(),
             ground: lit,
             sky: Handle::default(),
+            day: Handle::default(),
         });
         app
     }

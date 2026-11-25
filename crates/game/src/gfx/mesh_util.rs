@@ -59,6 +59,9 @@ pub struct MeshBuilder {
     pub lod: bool,
     /// Smoke emitters (chimney tops) in model space, for `smoke`.
     pub emitters: Vec<Vec3>,
+    /// Driveways meeting the lot's front edge (`+z`): their model-space x
+    /// ranges, so street furniture keeps clear of them.
+    pub driveways: Vec<(f32, f32)>,
 }
 
 impl MeshBuilder {

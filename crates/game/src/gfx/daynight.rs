@@ -12,7 +12,9 @@ use bevy::light::GlobalAmbientLight;
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 
-use super::city_material::{CityMaterial, SkyMaterial};
+use bevy::render::storage::ShaderBuffer;
+
+use super::city_material::{DayParams, SkyMaterial};
 use super::palette::{self, mix};
 use super::roads::{LampPoolMesh, LampPools};
 use super::scene::{Bounce, Sun, WorldMaterials, quality_settings};
@@ -133,7 +135,7 @@ fn keys() -> [Key; 5] {
             glow: c(0x34436E),
             glow_strength: 0.25,
             ambient: Color::srgb(0.42, 0.55, 1.0),
-            ambient_brightness: 330.0,
+            ambient_brightness: 210.0,
         },
         Key {
             elevation: -6.0,
@@ -143,7 +145,7 @@ fn keys() -> [Key; 5] {
             glow: c(0xB0707A),
             glow_strength: 0.5,
             ambient: Color::srgb(0.62, 0.7, 0.95),
-            ambient_brightness: 560.0,
+            ambient_brightness: 430.0,
         },
         Key {
             elevation: -0.5,
@@ -155,7 +157,7 @@ fn keys() -> [Key; 5] {
             // Warmth goes to the sky; the ground light stays nearly neutral
             // so grass reads green, not brown, at dawn and dusk.
             ambient: Color::srgb(0.86, 0.87, 0.94),
-            ambient_brightness: 860.0,
+            ambient_brightness: 680.0,
         },
         Key {
             elevation: 7.0,
@@ -240,7 +242,7 @@ pub fn day_light(hour: f32) -> DayLight {
     let (light_dir, light_color, light_lux) = if elevation > -4.0 {
         // A low sun still lights the town well (from about 40 % just above
         // the horizon), in a soft peach rather than deep orange.
-        let k = smoothstep(-4.0, 4.0, elevation) * 0.42 + smoothstep(4.0, 20.0, elevation) * 0.58;
+        let k = smoothstep(-4.0, 4.0, elevation) * 0.55 + smoothstep(4.0, 20.0, elevation) * 0.45;
         let warm = smoothstep(2.0, 22.0, elevation);
         let color = mix(Color::srgb_u32(0xFFC594), palette::SUN, warm);
         // Keep shadows from going infinitely long at the horizon.
@@ -248,7 +250,7 @@ pub fn day_light(hour: f32) -> DayLight {
         (-d, color, 6_200.0 * k)
     } else {
         let k = ((-4.0 - elevation) / 8.0).clamp(0.0, 1.0);
-        (-to_moon, Color::srgb(0.62, 0.74, 1.0), 1_500.0 * k)
+        (-to_moon, Color::srgb(0.62, 0.74, 1.0), 1_000.0 * k)
     };
     DayLight {
         hour,
@@ -323,7 +325,7 @@ fn apply_materials(
     light: Res<DayLight>,
     quality: Res<GraphicsQuality>,
     mats: Option<Res<WorldMaterials>>,
-    mut city: ResMut<Assets<CityMaterial>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut sky: ResMut<Assets<SkyMaterial>>,
     pools: Option<Res<LampPools>>,
     mut std_mats: ResMut<Assets<StandardMaterial>>,
@@ -363,12 +365,15 @@ fn apply_materials(
         let k = light.night * 0.42;
         m.base_color = Color::linear_rgb(1.0 * k, 0.72 * k, 0.4 * k);
     }
-    for h in mats.city_handles() {
-        if let Some(mut m) = city.get_mut(h) {
-            m.extension.params.night = light.night;
-            m.extension.params.windows = light.windows;
-            m.extension.params.clouds = clouds;
-        }
+    let day = DayParams {
+        night: light.night,
+        windows: light.windows,
+        clouds,
+        ..default()
+    };
+    if let Some(mut b) = buffers.get_mut(&mats.day) {
+        b.clear();
+        b.extend_from_slice(&day.to_buffer());
     }
     if let Some(mut m) = sky.get_mut(&mats.sky) {
         let p = &mut m.extension.params;
@@ -408,7 +413,9 @@ mod tests {
         for i in 1..=24 * 20 {
             let d = day_light(i as f32 / 20.0);
             assert!((d.elevation - prev.elevation).abs() < 4.0, "{}", d.hour);
-            assert!((d.light_lux - prev.light_lux).abs() < 400.0, "{}", d.hour);
+            // A low sun lights the town well, so it brightens quickly (but
+            // without a jump) as it clears the horizon.
+            assert!((d.light_lux - prev.light_lux).abs() < 500.0, "{}", d.hour);
             assert!(d.light_dir.y < 0.0, "light from below at {}", d.hour);
             prev = d;
         }
