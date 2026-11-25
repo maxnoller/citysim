@@ -12,6 +12,8 @@ use super::format;
 use super::theme::{self as t, UiFonts, icon};
 use super::tools::ToolState;
 use super::widgets::{ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, label, layout, panel, spawn_button};
+use citysim_sim::Zone;
+
 use crate::shared::{ActiveTool, BulldozeMode, GameSet, RoadChoice, RoadMode, ToolModes, ZoneMode};
 
 pub struct ToolOptsPlugin;
@@ -41,9 +43,6 @@ struct OptsRoot;
 
 #[derive(Component)]
 struct BlockLabel;
-
-#[derive(Component)]
-struct KeysLabel;
 
 #[derive(Component)]
 struct PriceLabel(RoadChoice);
@@ -124,20 +123,38 @@ pub fn spawn_opts(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 Node {
                     min_width: px(74),
                     margin: UiRect::horizontal(px(t::S2)),
+                    justify_content: JustifyContent::Center,
                     ..default()
                 },
-                TextLayout::justify(Justify::Center),
             ));
             stepper(s, fonts, UiAction::BlockSize(1), icon::PLUS, "Bigger blocks", "]");
         });
-        // Zone modes.
+        // Zone types and modes.
         section(bar, Section::Zone, |s| {
+            for (zone, desc) in [
+                (
+                    Some(Zone::Residential),
+                    "Homes. Residents need jobs and a road to drive on.",
+                ),
+                (
+                    Some(Zone::Commercial),
+                    "Shops and offices. Provide jobs, need customers.",
+                ),
+                (
+                    Some(Zone::Industrial),
+                    "Factories. Many jobs; keep them away from homes.",
+                ),
+                (None, "Remove zoning from empty cells."),
+            ] {
+                super::toolbar::spawn_zone_item(s, fonts, zone, desc);
+            }
+            s.spawn(super::widgets::vdivider(26.0));
             mode_button(
                 s,
                 fonts,
                 UiAction::ZoneMode(ZoneMode::Rect),
                 icon::SCAN,
-                "Rectangle",
+                "",
                 Tooltip {
                     title: "Zone a rectangle",
                     desc: "Drag a rectangle; only land near a road is zoned.",
@@ -150,7 +167,7 @@ pub fn spawn_opts(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 fonts,
                 UiAction::ZoneMode(ZoneMode::Frontage),
                 icon::ROUTE,
-                "Along road",
+                "",
                 Tooltip {
                     title: "Zone along a road",
                     desc: "Click one side of a road to zone it between two junctions, or drag along a road.",
@@ -163,7 +180,7 @@ pub fn spawn_opts(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 fonts,
                 UiAction::ZoneMode(ZoneMode::Fill),
                 icon::PAINT_BUCKET,
-                "Fill block",
+                "",
                 Tooltip {
                     title: "Fill a block",
                     desc: "Click inside a block enclosed by roads to zone all of it.",
@@ -233,14 +250,6 @@ pub fn spawn_opts(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 },
             );
         });
-        bar.spawn((
-            label(fonts, "", t::FONT_CAPTION + 0.5, t::W_REGULAR, t::TEXT_FAINT),
-            KeysLabel,
-            Node {
-                margin: UiRect::new(px(t::S3), px(t::S3), px(0), px(0)),
-                ..default()
-            },
-        ));
     });
 }
 
@@ -257,6 +266,8 @@ fn section(p: &mut ChildSpawnerCommands, s: Section, f: impl FnOnce(&mut ChildSp
     .with_children(f);
 }
 
+/// A mode button: icon and label, or icon only when `text` is empty (the
+/// tooltip names it).
 fn mode_button(
     p: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -265,6 +276,23 @@ fn mode_button(
     text: &'static str,
     tip: Tooltip,
 ) {
+    let node = if text.is_empty() {
+        Node {
+            width: px(36),
+            height: px(34),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        }
+    } else {
+        Node {
+            height: px(34),
+            padding: UiRect::new(px(t::S3 + 1.0), px(t::S4 - 1.0), px(0), px(0)),
+            column_gap: px(t::S2 + 2.0),
+            align_items: AlignItems::Center,
+            ..default()
+        }
+    };
     spawn_button(
         p,
         UiButton {
@@ -272,29 +300,30 @@ fn mode_button(
             kind: ButtonKind::Segment,
             accent: t::ACCENT,
         },
-        Node {
-            height: px(34),
-            padding: UiRect::new(px(t::S3 + 1.0), px(t::S4 - 1.0), px(0), px(0)),
-            column_gap: px(t::S2 + 2.0),
-            align_items: AlignItems::Center,
-            ..default()
-        },
+        node,
         Some(tip),
         |b, id| {
+            let size = if text.is_empty() {
+                t::ICON_MD - 1.0
+            } else {
+                t::ICON_SM + 1.0
+            };
             b.spawn((
-                super::widgets::icon(fonts, glyph, t::ICON_SM + 1.0, t::TEXT_MUTED),
+                super::widgets::icon(fonts, glyph, size, t::TEXT_MUTED),
                 ButtonFg {
                     owner: id,
                     base: t::TEXT_MUTED,
                 },
             ));
-            b.spawn((
-                label(fonts, text, t::FONT_BODY, t::W_MEDIUM, t::TEXT),
-                ButtonFg {
-                    owner: id,
-                    base: t::TEXT,
-                },
-            ));
+            if !text.is_empty() {
+                b.spawn((
+                    label(fonts, text, t::FONT_BODY, t::W_MEDIUM, t::TEXT),
+                    ButtonFg {
+                        owner: id,
+                        base: t::TEXT,
+                    },
+                ));
+            }
         },
     );
 }
@@ -396,20 +425,6 @@ fn stepper(
     );
 }
 
-/// Modifier keys line for the current tool and mode.
-pub fn keys_text(tool: ActiveTool, modes: ToolModes) -> &'static str {
-    match tool {
-        ActiveTool::Road => match modes.road {
-            RoadMode::Path => "Alt: no snap · Backspace: last corner · Ctrl+Z: undo",
-            RoadMode::Block => "Alt: no snap · [ ]: block size · Ctrl+Z: undo",
-            RoadMode::Junction => "Click a junction to switch its control",
-        },
-        ActiveTool::Zone(_) => "Z: zone type · Tab: mode · Ctrl+Z: undo",
-        ActiveTool::Bulldoze => "Tab: mode · Right-click: cancel",
-        ActiveTool::Inspect => "",
-    }
-}
-
 #[allow(clippy::type_complexity)]
 fn update_opts(
     tool: Res<ActiveTool>,
@@ -417,11 +432,7 @@ fn update_opts(
     state: Res<ToolState>,
     mut root: Query<&mut Node, (With<OptsRoot>, Without<Section>)>,
     mut sections: Query<(&Section, &mut Node), Without<OptsRoot>>,
-    mut texts: ParamSet<(
-        Query<&mut Text, With<BlockLabel>>,
-        Query<&mut Text, With<KeysLabel>>,
-        Query<(&mut Text, &PriceLabel)>,
-    )>,
+    mut texts: ParamSet<(Query<&mut Text, With<BlockLabel>>, Query<(&mut Text, &PriceLabel)>)>,
     mut first: Local<bool>,
 ) {
     if !tool.is_changed() && !modes.is_changed() && !state.is_changed() && *first {
@@ -462,13 +473,7 @@ fn update_opts(
             tx.0 = block.clone();
         }
     }
-    let keys = keys_text(*tool, *modes);
-    for mut tx in &mut texts.p1() {
-        if tx.0 != keys {
-            tx.0 = keys.into();
-        }
-    }
-    for (mut tx, p) in &mut texts.p2() {
+    for (mut tx, p) in &mut texts.p1() {
         let s = format::money(road_price(p.0));
         if tx.0 != s {
             tx.0 = s;

@@ -546,6 +546,10 @@ fn nearest_on_guide(g: &GuideLine, p: [f32; 2]) -> Option<Cell> {
 /// snapping off only that rule applies).
 pub fn snap_leg(index: &RoadIndex, from: Cell, cursor: [f32; 2], radius: f32, enabled: bool) -> Snap {
     let start = from.center();
+    // On the corner itself: no leg yet (the next click there ends the path).
+    if geom::dist(cursor, start) < CELL_SIZE * 0.6 {
+        return Snap::plain(from, SnapTarget::None);
+    }
     let rel = geom::sub(cursor, start);
     // The plain ray point nearest the cursor.
     let mut plain: Option<(f32, Cell, (i32, i32))> = None;

@@ -198,8 +198,11 @@ impl Plugin for ToolsPlugin {
     }
 }
 
-fn ctrl(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+/// Ctrl held, or pressed / released this frame (a fast Ctrl+Z can press
+/// and release both keys within one slow frame).
+pub fn ctrl(keys: &ButtonInput<KeyCode>) -> bool {
+    let k = [KeyCode::ControlLeft, KeyCode::ControlRight];
+    keys.any_pressed(k) || keys.any_just_pressed(k) || keys.any_just_released(k)
 }
 
 fn alt(keys: &ButtonInput<KeyCode>) -> bool {
@@ -408,6 +411,9 @@ pub fn pending(tool: ActiveTool, modes: ToolModes, state: &ToolState, hovered: O
         ActiveTool::Inspect => Pending::None,
         ActiveTool::Road => match modes.road {
             RoadMode::Path => {
+                if state.path.is_empty() {
+                    return Pending::None;
+                }
                 let mut points = state.path.clone();
                 let placed = points.len();
                 if let Some(c) = snapped.filter(|_| hovered.is_some() || state.busy()) {
@@ -669,6 +675,7 @@ fn commit(
     state.batch_frame = !single;
     for &cmd in &plan.eval.cmds {
         state.sent = Some(cmd);
+        info!("tool sends {cmd:?}");
         out.write(SimCommand(cmd));
     }
     toast
@@ -729,6 +736,17 @@ fn use_tool(
     state.batch_frame = false;
     let state = state.as_mut();
     let undo_asked = actions.read().any(|a| *a == UiAction::Undo);
+    if mouse.just_pressed(MouseButton::Left) || mouse.just_released(MouseButton::Left) {
+        info!(
+            "tool mouse pressed={} released={} hovered={:?} snap={:?} action={:?} path={:?}",
+            mouse.just_pressed(MouseButton::Left),
+            mouse.just_released(MouseButton::Left),
+            hovered.0,
+            state.snap.as_ref().map(|s| (s.cell, s.target)),
+            state.action,
+            state.path
+        );
+    }
     if ui.menu_open {
         state.reset();
         return;
