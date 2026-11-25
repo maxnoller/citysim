@@ -10,16 +10,22 @@ mod budget;
 mod context;
 mod controls;
 mod demand;
+mod fiscal;
 mod format;
 mod hud;
 mod legend;
+mod loading;
 mod menu;
+mod plan;
 mod pointer;
 mod save_load;
+mod settings;
 mod shots;
+mod snap;
 mod theme;
 mod toasts;
 mod toolbar;
+mod toolopts;
 mod tools;
 mod tooltip;
 mod widgets;
@@ -42,6 +48,10 @@ pub struct UiState {
     pub hint_visible: bool,
     /// Zone type the Zone button selects.
     pub last_zone: Option<Zone>,
+    /// Settings card open (inside the pause menu).
+    pub settings_open: bool,
+    /// Index into `settings::UI_SCALES`.
+    pub ui_scale: usize,
 }
 
 impl Default for UiState {
@@ -52,6 +62,8 @@ impl Default for UiState {
             paused_before_menu: false,
             hint_visible: false,
             last_zone: Some(Zone::Residential),
+            settings_open: false,
+            ui_scale: 1,
         }
     }
 }
@@ -70,6 +82,7 @@ impl Plugin for UiPlugin {
                 save_load::SaveLoadPlugin,
                 hud::HudPlugin,
                 toolbar::ToolbarPlugin,
+                toolopts::ToolOptsPlugin,
                 demand::DemandPlugin,
                 context::ContextPlugin,
                 legend::LegendPlugin,
@@ -78,6 +91,7 @@ impl Plugin for UiPlugin {
                 menu::MenuPlugin,
                 tooltip::TooltipPlugin,
             ))
+            .add_plugins((fiscal::FiscalPlugin, settings::SettingsPlugin, loading::LoadingPlugin))
             .add_systems(PostStartup, fallback_ui_camera)
             .add_systems(PreUpdate, scale_ui);
         if let Some(dir) = std::env::var_os("CITYSIM_UI_SHOTS").filter(|d| !d.is_empty()) {
@@ -118,15 +132,20 @@ pub fn ui_scale_for(size: Vec2) -> f32 {
 fn scale_ui(
     mut resized: MessageReader<WindowResized>,
     window: Query<&Window, With<PrimaryWindow>>,
+    state: Res<UiState>,
     mut scale: ResMut<UiScale>,
     mut first: Local<bool>,
 ) {
-    if resized.read().count() == 0 && *first {
+    if resized.read().count() == 0 && *first && !state.is_changed() {
         return;
     }
     *first = true;
     if let Ok(w) = window.single() {
-        let s = ui_scale_for(Vec2::new(w.width(), w.height()));
+        let mult = settings::UI_SCALES[state.ui_scale.min(settings::UI_SCALES.len() - 1)].0;
+        let size = Vec2::new(w.width(), w.height());
+        // Larger than the window can hold would cut panels off: the design
+        // size must always fit.
+        let s = (ui_scale_for(size) * mult).min((size / theme::DESIGN_SIZE).min_element().max(0.6));
         if (scale.0 - s).abs() > 1e-3 {
             scale.0 = s;
         }

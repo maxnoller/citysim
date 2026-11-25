@@ -22,6 +22,7 @@ use slotmap::new_key_type;
 
 use crate::derived::{Access, access_pos};
 use crate::idmap::key_index;
+use crate::junction::{self, JunctionState, Turn};
 use crate::path::{self, Target};
 use crate::roads::RoadSegment;
 use crate::side::SideTable;
@@ -32,10 +33,12 @@ new_key_type! {
     pub struct VehicleId;
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Vehicle {
     /// Position in sim metres, on the segment centre line (renderers offset
-    /// to the driving lane using `heading`).
+    /// to the driving lane using `heading` and `lane`, see
+    /// `RoadKind::lane_offset_m`). Inside a junction (`junction` is
+    /// `Some`) it is the exact point on the turn path, lane offset included.
     pub pos: [f32; 2],
     /// Heading in radians, `atan2(dy, dx)` in sim space.
     pub heading: f32,
@@ -58,6 +61,49 @@ pub struct Vehicle {
     /// Stable random number for purely visual variation.
     #[serde(default)]
     pub seed: u32,
+    /// Lane on the current segment direction: 0 is the kerb-side (right)
+    /// lane, 1 the next one left (avenues and the highway have two).
+    pub lane: u8,
+    /// Lateral position still to cover after a lane change, in lanes
+    /// (+1: the car came from the lane to its left, -1: from the right);
+    /// eases to 0 over about a second. Renderers add it to `lane`.
+    pub lane_shift: f32,
+    /// Set while the car is inside a junction box.
+    pub junction: Option<JunctionMove>,
+    /// Slowing down (brake lights).
+    pub braking: bool,
+    /// Allowed into the junction ahead at the last tick (cars that must
+    /// give way yield to it).
+    pub go: bool,
+}
+
+impl Vehicle {
+    /// Standing (or crawling) still.
+    pub fn stopped(&self) -> bool {
+        self.speed < balance::WAIT_SPEED
+    }
+}
+
+/// A vehicle's way through a junction box. While it is set, the vehicle's
+/// `segment` / `progress` stay at the end of the segment it left; `pos` and
+/// `heading` follow the movement's curve
+/// (`junction::JunctionState::movements[movement]`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct JunctionMove {
+    pub node: NodeId,
+    /// Segment the vehicle came from and the one it turns into.
+    pub from: SegmentId,
+    pub to: SegmentId,
+    /// Direction it will drive `to` in (`a -> b`).
+    pub to_forward: bool,
+    /// Index into the junction's `movements`.
+    pub movement: u16,
+    pub turn: Turn,
+    pub from_lane: u8,
+    pub to_lane: u8,
+    /// Metres travelled along the turn so far, and its length.
+    pub distance: f32,
+    pub length: f32,
 }
 
 /// Why a car is on the road.
@@ -112,50 +158,6 @@ pub struct Departure {
     pub requested_tick: u64,
 }
 
-/// Junction control state per node slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct Junction {
-    /// Approaches outside the current phase may not enter before this tick
-    /// (last crossing + clearance time).
-    pub busy_until: u64,
-    /// Index (into the node's `segments`) of the approach that opened the
-    /// current phase; approaches parallel to it (straight across) share it.
-    pub last_served: u8,
-    /// Cars let through in the current phase.
-    #[serde(default)]
-    pub phase_count: u16,
-}
-
-/// Unit direction from node `n` along its `i`-th segment.
-fn approach_dir(roads: &RoadNetwork, n: NodeId, i: usize) -> [f32; 2] {
-    let node = &roads.nodes[n];
-    let Some(&s) = node.segments.get(i) else {
-        return [0.0, 0.0];
-    };
-    let other = roads.nodes[roads.segments[s].other(n)].pos;
-    let d = geom::sub(other, node.pos);
-    let l = geom::dot(d, d).sqrt().max(1e-6);
-    [d[0] / l, d[1] / l]
-}
-
-/// Do two approaches of a junction move in the same signal phase (they lie
-/// on one straight line, or are the same approach)?
-fn same_phase(roads: &RoadNetwork, n: NodeId, a: usize, b: usize) -> bool {
-    a == b || geom::cross(approach_dir(roads, n, a), approach_dir(roads, n, b)).abs() < 0.35
-}
-
-/// Is the move from segment `from` into segment `to` at node `n` a turn?
-fn is_turn(roads: &RoadNetwork, n: NodeId, from: SegmentId, to: SegmentId) -> bool {
-    let node = &roads.nodes[n];
-    let i = node.segments.iter().position(|&s| s == from);
-    let j = node.segments.iter().position(|&s| s == to);
-    match (i, j) {
-        // Straight on: the outgoing direction is opposite the incoming one.
-        (Some(i), Some(j)) => geom::dot(approach_dir(roads, n, i), approach_dir(roads, n, j)) > -0.9,
-        _ => true,
-    }
-}
-
 /// How a trip ended, reported to the household.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TripEnd {
@@ -177,8 +179,12 @@ pub(crate) type Ended = (Option<HouseholdId>, TripPurpose, TripEnd);
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TrafficState {
     pub trips: SideTable<VehicleId, Trip>,
-    /// Indexed by node slot (`idmap::key_index`).
-    pub junctions: Vec<Junction>,
+    /// Geometry, control and signal state per node (see `junction`).
+    /// Rebuilt when the road graph changes; settings and signal timers
+    /// survive edits that keep a junction's arms.
+    pub junction_states: SideTable<NodeId, JunctionState>,
+    /// `versions.roads` the junction states were built for.
+    pub junctions_version: u64,
     /// Trips waiting for a car to start (path budget or blocked driveway).
     pub pending: VecDeque<Departure>,
     /// Vehicles waiting for a new route.
@@ -201,11 +207,17 @@ pub struct TrafficState {
     pub congestion_share: f32,
     pub peak_congestion_today: f32,
     pub peak_congestion_yesterday: f32,
+    /// Gridlock breakers that fired (all time): a car stuck so long it was
+    /// taken off the road, and junction deadlocks that had to be cleared.
+    pub stuck_removed: u32,
+    pub deadlocks_resolved: u32,
+    /// Bumped whenever a junction's control changes (routing costs follow).
+    pub control_version: u64,
 }
 
-const DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
+pub(crate) const DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
 
-fn secs_to_ticks(s: f32) -> u64 {
+pub(crate) fn secs_to_ticks(s: f32) -> u64 {
     (s * TICKS_PER_SECOND as f32).round() as u64
 }
 
@@ -219,7 +231,7 @@ pub fn shortest_path(roads: &RoadNetwork, from: NodeId, to: NodeId) -> Option<Ve
     let mut scratch = path::PathScratch::default();
     let mut budget = i64::MAX;
     scratch
-        .search(roads, &[(from, 0.0)], Target::Node(to), &mut budget)
+        .search(roads, &[], &[(from, 0.0)], Target::Node(to), &mut budget)
         .map(|f| f.segments)
 }
 
@@ -250,7 +262,7 @@ fn resolve(world: &World, place: Place) -> Option<Access> {
     }
 }
 
-fn set_pose(roads: &RoadNetwork, v: &mut Vehicle) {
+pub(crate) fn set_pose(roads: &RoadNetwork, v: &mut Vehicle) {
     let Some(s) = v.segment else { return };
     let Some(seg) = roads.segments.get(s) else { return };
     let (pa, pb) = roads.segment_ends(s);
@@ -261,7 +273,7 @@ fn set_pose(roads: &RoadNetwork, v: &mut Vehicle) {
         0.0
     };
     v.pos = [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f];
-    v.heading = (to[1] - from[1]).atan2(to[0] - from[0]);
+    v.heading = libm::atan2f(to[1] - from[1], to[0] - from[0]);
 }
 
 fn route_valid(roads: &RoadNetwork, v: &Vehicle, dest: Option<Access>) -> bool {
@@ -299,7 +311,7 @@ fn queue_replan(traffic: &mut TrafficState, id: VehicleId, urgent: bool) {
     }
 }
 
-fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, ended: &mut Vec<Ended>) {
+pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, ended: &mut Vec<Ended>) {
     let household = world.vehicles.remove(id).and_then(|v| v.household);
     if let Some(trip) = world.traffic.trips.remove(id) {
         if let TripEnd::Arrived(s) | TripEnd::GaveUp(s) = end {
@@ -322,20 +334,50 @@ fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, ended: &mut Ve
 /// nothing changed).
 pub(crate) fn sync_network(world: &mut World, ended: &mut Vec<Ended>) {
     world.cache.ensure_roads(&world.roads, world.versions.roads);
-    let n = world.roads.nodes.slot_count();
-    if world.traffic.junctions.len() < n {
-        world.traffic.junctions.resize(n, Junction::default());
-    }
+    sync_junctions(world);
     if world.traffic.roads_version == world.versions.roads {
         return;
     }
     world.traffic.roads_version = world.versions.roads;
     let ids: Vec<VehicleId> = world.vehicles.keys().collect();
     for id in ids {
-        // Still where it thinks it is?
-        let v = &world.vehicles[id];
+        // Inside a junction box: keep the movement if the junction still
+        // has it, else put the car back at the stop line it came from.
         let mut ok = false;
-        if let Some(s) = v.segment
+        if let Some(jm) = world.vehicles[id].junction {
+            let kept = world.traffic.junction_states.get(jm.node).and_then(|j| {
+                let (a, b) = (j.arm_of(jm.from)?, j.arm_of(jm.to)?);
+                let m = j.movement(a, jm.from_lane, b)?;
+                Some((m, j.movements[m].length, j.movements[m].to_lane, j.arms[a].setback))
+            });
+            let seg_ok = world.roads.segments.contains_key(jm.from) && world.roads.segments.contains_key(jm.to);
+            let v = &mut world.vehicles[id];
+            match kept {
+                Some((m, length, to_lane, setback)) if seg_ok => {
+                    // The segment it left may have been cut or merged:
+                    // stay at its stop line.
+                    let from_len = world.roads.segments[jm.from].length;
+                    v.progress = (from_len - setback).clamp(0.0, from_len);
+                    let jm = v.junction.as_mut().expect("checked");
+                    jm.movement = m as u16;
+                    jm.length = length;
+                    jm.to_lane = to_lane;
+                    jm.distance = jm.distance.min(length);
+                    ok = true;
+                }
+                _ => {
+                    v.junction = None;
+                    if let Some(seg) = world.roads.segments.get(jm.from) {
+                        v.segment = Some(jm.from);
+                        v.progress = v.progress.min(seg.length);
+                        set_pose(&world.roads, v);
+                    }
+                }
+            }
+        }
+        let v = &world.vehicles[id];
+        if !ok
+            && let Some(s) = v.segment
             && let Some(seg) = world.roads.segments.get(s)
             && v.progress <= seg.length + 0.01
         {
@@ -368,11 +410,27 @@ pub(crate) fn sync_network(world: &mut World, ended: &mut Vec<Ended>) {
     }
 }
 
+/// Rebuild junction geometry / control for the current road graph (no-op
+/// when it did not change).
+pub(crate) fn sync_junctions(world: &mut World) {
+    if world.traffic.junctions_version == world.versions.roads {
+        return;
+    }
+    world.traffic.junctions_version = world.versions.roads;
+    let roads = &world.roads;
+    let states = &mut world.traffic.junction_states;
+    states.retain_keys(|n| roads.nodes.contains_key(n));
+    for n in roads.nodes.keys() {
+        let old = states.remove(n);
+        states.insert(n, junction::build_state(roads, n, old.as_ref()));
+    }
+}
+
 /// Put a vehicle on the segment under its position, keeping its heading.
 fn relocate(world: &mut World, id: VehicleId) -> bool {
     let v = &world.vehicles[id];
     let pos = v.pos;
-    let dir = [v.heading.cos(), v.heading.sin()];
+    let dir = [libm::cosf(v.heading), libm::sinf(v.heading)];
     let c = crate::Cell::from_pos(pos);
     let mut best: Option<(f32, SegmentId, f32)> = None;
     for y in c.y - 1..=c.y + 1 {
@@ -417,7 +475,7 @@ pub(crate) fn tick(world: &mut World) {
         world.traffic.peak_congestion_today = 0.0;
         world.traffic.trips_today = 0;
     }
-    move_vehicles(world, &mut ended);
+    crate::drive::step(world, &mut ended);
     let total = balance::PATH_EXPANSIONS_PER_TICK as i64;
     let mut budget = total;
     replan_some(world, &mut budget, &mut ended);
@@ -429,307 +487,6 @@ pub(crate) fn tick(world: &mut World) {
     for e in ended {
         households::trip_ended(world, e);
     }
-}
-
-struct Request {
-    node_slot: usize,
-    node: NodeId,
-    approach: usize,
-    order_idx: usize,
-    next_lane: usize,
-}
-
-fn move_vehicles(world: &mut World, ended: &mut Vec<Ended>) {
-    let now = world.time.tick;
-    let nlanes = world.roads.segments.slot_count() * 2;
-
-    // Lanes: vehicles grouped by (segment, direction), front first.
-    let mut order: Vec<(u32, f32, VehicleId)> = Vec::with_capacity(world.vehicles.len());
-    let mut lost: Vec<VehicleId> = Vec::new();
-    for (id, v) in world.vehicles.iter() {
-        match v.segment.filter(|&s| world.roads.segments.contains_key(s)) {
-            Some(s) => order.push((lane_of(s, v.forward) as u32, v.progress, id)),
-            None => lost.push(id),
-        }
-    }
-    for id in lost {
-        remove_vehicle(world, id, TripEnd::Vanished, ended);
-    }
-    order.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
-    let mut lane_rear = vec![f32::INFINITY; nlanes];
-    for &(lane, p, _) in &order {
-        let r = &mut lane_rear[lane as usize];
-        *r = r.min(p);
-    }
-
-    let World {
-        roads,
-        vehicles,
-        traffic,
-        ..
-    } = world;
-    let roads: &RoadNetwork = roads;
-
-    // Junction requests from lane fronts about to reach their end node.
-    let mut requests: Vec<Request> = Vec::new();
-    for (i, &(lane, _, id)) in order.iter().enumerate() {
-        if i > 0 && order[i - 1].0 == lane {
-            continue;
-        }
-        let v = &vehicles[id];
-        let Some(next) = next_step(roads, v) else { continue };
-        let seg = &roads.segments[v.segment.expect("in order")];
-        let d_end = seg.length - v.progress;
-        let reach = (v.speed + balance::ACCELERATION * DT).min(seg.speed_limit * 1.2) * DT;
-        if d_end > reach + balance::STOP_LINE_M + 0.05 {
-            continue;
-        }
-        if lane_rear[next.lane] < balance::MIN_GAP_M {
-            continue;
-        }
-        let approach = roads.nodes[next.node]
-            .segments
-            .iter()
-            .position(|&x| Some(x) == v.segment)
-            .unwrap_or(0);
-        requests.push(Request {
-            node_slot: key_index(next.node),
-            node: next.node,
-            approach,
-            order_idx: i,
-            next_lane: next.lane,
-        });
-    }
-    let mut granted = vec![false; order.len()];
-    let mut lane_taken: Vec<usize> = Vec::new();
-    requests.sort_by_key(|r| (r.node_slot, r.approach));
-    let mut k = 0;
-    while k < requests.len() {
-        let mut e = k;
-        while e < requests.len() && requests[e].node_slot == requests[k].node_slot {
-            e += 1;
-        }
-        let node = requests[k].node;
-        let deg = roads.nodes[node].segments.len();
-        if deg <= 2 {
-            for r in &requests[k..e] {
-                if !lane_taken.contains(&r.next_lane) {
-                    lane_taken.push(r.next_lane);
-                    granted[r.order_idx] = true;
-                }
-            }
-        } else {
-            // Signal-like phases: approaches on one straight line flow
-            // together for up to PHASE_MAX_CARS cars, then (after the
-            // clearance time) the next waiting approach gets its phase.
-            let j = &mut traffic.junctions[requests[k].node_slot];
-            let cur = (j.last_served as usize).min(deg - 1);
-            let reqs = &requests[k..e];
-            let in_phase = |a: usize| same_phase(roads, node, a, cur);
-            let any_in = reqs.iter().any(|r| in_phase(r.approach));
-            let others = reqs.iter().filter(|r| !in_phase(r.approach));
-            let waiting_others = others.clone().count() > 0;
-            let phase = if any_in && (j.phase_count < balance::PHASE_MAX_CARS || !waiting_others) {
-                if j.phase_count >= balance::PHASE_MAX_CARS {
-                    j.phase_count = 0;
-                }
-                Some(cur)
-            } else if waiting_others && j.busy_until <= now {
-                let pick = others
-                    .min_by_key(|r| (r.approach + deg - cur - 1) % deg)
-                    .expect("waiting");
-                j.last_served = pick.approach as u8;
-                j.phase_count = 0;
-                Some(pick.approach)
-            } else {
-                None
-            };
-            if let Some(p) = phase {
-                for r in reqs {
-                    if same_phase(roads, node, r.approach, p) && !lane_taken.contains(&r.next_lane) {
-                        lane_taken.push(r.next_lane);
-                        granted[r.order_idx] = true;
-                        j.phase_count = j.phase_count.saturating_add(1);
-                        j.busy_until = now + secs_to_ticks(balance::JUNCTION_CLEARANCE_S);
-                    }
-                }
-            }
-        }
-        k = e;
-    }
-
-    // Move, lane by lane, front to back.
-    let mut done: Vec<(VehicleId, TripEnd)> = Vec::new();
-    let replan_ticks = secs_to_ticks(balance::REPLAN_AFTER_WAIT_S) as u32;
-    let stuck_ticks = secs_to_ticks(balance::STUCK_REMOVE_AFTER_S) as u32;
-    let mut i = 0;
-    while i < order.len() {
-        let lane = order[i].0;
-        let mut leader: Option<f32> = None;
-        while i < order.len() && order[i].0 == lane {
-            let id = order[i].2;
-            let is_front = leader.is_none();
-            let v = &mut vehicles[id];
-            let s = v.segment.expect("in order");
-            let seg = &roads.segments[s];
-            let len = seg.length;
-            let driver = 1.0 + balance::DRIVER_SPEED_VARIATION * ((v.seed % 1001) as f32 / 500.0 - 1.0);
-            let mut target = seg.speed_limit * driver * path::vdf(seg.congestion_in(v.forward));
-            let d_end = len - v.progress;
-            let trip = traffic.trips.get_mut(id);
-            let mut cross: Option<Next> = None;
-            let mut arrive_at: Option<f32> = None;
-            if v.route.is_empty() {
-                let dest = trip.as_ref().and_then(|t| if t.needs_route { None } else { t.dest });
-                match dest {
-                    Some(d) if d.segment == s => {
-                        let stop = if v.forward { d.from_a } else { len - d.from_a };
-                        arrive_at = Some(stop.clamp(0.0, len));
-                    }
-                    _ if trip.is_none() => arrive_at = Some(len),
-                    _ => {}
-                }
-            }
-            if let Some(lp) = leader {
-                target = target.min(follow_speed(lp - v.progress));
-                if let Some(stop) = arrive_at {
-                    target = target.min(stop_speed(stop - v.progress + 3.0));
-                }
-            } else if v.route.is_empty() {
-                target = match arrive_at {
-                    Some(stop) if trip.is_some() => target.min(stop_speed(stop - v.progress + 3.0)),
-                    Some(_) => target,
-                    None => target.min(stop_speed(d_end - balance::STOP_LINE_M)),
-                };
-            } else {
-                let next = next_step(roads, v);
-                match next {
-                    Some(n) if granted[i] => {
-                        target = target.min(follow_speed(d_end + lane_rear[n.lane].min(1e6)));
-                        cross = Some(n);
-                    }
-                    Some(n) => {
-                        let deg = roads.nodes[n.node].segments.len();
-                        let eta = d_end / v.speed.max(1.0);
-                        let open = deg <= 2
-                            || traffic.junctions.get(key_index(n.node)).is_some_and(|j| {
-                                let me = roads.nodes[n.node].segments.iter().position(|&x| x == s).unwrap_or(0);
-                                (same_phase(roads, n.node, me, j.last_served as usize)
-                                    && j.phase_count < balance::PHASE_MAX_CARS)
-                                    || j.busy_until <= now + secs_to_ticks(eta)
-                            });
-                        let clear = lane_rear[n.lane] >= balance::MIN_GAP_M && open;
-                        if clear {
-                            target = target.min(follow_speed(d_end + lane_rear[n.lane].min(1e6)));
-                        } else {
-                            target = target.min(stop_speed(d_end - balance::STOP_LINE_M));
-                        }
-                        if deg >= 3 && is_turn(roads, n.node, s, n.segment) {
-                            let jv = balance::JUNCTION_SPEED;
-                            target = target.min((jv * jv + 2.0 * balance::BRAKING * d_end.max(0.0)).sqrt());
-                        }
-                    }
-                    None => target = target.min(stop_speed(d_end - balance::STOP_LINE_M)),
-                }
-            }
-            let speed = (v.speed + balance::ACCELERATION * DT).min(target).max(0.0);
-            let mut adv = speed * DT;
-            v.speed = speed;
-            let mut finished: Option<TripEnd> = None;
-            if let Some(stop) = arrive_at
-                && v.progress + adv >= stop - 0.05
-            {
-                let secs = trip
-                    .as_ref()
-                    .map_or(0.0, |t| (now - t.requested_tick.min(now)) as f32 * DT);
-                finished = Some(TripEnd::Arrived(secs));
-            }
-            if finished.is_none() {
-                if let Some(n) = cross {
-                    let overflow = (v.progress + adv - len).max(0.0);
-                    v.route.remove(0);
-                    v.segment = Some(n.segment);
-                    v.forward = n.forward;
-                    v.progress = overflow.min(roads.segments[n.segment].length);
-                    leader = Some(len + v.progress);
-                } else {
-                    if v.progress + adv > len - 0.01 {
-                        adv = (len - 0.01 - v.progress).max(0.0);
-                        v.speed = adv / DT;
-                    }
-                    v.progress += adv;
-                    leader = Some(v.progress);
-                }
-                set_pose(roads, v);
-            } else if !is_front {
-                leader = Some(v.progress);
-            }
-            if let Some(t) = trip {
-                if v.speed < balance::WAIT_SPEED {
-                    t.wait_ticks += 1;
-                } else {
-                    t.wait_ticks = 0;
-                }
-                if finished.is_none() {
-                    if t.wait_ticks >= stuck_ticks {
-                        let secs = (now - t.requested_tick.min(now)) as f32 * DT;
-                        finished = Some(TripEnd::GaveUp(secs));
-                    } else if t.wait_ticks > 0 && t.wait_ticks % replan_ticks == 0 && !t.queued {
-                        t.queued = true;
-                        traffic.replan.push_back(id);
-                    }
-                }
-            }
-            if let Some(f) = finished {
-                done.push((id, f));
-            }
-            i += 1;
-        }
-    }
-    for (id, f) in done {
-        remove_vehicle(world, id, f, ended);
-    }
-}
-
-/// Speed allowed when the car ahead (or a free lane start) is `gap` metres
-/// ahead.
-fn follow_speed(gap: f32) -> f32 {
-    ((gap - balance::MIN_GAP_M) / balance::FOLLOW_HEADWAY_S).max(0.0)
-}
-
-/// Speed from which the car can still stop within `d` metres.
-fn stop_speed(d: f32) -> f32 {
-    let d = d.max(0.0);
-    (2.0 * balance::BRAKING * d).sqrt().min(d / DT)
-}
-
-#[derive(Clone, Copy)]
-struct Next {
-    node: NodeId,
-    segment: SegmentId,
-    forward: bool,
-    lane: usize,
-}
-
-/// The node at the end of the current segment and the segment after it.
-fn next_step(roads: &RoadNetwork, v: &Vehicle) -> Option<Next> {
-    let seg = roads.segments.get(v.segment?)?;
-    let node = if v.forward { seg.b } else { seg.a };
-    let next = *v.route.first()?;
-    let ns = roads.segments.get(next)?;
-    let forward = if ns.a == node {
-        true
-    } else if ns.b == node {
-        false
-    } else {
-        return None;
-    };
-    Some(Next {
-        node,
-        segment: next,
-        forward,
-        lane: lane_of(next, forward),
-    })
 }
 
 fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
@@ -745,6 +502,15 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         trip.queued = false;
         let to = trip.to;
         let Some(v) = world.vehicles.get(id) else { continue };
+        if v.junction.is_some() {
+            // Crossing a junction: its next segment is committed. Try
+            // again once it is out of the box.
+            if let Some(t) = world.traffic.trips.get_mut(id) {
+                t.queued = true;
+            }
+            world.traffic.replan.push_back(id);
+            continue;
+        }
         let Some(s) = v.segment.filter(|&s| world.roads.segments.contains_key(s)) else {
             continue;
         };
@@ -761,11 +527,14 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             } else {
                 let end = if v.forward { seg.b } else { seg.a };
                 let remaining = path::drive_time(seg, v.forward, seg.length - v.progress);
-                match world
-                    .cache
-                    .path
-                    .search(&world.roads, &[(end, remaining)], Target::Access(dest), budget)
-                {
+                let cache = &mut world.cache;
+                match cache.path.search(
+                    &world.roads,
+                    &cache.route_delay,
+                    &[(end, remaining)],
+                    Target::Access(dest),
+                    budget,
+                ) {
                     Some(found) => (found.segments, Some(found.last_node)),
                     None => {
                         remove_vehicle(world, id, TripEnd::Vanished, ended);
@@ -850,10 +619,10 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                     ),
                 ],
             };
-            match world
-                .cache
+            let cache = &mut world.cache;
+            match cache
                 .path
-                .search(&world.roads, &sources, Target::Access(to), budget)
+                .search(&world.roads, &cache.route_delay, &sources, Target::Access(to), budget)
             {
                 Some(found) => (found.first == from_seg.b, found.segments, Some(found.last_node)),
                 None => {
@@ -866,6 +635,18 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             from.from_a
         } else {
             from_seg.length - from.from_a
+        };
+        // Start on the road, not inside a junction box.
+        let progress = if world.cache.setbacks_key == Some(world.traffic.junctions_version) {
+            let (lo, hi) = crate::drive::lane_range(&world.cache.setbacks, from.segment, forward, from_seg.length);
+            let lo = if lo > 0.0 {
+                (lo + balance::NO_LANE_CHANGE_AFTER_BOX_M).min(hi)
+            } else {
+                lo
+            };
+            progress.clamp(lo, hi)
+        } else {
+            progress
         };
         if from.segment == to.segment && (to.from_a - from.from_a).abs() < 2.0 {
             ended.push((dep.household, dep.purpose, TripEnd::Arrived(0.0)));
@@ -891,6 +672,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             destination: last,
             household: dep.household,
             seed,
+            ..Vehicle::default()
         };
         set_pose(&world.roads, &mut v);
         let id = world.vehicles.insert(v);
@@ -923,6 +705,48 @@ fn update_loads(world: &mut World) {
             seg.load[RoadSegment::dir(v.forward)] += 1.0;
         }
     }
+    // Queues per approach, per-minute entry counts (auto control).
+    for j in world.traffic.junction_states.values_mut() {
+        j.queue.iter_mut().for_each(|q| *q = 0);
+    }
+    for v in world.vehicles.values() {
+        if !v.stopped() || v.junction.is_some() {
+            continue;
+        }
+        let Some(seg) = v.segment.and_then(|s| world.roads.segments.get(s)) else {
+            continue;
+        };
+        let end = if v.forward { seg.b } else { seg.a };
+        if let Some(j) = world.traffic.junction_states.get_mut(end)
+            && let Some(arm) = j.arm_of(v.segment.expect("checked"))
+        {
+            j.queue[arm] = j.queue[arm].saturating_add(1);
+        }
+    }
+    let minute = 60 * TICKS_PER_SECOND as u64;
+    if world.time.tick.is_multiple_of(minute) {
+        for j in world.traffic.junction_states.values_mut() {
+            j.peak_minute_today = j.peak_minute_today.max(j.entered_minute);
+            j.entered_minute = 0;
+        }
+    }
+    if world.time.tick_of_day == 0 {
+        for j in world.traffic.junction_states.values_mut() {
+            j.peak_minute_yesterday = j.peak_minute_today.max(j.entered_minute);
+            j.peak_minute_today = 0;
+            let busy = if j.busy {
+                j.peak_minute_yesterday >= balance::AUTO_PRIORITY_PER_MINUTE
+            } else {
+                j.peak_minute_yesterday >= balance::AUTO_SIGNAL_PER_MINUTE
+            };
+            if busy != j.busy {
+                j.busy = busy;
+                let setting = j.setting;
+                junction::set_setting(j, setting);
+                world.traffic.control_version += 1;
+            }
+        }
+    }
     let n = world.vehicles.len();
     let nseg = world.roads.segments.len();
     let jammed = world.roads.segments.values().filter(|s| s.congestion() > 0.8).count();
@@ -931,6 +755,18 @@ fn update_loads(world: &mut World) {
     t.peak_today = t.peak_today.max(n as u32);
     t.congestion_share = if nseg > 0 { jammed as f32 / nseg as f32 } else { 0.0 };
     t.peak_congestion_today = t.peak_congestion_today.max(t.congestion_share);
+}
+
+/// Debug counters: front cars refused entry at the stop line, by reason
+/// `[conflict in box, no room beyond, signal, yielding]` (not saved).
+pub fn debug_denials(world: &World) -> [u64; 4] {
+    world.cache.denials
+}
+
+/// Debug counters: junction entries by turn `[straight, right, left,
+/// u-turn]` (not saved).
+pub fn debug_turns(world: &World) -> [u64; 4] {
+    world.cache.turns
 }
 
 /// Queue a household-less trip between two positions (tests, tools).

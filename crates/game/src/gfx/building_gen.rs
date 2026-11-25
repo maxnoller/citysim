@@ -8,7 +8,8 @@
 use bevy::prelude::*;
 use citysim_sim::Zone;
 
-use super::mesh_util::MeshBuilder;
+use super::lot_props;
+use super::mesh_util::{Glow, MeshBuilder};
 use super::noise::Stream;
 use super::palette::{self, lin, mix, shade};
 use super::props;
@@ -121,12 +122,25 @@ impl Face {
     #[allow(clippy::too_many_arguments)]
     fn window(&self, m: &mut MeshBuilder, a: f32, b: f32, w: f32, h: f32, frame: Color, glass: Color) {
         let f = 0.1;
+        let r = wrand(self.at(a, b, 0.0));
         if m.lod {
-            self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, mix(glass, frame, 0.25));
+            m.glow(Glow::Window, r, |m| {
+                self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, mix(glass, frame, 0.25))
+            });
             return;
         }
         self.rect(m, a - w * 0.5 - f, a + w * 0.5 + f, b - f, b + h + f, 0.03, frame);
-        self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, glass);
+        m.glow(Glow::Window, r, |m| {
+            self.rect(m, a - w * 0.5, a + w * 0.5, b, b + h, 0.05, glass)
+        });
+    }
+
+    /// Glass rectangle lit at night as one window (`Window`) or as a shop
+    /// front (`Shop`, always lit after dark).
+    #[allow(clippy::too_many_arguments)]
+    fn lit_rect(&self, m: &mut MeshBuilder, kind: Glow, a0: f32, a1: f32, b0: f32, b1: f32, off: f32, color: Color) {
+        let r = wrand(self.at((a0 + a1) * 0.5, b0, 0.0));
+        m.glow(kind, r, |m| self.rect(m, a0, a1, b0, b1, off, color));
     }
 
     /// Box sticking out of the face (canopies, balconies, signs).
@@ -138,6 +152,13 @@ impl Face {
         let max = p0.max(p1).with_y(b1 + self.origin.y);
         m.cuboid2(min, max, sides, top);
     }
+}
+
+/// A stable pseudo-random value in `0..1` for a point of a model (which
+/// windows are lit at night).
+fn wrand(p: Vec3) -> f32 {
+    let h = (p.x * 12.9898 + p.y * 78.233 + p.z * 37.719).sin() * 43_758.547;
+    h - h.floor()
 }
 
 /// Evenly spaced positions for `n` items across a face of `width`.
@@ -341,11 +362,19 @@ fn roof_details_inner(m: &mut MeshBuilder, rng: &mut Stream, r: Rect, top: f32) 
 }
 
 fn chimney(m: &mut MeshBuilder, x: f32, z: f32, y0: f32, y1: f32) {
+    let brick = mix(palette::BRICK, Color::srgb_u32(0x7A6A60), 0.45);
     m.cuboid2(
-        Vec3::new(x - 0.3, y0, z - 0.3),
-        Vec3::new(x + 0.3, y1, z + 0.3),
-        palette::BRICK,
-        shade(palette::BRICK, 0.6),
+        Vec3::new(x - 0.24, y0, z - 0.3),
+        Vec3::new(x + 0.24, y1, z + 0.3),
+        brick,
+        shade(brick, 0.5),
+    );
+    // Cap.
+    m.cuboid2(
+        Vec3::new(x - 0.3, y1, z - 0.36),
+        Vec3::new(x + 0.3, y1 + 0.1, z + 0.36),
+        shade(brick, 0.85),
+        shade(brick, 0.45),
     );
 }
 
@@ -465,9 +494,26 @@ fn house_body(
     let span = if along_x { r.d() } else { r.w() };
     let rise = span * rng.range(0.38, 0.55);
     pitched_roof(m, r, top, rise, along_x, roof_kind == 2, 0.35, st.roof, st.wall);
-    if rng.chance(0.45) {
+    let solar = along_x && r.w() > 4.2 && rng.chance(0.3);
+    if solar {
+        // On the front slope, inset from the ends (more on a hipped roof).
+        let inset = if roof_kind == 2 { 0.5 + span * 0.5 } else { 0.6 };
+        let (x0, x1) = (r.x0 + inset, r.x1 - inset);
+        if x1 - x0 > 1.2 {
+            let e = Vec3::new(x0, top, r.z1);
+            let ridge = Vec3::new(x0, top + rise, r.cz());
+            let up = ridge - e;
+            let n = Vec3::X.cross(up).normalize();
+            let n = if n.y < 0.0 { -n } else { n };
+            m.detail_only(|m| {
+                lot_props::solar_panels(m, e + up * 0.15, Vec3::X * (x1 - x0), up * 0.65, n);
+            });
+        }
+    }
+    if rng.chance(0.4) {
         let x = if rng.chance(0.5) { r.x0 + 0.9 } else { r.x1 - 0.9 };
-        chimney(m, x, r.cz() - span * 0.12, top, top + rise + 0.9);
+        let z = if along_x { r.cz() - span * 0.15 } else { r.cz() };
+        chimney(m, x, z, top, top + rise * 0.8 + 0.5);
     }
 }
 
@@ -503,22 +549,38 @@ fn lawn_color(rng: &mut Stream) -> Color {
     mix(palette::GRASS_LIGHT, palette::GRASS, rng.range(0.0, 0.6))
 }
 
-/// Detached house (level 1).
+/// Detached house (level 1): a driveway beside the house with the family
+/// car, a front path and beds, and on a deep lot a real back garden
+/// (patio, shed, washing line, vegetable beds, trees).
 fn detached(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
     lot_ground(m, lot, lawn_color(rng));
     let st = house_style(rng);
-    let front_yard = rng.range(1.9, 2.6);
-    let bw = rng.range(4.4, 5.6).min(lot.w() - 1.8);
-    let bd = rng.range(3.9, 4.8).min(lot.d() - front_yard - 1.2);
-    let x0 = lot.cx() - bw * 0.5 + rng.range(-0.5, 0.5);
+    let front_yard = rng.range(2.0, 2.8);
+    let drive = lot.w() >= 7.5 && rng.chance(0.75);
+    let drive_left = rng.chance(0.5);
+    let bw = if drive {
+        rng.range(4.3, 4.9).min(lot.w() - 3.4)
+    } else {
+        rng.range(4.4, 5.6).min(lot.w() - 1.8)
+    };
+    let bd = rng.range(4.2, 5.2).min(lot.d() - front_yard - 1.2);
+    let x0 = if drive {
+        if drive_left { lot.x1 - 0.6 - bw } else { lot.x0 + 0.6 }
+    } else {
+        lot.cx() - bw * 0.5 + rng.range(-0.5, 0.5)
+    };
     let body = Rect {
         x0,
         x1: x0 + bw,
         z0: lot.z1 - front_yard - bd,
         z1: lot.z1 - front_yard,
     };
-    let storeys = if rng.chance(0.8) { 1 } else { 2 };
-    let door = rng.range(0.9, bw - 0.9);
+    let storeys = if rng.chance(0.75) { 1 } else { 2 };
+    let door = if drive {
+        if drive_left { 1.0 } else { bw - 1.0 }
+    } else {
+        rng.range(0.9, bw - 0.9)
+    };
     let roof_kind = rng.below(3);
     house_body(m, rng, body, storeys, &st, Some(door), roof_kind);
     // Path from the door to the pavement.
@@ -534,43 +596,178 @@ fn detached(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
         0.05,
         palette::PATH,
     );
-    // Hedge or picket fence along the front and sides.
+    // Driveway with the car, nose to the street (or reversed in).
+    let mut drive_rect = None;
+    if drive {
+        let (dx0, dx1) = if drive_left {
+            (lot.x0 + 0.35, body.x0 - 0.35)
+        } else {
+            (body.x1 + 0.35, lot.x1 - 0.35)
+        };
+        let dz0 = (body.z0 + 0.5).max(lot.z0 + 0.5);
+        lot_props::patch(
+            m,
+            dx0,
+            dz0,
+            dx1,
+            lot.z1,
+            0.045,
+            mix(palette::PAVING, palette::ASPHALT, 0.25),
+        );
+        drive_rect = Some((dx0, dx1));
+        if rng.chance(0.8) {
+            let len = 4.2;
+            let cz = (lot.z1 - 0.4 - len * 0.5).min(body.z1 + 0.5);
+            let yaw = if rng.chance(0.6) {
+                -std::f32::consts::FRAC_PI_2
+            } else {
+                std::f32::consts::FRAC_PI_2
+            };
+            lot_props::parked_car(m, rng, Vec3::new((dx0 + dx1) * 0.5, 0.045, cz), yaw);
+        }
+        lot_props::bins(
+            m,
+            rng,
+            Vec2::new(if drive_left { dx1 + 0.5 } else { dx0 - 1.2 }, lot.z1 - 0.6),
+        );
+    }
+    // Flower bed along the front of the house.
+    if rng.chance(0.55) {
+        let (a, b) = if door > bw * 0.5 {
+            (body.x0 + 0.2, px - 0.7)
+        } else {
+            (px + 0.7, body.x1 - 0.2)
+        };
+        if b - a > 1.0 {
+            lot_props::flower_bed(m, rng, a, b, body.z1 + 0.15, body.z1 + 0.75);
+        }
+    }
+    // Hedge or picket fence along the front (not across the driveway).
     let e = 0.3;
-    let (a, b, c, d) = (
-        Vec2::new(lot.x0 + e, lot.z1 - e),
-        Vec2::new(lot.x1 - e, lot.z1 - e),
-        Vec2::new(lot.x0 + e, lot.z0 + e),
-        Vec2::new(lot.x1 - e, lot.z0 + e),
-    );
+    let (fx0, fx1) = match drive_rect {
+        Some((_, dx1)) if drive_left => (dx1 + 0.2, lot.x1 - e),
+        Some((dx0, _)) => (lot.x0 + e, dx0 - 0.2),
+        None => (lot.x0 + e, lot.x1 - e),
+    };
+    let fz = lot.z1 - e;
     match rng.below(3) {
         0 => {
             let h = rng.range(0.6, 0.9);
-            hedge(m, a, Vec2::new(px - 0.8, a.y), h);
-            hedge(m, Vec2::new(px + 0.8, a.y), b, h);
-            hedge(m, a, c, h);
+            if px - 0.8 > fx0 {
+                hedge(m, Vec2::new(fx0, fz), Vec2::new(px - 0.8, fz), h);
+            }
+            if fx1 > px + 0.8 {
+                hedge(m, Vec2::new(px + 0.8, fz), Vec2::new(fx1, fz), h);
+            }
         }
         1 => {
-            fence(m, a, Vec2::new(px - 0.7, a.y));
-            fence(m, Vec2::new(px + 0.7, a.y), b);
-            fence(m, b, d);
+            if px - 0.7 > fx0 {
+                fence(m, Vec2::new(fx0, fz), Vec2::new(px - 0.7, fz));
+            }
+            if fx1 > px + 0.7 {
+                fence(m, Vec2::new(px + 0.7, fz), Vec2::new(fx1, fz));
+            }
         }
         _ => {}
     }
-    // Back garden bed.
-    if rng.chance(0.35) {
-        flat_patch(
-            m,
-            Rect {
-                x0: lot.x1 - 2.6,
-                x1: lot.x1 - 0.8,
-                z0: lot.z0 + 0.7,
-                z1: lot.z0 + 1.6,
-            },
-            0.05,
-            palette::EARTH,
-        );
+    // Back garden: between the house and the back of the lot.
+    let garden = Rect {
+        x0: lot.x0 + 0.5,
+        x1: lot.x1 - 0.5,
+        z0: lot.z0 + 0.5,
+        z1: body.z0 - 0.3,
+    };
+    let mut used: Vec<Rect> = vec![body];
+    if garden.d() > 2.2 {
+        // Patio right behind the house.
+        if rng.chance(0.7) {
+            let pz1 = body.z0 - 0.05;
+            let pz0 = pz1 - rng.range(1.8, 2.6).min(garden.d() - 0.3);
+            let pw = rng.range(2.6, 3.6).min(bw);
+            let px0 = body.cx() - pw * 0.5;
+            lot_props::patio(m, rng, px0, pz0, px0 + pw, pz1);
+            used.push(Rect {
+                x0: px0,
+                x1: px0 + pw,
+                z0: pz0,
+                z1: pz1,
+            });
+        }
     }
-    yard_greenery(m, rng, lot, body);
+    if garden.d() > 5.0 {
+        // Shed in a back corner.
+        if rng.chance(0.65) {
+            let left = rng.chance(0.5);
+            let c = Vec2::new(if left { garden.x0 + 1.3 } else { garden.x1 - 1.3 }, garden.z0 + 1.1);
+            lot_props::shed(m, rng, c, 1.0);
+            used.push(Rect {
+                x0: c.x - 1.4,
+                x1: c.x + 1.4,
+                z0: c.y - 1.2,
+                z1: c.y + 1.4,
+            });
+        }
+        // Washing line across the lawn.
+        if rng.chance(0.45) {
+            let z = garden.z0 + garden.d() * rng.range(0.45, 0.65);
+            let (a, b) = (
+                Vec2::new(garden.x0 + 0.6, z),
+                Vec2::new(garden.x1 - 0.6, z - rng.range(-0.8, 0.8)),
+            );
+            if !used
+                .iter()
+                .any(|r| r.z0 - 0.3 < z && z < r.z1 + 0.3 && r.x1 > a.x && r.x0 < b.x)
+            {
+                lot_props::washing_line(m, rng, a, b);
+            }
+        }
+        // Vegetable beds.
+        if rng.chance(0.45) {
+            let left = rng.chance(0.5);
+            let w = rng.range(2.0, 3.2);
+            let (x0, x1) = if left {
+                (garden.x0 + 0.2, garden.x0 + 0.2 + w)
+            } else {
+                (garden.x1 - 0.2 - w, garden.x1 - 0.2)
+            };
+            let (z0, z1) = (
+                garden.z0 + garden.d() * 0.35,
+                garden.z0 + garden.d() * 0.35 + rng.range(1.5, 2.4),
+            );
+            let r = Rect { x0, x1, z0, z1 };
+            if !used
+                .iter()
+                .any(|u| u.x0 < r.x1 && r.x0 < u.x1 && u.z0 < r.z1 && r.z0 < u.z1)
+                && z1 < garden.z1
+            {
+                lot_props::veg_beds(m, rng, x0, z0, x1, z1);
+                used.push(r);
+            }
+        }
+        // Side and back fences on deep lots.
+        if rng.chance(0.6) {
+            let (a, b, c, d) = (
+                Vec2::new(lot.x0 + e, body.z0),
+                Vec2::new(lot.x0 + e, lot.z0 + e),
+                Vec2::new(lot.x1 - e, lot.z0 + e),
+                Vec2::new(lot.x1 - e, body.z0),
+            );
+            fence(m, a, b);
+            fence(m, b, c);
+            fence(m, c, d);
+        }
+    }
+    yard_greenery(
+        m,
+        rng,
+        lot,
+        used.iter().fold(body, |acc, r| Rect {
+            x0: acc.x0.min(r.x0),
+            x1: acc.x1.max(r.x1),
+            z0: acc.z0.min(r.z0),
+            z1: acc.z1.max(r.z1),
+        }),
+    );
 }
 
 /// A row of narrow townhouses (level 2) with `storeys` floors.
@@ -611,6 +808,36 @@ fn terrace(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
             palette::PATH,
         );
     }
+    // Back gardens per unit: patio, sometimes a shed, fences between.
+    let back = lot.z1 - front_yard - depth;
+    if back - lot.z0 > 3.0 {
+        for u in 0..units {
+            let x0 = lot.x0 + 0.4 + uw * u as f32;
+            let x1 = x0 + uw;
+            lot_props::patch(
+                m,
+                x0 + 0.3,
+                back - 1.8,
+                x1 - 0.3,
+                back - 0.05,
+                0.05,
+                mix(palette::PAVING, palette::PATH, 0.5),
+            );
+            if back - lot.z0 > 6.0 && rng.chance(0.4) {
+                lot_props::shed(m, rng, Vec2::new((x0 + x1) * 0.5, lot.z0 + 1.4), 1.0);
+            } else if rng.chance(0.4) {
+                lot_props::washing_line(
+                    m,
+                    rng,
+                    Vec2::new(x0 + 0.5, (lot.z0 + back) * 0.5),
+                    Vec2::new(x1 - 0.5, (lot.z0 + back) * 0.5 + 0.4),
+                );
+            }
+            if u > 0 {
+                fence(m, Vec2::new(x0, back), Vec2::new(x0, lot.z0 + 0.3));
+            }
+        }
+    }
     let e = 0.3;
     hedge(
         m,
@@ -631,12 +858,55 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     let base_col = mix(shade(wall, 0.82), palette::BRICK, rng.range(0.0, 0.5));
     let big = lot.w() > 12.0;
     let side = if big { 1.0 } else { 0.4 };
+    // Deep lots: a block of normal depth with residents' parking behind.
+    let deep = lot.d() > 12.0;
     let body = Rect {
         x0: lot.x0 + side,
         x1: lot.x1 - side,
-        z0: lot.z0 + side,
+        z0: if deep {
+            lot.z1 - 1.6 - rng.range(9.5, 11.0)
+        } else {
+            lot.z0 + side
+        },
         z1: lot.z1 - 1.6,
     };
+    if deep {
+        let park = Rect {
+            x0: lot.x0 + 0.4,
+            x1: lot.x1 - 0.4,
+            z0: lot.z0 + 0.4,
+            z1: body.z0 - 0.6,
+        };
+        lot_props::patch(
+            m,
+            park.x0,
+            park.z0,
+            park.x1,
+            park.z1,
+            0.04,
+            mix(palette::ASPHALT, palette::PAVING, 0.3),
+        );
+        let white = lin(palette::MARKING);
+        let bays = ((park.w() - 0.4) / 2.6).floor() as usize;
+        for k in 0..=bays {
+            let x = park.x0 + 0.2 + k as f32 * 2.6;
+            m.quad_up(
+                [
+                    Vec3::new(x - 0.05, 0.05, park.z0 + 0.2),
+                    Vec3::new(x + 0.05, 0.05, park.z0 + 0.2),
+                    Vec3::new(x + 0.05, 0.05, park.z0 + 4.8),
+                    Vec3::new(x - 0.05, 0.05, park.z0 + 4.8),
+                ],
+                white,
+            );
+        }
+        for k in 0..bays {
+            if rng.chance(0.6) {
+                let x = park.x0 + 0.2 + (k as f32 + 0.5) * 2.6;
+                lot_props::parked_car(m, rng, Vec3::new(x, 0.04, park.z0 + 2.5), std::f32::consts::FRAC_PI_2);
+            }
+        }
+    }
     let sh = 3.0;
     let ground = 3.4;
     let attic = storeys >= 5 && rng.chance(0.6);
@@ -685,7 +955,10 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
                         shade(wall, 0.85),
                         wall,
                     );
-                    f.slab(m, a - 0.95, a + 0.95, base - 0.75, base - 0.15, 1.0, accent, accent);
+                    // Glass parapet with a rail in the accent colour.
+                    let glass = mix(palette::GLASS, Color::WHITE, 0.45);
+                    f.slab(m, a - 0.95, a + 0.95, base - 0.75, base - 0.25, 1.0, glass, glass);
+                    f.slab(m, a - 0.97, a + 0.97, base - 0.25, base - 0.17, 1.02, accent, accent);
                 }
             }
             // Floor band.
@@ -697,7 +970,7 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     let f = faces[0];
     let per = per_of(f.width);
     let a = spread(f.width, per)[per / 2];
-    f.rect(m, a - 0.75, a + 0.75, 0.0, 2.6, 0.08, palette::GLASS);
+    f.lit_rect(m, Glow::Shop, a - 0.75, a + 0.75, 0.0, 2.6, 0.08, palette::GLASS);
     f.slab(m, a - 1.3, a + 1.3, 2.8, 2.98, 1.4, accent, accent);
     flat_patch(
         m,
@@ -728,7 +1001,7 @@ fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
             wall,
         );
         let f = Face::of(inner, top)[0];
-        f.rect(m, 0.5, f.width - 0.5, 0.3, 2.4, 0.04, palette::GLASS);
+        f.lit_rect(m, Glow::Window, 0.5, f.width - 0.5, 0.3, 2.4, 0.04, palette::GLASS);
         if hipped {
             pitched_roof(m, inner, atop, inner.d() * 0.25, true, true, 0.3, accent, wall);
         } else {
@@ -755,13 +1028,17 @@ fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     let wall = mix(wall, rng.pick(&palette::HOUSE_WALLS), rng.range(0.0, 0.5));
     let accent = rng.pick(&palette::ACCENTS);
     let margin = 0.5;
-    let front = 0.9;
+    let cafe = lot.d() >= 8.0 && rng.chance(0.4);
+    let front = if cafe { 2.6 } else { 0.9 };
     let body = Rect {
         x0: lot.x0 + margin,
         x1: lot.x1 - margin,
-        z0: lot.z0 + margin + rng.range(0.0, 1.0),
+        z0: lot.z0 + margin + rng.range(0.0, 1.0).min(lot.d() - front - 6.0).max(0.0),
         z1: lot.z1 - front,
     };
+    if cafe {
+        lot_props::cafe_seating(m, rng, body.x0, body.x1, lot.z1 - 1.25, accent);
+    }
     let ground_h = 3.6;
     let sh = 3.1;
     let top = ground_h + (storeys - 1) as f32 * sh;
@@ -775,7 +1052,7 @@ fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
     let f = faces[0];
     // Shop front: big glass, door, awning and sign.
     f.rect(m, 0.35, f.width - 0.35, 0.0, 0.45, 0.03, shade(wall, 0.7));
-    f.rect(m, 0.4, f.width - 0.4, 0.45, 2.9, 0.04, palette::GLASS);
+    f.lit_rect(m, Glow::Shop, 0.4, f.width - 0.4, 0.45, 2.9, 0.04, palette::GLASS);
     let door = f.width * rng.range(0.25, 0.75);
     f.rect(m, door - 0.6, door + 0.6, 0.0, 2.5, 0.06, shade(palette::GLASS, 0.75));
     for a in spread(f.width - 0.8, 3) {
@@ -806,15 +1083,17 @@ fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
         accent,
         shade(accent, 1.1),
     );
-    f.rect(
-        m,
-        f.width * 0.27,
-        f.width * 0.73,
-        sign_y + 0.18,
-        sign_y + 0.37,
-        0.19,
-        palette::WINDOW_FRAME,
-    );
+    m.glow(Glow::Sign, 0.0, |m| {
+        f.rect(
+            m,
+            f.width * 0.27,
+            f.width * 0.73,
+            sign_y + 0.18,
+            sign_y + 0.37,
+            0.19,
+            palette::WINDOW_FRAME,
+        )
+    });
     // Upper floors.
     for (fi, f) in faces.iter().enumerate() {
         let per = ((f.width / 2.2).floor() as usize).clamp(1, 6);
@@ -825,7 +1104,16 @@ fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
             }
         }
         if fi > 0 && storeys == 1 {
-            f.rect(m, 0.6, f.width - 0.6, 1.0, 2.2, 0.03, shade(palette::GLASS, 0.9));
+            f.lit_rect(
+                m,
+                Glow::Shop,
+                0.6,
+                f.width - 0.6,
+                1.0,
+                2.2,
+                0.03,
+                shade(palette::GLASS, 0.9),
+            );
         }
     }
     flat_roof(m, body, top, wall, palette::ROOF_FLAT, 0.45);
@@ -878,14 +1166,14 @@ fn office(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u32) {
         for f in &faces {
             if s0 == 0 {
                 // Lobby glass on the ground floor.
-                f.rect(m, 0.5, f.width - 0.5, 0.3, 3.3, 0.04, shade(glass, 0.85));
+                f.lit_rect(m, Glow::Shop, 0.5, f.width - 0.5, 0.3, 3.3, 0.04, shade(glass, 0.85));
             }
             for s in s0.max(1)..s1 {
                 let y = base_h + (s - 1) as f32 * sh;
                 match style {
                     0 => {
                         // Ribbon windows.
-                        f.rect(m, 0.3, f.width - 0.3, y + 0.75, y + 2.7, 0.04, glass);
+                        f.lit_rect(m, Glow::Window, 0.3, f.width - 0.3, y + 0.75, y + 2.7, 0.04, glass);
                     }
                     1 => {
                         // Punched windows in a stone or brick facade.
@@ -971,7 +1259,16 @@ fn supermarket(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
     );
     let f = Face::of(body, 0.0)[0];
     f.rect(m, 0.0, f.width, top - 1.1, top, 0.03, accent);
-    f.rect(m, f.width * 0.3, f.width * 0.7, 0.0, 3.0, 0.04, palette::GLASS);
+    f.lit_rect(
+        m,
+        Glow::Shop,
+        f.width * 0.3,
+        f.width * 0.7,
+        0.0,
+        3.0,
+        0.04,
+        palette::GLASS,
+    );
     f.slab(
         m,
         f.width * 0.28,
@@ -1023,8 +1320,16 @@ fn supermarket(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
 
 fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
     lot_ground(m, lot, mix(palette::YARD_CONCRETE, palette::EARTH, rng.range(0.0, 0.5)));
-    let wall = mix(palette::INDUSTRY_WALLS, palette::SHOP_WALLS[1], rng.range(0.0, 0.4));
-    let roof = palette::INDUSTRY_ROOF;
+    let cladding = [
+        palette::INDUSTRY_WALLS,
+        Color::srgb_u32(0x9DB0BC),
+        Color::srgb_u32(0xA9B9A4),
+        Color::srgb_u32(0xD8CBA6),
+        Color::srgb_u32(0xB8C0C6),
+        Color::srgb_u32(0xC2A58A),
+    ];
+    let wall = mix(rng.pick(&cladding), palette::SHOP_WALLS[1], rng.range(0.0, 0.25));
+    let roof = mix(palette::INDUSTRY_ROOF, wall, rng.range(0.0, 0.25));
     let big = lot.w() > 12.0;
     let margin = 0.6;
     let body = Rect {
@@ -1045,12 +1350,35 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
         wall,
     );
     let faces = Face::of(body, 0.0);
-    // Accent stripe right round the building.
+    let stripe = rng.pick(&[
+        palette::INDUSTRY_STRIPE,
+        Color::srgb_u32(0x2F6FB5),
+        Color::srgb_u32(0x3FA66B),
+        Color::srgb_u32(0xC8322B),
+    ]);
+    // Accent stripe right round the building, cladding ribs below it.
     for f in &faces {
-        f.rect(m, 0.0, f.width, h - 0.9, h - 0.55, 0.02, palette::INDUSTRY_STRIPE);
+        f.rect(m, 0.0, f.width, h - 0.9, h - 0.55, 0.02, stripe);
+        m.detail_only(|m| {
+            let rib = shade(wall, 0.88);
+            let mut a = 0.4;
+            while a < f.width - 0.2 {
+                f.rect(m, a - 0.05, a + 0.05, 0.3, h - 0.95, 0.015, rib);
+                a += 0.9;
+            }
+        });
         let per = ((f.width / 3.0).floor() as usize).max(1);
         for a in spread(f.width, per) {
-            f.rect(m, a - 0.7, a + 0.7, h - 2.0, h - 1.2, 0.03, palette::WINDOW);
+            f.lit_rect(
+                m,
+                Glow::Window,
+                a - 0.7,
+                a + 0.7,
+                h - 2.0,
+                h - 1.2,
+                0.03,
+                palette::WINDOW,
+            );
         }
     }
     // Loading doors.
@@ -1060,18 +1388,15 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
         if i == doors {
             // Small office door.
             f.rect(m, a - 0.45, a + 0.45, 0.0, 2.2, 0.04, palette::DOOR);
+            // Company sign over the office door.
+            f.slab(m, a - 1.3, a + 1.3, 2.6, 3.3, 0.12, stripe, shade(stripe, 1.1));
+            m.glow(Glow::Sign, 0.0, |m| {
+                f.rect(m, a - 1.0, a + 1.0, 2.85, 3.05, 0.13, palette::WINDOW_FRAME)
+            });
             continue;
         }
         let dw = 1.6;
-        f.rect(
-            m,
-            a - dw - 0.12,
-            a + dw + 0.12,
-            0.0,
-            3.5,
-            0.03,
-            palette::INDUSTRY_STRIPE,
-        );
+        f.rect(m, a - dw - 0.12, a + dw + 0.12, 0.0, 3.5, 0.03, stripe);
         f.rect(m, a - dw, a + dw, 0.0, 3.35, 0.05, shade(palette::INDUSTRY_ROOF, 1.1));
         for k in 0..7 {
             let y = 0.4 + k as f32 * 0.42;
@@ -1118,6 +1443,9 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
             rng.range(2.2, 3.6)
         };
         m.cylinder(c, 0.5, ch, 8, palette::BRICK, shade(palette::BRICK, 0.45));
+        if level >= 2 {
+            m.emitters.push(c + Vec3::Y * ch);
+        }
         m.cylinder(
             c + Vec3::Y * (ch - 0.8),
             0.58,
@@ -1158,6 +1486,280 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
             props::crate_box(m, base, 0.85, rng.range(-0.15, 0.15));
         }
     }
+    // Pallets and a parked lorry where the yard allows.
+    let front = lot.z1 - body.z1;
+    if front > 2.6 {
+        m.detail_only(|m| {
+            for k in 0..1 + rng.below(3) {
+                let c = Vec2::new(body.x0 + 1.0 + k as f32 * 1.5, lot.z1 - 1.0);
+                lot_props::pallets(m, rng, c);
+            }
+        });
+    }
+    if lot.d() > 12.0 && front > 5.5 && rng.chance(0.6) {
+        let (cab, cargo, stripe) = rng.pick(&palette::TRUCK_LIVERIES);
+        let t = super::vehicle_gen::truck_model(cab, cargo, stripe, m.lod);
+        let start = m.pos.len();
+        let c = Vec3::new(body.cx() + rng.range(-1.0, 1.0), 0.03, body.z1 + front * 0.55);
+        m.append(
+            &t,
+            c,
+            std::f32::consts::FRAC_PI_2 * if rng.chance(0.5) { 1.0 } else { -1.0 },
+            Vec3::ONE,
+            [1.0; 4],
+        );
+        for uv in &mut m.uv[start..] {
+            *uv = [0.0, 0.0];
+        }
+    }
+}
+
+// ------------------------------------------------------------------ building sites
+
+/// Storeys a finished building of `key` will roughly have (for the frame).
+fn site_storeys(key: ModelKey) -> u32 {
+    let big = key.cells.0 >= 2 && key.cells.1 >= 2;
+    match (key.kind, key.level) {
+        (Zone::Industrial, _) => 1,
+        (_, 0 | 1) => 1,
+        (_, 2) => 2,
+        _ => 4 + u32::from(big),
+    }
+}
+
+/// A building site on the lot of `key`: hoarding round the lot, a
+/// foundation slab, a portacabin and materials (`stage` 0); then the bare
+/// frame with scaffolding and, for tall buildings, a tower crane (1).
+pub fn site(key: ModelKey, stage: u8) -> MeshBuilder {
+    let mut m = MeshBuilder::with_ground_ao(0.25);
+    let mut rng = Stream::new(key.variant as u32 * 31 + key.level as u32 * 7 + key.cells.0 as u32 * 3 + stage as u32);
+    let w = key.cells.0 as f32 * citysim_sim::CELL_SIZE;
+    let d = key.cells.1 as f32 * citysim_sim::CELL_SIZE;
+    let lot = Rect {
+        x0: -w * 0.5,
+        x1: w * 0.5,
+        z0: -d * 0.5,
+        z1: d * 0.5,
+    };
+    let mud = mix(palette::EARTH, Color::srgb_u32(0x8A7558), 0.5);
+    lot_ground(&mut m, lot, mud);
+    let body = Rect {
+        x0: lot.x0 + 1.2,
+        x1: lot.x1 - 1.2,
+        z0: lot.z0 + 1.2,
+        z1: lot.z1 - 2.2,
+    };
+    let concrete = Color::srgb_u32(0xB9B6AE);
+    m.cuboid2(
+        Vec3::new(body.x0, 0.0, body.z0),
+        Vec3::new(body.x1, 0.35, body.z1),
+        shade(concrete, 0.85),
+        concrete,
+    );
+    // Hoarding: white panels with an orange band, a gap for the gate.
+    let white = Color::srgb_u32(0xEEEDE8);
+    let orange = palette::INDUSTRY_STRIPE;
+    let e = 0.25;
+    let gate = (lot.cx() - 1.6, lot.cx() + 1.6);
+    let mut panel = |a: Vec2, b: Vec2| {
+        let mid = (a + b) * 0.5;
+        let dvec = b - a;
+        let yaw = -dvec.y.atan2(dvec.x);
+        let len = dvec.length();
+        if len < 0.1 {
+            return;
+        }
+        m.box_yaw(
+            Vec3::new(mid.x, 0.0, mid.y),
+            Vec3::new(len, 1.9, 0.06),
+            yaw,
+            white,
+            white,
+        );
+        m.box_yaw(
+            Vec3::new(mid.x, 1.3, mid.y),
+            Vec3::new(len + 0.01, 0.25, 0.08),
+            yaw,
+            orange,
+            orange,
+        );
+    };
+    panel(Vec2::new(lot.x0 + e, lot.z0 + e), Vec2::new(lot.x1 - e, lot.z0 + e));
+    panel(Vec2::new(lot.x0 + e, lot.z0 + e), Vec2::new(lot.x0 + e, lot.z1 - e));
+    panel(Vec2::new(lot.x1 - e, lot.z0 + e), Vec2::new(lot.x1 - e, lot.z1 - e));
+    panel(Vec2::new(lot.x0 + e, lot.z1 - e), Vec2::new(gate.0, lot.z1 - e));
+    panel(Vec2::new(gate.1, lot.z1 - e), Vec2::new(lot.x1 - e, lot.z1 - e));
+    // Portacabin and a sand heap.
+    let cabin = Color::srgb_u32(0x3F7FB8);
+    let cx = if rng.chance(0.5) { lot.x0 + 1.9 } else { lot.x1 - 1.9 };
+    if key.cells.0 >= 2 || stage == 0 {
+        m.cuboid2(
+            Vec3::new(cx - 1.3, 0.0, lot.z1 - 2.0),
+            Vec3::new(cx + 1.3, 2.4, lot.z1 - 0.6),
+            cabin,
+            shade(cabin, 1.2),
+        );
+    }
+    let sand = Color::srgb_u32(0xD8C08A);
+    m.cone(
+        Vec3::new(lot.cx() + rng.range(-1.5, 1.5), 0.0, lot.z1 - 1.4),
+        0.9,
+        0.8,
+        7,
+        sand,
+        0.1,
+    );
+    lot_props::pallets(&mut m, &mut rng, Vec2::new(lot.x0 + 1.4, body.z0 + 1.0));
+    if stage == 0 {
+        // Footings and rebar stubs.
+        let steel = Color::srgb_u32(0x6E5A4A);
+        let mut x = body.x0 + 0.3;
+        while x < body.x1 {
+            for z in [body.z0 + 0.3, body.z1 - 0.3] {
+                m.cuboid(
+                    Vec3::new(x - 0.05, 0.35, z - 0.05),
+                    Vec3::new(x + 0.05, 1.3, z + 0.05),
+                    steel,
+                );
+            }
+            x += 1.6;
+        }
+        return m;
+    }
+    // Bare frame: columns and floor slabs.
+    let storeys = site_storeys(key);
+    let sh = if key.kind == Zone::Industrial { 5.0 } else { 3.0 };
+    let top = 0.35 + storeys as f32 * sh;
+    let grey = Color::srgb_u32(0xA7A49C);
+    let step = if body.w() > 10.0 {
+        3.5
+    } else {
+        (body.w() / 2.0).max(1.8)
+    };
+    let mut x = body.x0;
+    while x <= body.x1 + 0.01 {
+        for z in [body.z0, body.cz(), body.z1] {
+            m.cuboid(
+                Vec3::new(x - 0.15, 0.35, z - 0.15),
+                Vec3::new(x + 0.15, top, z + 0.15),
+                grey,
+            );
+        }
+        x += step;
+    }
+    for k in 1..=storeys {
+        let y = 0.35 + k as f32 * sh;
+        m.cuboid2(
+            Vec3::new(body.x0 - 0.1, y - 0.25, body.z0 - 0.1),
+            Vec3::new(body.x1 + 0.1, y, body.z1 + 0.1),
+            shade(concrete, 0.8),
+            concrete,
+        );
+    }
+    // Scaffold along the front: poles, boards and a safety net.
+    let pole = Color::srgb_u32(0xC9CCCF);
+    let board = Color::srgb_u32(0xC49A5A);
+    let zf = body.z1 + 0.9;
+    let mut x = body.x0 - 0.2;
+    while x <= body.x1 + 0.3 {
+        for z in [body.z1 + 0.25, zf] {
+            m.cuboid(
+                Vec3::new(x - 0.04, 0.0, z - 0.04),
+                Vec3::new(x + 0.04, top + 1.0, z + 0.04),
+                pole,
+            );
+        }
+        x += 2.0;
+    }
+    for k in 1..=storeys {
+        let y = 0.35 + k as f32 * sh - 0.3;
+        m.cuboid(
+            Vec3::new(body.x0 - 0.2, y, body.z1 + 0.25),
+            Vec3::new(body.x1 + 0.3, y + 0.06, zf),
+            board,
+        );
+    }
+    let net = Color::srgba(0.32, 0.62, 0.42, 1.0);
+    m.detail_only(|m| {
+        m.quad_facing(
+            [
+                Vec3::new(body.x0 - 0.2, 1.0, zf + 0.05),
+                Vec3::new(body.x1 + 0.3, 1.0, zf + 0.05),
+                Vec3::new(body.x1 + 0.3, top * 0.6, zf + 0.05),
+                Vec3::new(body.x0 - 0.2, top * 0.6, zf + 0.05),
+            ],
+            Vec3::Z,
+            net,
+        );
+    });
+    // Tower crane for tall buildings.
+    if storeys >= 4 {
+        let yellow = palette::ACCENTS[2];
+        let c = Vec3::new(body.x0 - 0.2, 0.0, body.z0 + 0.6);
+        let h = top + 9.0;
+        let mast = 0.9;
+        m.cuboid2(
+            c - Vec3::new(1.0, 0.0, 1.0),
+            c + Vec3::new(1.0, 0.6, 1.0),
+            concrete,
+            concrete,
+        );
+        for (dx, dz) in [(0.0, 0.0), (mast, 0.0), (0.0, mast), (mast, mast)] {
+            let p = c + Vec3::new(dx - mast * 0.5, 0.0, dz - mast * 0.5);
+            m.cuboid(p - Vec3::new(0.07, 0.0, 0.07), p + Vec3::new(0.07, h, 0.07), yellow);
+        }
+        let mut y = 1.5;
+        while y < h {
+            m.cuboid(
+                c + Vec3::new(-mast * 0.5, y, -mast * 0.5),
+                c + Vec3::new(mast * 0.5, y + 0.08, mast * 0.5),
+                yellow,
+            );
+            y += 1.5;
+        }
+        // Jib over the building, counter-jib with its weight, the cab.
+        let jib = (body.w() + 6.0).min(26.0);
+        m.cuboid(
+            c + Vec3::new(-mast * 0.5, h, -0.4),
+            c + Vec3::new(jib, h + 0.8, 0.4),
+            yellow,
+        );
+        m.cuboid(
+            c + Vec3::new(-7.0, h, -0.45),
+            c + Vec3::new(-mast * 0.5, h + 0.7, 0.45),
+            yellow,
+        );
+        m.cuboid2(
+            c + Vec3::new(-6.8, h - 1.2, -0.7),
+            c + Vec3::new(-5.0, h, 0.7),
+            concrete,
+            concrete,
+        );
+        m.cuboid2(
+            c + Vec3::new(-0.6, h - 1.4, -0.7),
+            c + Vec3::new(0.6, h, 0.7),
+            yellow,
+            shade(yellow, 1.1),
+        );
+        m.cuboid(
+            c + Vec3::new(-0.2, h + 0.8, -0.2),
+            c + Vec3::new(0.2, h + 3.2, 0.2),
+            yellow,
+        );
+        // Hook line.
+        let hx = jib * 0.6;
+        m.cuboid(
+            c + Vec3::new(hx - 0.02, top + 1.0, -0.02),
+            c + Vec3::new(hx + 0.02, h, 0.02),
+            Color::srgb_u32(0x3A3D40),
+        );
+        m.cuboid(
+            c + Vec3::new(hx - 0.25, top + 0.6, -0.25),
+            c + Vec3::new(hx + 0.25, top + 1.0, 0.25),
+            palette::INDUSTRY_STRIPE,
+        );
+    }
+    m
 }
 
 // ------------------------------------------------------------------ entry
@@ -1166,6 +1768,9 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
 pub fn generate(key: ModelKey, lod: bool) -> MeshBuilder {
     let mut m = MeshBuilder::with_ground_ao(0.32);
     m.lod = lod;
+    if lod {
+        m.tag = [Glow::Body as u32 as f32, 0.0];
+    }
     let w = key.cells.0 as f32 * citysim_sim::CELL_SIZE;
     let d = key.cells.1 as f32 * citysim_sim::CELL_SIZE;
     let lot = Rect {

@@ -7,13 +7,18 @@
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use citysim_sim::{CELL_SIZE, Cell};
+use citysim_sim::{CELL_SIZE, Cell, RoadKind};
 
 use super::heights;
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix};
+use super::road_geom;
+use super::road_ghost::{GhostLeg, ghost_meshes};
 use super::zones::zone_color;
-use crate::shared::{ActiveTool, GameSet, HoveredCell, PreviewKind, ToolPreview, cell_center, cell_corners};
+use crate::shared::{
+    ActiveTool, GameSet, HoveredCell, PathPreview, PreviewKind, RoadChoice, SimWorld, ToolPreview, cell_center,
+    cell_corners,
+};
 
 /// Grid radius around the cursor, cells.
 const GRID_R: i32 = 14;
@@ -36,7 +41,14 @@ struct CursorMaterials {
     /// Hover frame (colour set per tool).
     frame: Handle<StandardMaterial>,
     grid: Handle<StandardMaterial>,
+    /// Translucent lit road preview, valid / refused.
+    road_ok: Handle<StandardMaterial>,
+    road_bad: Handle<StandardMaterial>,
 }
+
+/// Part of the road preview: 0 road, 1 outline, 2 refused legs.
+#[derive(Component)]
+struct GhostRoadPart(usize);
 
 pub struct CursorPlugin;
 
@@ -119,11 +131,33 @@ fn grid_mesh() -> Mesh {
 }
 
 fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+    let ghost_road = |c: Color| StandardMaterial {
+        base_color: c,
+        emissive: LinearRgba::from(c) * 0.3,
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.9,
+        depth_bias: 20.0,
+        ..default()
+    };
     let mats = CursorMaterials {
         ghost: overlay_material(&mut materials, Color::WHITE, 0.0),
         frame: overlay_material(&mut materials, Color::WHITE, 0.0),
         grid: overlay_material(&mut materials, Color::WHITE, 0.0),
+        road_ok: materials.add(ghost_road(Color::srgba(0.86, 0.93, 1.0, 0.72))),
+        road_bad: materials.add(ghost_road(Color::srgba(1.0, 0.55, 0.5, 0.72))),
     };
+    let outline = overlay_material(&mut materials, Color::srgba(0.85, 0.93, 1.0, 0.9), 30.0);
+    let bad = overlay_material(&mut materials, Color::srgb(1.0, 0.3, 0.25), 30.0);
+    for (i, mat) in [(0, mats.road_ok.clone()), (1, outline), (2, bad)] {
+        commands.spawn((
+            Name::new("Road preview"),
+            GhostRoadPart(i),
+            MeshMaterial3d(mat),
+            Transform::default(),
+            Visibility::Hidden,
+            NotShadowCaster,
+        ));
+    }
     commands.spawn((
         Name::new("Hovered cell"),
         HoverFrame { pos: Vec3::ZERO },
@@ -231,85 +265,110 @@ fn cell_quad(m: &mut MeshBuilder, c: Cell, inset: f32, y: f32, col: [f32; 4]) {
     m.quad_up(cell_corners(c, inset, y), col);
 }
 
-/// Translucent road from `a` to `b` (Bevy positions on the ground).
-fn road_ghost(m: &mut MeshBuilder, a: Vec3, b: Vec3, valid: bool) {
-    let y = heights::GHOST;
-    let d = (b - a).with_y(0.0);
-    let len = d.length();
-    if len < 1e-3 {
-        return;
-    }
-    let dir = d / len;
-    let n = Vec3::new(-dir.z, 0.0, dir.x);
-    let base = if valid { palette::TOOL_OK } else { palette::TOOL_BAD };
-    let body = lin(base.with_alpha(0.55));
-    let edge = lin(mix(base, Color::WHITE, 0.4).with_alpha(0.95));
-    let at = |t: f32, o: f32| a.with_y(y) + dir * t + n * o;
-    let (h, walk) = (2.75, 1.25);
-    m.quad_up(
-        [
-            at(0.0, -h - walk),
-            at(len, -h - walk),
-            at(len, h + walk),
-            at(0.0, h + walk),
-        ],
-        body,
-    );
-    for s in [1.0f32, -1.0] {
-        let (o0, o1) = (s * (h + walk - 0.35), s * (h + walk));
-        m.quad_up([at(0.0, o0), at(len, o0), at(len, o1), at(0.0, o1)], edge);
-    }
-    if valid {
-        // Centre dashes.
-        let mut t = 1.0;
-        while t + 2.0 < len {
-            m.quad_up([at(t, -0.12), at(t + 2.0, -0.12), at(t + 2.0, 0.12), at(t, 0.12)], edge);
-            t += 4.0;
-        }
-    } else {
-        // Diagonal hatching.
-        let mut t = 0.0;
-        while t + 1.2 < len {
-            let w = h + walk - 0.4;
-            m.quad_up(
-                [at(t, -w), at(t + 0.9, -w), at(t + 3.0, w), at(t + 2.1, w)].map(|p| p + Vec3::Y * 0.01),
-                edge,
-            );
-            t += 3.0;
-        }
-    }
-    // Round end caps.
-    for (p, s) in [(a, -1.0f32), (b, 1.0)] {
-        let r = h + walk;
-        let ring: Vec<Vec3> = (0..=12)
-            .map(|k| {
-                let ang = std::f32::consts::PI * k as f32 / 12.0;
-                p.with_y(y) + (dir * s * ang.sin() + n * ang.cos()) * r
-            })
-            .collect();
-        m.fan_up(p.with_y(y), &ring, body);
+fn kind_of(c: RoadChoice) -> RoadKind {
+    match c {
+        RoadChoice::Street => RoadKind::Street,
+        RoadChoice::Avenue => RoadKind::Avenue,
     }
 }
 
+/// Placed corners of the path: small accent dots.
+fn corner_marks(m: &mut MeshBuilder, path: &PathPreview) {
+    let y = road_geom::WALK_Y + 0.1;
+    for (i, &c) in path.points.iter().enumerate().take(path.placed.max(1)) {
+        let p = cell_center(c, y);
+        let r = if i == 0 { 0.9 } else { 0.7 };
+        let ring: Vec<Vec3> = (0..16)
+            .map(|k| {
+                let a = k as f32 / 16.0 * std::f32::consts::TAU;
+                p + Vec3::new(a.cos() * r, 0.0, a.sin() * r)
+            })
+            .collect();
+        m.fan_up(p, &ring, [1.0, 1.0, 1.0, 0.95]);
+    }
+}
+
+/// Show `m` on entity `e` (hide it when empty; never remove `Mesh3d`).
+fn show_mesh(commands: &mut Commands, meshes: &mut Assets<Mesh>, e: Entity, vis: &mut Mut<Visibility>, m: MeshBuilder) {
+    if m.is_empty() {
+        vis.set_if_neq(Visibility::Hidden);
+    } else {
+        commands.entity(e).insert(Mesh3d(meshes.add(m.build())));
+        vis.set_if_neq(Visibility::Inherited);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_ghost(
     mut commands: Commands,
     preview: Res<ToolPreview>,
+    path: Res<PathPreview>,
+    sim: Res<SimWorld>,
+    mats: Res<CursorMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(Entity, &mut Visibility), With<GhostMesh>>,
+    mut roads: Query<
+        (
+            Entity,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+            &GhostRoadPart,
+        ),
+        Without<GhostMesh>,
+    >,
+    mut last_roads: Local<Option<(u64, u64)>>,
 ) {
-    if !preview.is_changed() {
+    let roads_key = sim.key(sim.world.versions.roads);
+    if !preview.is_changed() && !path.is_changed() && *last_roads == Some(roads_key) {
         return;
     }
+    *last_roads = Some(roads_key);
     let Ok((entity, mut vis)) = q.single_mut() else { return };
     let mut m = MeshBuilder::new();
     let valid = preview.is_valid();
-    match preview.kind {
-        PreviewKind::None => {}
-        PreviewKind::Road => {
-            if let Some((from, to)) = preview.line {
-                road_ghost(&mut m, cell_center(from, 0.0), cell_center(to, 0.0), valid);
+    // The road preview: real geometry on a copy of the road graph.
+    let mut parts = [MeshBuilder::new(), MeshBuilder::new(), MeshBuilder::new()];
+    let mut road_valid = true;
+    if preview.kind == PreviewKind::Road {
+        let (legs, kind): (Vec<GhostLeg>, RoadKind) = if !path.legs.is_empty() {
+            (
+                path.legs
+                    .iter()
+                    .map(|l| GhostLeg {
+                        from: l.from,
+                        to: l.to,
+                        valid: l.error.is_none(),
+                    })
+                    .collect(),
+                kind_of(path.kind),
+            )
+        } else if let Some((from, to)) = preview.line {
+            (vec![GhostLeg { from, to, valid }], kind_of(path.kind))
+        } else {
+            (Vec::new(), RoadKind::Street)
+        };
+        road_valid = legs.iter().all(|l| l.valid) && path.error.is_none();
+        if !legs.is_empty() {
+            let g = ghost_meshes(&sim.world.roads, &legs, kind);
+            parts[0] = g.road;
+            parts[1] = g.outline;
+            parts[2] = g.bad;
+            corner_marks(&mut parts[1], &path);
+        }
+    }
+    for (e, mut v, mut mat, part) in &mut roads {
+        let i = part.0;
+        if i == 0 {
+            let want = if road_valid { &mats.road_ok } else { &mats.road_bad };
+            if mat.0 != *want {
+                mat.0 = want.clone();
             }
         }
+        let mesh = std::mem::take(&mut parts[i]);
+        show_mesh(&mut commands, &mut meshes, e, &mut v, mesh);
+    }
+    match preview.kind {
+        PreviewKind::None | PreviewKind::Road => {}
         kind => {
             let base = match kind {
                 _ if !valid => palette::TOOL_BAD,
@@ -345,10 +404,5 @@ fn draw_ghost(
     }
     // Hide rather than remove `Mesh3d`: an entity whose Mesh3d was removed
     // and later re-inserted was never drawn again (seen with Bevy 0.20.1).
-    if m.is_empty() {
-        vis.set_if_neq(Visibility::Hidden);
-    } else {
-        commands.entity(entity).insert(Mesh3d(meshes.add(m.build())));
-        vis.set_if_neq(Visibility::Inherited);
-    }
+    show_mesh(&mut commands, &mut meshes, entity, &mut vis, m);
 }

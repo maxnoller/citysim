@@ -10,6 +10,7 @@ fn build(w: &mut World, a: (i32, i32), b: (i32, i32)) -> bool {
     w.apply(Command::BuildRoad {
         from: c(a.0, a.1),
         to: c(b.0, b.1),
+        kind: citysim_sim::RoadKind::Street,
     })
     .is_ok()
 }
@@ -105,7 +106,9 @@ fn enormous_dead_end_tree() {
     let (peak, done) = run(&mut w, DAY);
     run_to_hour(&mut w, 8);
     assert!(w.households.len() > 100, "{}", w.households.len());
-    assert!(peak > 20 && done > 50, "peak {peak}, trips {done}");
+    // (A trunk crossed by a branch every six cells is a chain of all-way
+    // stops: slow, but alive.)
+    assert!(peak > 20 && done > 20, "peak {peak}, trips {done}");
     // Cut the trunk under the morning rush.
     bulldoze(&mut w, (13, 127), (13, 129));
     let cut_off = |b: &Building| b.footprint.min.x > 16;
@@ -115,10 +118,25 @@ fn enormous_dead_end_tree() {
     // Only the few buildings next to the highway stub are still reachable.
     assert!(!w.buildings.values().any(cut_off), "cut-off buildings are abandoned");
     // Cars already on the tree finish their drives (vehicle time is real
-    // time: a cross-tree drive takes several in-game hours).
-    run(&mut w, DAY / 2);
-    let far = w.vehicles.values().filter(|v| v.pos[0] > 16.0 * CELL_SIZE).count();
-    assert_eq!(far, 0, "cars left on the cut-off tree");
+    // time: a cross-tree drive past thirty all-way stops takes several
+    // in-game hours).
+    run(&mut w, DAY);
+    let far: Vec<String> = w
+        .vehicles
+        .iter()
+        .filter(|(_, v)| v.pos[0] > 16.0 * CELL_SIZE)
+        .map(|(id, v)| {
+            format!(
+                "{id:?} pos {:?} speed {} jm {:?} route {} trip {:?}",
+                v.pos,
+                v.speed,
+                v.junction.map(|j| (j.turn, j.distance)),
+                v.route.len(),
+                w.traffic.trips.get(id)
+            )
+        })
+        .collect();
+    assert!(far.is_empty(), "cars left on the cut-off tree: {far:#?}");
     check_roads(&w);
 }
 

@@ -86,7 +86,11 @@ fn cell_trees(cx: i32, cy: i32, out: &mut Vec<Tree>) {
     let pine_bias = noise::value(x0 / 400.0, z0 / 400.0, 5);
     for _ in 0..n.min(5) {
         let pos = Vec3::new(x0 + rng.range(1.0, 7.0), 0.0, z0 + rng.range(1.0, 7.0));
-        let canopy = mix(rng.pick(&palette::CANOPIES), palette::GRASS_LIGHT, rng.range(0.0, 0.18));
+        let mut canopy = mix(rng.pick(&palette::CANOPIES), palette::GRASS_LIGHT, rng.range(0.0, 0.18));
+        // A few lighter / yellower crowns break up the woods.
+        if rng.chance(0.1) {
+            canopy = mix(canopy, Color::srgb_u32(0xA3AE4E), rng.range(0.3, 0.6));
+        }
         out.push(Tree {
             pos,
             scale: rng.range(0.7, 1.25),
@@ -96,8 +100,19 @@ fn cell_trees(cx: i32, cy: i32, out: &mut Vec<Tree>) {
             small: 0,
         });
     }
+    // Undergrowth in and at the edge of woods.
+    if d > 0.4 && rng.chance(0.4) {
+        out.push(Tree {
+            pos: Vec3::new(x0 + rng.range(1.0, 7.0), 0.0, z0 + rng.range(1.0, 7.0)),
+            scale: rng.range(0.9, 1.6),
+            pine: false,
+            canopy: shade(rng.pick(&palette::CANOPIES), rng.range(0.85, 1.1)),
+            yaw: rng.range(0.0, 6.0),
+            small: if rng.chance(0.12) { 2 } else { 1 },
+        });
+    }
     // Meadow clutter: a few bushes and rocks.
-    if d < 0.3 && rng.chance(0.05) {
+    if d < 0.3 && rng.chance(0.07) {
         out.push(Tree {
             pos: Vec3::new(x0 + rng.range(1.5, 6.5), 0.0, z0 + rng.range(1.5, 6.5)),
             scale: rng.range(0.7, 1.4),

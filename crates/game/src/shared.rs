@@ -10,10 +10,15 @@
 //!   written by `ui`.
 //! * `WorldCamera` entity (and honouring `CameraOverride`): owned by `gfx`.
 //! * `CameraOverride`: written by dev tooling (scripted demo / autoshot).
+//! * Round 2, written by ui, drawn by gfx: `RoadChoice`, `ToolModes`,
+//!   `SnapFeedback`, `PathPreview`, `WorldHighlight`, `DisplaySettings`.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use citysim_sim::{CELL_SIZE, Cell, CellRect, Command, CommandError, Outcome, TICKS_PER_SECOND, World, Zone};
+use citysim_sim::{
+    BuildingId, CELL_SIZE, Cell, CellRect, Command, CommandError, NodeId, Outcome, SegmentId, TICKS_PER_SECOND, World,
+    Zone,
+};
 
 // ---------------------------------------------------------------- ordering
 
@@ -138,6 +143,12 @@ pub enum PreviewKind {
 
 /// What the current tool would do right now (from `World::preview`).
 /// Written by ui (only when it changes), drawn by gfx as the ghost.
+///
+/// Round 2: for the road tool `line`/`cells` are the leg under the cursor
+/// only; the whole multi-point path (or block grid) is in [`PathPreview`].
+/// Zoning in every mode (rectangle, frontage, fill) and the bulldozer put
+/// exactly the cells they change in `cells`; `rect` is set only for the
+/// rectangle modes.
 #[derive(Resource, Debug, Clone, PartialEq, Default)]
 pub struct ToolPreview {
     pub kind: PreviewKind,
@@ -184,6 +195,239 @@ pub enum GraphicsQuality {
     Medium,
     #[default]
     High,
+}
+
+// ---------------------------------------------------------------- construction tools (round 2)
+//
+// Everything below is written by ui every frame it changes (`set_if_neq`)
+// and only read by gfx. Positions are in sim metres (`[x, y]`, see
+// `sim_to_world`); cells are map cells. Nothing here is game state: it is
+// what the interface is showing right now.
+
+/// Road type the road tool builds (written by ui). Maps 1:1 onto the sim's
+/// `RoadKind::{Street, Avenue}` (the highway is never player-built).
+#[allow(dead_code)] // variants constructed by ui tools as they land
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RoadChoice {
+    /// One lane each way, cheap; the default.
+    #[default]
+    Street,
+    /// Two lanes each way, faster and with more capacity; drawn wider (about
+    /// 13 m) but still one cell line in the grid.
+    Avenue,
+}
+
+/// What a road-tool drag does (sub-mode of `ActiveTool::Road`).
+#[allow(dead_code)] // variants constructed by ui tools as they land
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RoadMode {
+    /// Click/drag corners of a multi-segment path (`PathPreview`).
+    #[default]
+    Path,
+    /// Drag a rectangle: a street loop, optionally subdivided into a grid
+    /// (`PathPreview::legs` holds every street of it).
+    Block,
+    /// Hover a junction to see its control, click to switch it (no ghost;
+    /// `WorldHighlight::hovered` is the junction).
+    Junction,
+}
+
+/// What a zoning drag does (sub-mode of `ActiveTool::Zone(_)`).
+#[allow(dead_code)] // variants constructed by ui tools as they land
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ZoneMode {
+    /// Drag a rectangle (round-1 behaviour).
+    #[default]
+    Rect,
+    /// Click a road side: that whole frontage between two junctions, to the
+    /// lot depth. Drag along a road: paint the frontage passed over.
+    Frontage,
+    /// Click: every eligible cell of the enclosed block under the cursor.
+    Fill,
+}
+
+/// What a bulldozer drag does (sub-mode of `ActiveTool::Bulldoze`).
+#[allow(dead_code)] // variants constructed by ui tools as they land
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BulldozeMode {
+    /// Drag a rectangle (round-1 behaviour).
+    #[default]
+    Rect,
+    /// Click a road: the stretch between two junctions. Drag along a road:
+    /// just the part passed over.
+    Road,
+}
+
+/// Sub-mode of every tool (written by ui; the active one is the field for
+/// the current `ActiveTool`).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ToolModes {
+    pub road: RoadMode,
+    pub zone: ZoneMode,
+    pub bulldoze: BulldozeMode,
+}
+
+/// What a snapped point attached to, strongest first.
+#[allow(dead_code)] // variants constructed by ui tools as they land
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SnapTarget {
+    /// Snapping is off (Alt held) or nothing applied: the plain cell.
+    #[default]
+    None,
+    /// Plain grid cell (roads are built on cell centres).
+    Grid,
+    /// An existing road end or junction.
+    Node,
+    /// Onto the middle of an existing road (forms a T-junction).
+    Road,
+    /// The nearest straight / 45-degree direction from the previous corner.
+    Angle,
+    /// Perpendicular to a nearby road.
+    Perpendicular,
+    /// Parallel to (alongside) a nearby road.
+    Parallel,
+    /// On the extension of an existing road end.
+    Extension,
+    /// Same spacing as the neighbouring block.
+    Spacing,
+}
+
+/// Why a guide line is shown.
+#[allow(dead_code)] // variants constructed by ui tools as they land
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GuideKind {
+    /// The straight / 45-degree ray from the previous corner.
+    Angle,
+    /// An existing road end continued straight on.
+    Extension,
+    /// Perpendicular through / to a nearby road.
+    Perpendicular,
+    /// Parallel to a nearby road at the snapped offset.
+    Parallel,
+    /// The road this spacing is measured from (to the snapped point).
+    Spacing,
+}
+
+/// A dashed guide on the ground, in sim metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Guide {
+    pub from: [f32; 2],
+    pub to: [f32; 2],
+    pub kind: GuideKind,
+}
+
+/// Snapping feedback for the active tool (road tool; also zoning/bulldozer
+/// road modes, which snap to road stretches). Empty (`point: None`) when the
+/// tool does not snap.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct SnapFeedback {
+    /// The snapped point (a cell centre), sim metres.
+    pub point: Option<[f32; 2]>,
+    /// Its cell.
+    pub cell: Option<Cell>,
+    /// The strongest rule that placed the point.
+    pub target: SnapTarget,
+    /// Every rule that agreed on it (includes `target`), e.g. Node + Angle.
+    pub matched: Vec<SnapTarget>,
+    /// Guide lines to draw.
+    pub guides: Vec<Guide>,
+    /// With `SnapTarget::Spacing` (or a parallel snap): the spacing to the
+    /// neighbouring road in cells, shown as a label by ui.
+    pub spacing_cells: Option<i32>,
+    /// True while the player holds snapping off (Alt).
+    pub suspended: bool,
+}
+
+/// One straight leg of a road being drawn (one `Command::BuildRoad`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathLeg {
+    pub from: Cell,
+    pub to: Cell,
+    /// `None` when the sim would accept this leg (from `World::preview`,
+    /// checked after the legs before it).
+    pub error: Option<CommandError>,
+    /// Cells of the leg that already carry a road of a different kind (an
+    /// avenue over a street previews as an upgrade).
+    pub upgrade_cells: Vec<Cell>,
+}
+
+/// The whole road being drawn: the multi-point path of the road tool, or
+/// every street of the block tool. Empty when not drawing.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct PathPreview {
+    pub kind: RoadChoice,
+    /// Path corners in order (first = start, last = live end under the
+    /// cursor). Empty for the block tool.
+    pub points: Vec<Cell>,
+    /// Corners already placed (the rest of `points` follows the cursor).
+    pub placed: usize,
+    /// Every leg that would be built, in build order.
+    pub legs: Vec<PathLeg>,
+    /// Total length in metres and total price (new road + upgrades).
+    pub length_m: f32,
+    pub cost: i64,
+    /// First error of any leg (the whole path builds only when `None`).
+    pub error: Option<CommandError>,
+}
+
+/// A stretch of road between two junctions (or dead ends).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoadStretch {
+    /// The graph segments of the stretch, end to end.
+    pub segments: Vec<SegmentId>,
+    /// Its centre line as a polyline, sim metres (node positions).
+    pub points: Vec<[f32; 2]>,
+    /// Grid cells it covers.
+    pub cells: Vec<Cell>,
+}
+
+/// Something in the world the interface points at.
+#[allow(dead_code)] // variants constructed by ui tools as they land
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorldTarget {
+    Building(BuildingId),
+    Road(RoadStretch),
+    /// A road node with three or more arms.
+    Junction {
+        node: NodeId,
+        pos: [f32; 2],
+    },
+}
+
+/// What gfx should highlight in the world (issue 6): the hovered and the
+/// inspected (clicked, pinned) thing, and what the bulldozer would remove.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct WorldHighlight {
+    /// Under the cursor (inspect, junction tool, road-mode zoning/bulldozer).
+    pub hovered: Option<WorldTarget>,
+    /// Pinned by a click with Inspect (its card stays open).
+    pub selected: Option<WorldTarget>,
+    /// Bulldozer preview: buildings that would be removed (tint red).
+    pub doomed_buildings: Vec<BuildingId>,
+    /// Bulldozer preview: road cells that would be removed (tint red).
+    pub doomed_road_cells: Vec<Cell>,
+}
+
+/// Player display settings that gfx honours (written by ui from the
+/// settings panel).
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct DisplaySettings {
+    /// Move the camera when the cursor touches a window edge.
+    pub edge_scroll: bool,
+    /// Always mark zoned-but-empty lots, even without the zoning tool or
+    /// zones overlay (issue 9).
+    pub lot_markers: bool,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        DisplaySettings {
+            // Off by default: in a window the cursor crosses the border
+            // whenever it leaves the game.
+            edge_scroll: false,
+            lot_markers: true,
+        }
+    }
 }
 
 // ---------------------------------------------------------------- camera contract
@@ -259,6 +503,11 @@ pub fn cell_corners(c: Cell, inset: f32, height: f32) -> [Vec3; 4] {
 
 // ---------------------------------------------------------------- plugin
 
+/// True once the 3D scene's shaders are built and it really draws (written
+/// by gfx; ui shows a loading card until then). Starts false.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SceneReady(pub bool);
+
 pub struct SharedPlugin;
 
 impl Plugin for SharedPlugin {
@@ -282,6 +531,14 @@ impl Plugin for SharedPlugin {
         .init_resource::<OverlayMode>()
         .init_resource::<GraphicsQuality>()
         .init_resource::<CameraOverride>()
+        .init_resource::<RoadChoice>()
+        .init_resource::<ToolModes>()
+        .init_resource::<SnapFeedback>()
+        .init_resource::<PathPreview>()
+        .init_resource::<WorldHighlight>()
+        .init_resource::<DisplaySettings>()
+        // Without gfx there is nothing to wait for.
+        .insert_resource(SceneReady(!cfg!(feature = "gfx")))
         .add_message::<SimCommand>()
         .configure_sets(
             Update,

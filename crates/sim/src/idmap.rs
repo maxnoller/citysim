@@ -170,6 +170,23 @@ impl<K: Key, V> IdMap<K, V> {
         self.slots.iter().filter_map(|s| s.value.as_ref())
     }
 
+    /// The same map (same keys, same free list) with every value converted.
+    pub fn map_values<W>(self, mut f: impl FnMut(V) -> W) -> IdMap<K, W> {
+        IdMap {
+            slots: self
+                .slots
+                .into_iter()
+                .map(|s| Slot {
+                    version: s.version,
+                    value: s.value.map(&mut f),
+                })
+                .collect(),
+            free: self.free,
+            len: self.len,
+            _k: PhantomData,
+        }
+    }
+
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> + '_ {
         self.slots.iter_mut().filter_map(|s| s.value.as_mut())
     }

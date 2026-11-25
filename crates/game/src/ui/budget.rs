@@ -112,7 +112,15 @@ enum BudgetText {
     Amount(usize, usize),
     YesterdayHeader,
     TaxValue,
+    FiscalTitle,
+    FiscalBody,
+    FiscalFix,
+    FiscalIcon,
 }
+
+/// The fiscal status box (shown when the budget is not healthy).
+#[derive(Component)]
+struct FiscalBox;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum ChartText {
@@ -154,8 +162,19 @@ struct BudgetCache {
     today: Budget,
     age: f32,
     /// Inputs the texts were last written from.
-    key: Option<(u64, i64, u32, usize, Budget, u32, u32)>,
+    key: Option<BudgetKey>,
 }
+
+type BudgetKey = (
+    u64,
+    i64,
+    u32,
+    usize,
+    Budget,
+    u32,
+    u32,
+    (citysim_sim::FiscalState, citysim_sim::FiscalReason, u32),
+);
 
 const PANEL_W: f32 = 372.0;
 /// Width of each amount column of the table.
@@ -454,6 +473,48 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>) {
                 ))
                 .insert(TextLayout::justify(Justify::Right));
             });
+            // Fiscal status: what is wrong and what would fix it.
+            p.spawn((
+                FiscalBox,
+                layout(Node {
+                    margin: UiRect::top(px(t::S3 + 2.0)),
+                    padding: UiRect::new(px(t::S3 + 2.0), px(t::S3 + 2.0), px(t::S3), px(t::S3 + 1.0)),
+                    column_gap: px(t::S3 + 1.0),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(t::RADIUS_SM)),
+                    display: Display::None,
+                    ..default()
+                }),
+                BackgroundColor(t::alpha(t::WARNING, 0.10)),
+                BorderColor::all(t::alpha(t::WARNING, 0.35)),
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    super::widgets::icon(fonts, icon::ALERT, t::ICON_MD, t::WARNING),
+                    BudgetText::FiscalIcon,
+                ));
+                b.spawn(layout(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(t::S1 + 1.0),
+                    flex_grow: 1.0,
+                    flex_shrink: 1.0,
+                    ..default()
+                }))
+                .with_children(|c| {
+                    c.spawn((
+                        label(fonts, "", t::FONT_BODY, t::W_SEMIBOLD, t::WARNING),
+                        BudgetText::FiscalTitle,
+                    ));
+                    c.spawn((
+                        paragraph(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT),
+                        BudgetText::FiscalBody,
+                    ));
+                    c.spawn((
+                        paragraph(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
+                        BudgetText::FiscalFix,
+                    ));
+                });
+            });
             divider(p, t::S3 + 2.0, t::S3 + 2.0);
             chart(p, fonts);
             divider(p, t::S3 + 2.0, t::S3 + 2.0);
@@ -705,6 +766,10 @@ fn update_budget(
     mut texts: Query<(&BudgetText, &mut Text, &mut TextColor)>,
     mut fill: Query<&mut Node, (With<TaxFill>, Without<BudgetRoot>, Without<TaxKnob>)>,
     mut knob: Query<&mut Node, (With<TaxKnob>, Without<BudgetRoot>, Without<TaxFill>)>,
+    mut fiscal_box: Query<
+        (&mut Node, &mut BackgroundColor, &mut BorderColor),
+        (With<FiscalBox>, Without<BudgetRoot>, Without<TaxFill>, Without<TaxKnob>),
+    >,
     mut anim: Local<f32>,
 ) {
     let Ok((mut node, mut tf)) = root.single_mut() else {
@@ -750,20 +815,47 @@ fn update_budget(
         cache.today,
         w.stats.road_cells,
         w.stats.population,
+        (e.fiscal.state, e.fiscal.reason, e.fiscal.left_last_night),
     );
     if cache.key == Some(key) {
         return;
     }
     cache.key = Some(key);
     let booked = !e.history.is_empty();
+    let note = super::fiscal::fiscal_note(w);
+    let note_color = note.as_ref().map_or(t::WARNING, |n| n.color);
+    if let Ok((mut n, mut bg, mut border)) = fiscal_box.single_mut() {
+        let d = if note.is_some() { Display::Flex } else { Display::None };
+        if n.display != d {
+            n.display = d;
+        }
+        bg.set_if_neq(BackgroundColor(t::alpha(note_color, 0.10)));
+        border.set_if_neq(BorderColor::all(t::alpha(note_color, 0.35)));
+    }
     for (which, mut text, mut color) in &mut texts {
         let (s, c) = match *which {
             BudgetText::Balance => (format::money(e.money), if e.money < 0 { t::NEGATIVE } else { t::TEXT }),
+            // With a fiscal note below, the line beside the balance stays short.
+            BudgetText::BalanceNote if note.is_some() => match booked {
+                true => (
+                    format!("{} yesterday", format::signed_money(e.last_day.net())),
+                    signed_color(e.last_day.net()),
+                ),
+                false => (String::new(), t::TEXT_MUTED),
+            },
             BudgetText::BalanceNote => balance_note(e.money, booked.then_some(e.last_day.net()), cache.today.net()),
+            // (Short: a longer caption pushes the numbers out of the panel.)
             BudgetText::UpkeepCaption => (
                 format!("{} cells", format::group(w.stats.road_cells as u64)),
                 t::TEXT_FAINT,
             ),
+            BudgetText::FiscalTitle => (note.as_ref().map_or("", |n| n.title).to_string(), note_color),
+            BudgetText::FiscalBody => (note.as_ref().map(|n| n.body.clone()).unwrap_or_default(), t::TEXT),
+            BudgetText::FiscalFix => (
+                note.as_ref().map(|n| format!("Fix: {}", n.fix)).unwrap_or_default(),
+                t::TEXT_MUTED,
+            ),
+            BudgetText::FiscalIcon => (icon::ALERT.to_string(), note_color),
             BudgetText::ServicesCaption => (
                 format!("{} people", format::group(w.stats.population as u64)),
                 t::TEXT_FAINT,

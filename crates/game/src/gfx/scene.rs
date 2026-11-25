@@ -12,7 +12,16 @@ use bevy::pbr::{DistanceFog, FogFalloff, ScreenSpaceAmbientOcclusion, ScreenSpac
 use bevy::prelude::*;
 use citysim_sim::MAP_SIZE_M;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use bevy::camera::{Hdr, RenderTarget};
+use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
+use bevy::render::render_resource::{PipelineCache, TextureFormat};
+use bevy::render::{Render, RenderApp, RenderSystems};
+
 use super::camera::CameraRig;
+use super::city_material::{CityMaterial, SkyExt, SkyMaterial, city_material};
 use super::mesh_util::MeshBuilder;
 use super::noise;
 use super::palette::{self, lin, mix};
@@ -38,8 +47,20 @@ pub fn sun_direction() -> Vec3 {
 /// One shared material for everything vertex-coloured and lit.
 #[derive(Resource, Clone)]
 pub struct WorldMaterials {
-    /// Opaque, lit, vertex colours.
-    pub lit: Handle<StandardMaterial>,
+    /// Opaque, lit, vertex colours (with night glow, see `city_material`).
+    pub lit: Handle<CityMaterial>,
+    /// `lit` with the brake lights on (cars that are stopping).
+    pub lit_brake: Handle<CityMaterial>,
+    /// The ground: like `lit`, fully rough.
+    pub ground: Handle<CityMaterial>,
+    pub sky: Handle<SkyMaterial>,
+}
+
+impl WorldMaterials {
+    /// Every city material (they all follow the time of day).
+    pub fn city_handles(&self) -> [&Handle<CityMaterial>; 3] {
+        [&self.lit, &self.lit_brake, &self.ground]
+    }
 }
 
 #[derive(Component)]
@@ -48,9 +69,25 @@ struct SkyDome;
 #[derive(Component)]
 pub struct Sun;
 
+/// Soft fill light from the ground side.
+#[derive(Component)]
+pub struct Bounce;
+
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
+    fn finish(&self, app: &mut App) {
+        let pending = app.world().get_resource::<PendingPipelines>().cloned();
+        if let (Some(pending), Some(render)) = (pending, app.get_sub_app_mut(RenderApp)) {
+            render
+                .insert_resource(pending)
+                .add_systems(Render, count_pending_pipelines.in_set(RenderSystems::Cleanup));
+        } else {
+            // No renderer (tests): quality applies at once.
+            app.world_mut().remove_resource::<PendingPipelines>();
+        }
+    }
+
     fn build(&self, app: &mut App) {
         app.insert_resource(ClearColor(palette::SKY_HORIZON))
             .insert_resource(GlobalAmbientLight {
@@ -59,6 +96,7 @@ impl Plugin for ScenePlugin {
                 ..default()
             })
             .insert_resource(DirectionalLightShadowMap { size: 4096 })
+            .init_resource::<PendingPipelines>()
             .add_systems(PreStartup, init_materials)
             .add_systems(Startup, setup_scene)
             .add_systems(
@@ -70,32 +108,46 @@ impl Plugin for ScenePlugin {
     }
 }
 
-fn init_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
-    commands.insert_resource(WorldMaterials {
-        lit: materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.92,
-            reflectance: 0.25,
-            ..default()
-        }),
-    });
-}
-
-fn setup_scene(
+fn init_materials(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    world_mats: Res<WorldMaterials>,
+    mut materials: ResMut<Assets<CityMaterial>>,
+    mut skies: ResMut<Assets<SkyMaterial>>,
 ) {
-    commands.spawn((
-        Name::new("Ground"),
-        Mesh3d(meshes.add(ground_mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
+    let lit = StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.92,
+        reflectance: 0.25,
+        ..default()
+    };
+    let mut brake = city_material(lit.clone());
+    brake.extension.params.brake = 1.0;
+    commands.insert_resource(WorldMaterials {
+        lit: materials.add(city_material(lit)),
+        lit_brake: materials.add(brake),
+        ground: materials.add(city_material(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 1.0,
             reflectance: 0.1,
             ..default()
         })),
+        sky: skies.add(SkyMaterial {
+            base: StandardMaterial {
+                base_color: Color::WHITE,
+                unlit: true,
+                fog_enabled: false,
+                cull_mode: None,
+                ..default()
+            },
+            extension: SkyExt::default(),
+        }),
+    });
+}
+
+fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, world_mats: Res<WorldMaterials>) {
+    commands.spawn((
+        Name::new("Ground"),
+        Mesh3d(meshes.add(ground_mesh())),
+        MeshMaterial3d(world_mats.ground.clone()),
         Transform::default(),
         NotShadowCaster,
     ));
@@ -110,13 +162,7 @@ fn setup_scene(
         Name::new("Sky"),
         SkyDome,
         Mesh3d(meshes.add(sky_mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
-            fog_enabled: false,
-            cull_mode: None,
-            ..default()
-        })),
+        MeshMaterial3d(world_mats.sky.clone()),
         Transform::default(),
         NotShadowCaster,
         NoFrustumCulling,
@@ -137,6 +183,7 @@ fn setup_scene(
     // faces from going flat.
     commands.spawn((
         Name::new("Bounce"),
+        Bounce,
         DirectionalLight {
             color: Color::srgb(1.0, 0.93, 0.82),
             illuminance: 650.0,
@@ -192,6 +239,7 @@ fn ground_axis() -> Vec<f32> {
 fn ground_mesh() -> Mesh {
     let axis = ground_axis();
     let mut b = MeshBuilder::new();
+    b.tag = [super::mesh_util::Glow::Ground as u32 as f32, 0.0];
     let col: Vec<Vec<[f32; 4]>> = axis
         .iter()
         .map(|&z| axis.iter().map(|&x| lin(grass_color(x, z))).collect())
@@ -298,6 +346,9 @@ pub struct QualitySettings {
     pub fxaa: bool,
     /// Fraction of the full tree count to place.
     pub tree_density: f32,
+    pub bloom: bool,
+    /// Soft drifting cloud shadows on the sunlight.
+    pub cloud_shadows: bool,
 }
 
 pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
@@ -310,6 +361,8 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
             smaa: false,
             fxaa: true,
             tree_density: 0.35,
+            bloom: false,
+            cloud_shadows: false,
         },
         GraphicsQuality::Medium => QualitySettings {
             shadow_map: 2048,
@@ -319,6 +372,8 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
             smaa: false,
             fxaa: false,
             tree_density: 0.65,
+            bloom: true,
+            cloud_shadows: true,
         },
         GraphicsQuality::High => QualitySettings {
             shadow_map: 4096,
@@ -329,6 +384,8 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
             smaa: true,
             fxaa: false,
             tree_density: 1.0,
+            bloom: true,
+            cloud_shadows: true,
         },
     }
 }
@@ -337,6 +394,22 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
 pub fn camera_look() -> impl Bundle {
     (
         Tonemapping::TonyMcMapface,
+        // A little more punch than the neutral tonemapper gives: slightly
+        // richer colour and midtone contrast (the diorama look).
+        bevy::render::view::ColorGrading {
+            global: bevy::render::view::ColorGradingGlobal {
+                post_saturation: 1.1,
+                ..default()
+            },
+            midtones: bevy::render::view::ColorGradingSection {
+                contrast: 1.06,
+                ..default()
+            },
+            ..default()
+        },
+        // Always HDR (bloom only on some qualities): switching quality must
+        // not change the main pass's render target format.
+        Hdr,
         DistanceFog {
             color: palette::SKY_HORIZON,
             directional_light_color: Color::srgba(1.0, 0.95, 0.85, 0.25),
@@ -349,49 +422,161 @@ pub fn camera_look() -> impl Bundle {
     )
 }
 
+/// Pipelines the renderer is still compiling (written by the render world).
+#[derive(Resource, Clone, Default)]
+struct PendingPipelines(Arc<AtomicUsize>);
+
+fn count_pending_pipelines(cache: Res<PipelineCache>, pending: Res<PendingPipelines>) {
+    pending.0.store(cache.waiting_pipelines().count(), Ordering::Relaxed);
+}
+
+/// Hidden camera that renders the scene with the requested quality into a
+/// small image so its pipelines compile before the main camera switches.
+#[derive(Component)]
+struct WarmUpCamera;
+
+struct WarmUp {
+    entity: Entity,
+    quality: GraphicsQuality,
+    started: f32,
+    frames: u32,
+    calm: u32,
+}
+
+#[derive(Default)]
+struct QualityState {
+    camera: Option<Entity>,
+    applied: Option<GraphicsQuality>,
+    warm: Option<WarmUp>,
+}
+
+/// Put the per-quality camera components on `ec`.
+fn insert_quality(ec: &mut EntityCommands, s: &QualitySettings) {
+    ec.insert(s.msaa);
+    if s.ssao {
+        ec.insert(ScreenSpaceAmbientOcclusion {
+            quality_level: ScreenSpaceAmbientOcclusionQualityLevel::Medium,
+            radius: 1.6,
+            ..default()
+        });
+    } else {
+        ec.remove::<ScreenSpaceAmbientOcclusion>();
+    }
+    if s.smaa {
+        ec.insert(Smaa {
+            preset: SmaaPreset::High,
+        });
+    } else {
+        ec.remove::<Smaa>();
+    }
+    if s.fxaa {
+        ec.insert(Fxaa::default());
+    } else {
+        ec.remove::<Fxaa>();
+    }
+    if s.bloom {
+        ec.insert(Bloom {
+            intensity: 0.1,
+            low_frequency_boost: 0.4,
+            prefilter: BloomPrefilter {
+                threshold: 1.6,
+                threshold_softness: 0.4,
+            },
+            composite_mode: BloomCompositeMode::Additive,
+            ..Bloom::NATURAL
+        });
+    } else {
+        ec.remove::<Bloom>();
+    }
+}
+
+/// Apply `GraphicsQuality` to the world camera. Changing MSAA / SSAO makes
+/// the renderer re-specialise every pipeline, and while they compile nothing
+/// is drawn (round 1 showed a white frame for seconds). So a switch first
+/// renders the new settings on a hidden warm-up camera and moves the main
+/// camera over only once no pipeline is pending any more.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn apply_quality(
     quality: Res<GraphicsQuality>,
     mut commands: Commands,
-    cams: Query<Entity, Added<WorldCamera>>,
-    all_cams: Query<Entity, With<WorldCamera>>,
+    cams: Query<(Entity, &Transform, &Projection), (With<WorldCamera>, Without<WarmUpCamera>)>,
+    mut warm_cams: Query<&mut Transform, (With<WarmUpCamera>, Without<WorldCamera>)>,
     mut shadow_map: ResMut<DirectionalLightShadowMap>,
+    pending: Option<Res<PendingPipelines>>,
+    mut images: ResMut<Assets<Image>>,
+    time: Res<Time<Real>>,
+    mut state: Local<QualityState>,
 ) {
-    let targets: Vec<Entity> = if quality.is_changed() {
-        all_cams.iter().collect()
-    } else {
-        cams.iter().collect()
+    let Ok((cam, cam_tf, proj)) = cams.single() else {
+        return;
     };
-    if targets.is_empty() {
+    let want = *quality;
+    let now = time.elapsed_secs();
+    let apply = |commands: &mut Commands, shadow_map: &mut DirectionalLightShadowMap, q: GraphicsQuality| {
+        let s = quality_settings(q);
+        if shadow_map.size != s.shadow_map {
+            shadow_map.size = s.shadow_map;
+        }
+        insert_quality(&mut commands.entity(cam), &s);
+    };
+    // A new camera (or the very first frame): apply at once.
+    if state.camera != Some(cam) || pending.is_none() {
+        state.camera = Some(cam);
+        if state.applied != Some(want) || pending.is_none() {
+            apply(&mut commands, &mut shadow_map, want);
+        }
+        state.applied = Some(want);
         return;
     }
-    let s = quality_settings(*quality);
-    if shadow_map.size != s.shadow_map {
-        shadow_map.size = s.shadow_map;
+    if state.applied == Some(want) {
+        if let Some(w) = state.warm.take() {
+            commands.entity(w.entity).despawn();
+        }
+        return;
     }
-    for e in targets {
-        let mut ec = commands.entity(e);
-        ec.insert(s.msaa);
-        if s.ssao {
-            ec.insert(ScreenSpaceAmbientOcclusion {
-                quality_level: ScreenSpaceAmbientOcclusionQualityLevel::Medium,
-                radius: 1.6,
+    // Start (or restart) warming up the requested quality.
+    if state.warm.as_ref().is_none_or(|w| w.quality != want) {
+        if let Some(w) = state.warm.take() {
+            commands.entity(w.entity).despawn();
+        }
+        let image = images.add(Image::new_target_texture(320, 180, TextureFormat::Bgra8UnormSrgb, None));
+        let mut ec = commands.spawn((
+            Name::new("Quality warm-up camera"),
+            WarmUpCamera,
+            Camera3d::default(),
+            Camera {
+                order: -10,
                 ..default()
-            });
-        } else {
-            ec.remove::<ScreenSpaceAmbientOcclusion>();
-        }
-        if s.smaa {
-            ec.insert(Smaa {
-                preset: SmaaPreset::High,
-            });
-        } else {
-            ec.remove::<Smaa>();
-        }
-        if s.fxaa {
-            ec.insert(Fxaa::default());
-        } else {
-            ec.remove::<Fxaa>();
-        }
+            },
+            RenderTarget::Image(image.into()),
+            proj.clone(),
+            *cam_tf,
+            camera_look(),
+        ));
+        insert_quality(&mut ec, &quality_settings(want));
+        state.warm = Some(WarmUp {
+            entity: ec.id(),
+            quality: want,
+            started: now,
+            frames: 0,
+            calm: 0,
+        });
+        return;
+    }
+    let Some(w) = state.warm.as_mut() else { return };
+    if let Ok(mut t) = warm_cams.get_mut(w.entity) {
+        *t = *cam_tf;
+    }
+    w.frames += 1;
+    let waiting = pending.map_or(0, |p| p.0.load(Ordering::Relaxed));
+    w.calm = if waiting == 0 { w.calm + 1 } else { 0 };
+    if (w.frames >= 4 && w.calm >= 3) || now - w.started > 20.0 {
+        let entity = w.entity;
+        info!("graphics quality {want:?} applied after {} warm-up frames", w.frames);
+        state.warm = None;
+        commands.entity(entity).despawn();
+        apply(&mut commands, &mut shadow_map, want);
+        state.applied = Some(want);
     }
 }
 

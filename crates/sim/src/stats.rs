@@ -56,6 +56,8 @@ pub struct Stats {
     /// `congested_segments` / all segments, `0.0..=1.0`.
     #[serde(default)]
     pub congestion_share: f32,
+    /// Avenue cells (pieces), included in `road_cells`.
+    pub avenue_cells: u32,
     /// The workforce: people who want a job. One worker per household
     /// (children, retirees and partners are not modelled as workers), so
     /// this equals `households`. `employed + unemployed == workforce`.
@@ -74,8 +76,10 @@ impl Eq for Stats {}
 /// Recompute what can be derived cheaply from state.
 pub(crate) fn update(world: &mut World) {
     let road_cells = world.cache.road_cells(&world.grid, world.versions.grid);
+    let avenue_cells = world.cache.avenue_cells(&world.roads, world.versions.roads);
     let mut s = Stats {
         road_cells,
+        avenue_cells,
         buildings: world.buildings.len() as u32,
         households: world.households.len() as u32,
         vehicles_on_road: world.vehicles.len() as u32,

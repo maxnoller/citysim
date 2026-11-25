@@ -71,6 +71,6 @@ impl Facing {
     /// Direction of the front in sim space, radians, `atan2(dy, dx)`.
     pub fn angle(self) -> f32 {
         let (dx, dy) = self.offset();
-        (dy as f32).atan2(dx as f32)
+        libm::atan2f(dy as f32, dx as f32)
     }
 }

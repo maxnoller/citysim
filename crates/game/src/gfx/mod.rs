@@ -4,15 +4,24 @@
 mod building_gen;
 mod buildings;
 mod camera;
+mod city_material;
 mod cursor;
+mod daynight;
+mod guides;
+mod loading;
+mod lot_props;
+mod lots;
 mod mesh_util;
 mod noise;
 mod overlay;
 mod palette;
 mod props;
 mod road_geom;
+mod road_ghost;
 mod roads;
 mod scene;
+mod signals;
+mod smoke;
 mod stats;
 mod trees;
 mod vehicle_gen;
@@ -33,7 +42,9 @@ pub struct GfxPlugin;
 impl Plugin for GfxPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
+            city_material::CityMaterialPlugin,
             scene::ScenePlugin,
+            daynight::DayNightPlugin,
             camera::CameraPlugin,
             roads::RoadsPlugin,
             zones::ZonesPlugin,
@@ -43,6 +54,13 @@ impl Plugin for GfxPlugin {
             overlay::OverlayPlugin,
             trees::TreesPlugin,
             stats::StatsPlugin,
+        ));
+        app.add_plugins((
+            signals::SignalsPlugin,
+            lots::LotsPlugin,
+            guides::GuidesPlugin,
+            smoke::SmokePlugin,
+            loading::LoadingPlugin,
         ));
     }
 }
@@ -64,6 +82,7 @@ mod reload_tests {
             w.apply(Command::BuildRoad {
                 from: Cell::new(a.0, a.1),
                 to: Cell::new(b.0, b.1),
+                kind: citysim_sim::RoadKind::Street,
             })
             .expect("road");
         }
@@ -84,6 +103,7 @@ mod reload_tests {
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
+            .init_asset::<super::city_material::CityMaterial>()
             .insert_resource(SimWorld {
                 world: w,
                 generation: 0,
@@ -100,9 +120,14 @@ mod reload_tests {
             ));
         let lit = app
             .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::default());
-        app.insert_resource(WorldMaterials { lit });
+            .resource_mut::<Assets<super::city_material::CityMaterial>>()
+            .add(super::city_material::city_material(StandardMaterial::default()));
+        app.insert_resource(WorldMaterials {
+            lit: lit.clone(),
+            lit_brake: lit.clone(),
+            ground: lit,
+            sky: Handle::default(),
+        });
         app
     }
 

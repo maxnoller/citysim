@@ -21,6 +21,10 @@ const SHRINK_SECS: f32 = 0.35;
 /// a loaded save) just appear.
 const ANIMATE_IF_YOUNGER: u64 = 3 * citysim_sim::TICKS_PER_SECOND as u64;
 
+/// New buildings stand as a building site this long (sim ticks): first
+/// foundations, then the frame with scaffolding (and a crane when tall).
+pub const SITE_TICKS: u64 = 3 * citysim_sim::balance::TICKS_PER_HOUR as u64;
+
 /// Camera distance (m) where buildings cross-fade to their simplified model.
 pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
 
@@ -28,6 +32,8 @@ pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
 #[derive(Resource, Default)]
 pub struct BuildingModels {
     meshes: HashMap<ModelKey, (Handle<Mesh>, Handle<Mesh>)>,
+    emitters: HashMap<ModelKey, Vec<Vec3>>,
+    sites: HashMap<(ModelKey, u8), Handle<Mesh>>,
 }
 
 impl BuildingModels {
@@ -36,21 +42,77 @@ impl BuildingModels {
         self.meshes.len()
     }
 
-    fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
+    fn site(&mut self, key: ModelKey, stage: u8, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        // Sites only depend on the lot, the tier and the stage.
+        let k = ModelKey {
+            variant: key.variant % 4,
+            ..key
+        };
+        self.sites
+            .entry((k, stage))
+            .or_insert_with(|| meshes.add(building_gen::site(k, stage).build()))
+            .clone()
+    }
+
+    pub fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
+        let emitters = &mut self.emitters;
         self.meshes
             .entry(key)
             .or_insert_with(|| {
+                let mut detail = building_gen::generate(key, false);
+                emitters.insert(key, std::mem::take(&mut detail.emitters));
                 (
-                    meshes.add(building_gen::generate(key, false).build()),
+                    meshes.add(detail.build()),
                     meshes.add(building_gen::generate(key, true).build()),
                 )
             })
             .clone()
     }
+
+    /// Chimney tops that smoke, in model space (after `get`).
+    pub fn emitters(&self, key: ModelKey) -> &[Vec3] {
+        self.emitters.get(&key).map_or(&[], Vec::as_slice)
+    }
 }
 
 #[derive(Component)]
 pub(super) struct BuildingVisual;
+
+/// Drawn building per sim building: (parent entity, model key, model child
+/// transform). Highlights draw over these.
+#[derive(Resource, Default)]
+pub struct BuildingEntities(pub HashMap<BuildingId, (Entity, ModelKey, Transform)>);
+
+/// A building still under construction (its children show the site).
+#[derive(Component)]
+struct Site {
+    id: BuildingId,
+    key: ModelKey,
+    model_tf: Transform,
+    stage: u8,
+    /// Sim tick the works started (built, or rebuilt for a level-up).
+    start: u64,
+}
+
+/// A level-up big enough to rebuild visibly (a site with scaffolding and,
+/// for tall buildings, a crane): to the top levels, or any level-up of a
+/// large (2x2) lot.
+fn rebuild_shows_site(old: ModelKey, new: ModelKey) -> bool {
+    new.kind == old.kind
+        && new.cells == old.cells
+        && new.level > old.level
+        && (new.level >= 3 || new.cells.0 >= 2 && new.cells.1 >= 2)
+}
+
+fn site_stage(age: u64) -> Option<u8> {
+    if age >= SITE_TICKS {
+        None
+    } else if age < SITE_TICKS / 2 {
+        Some(0)
+    } else {
+        Some(1)
+    }
+}
 
 #[derive(Component)]
 struct Growing {
@@ -66,6 +128,9 @@ pub(super) struct Shrinking {
 struct Spawned {
     key: Option<((u64, u64), (u64, u64))>,
     entities: HashMap<BuildingId, (Entity, ModelKey, Facing, Inset)>,
+    /// Buildings rebuilt for a big level-up: sim tick the works started
+    /// (they show a building site again, with a crane when tall).
+    rebuilt: HashMap<BuildingId, u64>,
 }
 
 /// How a building model is shrunk away from a diagonal road: uniform
@@ -75,13 +140,99 @@ struct Spawned {
 pub struct Inset {
     pub scale: f32,
     pub shift: Vec2,
+    /// Extra squeeze along world x / z (lots stepping back from a wide
+    /// road beside them), 1 = none.
+    pub squeeze: Vec2,
 }
 
 impl Inset {
     const NONE: Inset = Inset {
         scale: 1.0,
         shift: Vec2::ZERO,
+        squeeze: Vec2::ONE,
     };
+
+    /// Scale for the model child, in the model's local frame (its x runs
+    /// along world z when the building faces +-x).
+    fn local_scale(&self, f: Facing) -> Vec3 {
+        let (sx, sz) = match f {
+            Facing::PlusY | Facing::MinusY => (self.squeeze.x, self.squeeze.y),
+            Facing::PlusX | Facing::MinusX => (self.squeeze.y, self.squeeze.x),
+        };
+        Vec3::new(sx, 1.0, sz) * self.scale
+    }
+}
+
+/// Axis-aligned roads drawn wider than their cell line (avenues), as
+/// (a, b, half-width incl. sidewalks).
+pub fn wide_roads(roads: &RoadNetwork) -> Vec<(Vec2, Vec2, f32)> {
+    roads
+        .segments
+        .iter()
+        .filter_map(|(_, seg)| {
+            let a = Vec2::from(roads.nodes.get(seg.a)?.pos);
+            let b = Vec2::from(roads.nodes.get(seg.b)?.pos);
+            let d = (b - a).normalize_or_zero();
+            let outer = road_geom::style(seg.kind).outer();
+            (outer > CELL_SIZE * 0.5 + 0.01 && (d.x.abs() < 0.02 || d.y.abs() < 0.02)).then_some((a, b, outer))
+        })
+        .collect()
+}
+
+/// Step a lot (`min..max`) back from wide roads running beside it: the
+/// lot shrinks on that side (never below `MIN_INSET_SCALE` of its size).
+pub fn wide_inset(min: Vec2, max: Vec2, roads: &[(Vec2, Vec2, f32)]) -> Inset {
+    let (mut lo, mut hi) = (min, max);
+    for &(a, b, outer) in roads {
+        let need = outer + ROAD_CLEARANCE;
+        if (a.y - b.y).abs() < 0.01 {
+            // Along x at z = a.y: must overlap the lot's x extent.
+            if a.x.max(b.x) <= min.x + 0.5 || a.x.min(b.x) >= max.x - 0.5 {
+                continue;
+            }
+            let z = a.y;
+            if z <= min.y {
+                lo.y = lo.y.max(z + need);
+            } else if z >= max.y {
+                hi.y = hi.y.min(z - need);
+            }
+        } else {
+            if a.y.max(b.y) <= min.y + 0.5 || a.y.min(b.y) >= max.y - 0.5 {
+                continue;
+            }
+            let x = a.x;
+            if x <= min.x {
+                lo.x = lo.x.max(x + need);
+            } else if x >= max.x {
+                hi.x = hi.x.min(x - need);
+            }
+        }
+    }
+    if lo == min && hi == max {
+        return Inset::NONE;
+    }
+    let size = max - min;
+    let floor = size * MIN_INSET_SCALE;
+    // Keep at least the floor, anchored at the side away from the road.
+    if hi.x - lo.x < floor.x {
+        if lo.x > min.x {
+            lo.x = hi.x - floor.x;
+        } else {
+            hi.x = lo.x + floor.x;
+        }
+    }
+    if hi.y - lo.y < floor.y {
+        if lo.y > min.y {
+            lo.y = hi.y - floor.y;
+        } else {
+            hi.y = lo.y + floor.y;
+        }
+    }
+    Inset {
+        scale: 1.0,
+        shift: (lo + hi) * 0.5 - (min + max) * 0.5,
+        squeeze: (hi - lo) / size,
+    }
 }
 
 /// Clearance kept between a building lot and a diagonal road's edge, m.
@@ -195,6 +346,7 @@ pub fn diagonal_inset(min: Vec2, max: Vec2, roads: &[(Vec2, Vec2, f32)]) -> Inse
             best = Inset {
                 scale: lo,
                 shift: (anchor + (centre - anchor) * lo) - centre,
+                squeeze: Vec2::ONE,
             };
         }
     }
@@ -205,10 +357,14 @@ pub struct BuildingsPlugin;
 
 impl Plugin for BuildingsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BuildingModels>().add_systems(
-            Update,
-            (sync_buildings, animate_buildings).chain().in_set(GameSet::Render),
-        );
+        app.init_resource::<BuildingModels>()
+            .init_resource::<BuildingEntities>()
+            .add_systems(
+                Update,
+                (sync_buildings, advance_sites, animate_buildings)
+                    .chain()
+                    .in_set(GameSet::Render),
+            );
     }
 }
 
@@ -257,6 +413,7 @@ fn sync_buildings(
     mut models: ResMut<BuildingModels>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut spawned: Local<Spawned>,
+    mut index: ResMut<BuildingEntities>,
 ) {
     let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
     if spawned.key == Some(key) {
@@ -268,23 +425,50 @@ fn sync_buildings(
     let world = &sim.world;
     let buildings = &world.buildings;
     let diagonals = diagonal_roads(&world.roads);
+    let wides = wide_roads(&world.roads);
     let inset_of = |b: &Building| {
-        if diagonals.is_empty() {
+        if diagonals.is_empty() && wides.is_empty() {
             return Inset::NONE;
         }
         let (w, d) = b.size();
         let min = Vec2::new(b.footprint.min.x as f32, b.footprint.min.y as f32) * CELL_SIZE;
-        diagonal_inset(min, min + Vec2::new(w as f32, d as f32) * CELL_SIZE, &diagonals)
+        let max = min + Vec2::new(w as f32, d as f32) * CELL_SIZE;
+        let wide = wide_inset(min, max, &wides);
+        // Diagonal clearance is measured on the stepped-back lot.
+        let c = (min + max) * 0.5 + wide.shift;
+        let half = (max - min) * 0.5 * wide.squeeze;
+        let diag = diagonal_inset(c - half, c + half, &diagonals);
+        Inset {
+            scale: diag.scale,
+            shift: wide.shift + diag.shift,
+            squeeze: wide.squeeze,
+        }
     };
+    let tick = world.time.tick;
+    let mut rebuilt: Vec<BuildingId> = Vec::new();
     spawned.entities.retain(|id, (e, k, f, i)| {
         let keep = buildings
             .get(*id)
             .is_some_and(|b| model_key(b) == *k && b.facing == *f && inset_of(b) == *i && !reloaded);
+        if !keep
+            && !reloaded
+            && let Some(b) = buildings.get(*id)
+            && rebuild_shows_site(*k, model_key(b))
+        {
+            rebuilt.push(*id);
+        }
         if !keep {
             commands.entity(*e).remove::<Growing>().insert(Shrinking { start: now });
+            index.0.remove(id);
         }
         keep
     });
+    for id in rebuilt {
+        spawned.rebuilt.insert(id, tick);
+    }
+    spawned
+        .rebuilt
+        .retain(|id, t| buildings.contains_key(*id) && tick.saturating_sub(*t) < SITE_TICKS && !reloaded);
     for (id, b) in buildings.iter() {
         if spawned.entities.contains_key(&id) {
             continue;
@@ -297,7 +481,30 @@ fn sync_buildings(
         // The inset lives on the model children, so the grow animation can
         // scale the parent freely.
         let model_tf = Transform::from_translation(rot.inverse() * Vec3::new(inset.shift.x, 0.0, inset.shift.y))
-            .with_scale(Vec3::splat(inset.scale));
+            .with_scale(inset.local_scale(b.facing));
+        let start = spawned.rebuilt.get(&id).copied().unwrap_or(b.created_tick);
+        let age = world.time.tick.saturating_sub(start);
+        if !reloaded && let Some(stage) = site_stage(age) {
+            let mesh = models.site(mk, stage, &mut meshes);
+            let mut ec = commands.spawn((
+                BuildingVisual,
+                Visibility::default(),
+                Site {
+                    id,
+                    key: mk,
+                    model_tf,
+                    stage,
+                    start,
+                },
+                tf,
+            ));
+            ec.with_children(|p| {
+                p.spawn((model_tf, Mesh3d(mesh), MeshMaterial3d(mats.lit.clone())));
+            });
+            index.0.insert(id, (ec.id(), mk, model_tf));
+            spawned.entities.insert(id, (ec.id(), mk, b.facing, inset));
+            continue;
+        }
         let (detail, far) = models.get(mk, &mut meshes);
         let mut ec = commands.spawn((BuildingVisual, Visibility::default()));
         ec.with_children(|p| {
@@ -327,7 +534,77 @@ fn sync_buildings(
         } else {
             ec.insert(tf);
         }
+        index.0.insert(id, (ec.id(), mk, model_tf));
         spawned.entities.insert(id, (ec.id(), mk, b.facing, inset));
+    }
+}
+
+/// Move building sites on: foundations -> frame -> the finished building
+/// (which then grows in).
+#[allow(clippy::too_many_arguments)]
+fn advance_sites(
+    mut commands: Commands,
+    sim: Res<SimWorld>,
+    time: Res<Time<Real>>,
+    mats: Res<WorldMaterials>,
+    mut models: ResMut<BuildingModels>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut sites: Query<(Entity, &mut Site, &mut Transform, &Children), Without<Shrinking>>,
+) {
+    let world = &sim.world;
+    for (e, mut site, mut tf, children) in &mut sites {
+        if !world.buildings.contains_key(site.id) {
+            continue;
+        }
+        let stage = site_stage(world.time.tick.saturating_sub(site.start));
+        if stage == Some(site.stage) {
+            continue;
+        }
+        for c in children.iter() {
+            commands.entity(c).despawn();
+        }
+        let model_tf = site.model_tf;
+        match stage {
+            Some(st) => {
+                site.stage = st;
+                let mesh = models.site(site.key, st, &mut meshes);
+                commands.entity(e).with_children(|p| {
+                    p.spawn((model_tf, Mesh3d(mesh), MeshMaterial3d(mats.lit.clone())));
+                });
+            }
+            None => {
+                let (detail, far) = models.get(site.key, &mut meshes);
+                tf.scale = Vec3::new(0.9, 0.01, 0.9);
+                commands
+                    .entity(e)
+                    .remove::<Site>()
+                    .insert(Growing {
+                        start: time.elapsed_secs(),
+                    })
+                    .with_children(|p| {
+                        p.spawn((
+                            model_tf,
+                            Mesh3d(detail),
+                            MeshMaterial3d(mats.lit.clone()),
+                            VisibilityRange {
+                                start_margin: 0.0..0.0,
+                                end_margin: LOD_DISTANCE,
+                                use_aabb: false,
+                            },
+                        ));
+                        p.spawn((
+                            model_tf,
+                            Mesh3d(far),
+                            MeshMaterial3d(mats.lit.clone()),
+                            VisibilityRange {
+                                start_margin: LOD_DISTANCE,
+                                end_margin: 1e6..1e6,
+                                use_aabb: false,
+                            },
+                        ));
+                    });
+            }
+        }
     }
 }
 
@@ -396,6 +673,7 @@ mod tests {
             w.apply(Command::BuildRoad {
                 from: Cell::new(a.0, a.1),
                 to: Cell::new(b.0, b.1),
+                kind: citysim_sim::RoadKind::Street,
             })
             .expect("road");
         }

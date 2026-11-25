@@ -255,7 +255,7 @@ def build_road(a, b):
             if point_at(b, a, b):
                 click()
         if tool() == "road":
-            key("Escape")  # end the chain (keeps the Road tool)
+            key("Return")  # build the path (two corners); keeps the Road tool
         if cmd(f"preview-road {a[0]} {a[1]} {b[0]} {b[1]}") == "ok 0":
             break
         log(f"road {a}->{b} not built yet, retrying")
@@ -449,6 +449,12 @@ def launch(release, quality, demo, extra_env):
         except (TimeoutError, FileNotFoundError):
             if p.poll() is not None:
                 raise RuntimeError("game exited during start")
+    for _ in range(600):
+        try:
+            cmd("ready", timeout=2.0)
+            break
+        except RuntimeError:
+            time.sleep(0.2)
     log("control channel up:", cmd("stats"))
 
 

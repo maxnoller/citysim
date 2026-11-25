@@ -13,7 +13,7 @@ pub struct DemandPlugin;
 impl Plugin for DemandPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_meter)
-            .add_systems(Update, update_meter.in_set(GameSet::Render));
+            .add_systems(Update, (update_meter, hide_under_budget).in_set(GameSet::Render));
     }
 }
 
@@ -172,6 +172,24 @@ pub fn spawn_meter(mut commands: Commands, fonts: Res<UiFonts>) {
 }
 
 #[allow(clippy::type_complexity)]
+/// The budget panel covers the left column: the demand stack steps aside
+/// while it is open.
+fn hide_under_budget(state: Res<super::UiState>, mut q: Query<&mut Node, With<BottomLeftStack>>) {
+    if !state.is_changed() {
+        return;
+    }
+    let d = if state.budget_open {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for mut n in &mut q {
+        if n.display != d {
+            n.display = d;
+        }
+    }
+}
+
 fn update_meter(
     time: Res<Time<Real>>,
     sim: Res<SimWorld>,

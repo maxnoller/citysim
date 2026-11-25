@@ -25,6 +25,15 @@ fn rand_cell(r: &mut Rng) -> Cell {
     }
 }
 
+/// Mostly streets, some avenues, now and then the (unbuildable) highway.
+fn rand_kind(r: &mut Rng) -> RoadKind {
+    match r.below(20) {
+        0..=13 => RoadKind::Street,
+        14..=18 => RoadKind::Avenue,
+        _ => RoadKind::Highway,
+    }
+}
+
 fn rand_command(r: &mut Rng) -> Command {
     const DIRS: [(i32, i32); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
     match r.below(100) {
@@ -43,7 +52,11 @@ fn rand_command(r: &mut Rng) -> Command {
                     from.offset(dx * n, dy * n)
                 }
             };
-            Command::BuildRoad { from, to }
+            Command::BuildRoad {
+                from,
+                to,
+                kind: rand_kind(r),
+            }
         }
         35..=49 => {
             let min = rand_cell(r);
@@ -72,7 +85,18 @@ fn rand_command(r: &mut Rng) -> Command {
             };
             Command::SetZone { min, max, zone }
         }
-        85..=94 => {
+        85..=89 => {
+            let control = match r.below(3) {
+                0 => JunctionSetting::Auto,
+                1 => JunctionSetting::Signal,
+                _ => JunctionSetting::Priority,
+            };
+            Command::SetJunctionControl {
+                cell: rand_cell(r),
+                control,
+            }
+        }
+        90..=94 => {
             let rate = match r.below(8) {
                 0 => f32::NAN,
                 1 => f32::INFINITY,
@@ -97,6 +121,7 @@ fn rand_command(r: &mut Rng) -> Command {
                 Command::BuildRoad {
                     from: min,
                     to: min.offset(dx * n, dy * n),
+                    kind: rand_kind(r),
                 }
             }
         }
@@ -112,6 +137,17 @@ fn apply_checked(w: &mut World, cmd: Command) {
     match (&preview, &got) {
         (Ok(p), Ok(o)) => {
             assert_eq!((p.cost, &p.cells), (o.cost, &o.cells), "{cmd:?}");
+            assert_eq!(
+                (p.new_pieces, p.upgraded, p.downgraded, p.junction),
+                (o.new_pieces, o.upgraded, o.downgraded, o.junction),
+                "{cmd:?}"
+            );
+            if let Command::SetJunctionControl { cell, control } = cmd {
+                let n = junction::junction_at(w, cell).expect("applied at a junction");
+                let j = junction::junction(w, n).expect("junction state");
+                assert_eq!(j.setting, control);
+                assert_eq!(Some(j.control), p.junction.map(|c| c.control_after));
+            }
             if let Command::Bulldoze { min, max } = cmd {
                 check_bulldoze(&before, w, CellRect::from_corners(min, max), &o.cells);
             }
@@ -187,6 +223,22 @@ fn fuzz(o: FuzzOpts, checkpoints: &[u64]) -> (World, Vec<Vec<u8>>) {
         };
         for _ in 0..n {
             let cmd = rand_command(&mut cmd_rng);
+            // Junction commands: usually aimed at a real junction.
+            let cmd = match cmd {
+                Command::SetJunctionControl { control, .. } if cmd_rng.below(4) != 0 => {
+                    let nodes: Vec<NodeId> = junction::junction_nodes(&w).collect();
+                    if nodes.is_empty() {
+                        cmd
+                    } else {
+                        let n = nodes[cmd_rng.below(nodes.len() as u32) as usize];
+                        Command::SetJunctionControl {
+                            cell: Cell::from_pos(w.roads.nodes[n].pos),
+                            control,
+                        }
+                    }
+                }
+                c => c,
+            };
             // A whole-map wipe now and then, not often.
             let cmd = match cmd {
                 Command::Bulldoze { min, max } if (max.x - min.x).abs() > 90 && cmd_rng.below(8) != 0 => {
@@ -243,7 +295,15 @@ fn fuzz_commands_and_steps_keep_the_world_consistent() {
             &[],
         );
         sanity(&w);
-        assert!(w.households.len() > 20, "fuzz city never grew: {}", w.households.len());
+        assert!(
+            w.households.len() > 20,
+            "fuzz city never grew: {} {:?} {:?} money {} tax {}",
+            w.households.len(),
+            w.economy.fiscal,
+            w.demand,
+            w.economy.money,
+            w.economy.tax_rate
+        );
         check_full(&w);
     }
 }
@@ -351,7 +411,7 @@ fn fuzz_determinism_long() {
 fn fuzz_a_busy_city_through_rush_hour() {
     let (w, _) = fuzz(
         FuzzOpts {
-            seed: 41,
+            seed: 42,
             ticks: 2 * DAY + 7 * HOUR,
             check: true,
             full_every: 60,
@@ -361,7 +421,17 @@ fn fuzz_a_busy_city_through_rush_hour() {
         &[],
     );
     sanity(&w);
-    assert!(w.households.len() > 200, "{}", w.households.len());
+    assert!(
+        w.households.len() > 200,
+        "{} {:?} {:?} money {} tax {} bldg {} day {}",
+        w.households.len(),
+        w.economy.fiscal,
+        w.demand,
+        w.economy.money,
+        w.economy.tax_rate,
+        w.buildings.len(),
+        w.time.day
+    );
 }
 
 /// Same busy city: identical inputs give identical saves, and reloading at

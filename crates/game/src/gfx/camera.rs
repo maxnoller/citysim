@@ -8,6 +8,9 @@
 //! * The tilt follows the zoom: low and cinematic close up, more top-down
 //!   (a flatter, map-like view) when zoomed out; middle-drag adds an offset.
 //! * Focus is clamped to the map. `CameraOverride` shows an exact pose.
+//! * With `DisplaySettings::edge_scroll` the view pans while the cursor
+//!   rests at a window edge (only while the window has focus and no mouse
+//!   button is held).
 //! * While `CameraInputBlocked` (pause menu) all camera input is ignored.
 
 use bevy::camera::PerspectiveProjection;
@@ -17,7 +20,9 @@ use bevy::window::PrimaryWindow;
 use citysim_sim::{MAP_SIZE_M, World};
 
 use super::scene::camera_look;
-use crate::shared::{CameraInputBlocked, CameraOverride, CameraPose, GameSet, PointerOverUi, WorldCamera, cell_center};
+use crate::shared::{
+    CameraInputBlocked, CameraOverride, CameraPose, DisplaySettings, GameSet, PointerOverUi, WorldCamera, cell_center,
+};
 
 pub const MIN_DISTANCE: f32 = 22.0;
 pub const MAX_DISTANCE: f32 = 2000.0;
@@ -27,6 +32,25 @@ const MIN_PITCH: f32 = 0.22;
 const MAX_PITCH: f32 = 1.48;
 /// How far the focus may leave the map, metres.
 const FOCUS_MARGIN: f32 = 60.0;
+/// Edge scrolling: band along the window border, logical pixels.
+const EDGE_BAND: f32 = 6.0;
+
+/// Pan direction (x right, y forward) for a cursor at `pos` in a window of
+/// `size`: non-zero only within `EDGE_BAND` of a border.
+pub fn edge_pan(pos: Vec2, size: Vec2) -> Vec2 {
+    let mut pan = Vec2::ZERO;
+    if pos.x <= EDGE_BAND {
+        pan.x -= 1.0;
+    } else if pos.x >= size.x - EDGE_BAND {
+        pan.x += 1.0;
+    }
+    if pos.y <= EDGE_BAND {
+        pan.y += 1.0;
+    } else if pos.y >= size.y - EDGE_BAND {
+        pan.y -= 1.0;
+    }
+    pan
+}
 
 /// The player-controlled pose of the world camera.
 #[derive(Component, Debug, Clone, Copy)]
@@ -74,9 +98,11 @@ fn gfx_pose_from_env() -> Option<CameraPose> {
     })
 }
 
-/// Dev aid: `CITYSIM_GFX_TOUR=1` flies a fixed camera path (for videos).
+/// Dev aid: `CITYSIM_GFX_TOUR=1` flies a fixed camera path (for videos);
+/// `CITYSIM_GFX_TOUR=4` flies it four times slower (record a slow machine,
+/// then speed the video up).
 #[derive(Resource, Default)]
-struct GfxTour(bool);
+struct GfxTour(bool, f32);
 
 /// Tour keyframes: (seconds, focus x, focus z, yaw, pitch, distance).
 const TOUR: [(f32, f32, f32, f32, f32, f32); 6] = [
@@ -106,9 +132,11 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        let tour = std::env::var("CITYSIM_GFX_TOUR").is_ok_and(|v| !v.is_empty() && v != "0");
+        let tour_var = std::env::var("CITYSIM_GFX_TOUR").unwrap_or_default();
+        let tour = !tour_var.is_empty() && tour_var != "0";
+        let slow = tour_var.parse::<f32>().unwrap_or(1.0).max(1.0);
         app.insert_resource(GfxPose(gfx_pose_from_env()))
-            .insert_resource(GfxTour(tour))
+            .insert_resource(GfxTour(tour, slow))
             .add_systems(Startup, spawn_camera)
             .add_systems(Update, (camera_controls, apply_rig).chain().in_set(GameSet::Tools));
     }
@@ -164,6 +192,7 @@ fn camera_controls(
     scroll: Res<AccumulatedMouseScroll>,
     over_ui: Res<PointerOverUi>,
     blocked: Res<CameraInputBlocked>,
+    display: Res<DisplaySettings>,
     overridden: Res<CameraOverride>,
     gfx_pose: Res<GfxPose>,
     tour: Res<GfxTour>,
@@ -172,7 +201,7 @@ fn camera_controls(
 ) {
     let dt = time.delta_secs().min(0.1);
     for (mut rig, camera, cam_tf) in &mut rigs {
-        let toured = tour.0.then(|| tour_pose(time.elapsed_secs() - 1.0));
+        let toured = tour.0.then(|| tour_pose(time.elapsed_secs() / tour.1 - 1.0));
         if let Some(pose) = toured.or(gfx_pose.0).or(overridden.0) {
             rig.target = pose;
             rig.current = pose;
@@ -194,6 +223,15 @@ fn camera_controls(
         }
         if keys.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]) {
             pan.x -= 1.0;
+        }
+        if display.edge_scroll
+            && pan == Vec2::ZERO
+            && !mouse.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle])
+            && let Ok(w) = window.single()
+            && w.focused
+            && let Some(pos) = w.cursor_position()
+        {
+            pan = edge_pan(pos, Vec2::new(w.width(), w.height()));
         }
         let boost = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
             2.5
@@ -264,6 +302,15 @@ fn apply_rig(mut q: Query<(&CameraRig, &mut Transform)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_scroll_only_at_the_border() {
+        let size = Vec2::new(1280.0, 720.0);
+        assert_eq!(edge_pan(Vec2::new(640.0, 360.0), size), Vec2::ZERO);
+        assert_eq!(edge_pan(Vec2::new(2.0, 360.0), size), Vec2::new(-1.0, 0.0));
+        assert_eq!(edge_pan(Vec2::new(1279.0, 1.0), size), Vec2::new(1.0, 1.0));
+        assert_eq!(edge_pan(Vec2::new(640.0, 719.0), size), Vec2::new(0.0, -1.0));
+    }
 
     #[test]
     fn pitch_flattens_towards_top_down_when_zooming_out() {

@@ -20,27 +20,108 @@ new_key_type! {
     pub struct SegmentId;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Road class. Variants are only ever appended (saves store the index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RoadKind {
+    /// One lane each way, 50 km/h. About 8 m wide with sidewalks.
     Street,
-    /// The pre-built stub connecting the map to the outside. Not bulldozable.
+    /// The pre-built stub connecting the map to the outside. Not bulldozable,
+    /// two lanes each way.
     Highway,
+    /// Two lanes each way, 60 km/h, much more capacity; costs more to build
+    /// and keep. Drawn about 13 m wide but still occupies one line of cells.
+    Avenue,
 }
 
 impl RoadKind {
+    /// Kinds a player can build with `Command::BuildRoad`.
+    pub const BUILDABLE: [RoadKind; 2] = [RoadKind::Street, RoadKind::Avenue];
+
     /// Metres per second.
     pub fn speed_limit(self) -> f32 {
         match self {
             RoadKind::Street => balance::STREET_SPEED_LIMIT,
             RoadKind::Highway => balance::HIGHWAY_SPEED_LIMIT,
+            RoadKind::Avenue => balance::AVENUE_SPEED_LIMIT,
         }
     }
 
-    /// Lanes per direction.
+    /// Lanes per direction (as a float, for capacity maths).
     pub fn lanes(self) -> f32 {
+        self.lane_count() as f32
+    }
+
+    /// Lanes per direction. Lane 0 is the kerb-side (right-hand) lane,
+    /// higher indices are further left (towards the centre line).
+    pub fn lane_count(self) -> u8 {
         match self {
             RoadKind::Street => balance::STREET_LANES,
             RoadKind::Highway => balance::HIGHWAY_LANES,
+            RoadKind::Avenue => balance::AVENUE_LANES,
+        }
+    }
+
+    /// Lateral offset of lane `lane`'s centre from the road's centre line,
+    /// metres, to the right of travel (traffic drives on the right; in sim
+    /// space "right" of a travel direction `d` is `(-d.y, d.x)`). Lanes
+    /// beyond `lane_count` are clamped to the leftmost lane.
+    pub fn lane_offset_m(self, lane: u8) -> f32 {
+        let l = lane.min(self.lane_count().saturating_sub(1));
+        match self {
+            RoadKind::Street => 1.4,
+            // 13 m: 0.5 m median strip each side of the centre, 3 m lanes.
+            RoadKind::Avenue => {
+                if l == 0 {
+                    4.75
+                } else {
+                    1.75
+                }
+            }
+            RoadKind::Highway => {
+                if l == 0 {
+                    3.6
+                } else {
+                    1.3
+                }
+            }
+        }
+    }
+
+    /// Half the carriageway width (kerb to centre line), metres. Junction
+    /// boxes and stop lines are laid out from these.
+    pub fn half_width_m(self) -> f32 {
+        match self {
+            RoadKind::Street => 2.75,
+            RoadKind::Avenue => 6.5,
+            RoadKind::Highway => 5.0,
+        }
+    }
+
+    /// Construction cost per cell (`Command::BuildRoad`).
+    pub fn cost_per_cell(self) -> i64 {
+        match self {
+            RoadKind::Street => balance::ROAD_COST_PER_CELL,
+            RoadKind::Avenue => balance::AVENUE_COST_PER_CELL,
+            RoadKind::Highway => balance::AVENUE_COST_PER_CELL,
+        }
+    }
+
+    /// Daily upkeep per cell.
+    pub fn upkeep_per_cell(self) -> i64 {
+        match self {
+            RoadKind::Street => balance::ROAD_UPKEEP_PER_CELL_PER_DAY,
+            RoadKind::Avenue => balance::AVENUE_UPKEEP_PER_CELL_PER_DAY,
+            RoadKind::Highway => balance::ROAD_UPKEEP_PER_CELL_PER_DAY,
+        }
+    }
+
+    /// Road class for priority rules: higher wins (Street 0, Avenue 1,
+    /// Highway 2).
+    pub fn rank(self) -> u8 {
+        match self {
+            RoadKind::Street => 0,
+            RoadKind::Avenue => 1,
+            RoadKind::Highway => 2,
         }
     }
 }
@@ -71,6 +152,32 @@ pub struct RoadSegment {
 }
 
 impl RoadSegment {
+    /// A segment of `kind` between two nodes `length` metres apart.
+    pub fn new(a: NodeId, b: NodeId, kind: RoadKind, length: f32, load: [f32; 2]) -> RoadSegment {
+        RoadSegment {
+            a,
+            b,
+            kind,
+            length,
+            speed_limit: kind.speed_limit(),
+            capacity: capacity_for(kind, length),
+            load,
+        }
+    }
+
+    /// Change the kind in place (upgrade / downgrade), keeping length and
+    /// load.
+    pub fn set_kind(&mut self, kind: RoadKind) {
+        self.kind = kind;
+        self.speed_limit = kind.speed_limit();
+        self.capacity = capacity_for(kind, self.length);
+    }
+
+    /// Lanes per direction.
+    pub fn lane_count(&self) -> u8 {
+        self.kind.lane_count()
+    }
+
     pub fn other(&self, n: NodeId) -> NodeId {
         if self.a == n { self.b } else { self.a }
     }
@@ -186,15 +293,7 @@ impl RoadNetwork {
     pub fn add_segment(&mut self, a: NodeId, b: NodeId, kind: RoadKind) -> SegmentId {
         assert_ne!(a, b, "zero-length segment");
         let length = geom::dist(self.nodes[a].pos, self.nodes[b].pos);
-        let s = self.segments.insert(RoadSegment {
-            a,
-            b,
-            kind,
-            length,
-            speed_limit: kind.speed_limit(),
-            capacity: capacity_for(kind, length),
-            load: [0.0; 2],
-        });
+        let s = self.segments.insert(RoadSegment::new(a, b, kind, length, [0.0; 2]));
         self.nodes[a].segments.push(s);
         self.nodes[b].segments.push(s);
         s

@@ -12,7 +12,7 @@ use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
     ButtonFg, ButtonKind, UiAction, UiButton, approach, hdivider, label, layout, panel, spawn_button, spawn_key_badge,
 };
-use crate::shared::{GameSet, GraphicsQuality, LastCommand, SimClock, SimWorld};
+use crate::shared::{GameSet, LastCommand, SimClock, SimWorld};
 
 pub struct MenuPlugin;
 
@@ -171,72 +171,15 @@ fn spawn_menu(mut commands: Commands, fonts: Res<UiFonts>) {
                     margin: UiRect::axes(px(t::S4), px(t::S3)),
                     ..default()
                 });
-                // Graphics quality.
-                c.spawn(layout(Node {
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::axes(px(t::S4), px(t::S2)),
-                    row_gap: px(t::S3),
-                    ..default()
-                }))
-                .with_children(|g| {
-                    g.spawn(layout(Node {
-                        align_items: AlignItems::Center,
-                        column_gap: px(t::S4),
-                        ..default()
-                    }))
-                    .with_children(|r| {
-                        r.spawn(super::widgets::icon(fonts, icon::MONITOR, t::ICON_MD, t::TEXT_MUTED));
-                        r.spawn((
-                            label(fonts, "Graphics quality", t::FONT_LABEL, t::W_MEDIUM, t::TEXT),
-                            Node {
-                                flex_grow: 1.0,
-                                ..default()
-                            },
-                        ));
-                        spawn_key_badge(r, fonts, "G");
-                    });
-                    g.spawn(layout(Node {
-                        padding: UiRect::all(px(3)),
-                        column_gap: px(3),
-                        border_radius: BorderRadius::all(px(t::RADIUS_SM + 1.0)),
-                        ..default()
-                    }))
-                    .insert(BackgroundColor(t::WELL))
-                    .with_children(|seg| {
-                        for (q, name) in [
-                            (GraphicsQuality::Low, "Low"),
-                            (GraphicsQuality::Medium, "Medium"),
-                            (GraphicsQuality::High, "High"),
-                        ] {
-                            spawn_button(
-                                seg,
-                                UiButton {
-                                    action: UiAction::Quality(q),
-                                    kind: ButtonKind::Segment,
-                                    accent: t::ACCENT,
-                                },
-                                Node {
-                                    flex_grow: 1.0,
-                                    flex_basis: px(0),
-                                    height: px(30),
-                                    justify_content: JustifyContent::Center,
-                                    align_items: AlignItems::Center,
-                                    ..default()
-                                },
-                                None,
-                                |b, id| {
-                                    b.spawn((
-                                        label(fonts, name, t::FONT_BODY, t::W_MEDIUM, t::TEXT_MUTED),
-                                        ButtonFg {
-                                            owner: id,
-                                            base: t::TEXT_MUTED,
-                                        },
-                                    ));
-                                },
-                            );
-                        }
-                    });
-                });
+                menu_row(
+                    c,
+                    fonts,
+                    UiAction::OpenSettings,
+                    icon::SETTINGS,
+                    "Settings and keys",
+                    None,
+                    ButtonKind::Menu,
+                );
                 c.spawn(hdivider()).insert(Node {
                     height: px(1),
                     margin: UiRect::axes(px(t::S4), px(t::S3)),
@@ -278,13 +221,17 @@ fn update_menu(
     let Ok((mut node, mut bg)) = root.single_mut() else {
         return;
     };
-    let d = if state.menu_open { Display::Flex } else { Display::None };
+    let d = if state.menu_open && !state.settings_open {
+        Display::Flex
+    } else {
+        Display::None
+    };
     if node.display != d {
         node.display = d;
         *anim = 0.0;
         *last = None;
     }
-    if !state.menu_open {
+    if !state.menu_open || state.settings_open {
         return;
     }
     if *anim < 1.0 {

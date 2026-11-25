@@ -25,6 +25,9 @@ pub enum DemoKind {
     City,
     /// Bad layout with one overloaded junction, morning rush.
     Jam,
+    /// Round-2 hierarchy city: avenues as arterials, streets inside the
+    /// blocks (`GridPlayer::hierarchy`), ~10,000 residents.
+    Hierarchy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,9 +75,10 @@ impl DevConfig {
             Some("town") => Some(DemoKind::Town),
             Some("city") => Some(DemoKind::City),
             Some("jam") => Some(DemoKind::Jam),
+            Some("hierarchy") => Some(DemoKind::Hierarchy),
             Some("" | "0") | None => None,
             Some(other) => {
-                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city or jam)");
+                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy or jam)");
                 None
             }
         };

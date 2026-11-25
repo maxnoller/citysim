@@ -47,6 +47,9 @@ pub const STARTING_MONEY: i64 = 30_000;
 /// Cost of one cell of newly built road (per cell-to-cell piece of length).
 /// The main money sink: an expanding city spends most of its surplus here.
 pub const ROAD_COST_PER_CELL: i64 = 65;
+/// Cost of one cell of avenue. Upgrading a street to an avenue costs the
+/// difference; downgrading is free (no refund).
+pub const AVENUE_COST_PER_CELL: i64 = 140;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
@@ -54,11 +57,28 @@ pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// cells per resident while it fills) is carried by the town after a day
 /// or two; a mesh many times bigger than its town still sinks it.
 pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 1;
+/// Daily upkeep per avenue cell.
+pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 2;
 /// Daily cost of city services per resident (police, fire, schools...,
 /// abstracted), charged at midnight with road upkeep. Keeps the margin per
 /// resident moderate (residents and their jobs pay ~$2.1 a day in taxes at
 /// the default rate), so a bigger city is not a money machine.
 pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 0.75;
+
+/// Debt: every midnight with money below zero cuts city services by this
+/// share (services cost less, but all demand falls), down to
+/// [`SERVICE_LEVEL_MIN`]; every midnight in the black restores this much.
+pub const SERVICE_CUT_PER_DAY: f32 = 0.15;
+pub const SERVICE_RECOVER_PER_DAY: f32 = 0.25;
+pub const SERVICE_LEVEL_MIN: f32 = 0.3;
+/// Demand lost per unit of missing services (residential; jobs half).
+pub const SERVICE_DEMAND_WEIGHT: f32 = 1.6;
+/// Demand lost while money is below zero (nobody invests in a broke city).
+pub const DEBT_DEMAND_PENALTY: f32 = 0.15;
+/// After this many midnights in debt the city is in crisis: each night
+/// `(1 - service level) * CRISIS_LEAVE_SHARE_PER_DAY` of households leave.
+pub const DEBT_CRISIS_DAYS: u16 = 3;
+pub const CRISIS_LEAVE_SHARE_PER_DAY: f32 = 0.12;
 
 /// Tax rate of a new game.
 pub const DEFAULT_TAX_RATE: f32 = 0.09;
@@ -83,8 +103,9 @@ pub const ZONE_ROAD_REACH: i32 = 2;
 pub const TICKS_PER_DAY: u32 = 4 * 60 * crate::TICKS_PER_SECOND;
 /// Ticks in one in-game hour (10 real seconds at 1x).
 pub const TICKS_PER_HOUR: u32 = TICKS_PER_DAY / 24;
-/// Time of day a new game starts at, in ticks after midnight (06:00).
-pub const START_TICK_OF_DAY: u32 = TICKS_PER_DAY / 4;
+/// Time of day a new game starts at, in ticks after midnight (09:00: a
+/// new city opens on a bright morning).
+pub const START_TICK_OF_DAY: u32 = TICKS_PER_DAY * 3 / 8;
 
 /// Morning departures to work are spread from this hour ...
 pub const MORNING_DEPART_START_H: f32 = 3.5;
@@ -100,7 +121,7 @@ pub const EVENING_DEPART_SPREAD_H: f32 = 9.0;
 /// per household per day, deterministic). The rest commute "off screen" and
 /// switch between home and work instantly. Keeps traffic proportional to
 /// the city without every worker being on the road at once.
-pub const COMMUTE_DRIVE_SHARE: f32 = 0.5;
+pub const COMMUTE_DRIVE_SHARE: f32 = 0.2;
 
 // ------------------------------------------------------------- vehicles ----
 
@@ -108,9 +129,12 @@ pub const COMMUTE_DRIVE_SHARE: f32 = 0.5;
 pub const STREET_SPEED_LIMIT: f32 = 13.9;
 /// Speed limit of the highway stub, metres per second (100 km/h).
 pub const HIGHWAY_SPEED_LIMIT: f32 = 27.8;
+/// Speed limit of avenues, metres per second (60 km/h).
+pub const AVENUE_SPEED_LIMIT: f32 = 16.7;
 /// Lanes per direction.
-pub const STREET_LANES: f32 = 1.0;
-pub const HIGHWAY_LANES: f32 = 2.0;
+pub const STREET_LANES: u8 = 1;
+pub const HIGHWAY_LANES: u8 = 2;
+pub const AVENUE_LANES: u8 = 2;
 /// Road length one queued vehicle occupies, metres (used for capacity:
 /// `capacity = length * lanes / VEHICLE_SPACING_M`). Slightly above
 /// `MIN_GAP_M`, so a standing queue reads ~0.9-1.0 and "over 80 %" means
@@ -124,12 +148,12 @@ pub const MIN_GAP_M: f32 = 5.5;
 /// lane at street speed.
 pub const FOLLOW_HEADWAY_S: f32 = 0.5;
 /// Acceleration, m/s².
-pub const ACCELERATION: f32 = 3.0;
+pub const ACCELERATION: f32 = 3.5;
 /// Comfortable braking used towards stop lines and junctions, m/s².
 pub const BRAKING: f32 = 4.0;
 /// Speed at which cars turn at junctions (degree >= 3), m/s. Straight-on
 /// traffic keeps its speed.
-pub const JUNCTION_SPEED: f32 = 8.0;
+pub const JUNCTION_SPEED: f32 = 9.0;
 /// Cars stop this far before a node they may not enter yet, metres.
 pub const STOP_LINE_M: f32 = 0.6;
 /// Per-driver speed variation: each car drives at `1 ± this` of the
@@ -149,9 +173,96 @@ pub const PHASE_MAX_CARS: u16 = 6;
 /// After the last car of a phase, other phases wait this long (clearing the
 /// junction). This is what makes a busy junction a bottleneck.
 pub const JUNCTION_CLEARANCE_S: f32 = 0.35;
+/// A car facing yellow keeps going (clears the junction) when faster than
+/// this, m/s: it could not stop comfortably at the line.
+pub const YELLOW_GO_SPEED: f32 = 4.0;
+/// Speed of a U-turn through a junction box, m/s.
+pub const UTURN_SPEED: f32 = 3.0;
+/// The front car of a lane decides whether it may enter the junction
+/// ahead from this far (or its braking distance, if longer), metres.
+pub const DECIDE_DISTANCE_M: f32 = 45.0;
+/// A car may enter a junction behind a queue on its out-lane that is
+/// moving off faster than this (m/s) without a full car spacing yet, when
+/// that lane is long (the queue cannot stop right behind the box).
+pub const EXIT_MOVING_SPEED: f32 = 3.0;
+/// No lane changes and no cars pulling out of driveways this close behind
+/// a junction box, metres (cars leaving the box need the room).
+pub const NO_LANE_CHANGE_AFTER_BOX_M: f32 = 10.0;
+/// All-way stops (crossings of equal roads): a car may only enter once it
+/// stood at the line, i.e. slower than this (m/s) within this distance of
+/// it (m).
+pub const STOP_SIGN_SPEED: f32 = 1.0;
+pub const STOP_SIGN_DISTANCE_M: f32 = 1.5;
+/// Critical gaps, seconds: a permissive left turn (and same-class cars)
+/// leaves this much time to a conflicting car with precedence, a car on a
+/// give-way approach this much to the major road.
+pub const PERMISSIVE_GAP_S: f32 = 2.5;
+pub const GIVE_WAY_GAP_S: f32 = 3.5;
+/// A car not moving inside a junction box for this long is taken off the
+/// road (deadlock breaker; only road edits can cause it).
+pub const BOX_DEADLOCK_S: f32 = 20.0;
+/// A lane change takes this long (renderers ease `lane_shift` over it), s.
+pub const LANE_CHANGE_S: f32 = 1.2;
+/// Cars move into the lane their next turn needs within this distance of
+/// the stop line, metres.
+pub const LANE_PREPARE_M: f32 = 90.0;
+/// Extra stop-line distance beyond the carriageways of the crossing roads,
+/// metres: room for a pedestrian crossing and the kerb radius (junctions of
+/// three or more roads).
+pub const JUNCTION_MARGIN_M: f32 = 2.5;
+/// The same for a bend (two roads meeting at an angle): kerb radius only.
+pub const BEND_MARGIN_M: f32 = 0.5;
+/// Two movements through a junction whose paths come closer than this
+/// (centre lines, metres) conflict even when they do not cross: a car is
+/// about 1.9 m wide, plus room so the bodies never brush.
+pub const MOVEMENT_CLEARANCE_M: f32 = 2.6;
+/// Length of the merge box where a road changes its number of lanes
+/// without a junction (split between both sides of the node), metres.
+pub const LANE_MERGE_TAPER_M: f32 = 14.0;
+
+// -------------------------------------------------------------- signals ----
+
+/// Minimum / maximum green of a phase, seconds of vehicle time. A phase
+/// ends early once nobody approaches on green (gap-out), never before its
+/// minimum, and is skipped when nobody waits for it.
+pub const SIGNAL_MIN_GREEN_S: f32 = 5.0;
+pub const SIGNAL_MAIN_MAX_GREEN_S: f32 = 30.0;
+pub const SIGNAL_SIDE_MAX_GREEN_S: f32 = 20.0;
+/// Protected left-turn phase (avenues).
+pub const SIGNAL_LEFT_MIN_GREEN_S: f32 = 4.0;
+pub const SIGNAL_LEFT_MAX_GREEN_S: f32 = 12.0;
+/// Yellow and all-red clearance, seconds.
+pub const SIGNAL_YELLOW_S: f32 = 2.5;
+pub const SIGNAL_ALL_RED_S: f32 = 1.0;
+/// Vehicles closer than this to the stop line call their phase, metres.
+pub const SIGNAL_DETECT_M: f32 = 40.0;
+/// Common cycle of coordinated signals along avenues, seconds ...
+pub const SIGNAL_COORD_CYCLE_S: f32 = 60.0;
+/// ... of which the avenue keeps at least this share once green ...
+pub const SIGNAL_COORD_MAIN_SHARE: f32 = 0.5;
+/// ... and offsets follow a platoon driving at this speed, m/s.
+pub const SIGNAL_PROGRESSION_SPEED: f32 = 14.0;
+/// Auto control turns a priority junction into signals when its busiest
+/// minute of vehicle time yesterday let in at least this many vehicles,
+/// and back below the lower number.
+pub const AUTO_SIGNAL_PER_MINUTE: u16 = 16;
+pub const AUTO_PRIORITY_PER_MINUTE: u16 = 9;
+
 /// Route planning: fixed cost of passing a junction, seconds (prefers
 /// straighter routes with fewer junctions).
 pub const ROUTE_JUNCTION_COST_S: f32 = 1.5;
+/// Route planning: expected wait at a junction by how the approach is
+/// controlled, seconds (replaces `ROUTE_JUNCTION_COST_S` once junctions
+/// are known): through on the major road, giving way, an all-way stop, a
+/// signal's main road and its side roads. Makes trips prefer arterials.
+pub const ROUTE_MAJOR_S: f32 = 0.5;
+pub const ROUTE_GIVE_WAY_S: f32 = 4.0;
+pub const ROUTE_ALL_WAY_S: f32 = 5.0;
+pub const ROUTE_SIGNAL_MAIN_S: f32 = 3.0;
+pub const ROUTE_SIGNAL_SIDE_S: f32 = 8.0;
+/// Route planning: turning back the way the car came at a node, seconds
+/// (only when nothing else works).
+pub const ROUTE_UTURN_COST_S: f32 = 30.0;
 /// Route planning: expected wait per car already on a segment direction
 /// that ends at a junction, multiplied by that direction's congestion.
 pub const ROUTE_QUEUE_COST_S: f32 = 2.0;
@@ -185,11 +296,11 @@ pub const ACCESS_SEARCH_CELLS: i32 = 4;
 pub const ERRAND_INTERVAL_TICKS: u64 = 10;
 /// One-way shopping runs per household per day (half home -> shop, half
 /// back), mostly 10:00-20:00.
-pub const SHOP_TRIPS_PER_HOUSEHOLD_PER_DAY: f32 = 0.3;
+pub const SHOP_TRIPS_PER_HOUSEHOLD_PER_DAY: f32 = 0.15;
 /// Goods trips per filled industrial job per day, mostly 05:00-19:00.
-pub const GOODS_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY: f32 = 0.25;
+pub const GOODS_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY: f32 = 0.15;
 /// Share of goods trips that leave for / come from the highway.
-pub const GOODS_VIA_HIGHWAY_SHARE: f32 = 0.3;
+pub const GOODS_VIA_HIGHWAY_SHARE: f32 = 0.2;
 /// Errand destinations: nearest of this many random candidates.
 pub const ERRAND_SAMPLES: usize = 3;
 
@@ -250,12 +361,17 @@ pub const JOB_VACANCY_WEIGHT: f32 = 2.0;
 pub const JOB_VACANCY_OK: f32 = 0.12;
 /// Softens ratios in a tiny city (added to denominators).
 pub const DEMAND_SMALL_CITY: f32 = 40.0;
-/// Demand change per unit of tax rate above [`DEFAULT_TAX_RATE`] (negative
-/// above, positive below). At 30 % tax all demand drops by ~0.8.
+/// Demand change per unit of tax rate above [`DEFAULT_TAX_RATE`]. At 30 %
+/// tax all demand drops by ~0.8.
 pub const TAX_DEMAND_SLOPE: f32 = 4.0;
+/// Below the default rate demand rises only gently, by this per unit of
+/// tax rate, and by at most [`LOW_TAX_DEMAND_MAX`]: zero tax is no growth
+/// button (it is a fast way into debt).
+pub const LOW_TAX_DEMAND_SLOPE: f32 = 1.0;
+pub const LOW_TAX_DEMAND_MAX: f32 = 0.06;
 /// Average car commutes longer than this (vehicle seconds) cut residential
 /// demand ...
-pub const COMMUTE_OK_S: f32 = 60.0;
+pub const COMMUTE_OK_S: f32 = 70.0;
 /// ... by 1.0 per this many extra seconds.
 pub const COMMUTE_DEMAND_SCALE_S: f32 = 120.0;
 
@@ -265,7 +381,7 @@ pub const COMMUTE_DEMAND_SCALE_S: f32 = 120.0;
 pub const GROWTH_INTERVAL_TICKS: u64 = 10;
 /// New buildings (or upgrades) per in-game hour at demand 1.0, per zone
 /// `[residential, commercial, industrial]`. Scales linearly with demand.
-pub const GROWTH_PER_HOUR: [f32; 3] = [9.5, 3.5, 3.2];
+pub const GROWTH_PER_HOUR: [f32; 3] = [5.0, 2.7, 2.8];
 /// Fraction of growth events that upgrade an existing full building
 /// instead of building a new one (when both are possible).
 pub const UPGRADE_SHARE: f32 = 0.2;

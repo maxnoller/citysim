@@ -10,6 +10,7 @@ fn road(w: &mut World, a: (i32, i32), b: (i32, i32)) -> Result<Outcome, CommandE
     w.apply(Command::BuildRoad {
         from: c(a.0, a.1),
         to: c(b.0, b.1),
+        kind: citysim_sim::RoadKind::Street,
     })
 }
 
@@ -264,7 +265,8 @@ fn diagonals_crossing_between_centres_rejected() {
     assert!(
         w.preview(&Command::BuildRoad {
             from: c(4, 3),
-            to: c(3, 4)
+            to: c(3, 4),
+            kind: citysim_sim::RoadKind::Street,
         })
         .is_err()
     );
@@ -334,6 +336,7 @@ fn insufficient_funds() {
     let cmd = Command::BuildRoad {
         from: c(0, 0),
         to: c(5, 0),
+        kind: citysim_sim::RoadKind::Street,
     };
     let err = CommandError::InsufficientFunds {
         cost: 5 * per,
@@ -637,6 +640,7 @@ fn preview_matches_apply_and_does_not_mutate() {
         Command::BuildRoad {
             from: c(20, 120),
             to: c(20, 140),
+            kind: citysim_sim::RoadKind::Street,
         },
         Command::SetZone {
             min: c(12, 126),
@@ -685,7 +689,7 @@ fn tax_rate_validation() {
 fn step_advances_time_and_days() {
     let mut w = World::new(0);
     assert_eq!(w.time.day, 1);
-    assert_eq!(w.time.hour(), 6.0);
+    assert_eq!(w.time.hour(), 9.0);
     w.step();
     assert_eq!(w.time.tick, 1);
     for _ in 0..balance::TICKS_PER_DAY {
@@ -728,6 +732,7 @@ fn save_load_round_trip() {
     let cmd = Command::BuildRoad {
         from: c(40, 128),
         to: c(40, 100),
+        kind: citysim_sim::RoadKind::Street,
     };
     assert_eq!(a.apply(cmd), b.apply(cmd));
     a.step();
@@ -766,7 +771,11 @@ fn random_edits_keep_graph_valid() {
                 max: a.offset(rng.below(3) as i32, rng.below(3) as i32),
             }
         } else {
-            Command::BuildRoad { from: a, to: b }
+            Command::BuildRoad {
+                from: a,
+                to: b,
+                kind: citysim_sim::RoadKind::Street,
+            }
         };
         let preview = w.preview(&cmd);
         let res = w.apply(cmd);

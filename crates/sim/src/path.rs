@@ -43,7 +43,7 @@ pub(crate) struct Found {
 
 /// Speed factor of the volume-delay curve at congestion `x` (0..=1).
 pub(crate) fn vdf(x: f32) -> f32 {
-    1.0 / (1.0 + balance::VDF_ALPHA * x.max(0.0).powf(balance::VDF_BETA))
+    1.0 / (1.0 + balance::VDF_ALPHA * libm::powf(x.max(0.0), balance::VDF_BETA))
 }
 
 /// Seconds to drive `dist` metres along `seg` in direction `forward`.
@@ -52,14 +52,19 @@ pub(crate) fn drive_time(seg: &RoadSegment, forward: bool, dist: f32) -> f32 {
 }
 
 /// Expected seconds to traverse `s` in direction `forward`, including the
-/// junction at its far end.
-pub(crate) fn edge_cost(roads: &RoadNetwork, s: SegmentId, forward: bool) -> f32 {
+/// junction at its far end. `delays[slot][dir]` is the expected wait at
+/// that junction for this approach (its control); without an entry a flat
+/// `ROUTE_JUNCTION_COST_S`.
+pub(crate) fn edge_cost(roads: &RoadNetwork, delays: &[[f32; 2]], s: SegmentId, forward: bool) -> f32 {
     let seg = &roads.segments[s];
     let mut t = drive_time(seg, forward, seg.length);
     let end = if forward { seg.b } else { seg.a };
     if roads.nodes[end].segments.len() >= 3 {
         let d = RoadSegment::dir(forward);
-        t += balance::ROUTE_JUNCTION_COST_S + seg.load[d] * seg.congestion_in(forward) * balance::ROUTE_QUEUE_COST_S;
+        let wait = delays
+            .get(key_index(s))
+            .map_or(balance::ROUTE_JUNCTION_COST_S, |w| w[d]);
+        t += wait + seg.load[d] * seg.congestion_in(forward) * balance::ROUTE_QUEUE_COST_S;
     }
     t
 }
@@ -100,6 +105,7 @@ impl PathScratch {
     pub fn search(
         &mut self,
         roads: &RoadNetwork,
+        delays: &[[f32; 2]],
         sources: &[(NodeId, f32)],
         target: Target,
         budget: &mut i64,
@@ -156,11 +162,16 @@ impl PathScratch {
                     }
                 }
             }
+            let came_by = self.prev[ui].map(|p| p.0);
             for &s in &roads.nodes[u].segments {
                 let seg = &roads.segments[s];
                 let fwd = seg.a == u;
                 let v = if fwd { seg.b } else { seg.a };
-                let c = gu + edge_cost(roads, s, fwd);
+                let mut c = gu + edge_cost(roads, delays, s, fwd);
+                if came_by == Some(s) {
+                    // Turning back where we came from.
+                    c += balance::ROUTE_UTURN_COST_S;
+                }
                 self.relax(v, c, h(roads.nodes[v].pos), Some((s, u)));
             }
         }

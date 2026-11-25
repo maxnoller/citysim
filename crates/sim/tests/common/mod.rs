@@ -38,6 +38,17 @@ pub fn check_consistency(w: &World, after_step: bool) {
         }
         let s = v.segment.unwrap();
         let seg = &w.roads.segments[s];
+        if let Some(jm) = v.junction {
+            let j = w.traffic.junction_states.get(jm.node).expect("box junction exists");
+            let m = &j.movements[jm.movement as usize];
+            assert!(
+                jm.distance >= 0.0 && jm.distance <= m.length + 0.01,
+                "tick {tick}: {vid:?} {jm:?}"
+            );
+            assert_eq!(jm.from, s, "tick {tick}: {vid:?} box from");
+            assert_eq!(v.route.first(), Some(&jm.to), "tick {tick}: {vid:?} box to");
+            continue;
+        }
         let pa = w.roads.nodes[seg.a].pos;
         let pb = w.roads.nodes[seg.b].pos;
         let (from, to) = if v.forward { (pa, pb) } else { (pb, pa) };
@@ -119,7 +130,14 @@ pub fn check_consistency(w: &World, after_step: bool) {
         assert!(w.grid.is_road(c(x, 128)), "tick {tick}: highway cell {x} lost");
     }
     if after_step {
-        assert!(w.traffic.junctions.len() >= w.roads.nodes.slot_count());
+        for (n, node) in w.roads.nodes.iter() {
+            let j = w.traffic.junction_states.get(n).expect("junction state for every node");
+            assert_eq!(
+                j.arms.iter().map(|a| a.segment).collect::<Vec<_>>(),
+                node.segments,
+                "tick {tick}: stale junction arms at {n:?}"
+            );
+        }
         let mut load: std::collections::BTreeMap<(SegmentId, usize), f32> = Default::default();
         for v in w.vehicles.values() {
             *load
@@ -127,9 +145,9 @@ pub fn check_consistency(w: &World, after_step: bool) {
                 .or_default() += 1.0;
         }
         for (s, seg) in w.roads.segments.iter() {
-            for d in 0..2 {
+            for (d, &have) in seg.load.iter().enumerate() {
                 let want = load.get(&(s, d)).copied().unwrap_or(0.0);
-                assert_eq!(seg.load[d], want, "tick {tick}: {s:?} load[{d}]");
+                assert_eq!(have, want, "tick {tick}: {s:?} load[{d}]");
             }
         }
     }

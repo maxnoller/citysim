@@ -22,6 +22,7 @@
 //! * `until-pop N [T]` / `until-day N [T]` / `until-hour H [T]` — T extra
 //!   steps per fixed tick (default `turbo` if set, else 30) until reached,
 //!   then reply and stop.
+//! * `ready` — ok once the scene draws (shaders built), else err.
 //! * `fps`, `counts` (entities, meshes, materials, vehicles, step time).
 //! * `window W H` — resize the window. `quit` — exit.
 
@@ -36,8 +37,8 @@ use bevy::window::PrimaryWindow;
 use citysim_sim::Cell;
 
 use crate::shared::{
-    ActiveTool, CameraOverride, CameraPose, HoveredCell, OverlayMode, PointerOverUi, SimClock, SimStep, SimWorld,
-    WorldCamera, cell_center,
+    ActiveTool, CameraOverride, CameraPose, HoveredCell, OverlayMode, PointerOverUi, SceneReady, SimClock, SimStep,
+    SimWorld, WorldCamera, cell_center,
 };
 
 const POLL_SECS: f32 = 0.1;
@@ -246,6 +247,7 @@ struct Ctx<'w, 's> {
     meshes: Res<'w, Assets<Mesh>>,
     materials: Res<'w, Assets<StandardMaterial>>,
     exit: MessageWriter<'w, AppExit>,
+    ready: Res<'w, SceneReady>,
 }
 
 fn poll_commands(mut commands: Commands, time: Res<Time<Real>>, mut ctl: ResMut<Control>, mut cx: Ctx) {
@@ -320,6 +322,7 @@ fn run(
             let cmd = citysim_sim::Command::BuildRoad {
                 from: Cell::new(num(args, 0)?, num(args, 1)?),
                 to: Cell::new(num(args, 2)?, num(args, 3)?),
+                kind: citysim_sim::RoadKind::Street,
             };
             match cx.sim.world.preview(&cmd) {
                 Ok(p) => ctl.reply(seq, true, &format!("ok {}", p.cost)),
@@ -391,6 +394,13 @@ fn run(
                     None => DEFAULT_UNTIL_TURBO,
                 };
                 ctl.until = Some((seq, goal, n));
+            }
+        }
+        "ready" => {
+            if cx.ready.0 {
+                ctl.reply(seq, true, "ready");
+            } else {
+                return Err("still loading".into());
             }
         }
         "fps" => {

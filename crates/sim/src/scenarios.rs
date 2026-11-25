@@ -4,17 +4,28 @@
 //! The highway stub ends at cell `(11, 128)`. All layouts here grow east of
 //! it around the avenue `y = 128`.
 
-use crate::{Cell, Command, World, Zone};
+use crate::{Cell, Command, RoadKind, World, Zone};
 
 fn c(x: i32, y: i32) -> Cell {
     Cell::new(x, y)
 }
 
-/// Build a straight road; returns false if it failed (money, obstacles).
+/// Build a straight street; returns false if it failed (money, obstacles).
 pub fn road(w: &mut World, a: (i32, i32), b: (i32, i32)) -> bool {
+    road_of(w, a, b, RoadKind::Street)
+}
+
+/// Build (or upgrade to) a straight avenue.
+pub fn avenue(w: &mut World, a: (i32, i32), b: (i32, i32)) -> bool {
+    road_of(w, a, b, RoadKind::Avenue)
+}
+
+/// Build a straight road of `kind`.
+pub fn road_of(w: &mut World, a: (i32, i32), b: (i32, i32), kind: RoadKind) -> bool {
     w.apply(Command::BuildRoad {
         from: c(a.0, a.1),
         to: c(b.0, b.1),
+        kind,
     })
     .is_ok()
 }
@@ -91,6 +102,39 @@ pub fn add_connections(w: &mut World) {
     road(w, (50, NORTH_RIBS[4]), (50, SOUTH_RIBS[4]));
 }
 
+/// How a [`GridPlayer`] lays out its roads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Streets only (the round-1 player).
+    Streets,
+    /// A road hierarchy: the trunk `y = 128` and every third block row
+    /// (`y = 113, 143, ...`), and every second block column (`x = 20, 40,
+    /// 60, ...`) are avenues; the streets inside the blocks connect to them.
+    Hierarchy,
+    /// Everything hangs off one spine at `x = 20`: block rows are linked
+    /// only through it (no north-south streets elsewhere), so all traffic
+    /// funnels through the junction `(20, 128)`.
+    SingleArtery,
+}
+
+impl Layout {
+    fn horizontal(self, y: i32) -> RoadKind {
+        match self {
+            Layout::Hierarchy if (y - 128).rem_euclid(15) == 0 => RoadKind::Avenue,
+            _ => RoadKind::Street,
+        }
+    }
+
+    fn vertical(self, x: i32) -> Option<RoadKind> {
+        match self {
+            Layout::Streets => Some(RoadKind::Street),
+            Layout::Hierarchy if (x - 20) % 20 == 0 => Some(RoadKind::Avenue),
+            Layout::Hierarchy => Some(RoadKind::Street),
+            Layout::SingleArtery => (x == 20).then_some(RoadKind::Street),
+        }
+    }
+}
+
 /// A block of the progressive grid: `x0..=x0+10`, `y0..=y0+5` (cells), roads
 /// on its border, the inside zoned.
 #[derive(Debug, Clone, Copy)]
@@ -100,10 +144,15 @@ struct Block {
 }
 
 impl Block {
-    fn build(&self, w: &mut World, z: Zone) -> bool {
+    fn build(&self, w: &mut World, z: Zone, layout: Layout) -> bool {
         let (x0, y0, x1, y1) = (self.x0, self.y0, self.x0 + 10, self.y0 + 5);
-        let ok = road(w, (x0, y0), (x1, y0)) && road(w, (x0, y1), (x1, y1));
-        let ok = ok && road(w, (x0, y0), (x0, y1)) && road(w, (x1, y0), (x1, y1));
+        let mut ok = road_of(w, (x0, y0), (x1, y0), layout.horizontal(y0))
+            && road_of(w, (x0, y1), (x1, y1), layout.horizontal(y1));
+        for x in [x0, x1] {
+            if let Some(k) = layout.vertical(x) {
+                ok = ok && road_of(w, (x, y0), (x, y1), k);
+            }
+        }
         if ok {
             zone(w, (x0 + 1, y0 + 1), (x1 - 1, y1 - 1), z);
         }
@@ -111,8 +160,11 @@ impl Block {
     }
 
     /// Rough cost if nothing were built yet.
-    fn max_cost() -> i64 {
-        30 * crate::balance::ROAD_COST_PER_CELL
+    fn max_cost(layout: Layout) -> i64 {
+        match layout {
+            Layout::Hierarchy => 20 * crate::balance::ROAD_COST_PER_CELL + 10 * crate::balance::AVENUE_COST_PER_CELL,
+            _ => 30 * crate::balance::ROAD_COST_PER_CELL,
+        }
     }
 }
 
@@ -130,6 +182,8 @@ pub struct GridPlayer {
     lists: [Vec<Block>; 3],
     /// Zone types this player uses.
     pub zones: Vec<Zone>,
+    /// Road layout.
+    pub layout: Layout,
     /// Blocks built so far.
     pub blocks_built: u32,
     /// Ticks during which the player wanted to build its next block but
@@ -176,11 +230,35 @@ impl GridPlayer {
                 order_mixed(&[(1, true), (3, false), (4, false), (6, false), (7, true)]),
             ],
             zones: zones.to_vec(),
+            layout: Layout::Streets,
             blocks_built: 0,
             money_wait_ticks: 0,
             longest_money_wait_ticks: 0,
             waiting_since: None,
         }
+    }
+
+    /// The sensible player with a road hierarchy (avenues as arterials,
+    /// streets inside the blocks), all zone types.
+    pub fn hierarchy() -> GridPlayer {
+        GridPlayer {
+            layout: Layout::Hierarchy,
+            ..GridPlayer::new(&Zone::ALL)
+        }
+    }
+
+    /// Same blocks, but every row hangs off one spine (all zone types).
+    pub fn single_artery() -> GridPlayer {
+        GridPlayer {
+            layout: Layout::SingleArtery,
+            ..GridPlayer::new(&Zone::ALL)
+        }
+    }
+
+    /// The road from the highway stub to the first block (re-laid if it
+    /// was bulldozed; costs nothing when it is there).
+    fn link(&self, w: &mut World) {
+        road_of(w, (11, 128), (20, 128), self.layout.horizontal(128));
     }
 
     /// Free zoned, empty cells per zone.
@@ -201,9 +279,7 @@ impl GridPlayer {
         if !w.time.tick.is_multiple_of(crate::balance::TICKS_PER_HOUR as u64) {
             return;
         }
-        if w.roads.segments.len() == 1 {
-            road(w, (11, 128), (20, 128));
-        }
+        self.link(w);
         let free = Self::free_cells(w);
         let d = [w.demand.residential, w.demand.commercial, w.demand.industrial];
         let mut short_of_money = false;
@@ -217,9 +293,9 @@ impl GridPlayer {
             if !want || free[zi] >= 24 {
                 continue;
             }
-            if w.economy.money <= Block::max_cost() + 1_000 {
+            if w.economy.money <= Block::max_cost(self.layout) + 1_000 {
                 short_of_money = true;
-            } else if b.build(w, z) {
+            } else if b.build(w, z, self.layout) {
                 self.next[zi] += 1;
                 self.blocks_built += 1;
             }
@@ -245,9 +321,7 @@ impl GridPlayer {
     /// there.
     pub fn build_ahead(&mut self, w: &mut World, blocks: [usize; 3]) -> u32 {
         let mut built = 0;
-        if w.roads.segments.len() == 1 {
-            road(w, (11, 128), (20, 128));
-        }
+        self.link(w);
         // Interleave the zone types so a short budget still gives a mix.
         for round in 0..blocks.into_iter().max().unwrap_or(0) {
             for z in self.zones.clone() {
@@ -258,7 +332,7 @@ impl GridPlayer {
                 let Some(b) = self.lists[zi].get(self.next[zi]).copied() else {
                     continue;
                 };
-                if !b.build(w, z) {
+                if !b.build(w, z, self.layout) {
                     return built;
                 }
                 self.next[zi] += 1;

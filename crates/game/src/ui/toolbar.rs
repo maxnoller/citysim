@@ -1,5 +1,5 @@
-//! Bottom-centre toolbar (Inspect, Road, Zone, Bulldoze | Traffic, Zones
-//! overlays) and the zone flyout above it while zoning.
+//! Bottom-centre toolbar (Inspect, Road, Zone, Bulldoze, Junctions | Traffic,
+//! Zones overlays); the tool options bar (`toolopts.rs`) sits above it.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
@@ -9,19 +9,15 @@ use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
     ActiveMark, ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, label, layout, panel, spawn_button,
 };
-use crate::shared::{ActiveTool, GameSet, OverlayMode};
+use crate::shared::{ActiveTool, OverlayMode, RoadMode};
 
 pub struct ToolbarPlugin;
 
 impl Plugin for ToolbarPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_toolbar)
-            .add_systems(Update, show_flyout.in_set(GameSet::Render));
+        app.add_systems(Startup, spawn_toolbar);
     }
 }
-
-#[derive(Component)]
-struct ZoneFlyout;
 
 fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
     let fonts = fonts.into_inner();
@@ -40,37 +36,7 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
             }),
         ))
         .with_children(|root| {
-            // Zone flyout.
-            root.spawn((
-                ZoneFlyout,
-                panel(Node {
-                    padding: UiRect::all(px(t::S2 + 1.0)),
-                    column_gap: px(t::S1 + 1.0),
-                    display: Display::None,
-                    ..default()
-                }),
-                UiTransform::default(),
-            ))
-            .with_children(|f| {
-                for (zone, desc) in [
-                    (
-                        Some(Zone::Residential),
-                        "Homes. Residents need jobs and a road to drive on.",
-                    ),
-                    (
-                        Some(Zone::Commercial),
-                        "Shops and offices. Provide jobs, need customers.",
-                    ),
-                    (
-                        Some(Zone::Industrial),
-                        "Factories. Many jobs; keep them away from homes.",
-                    ),
-                    (None, "Remove zoning from empty cells."),
-                ] {
-                    spawn_zone_item(f, fonts, zone, desc);
-                }
-            });
-
+            super::toolopts::spawn_opts(root, fonts);
             // Main bar.
             root.spawn(panel(Node {
                 padding: UiRect::all(px(t::S2 + 1.0)),
@@ -98,7 +64,7 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::ROAD,
                     Tooltip {
                         title: "Road",
-                        desc: "Click a start and an end point, or drag. Straight or 45° only.",
+                        desc: "Click corners and double-click to build, or drag one straight road. Snaps to roads and grids; Alt for free placement. R again: street / avenue.",
                         key: Some("R"),
                         price: Some(format!("${} per cell", balance::ROAD_COST_PER_CELL)),
                     },
@@ -110,7 +76,7 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::ZONE,
                     Tooltip {
                         title: "Zone",
-                        desc: "Drag a rectangle next to a road. Buildings grow by demand.",
+                        desc: "Drag a rectangle, click a road side, or fill a block. Buildings grow by demand. Tab switches mode.",
                         key: Some("Z"),
                         price: Some("Free".into()),
                     },
@@ -122,9 +88,21 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::BULLDOZE,
                     Tooltip {
                         title: "Bulldoze",
-                        desc: "Drag over roads and buildings to remove them.",
+                        desc: "Drag over roads and buildings, or click a road to remove it between junctions. Tab switches mode.",
                         key: Some("B"),
                         price: Some(format!("${} per cleared cell", balance::BULLDOZE_COST_PER_CELL)),
+                    },
+                );
+                tool_button(
+                    bar,
+                    fonts,
+                    UiAction::RoadMode(RoadMode::Junction),
+                    icon::WAYPOINTS,
+                    Tooltip {
+                        title: "Junctions",
+                        desc: "Hover a junction to see its traffic lights or priority rules; click to switch them.",
+                        key: Some("J"),
+                        price: None,
                     },
                 );
                 bar.spawn(super::widgets::vdivider(26.0));
@@ -210,7 +188,8 @@ fn tool_button(p: &mut ChildSpawnerCommands, fonts: &UiFonts, action: UiAction, 
     );
 }
 
-fn spawn_zone_item(p: &mut ChildSpawnerCommands, fonts: &UiFonts, zone: Option<Zone>, desc: &'static str) {
+/// One zone type button (used by the tool options bar).
+pub fn spawn_zone_item(p: &mut ChildSpawnerCommands, fonts: &UiFonts, zone: Option<Zone>, desc: &'static str) {
     let color = t::zone_color(zone);
     spawn_button(
         p,
@@ -271,20 +250,4 @@ fn spawn_zone_item(p: &mut ChildSpawnerCommands, fonts: &UiFonts, zone: Option<Z
             ));
         },
     );
-}
-
-fn show_flyout(tool: Res<ActiveTool>, mut flyout: Query<&mut Node, With<ZoneFlyout>>) {
-    if !tool.is_changed() {
-        return;
-    }
-    let d = if matches!(*tool, ActiveTool::Zone(_)) {
-        Display::Flex
-    } else {
-        Display::None
-    };
-    for mut node in &mut flyout {
-        if node.display != d {
-            node.display = d;
-        }
-    }
 }
