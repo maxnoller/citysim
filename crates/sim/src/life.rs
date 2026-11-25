@@ -267,10 +267,13 @@ pub(crate) fn night(world: &mut World) {
         };
         world.people.history.push(day);
     }
+    // The review runs in the ticks after midnight (midnight itself is busy:
+    // payday, budget, abandonment checks).
     let chunks = balance::NIGHT_CHUNKS;
-    if tod >= chunks || world.people.night.is_empty() {
+    if tod == 0 || tod > chunks || world.people.night.is_empty() {
         return;
     }
+    let tod = tod - 1;
     world.cache.ensure_access(&world.buildings, world.versions.buildings);
     let todo: Vec<HouseholdId> = world
         .people

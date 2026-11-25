@@ -45,7 +45,7 @@ fn main() {
     while w.time.day < days {
         p.act(&mut w);
         w.step();
-        if w.time.tick_of_day == balance::NIGHT_CHUNKS + 1 {
+        if w.time.tick_of_day == balance::NIGHT_CHUNKS + 2 {
             // The night's review is done: yesterday's events are final.
             let s = &w.people.stats;
             let e = &w.people.events_yesterday;
