@@ -694,7 +694,7 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
     // A zebra crossing between the sim's stop line and the junction box
     // where the box leaves room for one.
     if !st.highway {
-        for (at_a, deg, stop, edge) in [(true, s.deg_a, s.stop_a, s.s_a), (false, s.deg_b, s.stop_b, s.s_b)] {
+        for (at_a, deg, stop) in [(true, s.deg_a, s.stop_a), (false, s.deg_b, s.stop_b)] {
             if deg < 3 || stop <= 0.0 {
                 continue;
             }
@@ -707,7 +707,6 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
             // Room for a crossing: from just outside the crossing roads'
             // carriageways (the sim puts the stop line its junction margin
             // beyond them) out to just before the stop line.
-            let _ = edge;
             let inner = (stop - citysim_sim::balance::JUNCTION_MARGIN_M + 0.35).max(stop * 0.4);
             let width = (stop - 0.4 - inner).min(2.4);
             if width >= 1.6 {

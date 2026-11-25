@@ -8,7 +8,9 @@ demand. Every household has a home and a job and drives to work on the shortest 
 so a bad road layout shows up as real traffic jams that you fix by rebuilding roads. Taxes, road upkeep and city
 services drive the budget.
 
-![A town of about 5,000 residents](docs/screenshot.png)
+![A city of about 10,000 residents with avenues and streets](docs/screenshot.png)
+
+![The same city at night](docs/night.png)
 
 ## Features
 
@@ -19,9 +21,20 @@ services drive the budget.
 - Residential, commercial and industrial zoning within two cells of a road, by rectangle, along a road's frontage or by
   filling an enclosed block; buildings grow by demand and level up from small houses, shops and sheds to apartment
   blocks and offices.
-- Agent traffic: commuters, shopping trips and delivery trucks drive in real time through junctions that work like
-  simple traffic lights; a traffic overlay shows each road direction green / amber / red.
-- Budget by category (taxes per zone type, road upkeep, city services), a daily history chart and a tax slider.
+- Agent traffic: commuters, shopping trips and delivery trucks drive in real time on the right, in lanes (two each way
+  on avenues, with lane choice before turns), through junctions with real rules: actuated traffic lights with
+  protected left-turn phases on avenues and green waves along them, priority junctions where side roads give way, and
+  all-way stops. Junctions pick their control automatically by road type and traffic; the junction tool (J) shows
+  each approach's light and queue and switches a junction between automatic, lights and priority. A traffic overlay
+  shows each road direction green / amber / red.
+- Every building fronts a road: lots are one cell, a deep 1x2 lot with a back garden, or a 2x2 lot, and face their
+  street, so a filled block never grows a second row of houses.
+- Day and night: the sun and moon cross the sky, street lamps, windows, headlights and brake lights come on at dusk.
+- Budget by category (taxes per zone type, road upkeep, city services), a daily history chart and a tax slider. Low
+  taxes do not buy free growth; running into debt cuts city services, demand falls and residents move away until the
+  budget is fixed. The top bar and the budget panel say what is happening and what to do.
+- Inspect cards for buildings, roads and junctions with the inspected thing highlighted in the world; settings for
+  graphics quality, interface size, edge scrolling and empty-lot markers, remembered between sessions.
 - Pause and three speeds (1x, 3x, 6x; a day lasts 4 minutes at 1x), one save slot, graphics quality presets.
 
 Out of scope for this version: terrain height, water, curved roads, transit, pedestrians, utilities, land value,
@@ -39,7 +52,10 @@ cargo test --workspace              # simulation and game tests
 ```
 
 The save slot is `~/.local/share/citysim/city.citysave` on Linux (`~/Library/Application Support/CitySim` on macOS,
-`%APPDATA%\CitySim` on Windows); `CITYSIM_SAVE_DIR` overrides it.
+`%APPDATA%\CitySim` on Windows); `CITYSIM_SAVE_DIR` overrides it. Saves from the first version still load. Settings are
+kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows; `CITYSIM_CONFIG_DIR` overrides it).
+
+![Drawing a road path with a snap guide](docs/road-tool.png)
 
 ## Controls
 
@@ -57,7 +73,7 @@ The save slot is `~/.local/share/citysim/city.citysave` on Linux (`~/Library/App
 | Ctrl+Z | Undo the last road or zoning action (removing a road costs the demolition fee, no refund) |
 | T | Traffic overlay · O cycles overlays (zones, traffic) |
 | Space · 1 2 3 | Pause · speed 1x / 3x / 6x |
-| WASD or arrows · Q / E | Pan · rotate (Shift pans faster) |
+| WASD or arrows · Q / E | Pan · rotate (Shift pans faster); edge scrolling can be switched on in Settings |
 | Mouse wheel · middle drag | Zoom · rotate and tilt |
 | G | Graphics quality (Low / Medium / High) |
 | F5 · F9 | Save · load |
@@ -76,6 +92,10 @@ See `CLAUDE.md` for developer notes and dev flags, and `THIRD_PARTY_NOTICES.md` 
 
 ```sh
 CITYSIM_DEMO=city cargo run -p citysim --release    # start in a ~5,000-resident town (also: town, jam)
+CITYSIM_DEMO=hierarchy cargo run -p citysim --release   # ~10,000 residents, avenues and streets (about 50 s to build)
 CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png cargo run -p citysim --release   # screenshot and exit
 cargo run -p citysim_sim --release --example headless   # balance runs of scripted cities, no window
 ```
+
+CI (`.github/workflows/ci.yml`) checks formatting, clippy and the simulation tests (including the pinned determinism
+checksum), and builds and tests the game crate.

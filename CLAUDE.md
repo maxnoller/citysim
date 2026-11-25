@@ -4,6 +4,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 
 ## Build / test / run
 - `cargo test --workspace` · `cargo clippy --workspace --all-targets` (warning-free) · `cargo fmt --all --check` (width 120)
+- CI: `.github/workflows/ci.yml` (fmt, clippy `-D warnings` + tests for the sim; `cargo check` of all three feature sets +
+  tests for the game, with `Swatinem/rust-cache`). CI's clippy is the latest stable: keep the sim lint-clean on it.
 - Run: `cargo run -p citysim`. Fast loop (≈3 s/edit vs ≈13 s): `--features bevy/dynamic_linking` on the command
   line only, never as a default. First Bevy build ≈ 9–10 min. Never commit a `.cargo/config.toml` naming a linker.
 - Ownership check (must stay warning-free): `cargo clippy -p citysim --no-default-features --features gfx`
@@ -18,6 +20,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   quality keys, save/load. One `UiPlugin`. Assets in `crates/game/assets/ui/`.
 - `crates/game/src/shared.rs` — the ONLY contract between gfx and ui; change it only by agreement. gfx and ui
   never import each other. `main.rs` just builds the App (features `gfx`, `ui`, both default).
+- `.github/workflows/ci.yml` — CI. `docs/` — README images (`screenshot.png`, `night.png`, `road-tool.png`, `traffic-overlay.png`).
 - `crates/game/src/dev/` — development tooling, not owned by gfx/ui: `scenario` (real scripted towns), `autoshot`
   (screenshot and exit), `control` (file control channel for scripted play). `scripts/play.py` plays the real game with
   OS input (xdotool) through that channel.
@@ -38,7 +41,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - Round 2 (ui writes, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`, `SnapFeedback` (snapped point,
   `SnapTarget`, `Guide` lines in sim metres, spacing), `PathPreview` (corners, legs with per-leg error and
   `upgrade_cells`, length, cost), `WorldHighlight` (hovered / pinned `WorldTarget`, doomed buildings and road cells),
-  `DisplaySettings { edge_scroll, lot_markers }`. `ToolPreview::line` is the leg under the cursor only.
+  `DisplaySettings { edge_scroll, lot_markers }` (gfx's camera pans at the window edge when `edge_scroll`; default off).
+  `ToolPreview::line` is the leg under the cursor only.
+- `SceneReady(bool)`: gfx sets it once the render pipelines are built (`gfx/loading.rs` counts them in the render
+  world); ui shows a loading card until then (`ui/loading.rs`), autoshot counts its delay from it.
 
 ## Sim facts for renderers
 - `MAP_CELLS = 256`, `CELL_SIZE = 8` m. Cell `(x, y)` centre = `((x+.5)*8, (y+.5)*8)` m; sim `(x, y)` → Bevy
@@ -60,7 +66,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   day. Bulldozing is never refused for lack of money. Money may go negative.
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
-- Saves: format version 3 plus an extension block; `World::load` rejects structurally damaged saves.
+- Saves: format version 4 (round 2); version-3 (round-1) saves load (`save::v3`, fixture
+  `crates/sim/tests/data/round1_town.citysave`); `World::load` rejects structurally damaged saves. Round-1 saves keep
+  their old second-row buildings until they are rebuilt.
 - Scenarios: `scenarios::{GridPlayer, two_districts, add_connections, overbuilt}`; `scenarios::prebuilt(w, f)` pays
   for a static layout (they cost more than a new game's money).
 - Sim balance runs: `cargo run -p citysim_sim --release --example headless` (scripted cities in `citysim_sim::scenarios`).
@@ -76,17 +84,28 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   (`growth::has_frontage`). Money: `economy.fiscal` (`FiscalState`, `reason.text()`, `service_level`). Saves: format 4;
   version-3 saves load (`save::v3`). Scripted players: `GridPlayer::{new, hierarchy, single_artery}`; renders:
   `cargo run -p citysim_sim --release --example topdown -- signal|lots|video|watch out`.
+- Junction rules (round-2 integration): a junction's stop lines sit `JUNCTION_MARGIN_M` (2.5 m) beyond the crossing
+  carriageways (a bend: `BEND_MARGIN_M`), which leaves room for the zebra crossings gfx draws there; two movements
+  conflict when their paths cross *or* come within `MOVEMENT_CLEARANCE_M` (car width plus room), so cars never
+  touch in a box; a degree-2 node where the lane count changes (highway end, avenue -> street) gets a short merge box
+  (`LANE_MERGE_TAPER_M`). Auto control turns a junction into signals from `AUTO_SIGNAL_PER_MINUTE` (16) vehicles in
+  its busiest minute. New games start at 09:00 (`START_TICK_OF_DAY`). The pinned checksum in `tests/round2.rs` moves
+  with any rule change: update it deliberately.
 
 ## Dev / headless flags (need `DISPLAY=:0`; llvmpipe works)
-- `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000) · `jam` (bad layout, one overloaded junction): real towns
+- `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000, streets only) · `hierarchy` (`GridPlayer::hierarchy`,
+  ~10,000 with avenues, ~50 s to build in release) · `jam` (bad layout, one overloaded junction): real towns
   built by `citysim_sim::scenarios` through commands and fast-forwarded before the first frame (< 1 s release, a few s
   debug). `CITYSIM_DEMO_POP=n` target, `CITYSIM_DEMO_HOUR=h` stop time (default 8 = morning rush).
 - `CITYSIM_AUTOSHOT=out.png` (or `--autoshot`): screenshot then exit 0. `CITYSIM_SHOT_VIEW=wide|street|close`,
   `CITYSIM_SHOT_DELAY=25` (s, default 3), `CITYSIM_SHOT_OVERLAY=none|zones|traffic`. Without a demo it builds
   a small sample city. Example: `CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png CITYSIM_SHOT_DELAY=25 cargo run -p citysim`.
-- `CITYSIM_LOG_FPS=1` logs FPS (llvmpipe, 4 vCPU: small town 5–8, 5,000 residents ≈ 2–3). `CITYSIM_SEED=n` world seed.
+- `CITYSIM_LOG_FPS=1` logs FPS (llvmpipe, 4 vCPU: small town 5–8, 10,000 residents ≈ 4 Low / 2 High). `CITYSIM_SEED=n`
+  world seed (the `hierarchy` demo reaches 10,000 fastest with seed 3). `CITYSIM_CONFIG_DIR` overrides the settings
+  folder (`settings.cfg`; not written during autoshot / UI shots).
 - `CITYSIM_CONTROL=dir` + `scripts/play.py` (see its docstring): `launch`, `start`, `grow --until-pop N`, `road`, `zone`,
-  `bulldoze`, `look`, `shot`, `stats`, `counts`, `cmd 'until-day N'`. The channel only reads numbers, frames the camera,
+  `bulldoze`, `look`, `shot`, `stats`, `counts`, `cmd 'until-day N'` (`launch` waits for the `ready` reply: shaders
+  built). `launch --env K=V` passes extra variables. The channel only reads numbers, frames the camera,
   fast-forwards (`turbo`, `until-*`; they fail while paused) and takes screenshots; all play goes through real input.
 - UI capture: `CITYSIM_UI_SHOTS=dir` (interface states; `CITYSIM_SAVE_DIR` for the save/load step), `CITYSIM_UI_TOUR=1`.
   `CITYSIM_UI_SHOTS_ONLY=road-path,junction-tool,...` picks states (names in `ui/shots.rs`).
