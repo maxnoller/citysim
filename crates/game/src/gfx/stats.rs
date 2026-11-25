@@ -45,6 +45,7 @@ fn log_stats(
     buildings: Res<BuildingModels>,
     vehicles: Res<VehicleModels>,
     trees: Res<TreeCount>,
+    lights: Query<(), Or<(With<DirectionalLight>, With<PointLight>, With<SpotLight>)>>,
 ) {
     let now = time.elapsed_secs();
     if now - *last < 5.0 {
@@ -68,7 +69,7 @@ fn log_stats(
     }
     info!(
         "gfx stats: {} entities, {} mesh entities ({} visible, {:.2} M triangles), {} mesh assets, {} materials, \
-         {} building models, {} car models, {} trees",
+         {} building models, {} car models, {} trees, {} real lights",
         entities.iter().count(),
         mesh_entities.iter().count(),
         visible,
@@ -78,6 +79,7 @@ fn log_stats(
         buildings.count(),
         vehicles.count(),
         trees.0,
+        lights.iter().count(),
     );
 }
 

@@ -62,10 +62,10 @@ fn ground_color(base: vec3<f32>, wp: vec3<f32>) -> vec3<f32> {
     let p = wp.xz;
     let n1 = vnoise(p / 23.0);
     let n2 = vnoise(p / 6.5 + vec2<f32>(31.0, 7.0));
-    var c = base * (0.9 + 0.2 * (n1 - 0.5) + 0.12 * (n2 - 0.5));
+    var c = base * (0.96 + 0.16 * (n1 - 0.5) + 0.1 * (n2 - 0.5));
     // Drier, yellower patches.
-    let dry = smoothstep(0.6, 0.82, vnoise(p / 57.0 + vec2<f32>(7.0, 3.0)));
-    c = mix(c, c * vec3<f32>(1.16, 1.06, 0.72), dry * 0.55);
+    let dry = smoothstep(0.66, 0.86, vnoise(p / 57.0 + vec2<f32>(7.0, 3.0)));
+    c = mix(c, c * vec3<f32>(1.1, 1.04, 0.78), dry * 0.4);
     // Farmland patchwork beyond the playable map (2048 m square).
     let out = max(max(-p.x, p.x - 2048.0), max(-p.y, p.y - 2048.0));
     let farm = smoothstep(70.0, 260.0, out);

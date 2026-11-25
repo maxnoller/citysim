@@ -394,6 +394,19 @@ pub fn quality_settings(q: GraphicsQuality) -> QualitySettings {
 pub fn camera_look() -> impl Bundle {
     (
         Tonemapping::TonyMcMapface,
+        // A little more punch than the neutral tonemapper gives: slightly
+        // richer colour and midtone contrast (the diorama look).
+        bevy::render::view::ColorGrading {
+            global: bevy::render::view::ColorGradingGlobal {
+                post_saturation: 1.1,
+                ..default()
+            },
+            midtones: bevy::render::view::ColorGradingSection {
+                contrast: 1.06,
+                ..default()
+            },
+            ..default()
+        },
         // Always HDR (bloom only on some qualities): switching quality must
         // not change the main pass's render target format.
         Hdr,
@@ -463,11 +476,11 @@ fn insert_quality(ec: &mut EntityCommands, s: &QualitySettings) {
     }
     if s.bloom {
         ec.insert(Bloom {
-            intensity: 0.12,
-            low_frequency_boost: 0.6,
+            intensity: 0.1,
+            low_frequency_boost: 0.4,
             prefilter: BloomPrefilter {
-                threshold: 1.1,
-                threshold_softness: 0.5,
+                threshold: 1.6,
+                threshold_softness: 0.4,
             },
             composite_mode: BloomCompositeMode::Additive,
             ..Bloom::NATURAL
