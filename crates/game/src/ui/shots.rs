@@ -1032,9 +1032,16 @@ fn tour_targets(w: &mut World) {
     let fc = crate::shared::world_to_cell(focus);
     let bld = find_building_near(w, fc).unwrap_or(fc);
     let road = busiest_road_near(w, fc).unwrap_or(fc);
+    let junction = find_junction(w).unwrap_or(road);
     let mut data = w.resource_mut::<TourData>();
     data.cells.truncate(4);
     data.cells.extend([bld.offset(-2, -3), bld.offset(3, 2), bld, road]);
+    // 8: third corner of the road path; 9: beside its last leg; 10: a junction.
+    let (a, b) = (data.cells[0], data.cells[1]);
+    let (dx, dy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
+    let third = Cell::new(b.x - dy * 7, b.y + dx * 7);
+    let beside = Cell::new(b.x - dy * 4 + dx, b.y + dx * 4 + dy);
+    data.cells.extend([third, beside, junction]);
 }
 
 fn busiest_road_near(world: &World, focus: Cell) -> Option<Cell> {
@@ -1061,33 +1068,44 @@ fn busiest_road_near(world: &World, focus: Cell) -> Option<Cell> {
 fn tour_ops() -> Vec<Op> {
     use Op::*;
     use PointerTarget::{Button, Data};
-    let zone = |z| Button(UiAction::Tool(ActiveTool::Zone(Some(z))));
     vec![
         Run(tour_setup),
+        Run(tour_targets),
         Wait(1.5),
+        // A three-corner road, built with a double-click.
         Go(Button(UiAction::Tool(ActiveTool::Road)), 0.65),
-        Wait(1.0),
+        Wait(0.6),
         Click,
         Go(Data(0), 0.65),
         Click,
         Go(Data(1), 0.9),
-        Wait(0.5),
+        Wait(0.4),
         Click,
-        Wait(0.3),
-        Key(KeyCode::Escape),
+        Go(Data(8), 0.9),
+        Wait(0.9),
+        Click,
+        Wait(0.15),
+        Click,
+        Wait(0.8),
+        // Zone along the new road.
         Go(Button(UiAction::ZoneTool), 0.65),
         Click,
         Wait(0.3),
-        Go(zone(Zone::Commercial), 0.65),
-        Wait(0.5),
+        Go(Button(UiAction::ZoneMode(ZoneMode::Frontage)), 0.65),
+        Wait(0.6),
         Click,
-        Go(Data(2), 0.65),
-        Down,
-        Go(Data(3), 0.9),
-        Wait(0.5),
-        Up,
-        Wait(0.4),
-        Run(tour_targets),
+        Go(Data(9), 0.9),
+        Wait(1.2),
+        Click,
+        Wait(0.6),
+        // Switch a junction's control.
+        Go(Button(UiAction::RoadMode(RoadMode::Junction)), 0.65),
+        Click,
+        Go(Data(10), 0.9),
+        Wait(1.6),
+        Click,
+        Wait(1.4),
+        // Bulldozer preview (cancelled with a right click).
         Go(Button(UiAction::Tool(ActiveTool::Bulldoze)), 0.65),
         Click,
         Go(Data(4), 0.65),
@@ -1097,10 +1115,13 @@ fn tour_ops() -> Vec<Op> {
         RightClick,
         Up,
         Wait(0.2),
+        // Inspect and pin a building, then a road.
         Go(Button(UiAction::Tool(ActiveTool::Inspect)), 0.65),
         Click,
         Go(Data(6), 0.65),
-        Wait(1.1),
+        Wait(0.6),
+        Click,
+        Wait(1.0),
         Go(Data(7), 0.65),
         Wait(1.3),
         Go(Button(UiAction::Overlay(OverlayMode::Traffic)), 0.65),
@@ -1109,27 +1130,17 @@ fn tour_ops() -> Vec<Op> {
         Click,
         Go(Button(UiAction::ToggleBudget), 0.65),
         Click,
-        Wait(0.5),
-        Go(Button(UiAction::TaxStep(5)), 0.65),
-        Click,
-        Wait(0.25),
-        Click,
-        Wait(0.25),
-        Click,
-        Wait(0.6),
+        Wait(1.2),
         Go(Button(UiAction::CloseBudget), 0.65),
         Click,
-        Go(Button(UiAction::Speed(2)), 0.65),
-        Click,
-        Wait(1.1),
-        Go(Button(UiAction::TogglePause), 0.65),
-        Click,
-        Wait(0.6),
         Key(KeyCode::Escape),
         Wait(0.6),
-        Go(Button(UiAction::Save), 0.65),
+        Go(Button(UiAction::OpenSettings), 0.65),
         Click,
-        Wait(0.9),
+        Wait(1.6),
+        Go(Button(UiAction::CloseSettings), 0.65),
+        Click,
+        Wait(0.4),
         Go(Button(UiAction::CloseMenu), 0.65),
         Click,
         Wait(1.0),
