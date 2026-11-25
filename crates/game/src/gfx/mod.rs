@@ -18,6 +18,7 @@ mod noise;
 mod overlay;
 mod palette;
 mod props;
+mod record;
 mod road_geom;
 mod road_ghost;
 mod road_tool;
@@ -67,6 +68,7 @@ impl Plugin for GfxPlugin {
             land::LandPlugin,
             road_tool::RoadToolPlugin,
             bench::BenchPlugin,
+            record::RecordPlugin,
         ));
     }
 }

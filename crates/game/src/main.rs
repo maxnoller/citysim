@@ -37,9 +37,12 @@ fn main() {
         file_path: asset_root(),
         ..default()
     });
-    // `CITYSIM_BENCH`: no window at all (gfx renders off-screen); the app
-    // loop runs as fast as frames are drawn.
-    if std::env::var_os("CITYSIM_BENCH").is_some_and(|v| !v.is_empty()) {
+    // `CITYSIM_BENCH` / `CITYSIM_RECORD`: no window at all (gfx renders
+    // off-screen); the app loop runs as fast as frames are drawn.
+    let windowless = ["CITYSIM_BENCH", "CITYSIM_RECORD"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|v| !v.is_empty()));
+    if windowless {
         app.add_plugins(
             plugins
                 .set(WindowPlugin {
