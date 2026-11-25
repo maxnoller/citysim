@@ -61,6 +61,19 @@ impl<K: Key, V> SideTable<K, V> {
         self.get_mut(k).expect("just inserted")
     }
 
+    /// All entries, in slot order.
+    pub fn iter(&self) -> impl Iterator<Item = (K, &V)> + '_ {
+        self.entries.iter().filter_map(|e| e.as_ref().map(|(k, v)| (*k, v)))
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &V> + '_ {
+        self.entries.iter().filter_map(|e| e.as_ref().map(|(_, v)| v))
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> + '_ {
+        self.entries.iter_mut().filter_map(|e| e.as_mut().map(|(_, v)| v))
+    }
+
     /// Drop entries whose key `alive` rejects.
     pub fn retain_keys(&mut self, mut alive: impl FnMut(K) -> bool) {
         for e in &mut self.entries {

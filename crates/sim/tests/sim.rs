@@ -75,7 +75,8 @@ fn growth_needs_a_road_connection_to_the_highway() {
     for _ in 0..6 * HOUR {
         w.step();
     }
-    assert!(w.buildings.len() >= 5, "grows once connected: {}", w.buildings.len());
+    let cells: i32 = w.buildings.values().map(|b| b.size().0 * b.size().1).sum();
+    assert!(cells >= 5, "grows once connected: {cells} cells");
     for (_, b) in w.buildings.iter() {
         assert_eq!(b.kind, Zone::Residential);
         assert!(b.level >= 1 && b.capacity > 0);
@@ -262,6 +263,7 @@ fn bulldozing_under_traffic_never_panics() {
             let _ = w.apply(Command::BuildRoad {
                 from: c(x, y),
                 to: c(x + 2 * r, y),
+                kind: citysim_sim::RoadKind::Street,
             });
         }
         for _ in 0..150 {
@@ -346,6 +348,7 @@ fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
     let err = over.apply(Command::BuildRoad {
         from: c(30, 30),
         to: c(30, 35),
+        kind: citysim_sim::RoadKind::Street,
     });
     assert!(matches!(err, Err(CommandError::InsufficientFunds { .. })));
 }
