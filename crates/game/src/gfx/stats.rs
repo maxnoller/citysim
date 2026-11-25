@@ -229,6 +229,7 @@ fn tool_demo(
         selected: building.map(WorldTarget::Building),
         doomed_buildings: vec![],
         doomed_road_cells: vec![],
+        doomed_roads: vec![],
     });
 }
 

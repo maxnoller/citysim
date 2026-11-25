@@ -12,16 +12,19 @@ mod controls;
 mod demand;
 mod fiscal;
 mod format;
+mod fsnap;
 mod hud;
 mod legend;
 mod loading;
 mod menu;
+mod people;
 mod plan;
 mod pointer;
+mod readout;
 mod save_load;
 mod settings;
+mod shapes;
 mod shots;
-mod snap;
 mod theme;
 mod toasts;
 mod toolbar;
@@ -52,6 +55,10 @@ pub struct UiState {
     pub settings_open: bool,
     /// Index into `settings::UI_SCALES`.
     pub ui_scale: usize,
+    /// The camera follows the person or car of the people panel.
+    pub following: bool,
+    /// The city-wide people view is open.
+    pub city_people_open: bool,
 }
 
 impl Default for UiState {
@@ -64,6 +71,8 @@ impl Default for UiState {
             last_zone: Some(Zone::Residential),
             settings_open: false,
             ui_scale: 1,
+            following: false,
+            city_people_open: false,
         }
     }
 }

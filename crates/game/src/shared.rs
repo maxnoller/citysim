@@ -12,12 +12,16 @@
 //! * `CameraOverride`: written by dev tooling (scripted demo / autoshot).
 //! * Round 2, written by ui, drawn by gfx: `RoadChoice`, `ToolModes`,
 //!   `SnapFeedback`, `PathPreview`, `WorldHighlight`, `DisplaySettings`.
+//! * Round 4, written by ui, drawn / honoured by gfx: `CurveToolView` (the
+//!   free-form road tool), `ToolPreview::area`, `WorldHighlight::doomed_roads`,
+//!   `WorldTarget::Vehicle`, `CameraFollow`, `CameraGoTo`.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use citysim_sim::command::{NodeChange, PieceChange};
 use citysim_sim::{
-    BuildingId, CELL_SIZE, Cell, CellRect, CellRef, Command, CommandError, NodeId, Outcome, SegmentId,
-    TICKS_PER_SECOND, World, Zone,
+    BuildingId, CELL_SIZE, Cell, CellRect, CellRef, Command, CommandError, Curve, NodeId, Outcome, RoadKind, SegmentId,
+    TICKS_PER_SECOND, VehicleId, World, Zone,
 };
 
 // ---------------------------------------------------------------- ordering
@@ -166,6 +170,10 @@ pub struct ToolPreview {
     pub line: Option<(Cell, Cell)>,
     /// Rectangle tools: the dragged rectangle.
     pub rect: Option<CellRect>,
+    /// Marquee tools (zoning, bulldozer area): the dragged area, a
+    /// rectangle along the lattice it started on, sim metres (corners in
+    /// order). gfx draws its outline.
+    pub area: Option<[[f32; 2]; 4]>,
     /// Affected cells (valid: from the preview; invalid road: the straight
     /// line's cells if it is straight, else empty).
     pub cells: Vec<Cell>,
@@ -231,45 +239,66 @@ pub enum RoadChoice {
     Avenue,
 }
 
-/// What a road-tool drag does (sub-mode of `ActiveTool::Road`).
-#[allow(dead_code)] // variants constructed by ui tools as they land
+/// What the road tool draws (sub-mode of `ActiveTool::Road`). Every
+/// drawing mode shows its road in [`CurveToolView`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RoadMode {
-    /// Click/drag corners of a multi-segment path (`PathPreview`).
+    /// Straight pieces: click (or drag) from point to point.
     #[default]
-    Path,
-    /// Drag a rectangle: a street loop, optionally subdivided into a grid
-    /// (`PathPreview::legs` holds every street of it).
-    Block,
+    Straight,
+    /// Three clicks per piece: start, the corner where the two directions
+    /// meet, end.
+    Curve,
+    /// Each piece leaves the last one smoothly: click along the way.
+    Continuous,
+    /// Three clicks: a corner, the width, the length: a street grid at any
+    /// angle.
+    Grid,
+    /// Draw along a road to change it to the chosen kind (upgrade or
+    /// downgrade); click for the whole stretch between junctions.
+    Upgrade,
     /// Hover a junction to see its control, click to switch it (no ghost;
     /// `WorldHighlight::hovered` is the junction).
     Junction,
 }
 
-/// What a zoning drag does (sub-mode of `ActiveTool::Zone(_)`).
-#[allow(dead_code)] // variants constructed by ui tools as they land
+impl RoadMode {
+    /// Modes that draw new road.
+    pub fn draws(self) -> bool {
+        matches!(
+            self,
+            RoadMode::Straight | RoadMode::Curve | RoadMode::Continuous | RoadMode::Grid
+        )
+    }
+}
+
+/// What a zoning drag does (sub-mode of `ActiveTool::Zone(_)`). Every mode
+/// previews exactly the cells it changes in `ToolPreview::zone_cells`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ZoneMode {
-    /// Drag a rectangle (round-1 behaviour).
+    /// Paint cells under the cursor while the button is held.
     #[default]
-    Rect,
+    Paint,
     /// Click a road side: that whole frontage between two junctions, to the
-    /// lot depth. Drag along a road: paint the frontage passed over.
+    /// chosen depth. Drag along a road: the frontage passed over.
     Frontage,
-    /// Click: every eligible cell of the enclosed block under the cursor.
+    /// Click: the connected zoneable area under the cursor.
     Fill,
+    /// Drag a rectangle that follows the lattice of the block it starts on
+    /// (`ToolPreview::area`).
+    Marquee,
 }
 
 /// What a bulldozer drag does (sub-mode of `ActiveTool::Bulldoze`).
-#[allow(dead_code)] // variants constructed by ui tools as they land
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BulldozeMode {
-    /// Drag a rectangle (round-1 behaviour).
-    #[default]
-    Rect,
     /// Click a road: the stretch between two junctions. Drag along a road:
-    /// just the part passed over.
+    /// just the part passed over. Click a building: that building.
+    #[default]
     Road,
+    /// Drag a rectangle along the lattice it starts on: roads and buildings
+    /// inside (`ToolPreview::area`).
+    Area,
 }
 
 /// Sub-mode of every tool (written by ui; the active one is the field for
@@ -304,6 +333,8 @@ pub enum SnapTarget {
     Extension,
     /// Same spacing as the neighbouring block.
     Spacing,
+    /// A length in whole cells (8 m) from the previous point.
+    Length,
 }
 
 /// Why a guide line is shown.
@@ -384,6 +415,34 @@ pub struct PathPreview {
     pub error: Option<CommandError>,
 }
 
+/// What the free-form road tool shows right now (sim metres). Written by ui
+/// while a road is being drawn (also the upgrade mode: pieces marked
+/// `PieceChange::Upgrade` / `Downgrade`), drawn by gfx. The snap marker and
+/// guide lines of the live point are in [`SnapFeedback`]; `snap` / `guides`
+/// here are only filled by gfx's own sample states.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct CurveToolView {
+    pub active: bool,
+    pub kind: Option<RoadKind>,
+    /// The road as it would be, split at its nodes, with the kind of change.
+    pub pieces: Vec<(Curve, PieceChange)>,
+    /// Curves the sim refuses (the whole piece in error).
+    pub refused: Vec<Curve>,
+    /// Where the sim says the problem is.
+    pub error_at: Option<[f32; 2]>,
+    /// Control points: start, corners, live end.
+    pub points: Vec<[f32; 2]>,
+    /// Tangent handles: (anchor, handle tip).
+    pub handles: Vec<([f32; 2], [f32; 2])>,
+    /// Tightest bend: (point, its centre of curvature, radius, too tight).
+    pub tightest: Option<([f32; 2], [f32; 2], f32, bool)>,
+    /// The snapped point and what it snapped to.
+    pub snap: Option<([f32; 2], SnapTarget)>,
+    pub guides: Vec<Guide>,
+    /// Junctions it would make or use.
+    pub nodes: Vec<([f32; 2], NodeChange)>,
+}
+
 /// A stretch of road between two junctions (or dead ends).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RoadStretch {
@@ -406,6 +465,8 @@ pub enum WorldTarget {
         node: NodeId,
         pos: [f32; 2],
     },
+    /// A car or truck (follows it as it drives).
+    Vehicle(VehicleId),
 }
 
 /// What gfx should highlight in the world (issue 6): the hovered and the
@@ -420,6 +481,9 @@ pub struct WorldHighlight {
     pub doomed_buildings: Vec<BuildingId>,
     /// Bulldozer preview: road cells that would be removed (tint red).
     pub doomed_road_cells: Vec<Cell>,
+    /// Bulldozer preview: the parts of roads that would be removed (centre
+    /// lines and kinds; tint red over the road's width).
+    pub doomed_roads: Vec<(Curve, RoadKind)>,
 }
 
 /// Player display settings that gfx honours (written by ui from the
@@ -476,6 +540,23 @@ impl CameraPose {
 /// camera input (used by scripted demos and screenshots).
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct CameraOverride(pub Option<CameraPose>);
+
+/// While `focus` is `Some`, gfx's camera keeps its focus on that ground
+/// point (sim metres), easing after it as it moves; zoom and rotation stay
+/// with the player, panning keys are ignored (ui stops following on them).
+/// Written by ui every frame while following a person or car.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CameraFollow {
+    pub focus: Option<[f32; 2]>,
+}
+
+/// Move the camera's focus to a ground point (sim metres), and zoom to
+/// `distance` metres when given (sent by ui: links between views).
+#[derive(Message, Debug, Clone, Copy, PartialEq)]
+pub struct CameraGoTo {
+    pub focus: [f32; 2],
+    pub distance: Option<f32>,
+}
 
 // ---------------------------------------------------------------- coordinates
 
@@ -564,6 +645,9 @@ impl Plugin for SharedPlugin {
         .init_resource::<PathPreview>()
         .init_resource::<WorldHighlight>()
         .init_resource::<DisplaySettings>()
+        .init_resource::<CurveToolView>()
+        .init_resource::<CameraFollow>()
+        .add_message::<CameraGoTo>()
         // Without gfx there is nothing to wait for.
         .insert_resource(SceneReady(!cfg!(feature = "gfx")))
         .add_message::<SimCommand>()

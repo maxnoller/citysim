@@ -7,6 +7,7 @@
 //!   copy of its own model) with a ring on the ground, a road stretch gets a
 //!   bright band, a junction a ring coloured by its control; buildings and
 //!   road cells the bulldozer would remove glow red.
+//! * a hovered or selected car gets a ring that drives with it.
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
@@ -32,6 +33,10 @@ struct GuideLines;
 #[derive(Component)]
 struct HighlightGround;
 
+/// Ring under the hovered / selected vehicle (moved every frame).
+#[derive(Component)]
+struct VehicleRing;
+
 /// Tinted copies of highlighted buildings.
 #[derive(Component)]
 struct HighlightCopy;
@@ -50,12 +55,12 @@ impl Plugin for GuidesPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup).add_systems(
             Update,
-            (draw_snap, pulse_marker, draw_highlight).in_set(GameSet::Render),
+            (draw_snap, pulse_marker, draw_highlight, vehicle_ring).in_set(GameSet::Render),
         );
     }
 }
 
-fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>, mut meshes: ResMut<Assets<Mesh>>) {
     let overlay = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         alpha_mode: AlphaMode::Blend,
@@ -87,6 +92,25 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
             ec.insert(GuideLines);
         }
     }
+    let mut ring_mesh = MeshBuilder::new();
+    let gold = lin(Color::srgb(1.0, 0.86, 0.35).with_alpha(0.95));
+    ring(&mut ring_mesh, Vec2::ZERO, 3.6, 0.45, 0.0, gold, 32);
+    disc(
+        &mut ring_mesh,
+        Vec2::ZERO,
+        3.5,
+        -0.01,
+        [gold[0], gold[1], gold[2], 0.18],
+    );
+    commands.spawn((
+        Name::new("Vehicle ring"),
+        VehicleRing,
+        Mesh3d(meshes.add(ring_mesh.build())),
+        MeshMaterial3d(overlay.clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
     commands.spawn((
         Name::new("Highlight"),
         HighlightGround,
@@ -223,6 +247,14 @@ fn snap_glyph(m: &mut MeshBuilder, t: SnapTarget, suspended: bool) {
             ring(m, o, 2.0, 0.35, y, col, 4);
             disc(m, o, 0.6, y, col);
         }
+        SnapTarget::Length => {
+            // A ruler: a bar with ticks.
+            band(m, Vec2::new(-2.4, 0.0), Vec2::new(2.4, 0.0), 0.35, y, col);
+            for x in [-2.4f32, -0.8, 0.8, 2.4] {
+                let h = if x.abs() > 2.0 { 1.3 } else { 0.8 };
+                band(m, Vec2::new(x, -h), Vec2::new(x, h), 0.3, y, col);
+            }
+        }
         SnapTarget::Grid | SnapTarget::None => {
             let s = 1.3;
             outline(
@@ -307,11 +339,44 @@ fn draw_snap(
     }
 }
 
-/// Gentle pulse of the snap marker so it reads as live.
-fn pulse_marker(time: Res<Time<Real>>, mut q: Query<&mut Transform, With<SnapMarker>>) {
-    let s = 1.0 + 0.08 * (time.elapsed_secs() * 5.0).sin();
+/// Gentle pulse of the snap marker so it reads as live; it grows with the
+/// distance to the camera so it stays readable when zoomed out.
+fn pulse_marker(
+    time: Res<Time<Real>>,
+    camera: Query<&GlobalTransform, With<WorldCamera>>,
+    mut q: Query<&mut Transform, With<SnapMarker>>,
+) {
+    let eye = camera.single().map(|t| t.translation()).ok();
     for mut t in &mut q {
+        let k = eye.map_or(1.0, |e| (e.distance(t.translation) / 140.0).clamp(1.0, 6.0));
+        let s = k * (1.0 + 0.08 * (time.elapsed_secs() * 5.0).sin());
         t.scale = Vec3::new(s, 1.0, s);
+    }
+}
+
+/// The ring under a hovered or selected vehicle, at its exact lane pose.
+fn vehicle_ring(
+    hl: Res<WorldHighlight>,
+    sim: Res<SimWorld>,
+    mut q: Query<(&mut Transform, &mut Visibility), With<VehicleRing>>,
+) {
+    let Ok((mut t, mut vis)) = q.single_mut() else { return };
+    let id = [&hl.selected, &hl.hovered].into_iter().find_map(|x| match x {
+        Some(WorldTarget::Vehicle(v)) => Some(*v),
+        _ => None,
+    });
+    let pose = id
+        .and_then(|v| sim.world.vehicles.get(v))
+        .map(|v| citysim_sim::drive::vehicle_pose(&sim.world, v));
+    match pose {
+        Some((pos, dir)) => {
+            t.translation = Vec3::new(pos[0], heights::HIGHLIGHT + 0.05, pos[1]);
+            t.rotation = Quat::from_rotation_y(-dir[1].atan2(dir[0]));
+            vis.set_if_neq(Visibility::Inherited);
+        }
+        None => {
+            vis.set_if_neq(Visibility::Hidden);
+        }
     }
 }
 
@@ -423,6 +488,7 @@ fn draw_highlight(
                     disc(&mut m, Vec2::from(*p), w * 0.5, y, soft);
                 }
             }
+            WorldTarget::Vehicle(_) => {}
             WorldTarget::Junction { node, pos } => {
                 let r = junction::junction(world, *node)
                     .map_or(8.0, |j| j.arms.iter().map(|a| a.setback).fold(6.0, f32::max) + 3.0);
@@ -443,6 +509,16 @@ fn draw_highlight(
     let red = lin(mix(palette::TOOL_BAD, Color::WHITE, 0.1).with_alpha(0.45));
     for c in &hl.doomed_road_cells {
         m.quad_up(cell_corners(*c, 0.2, y), red);
+    }
+    for (curve, kind) in &hl.doomed_roads {
+        let w = road_geom::style(*kind).outer() * 2.0 + 0.6;
+        let pts = curve.flatten(0.25);
+        for p in pts.windows(2) {
+            band(&mut m, Vec2::from(p[0]), Vec2::from(p[1]), w, y, red);
+        }
+        for p in &pts[1..pts.len().saturating_sub(1)] {
+            disc(&mut m, Vec2::from(*p), w * 0.5, y, red);
+        }
     }
     for id in &hl.doomed_buildings {
         if let Some(&(parent, key, model_tf)) = index.0.get(id) {

@@ -115,7 +115,7 @@ fn handle_actions(
     mut ui: ResMut<UiState>,
     mut modes: ResMut<ToolModes>,
     mut kind: ResMut<RoadChoice>,
-    mut tools: ResMut<ToolState>,
+    mut opts: ResMut<super::tools::ToolOptions>,
     mut display: ResMut<DisplaySettings>,
     sim: Res<SimWorld>,
     mut cmds: MessageWriter<SimCommand>,
@@ -132,7 +132,7 @@ fn handle_actions(
     for action in actions.read() {
         match *action {
             UiAction::Tool(ActiveTool::Road) if *tool == ActiveTool::Road && modes.road == RoadMode::Junction => {
-                modes.road = RoadMode::Path;
+                modes.road = RoadMode::Straight;
             }
             UiAction::Tool(t) => {
                 let new = if *tool == t && t != ActiveTool::Inspect {
@@ -199,17 +199,28 @@ fn handle_actions(
             UiAction::RoadKind(k) => {
                 kind.set_if_neq(k);
                 if modes.road == RoadMode::Junction {
-                    modes.road = RoadMode::Path;
+                    modes.road = RoadMode::Straight;
                 }
             }
-            UiAction::BlockSize(d) => tools.block_size.step(d),
+            UiAction::BlockSize(d) => opts.step_block(d),
+            UiAction::Snap(r) => opts.toggle(r),
+            UiAction::ParallelStep(d) => opts.step_parallel(d),
+            UiAction::ZoneDepth(d) => opts.zone_depth = d,
             UiAction::OpenSettings => ui.settings_open = true,
             UiAction::CloseSettings => ui.settings_open = false,
             UiAction::UiScale(i) => ui.ui_scale = i,
             UiAction::EdgeScroll(on) => display.edge_scroll = on,
             UiAction::LotMarkers(on) => display.lot_markers = on,
-            // Handled in tools.rs.
-            UiAction::Undo => {}
+            // Handled in tools.rs and people_panel.rs.
+            UiAction::Undo
+            | UiAction::Person(_)
+            | UiAction::Place(_)
+            | UiAction::Vehicle(_)
+            | UiAction::Follow
+            | UiAction::StopFollow
+            | UiAction::PeopleBack
+            | UiAction::ClosePeople
+            | UiAction::CityPeople => {}
             // Handled in save_load.rs.
             UiAction::Save | UiAction::Load => {}
         }

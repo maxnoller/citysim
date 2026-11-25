@@ -1,40 +1,22 @@
-//! What a construction tool would do, as pure functions of the world:
-//! multi-leg road paths and block grids validated on a scratch copy of the
-//! world (so a path that crosses itself or runs out of money midway is
-//! judged exactly as the sim will judge it), road stretches between
-//! junctions, frontage / block-fill zoning, bulldozing along roads, and an
-//! honest undo for road building and zoning.
+//! Plans: what a tool would do, as a list of operations checked in order on
+//! a scratch copy of the world, and undo records. A plan is sent only when
+//! every operation is accepted, so a road is never built in part.
 //!
-//! Everything a tool sends is a list of ordinary `Command`s; a plan is only
-//! sent when every one of them is accepted on the scratch world, so the
-//! player never gets half a path.
+//! Operations on parts of existing roads name the part by its centre line
+//! ([`Op::Remove`], [`Op::Kind`]) and are resolved to the segment there when
+//! their turn comes: an earlier operation of the same plan may have split
+//! or merged segments. Resolving on the scratch copy and on the real world
+//! gives the same commands (the scratch copy has the same road graph).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::BTreeMap;
 
-use citysim_sim::{CELL_SIZE, Cell, CellRect, Command, CommandError, Occupant, RoadKind, World, Zone, balance};
+use citysim_sim::command::{NodeChange, PieceChange};
+use citysim_sim::{BuildingId, CellRef, Command, CommandError, Curve, Preview, RoadKind, World, Zone};
 
-use super::snap::RoadIndex;
-use crate::shared::{PathLeg, RoadChoice, RoadStretch};
-
-/// The command that builds one straight leg of the chosen kind.
-pub fn road_command(from: Cell, to: Cell, kind: RoadChoice) -> Command {
-    Command::BuildRoad {
-        from,
-        to,
-        kind: road_kind(kind),
-    }
-}
-
-/// The sim's road kind for the tool's choice.
-pub fn road_kind(kind: RoadChoice) -> RoadKind {
-    match kind {
-        RoadChoice::Street => RoadKind::Street,
-        RoadChoice::Avenue => RoadKind::Avenue,
-    }
-}
+use super::fsnap::dist;
 
 /// A copy of the parts of `world` that commands read and change (roads,
-/// grid, buildings, money), without households or traffic, so applying
+/// zoning, buildings, money), without people or traffic, so applying
 /// commands to it is cheap. Previews on it equal previews on `world`.
 pub fn scratch(world: &World) -> World {
     let mut w = World::new(world.seed);
@@ -46,579 +28,266 @@ pub fn scratch(world: &World) -> World {
     w.time = world.time.clone();
     w.versions = world.versions.clone();
     // Distinct from the fresh world's versions so its lazily built indices
-    // are rebuilt for the copied roads and grid.
+    // are rebuilt for the copied roads and zoning.
     w.versions.roads += 1;
     w.versions.grid += 1;
     w.versions.buildings += 1;
     w
 }
 
-/// Length of a leg in metres.
-pub fn leg_length(from: Cell, to: Cell) -> f32 {
-    let (dx, dy) = ((to.x - from.x).abs(), (to.y - from.y).abs());
-    let steps = dx.max(dy) as f32;
-    if dx != 0 && dy != 0 {
-        steps * CELL_SIZE * std::f32::consts::SQRT_2
-    } else {
-        steps * CELL_SIZE
+/// One step of a plan.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Op {
+    Cmd(Command),
+    /// Remove the part of a road along this centre line.
+    Remove(Curve),
+    /// Change the part of a road along this centre line to a kind.
+    Kind(Curve, RoadKind),
+    /// Remove every segment whose serial is in `lo..hi` (undo of new road).
+    RemoveSerials(u64, u64),
+}
+
+/// The segment carrying the centre line `c` and the range of it, metres
+/// from its `a` node.
+fn part_of(w: &World, c: &Curve) -> Option<(citysim_sim::SegmentId, f32, f32)> {
+    let mid = c.point_at(c.length() * 0.5, 0.0);
+    let (s, _, _) = w.roads.nearest_segment(mid, 0.6)?;
+    let seg = &w.roads.segments[s];
+    let (d0, e0, _) = seg.nearest(c.start());
+    let (d1, e1, _) = seg.nearest(c.end());
+    if e0 > 1.0 || e1 > 1.0 {
+        return None;
+    }
+    let (a, b) = (d0.min(d1), d0.max(d1));
+    let snap = |v: f32| {
+        if v < 0.3 {
+            0.0
+        } else if v > seg.length - 0.3 {
+            seg.length
+        } else {
+            v
+        }
+    };
+    Some((s, snap(a), snap(b)))
+}
+
+/// Kind of the road under the middle of `c` in `w`.
+pub fn kind_along(w: &World, c: &Curve) -> Option<RoadKind> {
+    let mid = c.point_at(c.length() * 0.5, 0.0);
+    let (s, _, _) = w.roads.nearest_segment(mid, 0.6)?;
+    Some(w.roads.segments[s].kind)
+}
+
+/// The command an operation stands for in `w` now.
+pub fn resolve(w: &World, op: &Op) -> Result<Command, CommandError> {
+    match op {
+        Op::Cmd(c) => Ok(c.clone()),
+        Op::Remove(c) => {
+            let (segment, from_m, to_m) = part_of(w, c).ok_or(CommandError::NoSuchRoad)?;
+            Ok(Command::RemoveRoad { segment, from_m, to_m })
+        }
+        Op::Kind(c, kind) => {
+            let (segment, from_m, to_m) = part_of(w, c).ok_or(CommandError::NoSuchRoad)?;
+            Ok(Command::SetRoadKind {
+                segment,
+                from_m,
+                to_m,
+                kind: *kind,
+            })
+        }
+        Op::RemoveSerials(..) => Err(CommandError::NoSuchRoad),
     }
 }
 
-/// Legs between consecutive points (zero-length ones dropped).
-pub fn legs_of(points: &[Cell]) -> Vec<(Cell, Cell)> {
-    points
-        .windows(2)
-        .filter(|w| w[0] != w[1])
-        .map(|w| (w[0], w[1]))
-        .collect()
+/// One checked step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Step {
+    /// The operation it came from (index into the plan).
+    pub op: usize,
+    /// The command it resolved to (`None` when it could not be resolved).
+    pub cmd: Option<Command>,
+    pub result: Result<Preview, CommandError>,
+    /// Kinds of the roads a removal takes away (parallel to
+    /// `Preview::removed`).
+    pub removed_kinds: Vec<RoadKind>,
 }
 
-/// A validated list of commands.
+/// A plan checked step by step.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Evaluated {
-    pub cmds: Vec<Command>,
-    /// Per command: `None` when accepted (after the ones before it).
-    pub errors: Vec<Option<CommandError>>,
+    pub steps: Vec<Step>,
     pub cost: i64,
-    /// Cells reported by the accepted commands (deduplicated, sorted).
-    pub cells: Vec<Cell>,
-    /// Roads: pieces built new, upgraded (street to avenue) and downgraded.
-    pub new_pieces: u32,
-    pub upgraded: u32,
-    pub downgraded: u32,
-    /// Roads: per command, the cells of pieces that change kind.
-    pub changed_cells: Vec<Vec<Cell>>,
+    /// Metres of new road.
+    pub length_m: f32,
 }
 
 impl Evaluated {
     pub fn first_error(&self) -> Option<&CommandError> {
-        self.errors.iter().flatten().next()
+        self.steps.iter().find_map(|s| s.result.as_ref().err())
     }
 
     pub fn ok(&self) -> bool {
-        !self.cmds.is_empty() && self.first_error().is_none()
+        self.first_error().is_none()
     }
-}
 
-/// Apply `cmds` in order to a copy of `base`; returns the verdict and the
-/// world after the accepted ones.
-pub fn evaluate(base: &World, cmds: Vec<Command>) -> (Evaluated, World) {
-    let mut w = base.clone();
-    let mut errors = Vec::with_capacity(cmds.len());
-    let mut cost = 0;
-    let mut cells = BTreeSet::new();
-    let (mut new_pieces, mut upgraded, mut downgraded) = (0, 0, 0);
-    let mut changed_cells = Vec::with_capacity(cmds.len());
-    for cmd in &cmds {
-        changed_cells.push(match *cmd {
-            Command::BuildRoad { from, to, kind } => kind_changes(&w, from, to, kind),
-            _ => Vec::new(),
+    /// The commands to send (only meaningful when `ok`).
+    pub fn cmds(&self) -> Vec<Command> {
+        self.steps.iter().filter_map(|s| s.cmd.clone()).collect()
+    }
+
+    fn previews(&self) -> impl Iterator<Item = &Preview> {
+        self.steps.iter().filter_map(|s| s.result.as_ref().ok())
+    }
+
+    /// Road pieces as they will be.
+    pub fn pieces(&self) -> Vec<(Curve, PieceChange)> {
+        self.previews()
+            .flat_map(|p| p.pieces.iter().map(|pc| (pc.curve, pc.change)))
+            .collect()
+    }
+
+    /// Junctions made or used (one per place).
+    pub fn nodes(&self) -> Vec<([f32; 2], NodeChange)> {
+        let mut out: Vec<([f32; 2], NodeChange)> = Vec::new();
+        for (p, c) in self.previews().flat_map(|p| p.nodes.iter().map(|n| (n.pos, n.change))) {
+            // A later piece starting where an earlier one ended: one node.
+            if let Some(o) = out.iter_mut().find(|o| dist(o.0, p) < 0.5) {
+                if o.1 == NodeChange::End {
+                    o.1 = c;
+                }
+            } else {
+                out.push((p, c));
+            }
+        }
+        out
+    }
+
+    /// Zoning cells that change.
+    pub fn zone_cells(&self) -> Vec<CellRef> {
+        let mut out: Vec<CellRef> = self.previews().flat_map(|p| p.zone_cells.iter().copied()).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Roads removed, with their kinds.
+    pub fn removed(&self) -> Vec<(Curve, RoadKind)> {
+        self.steps
+            .iter()
+            .filter_map(|s| s.result.as_ref().ok().map(|p| (p, &s.removed_kinds)))
+            .flat_map(|(p, k)| p.removed.iter().copied().zip(k.iter().copied()))
+            .collect()
+    }
+
+    /// Buildings demolished.
+    pub fn buildings(&self) -> Vec<BuildingId> {
+        let mut out: Vec<BuildingId> = self.previews().flat_map(|p| p.buildings.iter().copied()).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn push_step(&mut self, op: usize, cmd: Command, res: Result<Preview, CommandError>, kinds: Vec<RoadKind>) {
+        if let Ok(p) = &res {
+            self.cost += p.cost;
+            self.length_m += p.length_m;
+        }
+        self.steps.push(Step {
+            op,
+            cmd: Some(cmd),
+            result: res,
+            removed_kinds: kinds,
         });
-        match w.apply(cmd.clone()) {
-            Ok(o) => {
-                cost += o.cost;
-                cells.extend(o.cells);
-                new_pieces += o.new_pieces;
-                upgraded += o.upgraded;
-                downgraded += o.downgraded;
-                errors.push(None);
-            }
-            Err(e) => errors.push(Some(e)),
-        }
     }
-    (
-        Evaluated {
-            cmds,
-            errors,
-            cost,
-            cells: cells.into_iter().collect(),
-            new_pieces,
-            upgraded,
-            downgraded,
-            changed_cells,
-        },
-        w,
-    )
 }
 
-/// Cells of the pieces of the line `from`..`to` that are built as a
-/// changeable kind other than `kind` (upgrade / downgrade in place).
-fn kind_changes(w: &World, from: Cell, to: Cell, kind: RoadKind) -> Vec<Cell> {
-    let Some(line) = from.straight_line_to(to) else {
-        return Vec::new();
-    };
-    let mut out = BTreeSet::new();
-    for p in line.windows(2) {
-        if let Some(s) = w.roads.piece(p[0], p[1])
-            && let Some(seg) = w.roads.segments.get(s)
-            && seg.kind != kind
-            && RoadKind::BUILDABLE.contains(&seg.kind)
-        {
-            out.insert(p[0]);
-            out.insert(p[1]);
-        }
-    }
-    out.into_iter().collect()
-}
-
-/// The evaluated road path / block grid, for `PathPreview`.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct RoadPlan {
-    pub eval: Evaluated,
-    pub legs: Vec<PathLeg>,
-    pub length_m: f32,
-}
-
-pub fn plan_roads(base: &World, legs: &[(Cell, Cell)], kind: RoadChoice) -> RoadPlan {
-    let cmds = legs.iter().map(|&(a, b)| road_command(a, b, kind)).collect();
-    let (eval, _) = evaluate(base, cmds);
-    let legs = legs
-        .iter()
-        .zip(eval.errors.iter().zip(&eval.changed_cells))
-        .map(|(&(from, to), (e, changed))| PathLeg {
-            from,
-            to,
-            error: e.clone(),
-            upgrade_cells: changed.clone(),
-        })
-        .collect::<Vec<_>>();
-    let length_m = legs.iter().map(|l| leg_length(l.from, l.to)).sum();
-    RoadPlan { eval, legs, length_m }
-}
-
-// ---------------------------------------------------------------- block tool
-
-/// Streets of a block grid over the rectangle `a`..`b`: its outline plus,
-/// with `spacing`, inner streets every `spacing` cells (lines further than
-/// that from the far edge keep the last block a little larger rather than
-/// leaving a sliver). A one-cell-wide rectangle is a single street.
-pub fn block_legs(a: Cell, b: Cell, spacing: Option<i32>) -> Vec<(Cell, Cell)> {
-    let r = CellRect::from_corners(a, b);
-    let (x0, y0, x1, y1) = (r.min.x, r.min.y, r.max.x, r.max.y);
-    if x0 == x1 && y0 == y1 {
-        return Vec::new();
-    }
-    if x0 == x1 || y0 == y1 {
-        return vec![(r.min, r.max)];
-    }
-    let mut legs = vec![
-        (Cell::new(x0, y0), Cell::new(x1, y0)),
-        (Cell::new(x1, y0), Cell::new(x1, y1)),
-        (Cell::new(x1, y1), Cell::new(x0, y1)),
-        (Cell::new(x0, y1), Cell::new(x0, y0)),
-    ];
-    if let Some(s) = spacing.filter(|&s| s >= 2) {
-        let inner = |lo: i32, hi: i32| {
-            let mut v = Vec::new();
-            let mut k = lo + s;
-            while k <= hi - 2 {
-                v.push(k);
-                k += s;
-            }
-            v
-        };
-        for x in inner(x0, x1) {
-            legs.push((Cell::new(x, y0), Cell::new(x, y1)));
-        }
-        for y in inner(y0, y1) {
-            legs.push((Cell::new(x0, y), Cell::new(x1, y)));
-        }
-    }
-    legs
-}
-
-/// The block tool's far corner: whole blocks of `spacing` from `start`
-/// (at least one), so grids come out even.
-pub fn block_corner(start: Cell, cursor: Cell, spacing: Option<i32>) -> Cell {
-    let Some(s) = spacing.filter(|&s| s >= 2) else {
-        return cursor;
-    };
-    let round = |d: i32| {
-        let n = ((d.abs() as f32 / s as f32).round() as i32).max(1);
-        d.signum() * n * s
-    };
-    let (dx, dy) = (cursor.x - start.x, cursor.y - start.y);
-    let c = Cell::new(
-        start.x + if dx == 0 { 0 } else { round(dx) },
-        start.y + if dy == 0 { 0 } else { round(dy) },
-    );
-    // Pull back onto the map a block at a time.
-    let mut c = c;
-    while c.x < 0 {
-        c.x += s;
-    }
-    while c.y < 0 {
-        c.y += s;
-    }
-    while c.x >= citysim_sim::MAP_CELLS {
-        c.x -= s;
-    }
-    while c.y >= citysim_sim::MAP_CELLS {
-        c.y -= s;
-    }
-    c
-}
-
-// ---------------------------------------------------------------- road stretches
-
-/// Road cell adjacency (unit pieces) from the lattice index.
-#[derive(Debug, Clone, Default)]
-pub struct RoadCells {
-    pub adj: HashMap<Cell, Vec<Cell>>,
-    /// Node degree per node cell (junctions have 3 or more).
-    pub degree: HashMap<Cell, usize>,
-    /// Cells on the highway stub.
-    pub highway: BTreeSet<Cell>,
-}
-
-impl RoadCells {
-    pub fn build(index: &RoadIndex) -> RoadCells {
-        let mut adj: HashMap<Cell, Vec<Cell>> = HashMap::new();
-        let mut highway = BTreeSet::new();
-        for l in &index.lines {
-            let cells = l.a.straight_line_to(l.b).unwrap_or_default();
-            for w in cells.windows(2) {
-                adj.entry(w[0]).or_default().push(w[1]);
-                adj.entry(w[1]).or_default().push(w[0]);
-            }
-            if l.kind == RoadKind::Highway {
-                highway.extend(cells);
-            }
-        }
-        for v in adj.values_mut() {
-            v.sort_by_key(|c| (c.x, c.y));
-            v.dedup();
-        }
-        let degree = index.nodes.iter().map(|n| (n.cell, n.arms.len())).collect();
-        RoadCells { adj, degree, highway }
-    }
-
-    pub fn is_road(&self, c: Cell) -> bool {
-        self.adj.contains_key(&c)
-    }
-
-    pub fn is_junction(&self, c: Cell) -> bool {
-        self.degree.get(&c).is_some_and(|&d| d >= 3)
-    }
-
-    fn neighbours(&self, c: Cell) -> &[Cell] {
-        self.adj.get(&c).map(|v| v.as_slice()).unwrap_or(&[])
-    }
-
-    /// The stretch through road cell `c` between junctions or dead ends,
-    /// as an ordered list of cells (ends included). `None` off the road or
-    /// on a junction.
-    pub fn stretch_cells(&self, c: Cell) -> Option<Vec<Cell>> {
-        if !self.is_road(c) || self.is_junction(c) {
-            return None;
-        }
-        let ns = self.neighbours(c).to_vec();
-        let mut halves: Vec<Vec<Cell>> = Vec::new();
-        let mut seen: BTreeSet<Cell> = BTreeSet::from([c]);
-        for &first in ns.iter().take(2) {
-            let mut run = Vec::new();
-            let (mut prev, mut cur) = (c, first);
-            loop {
-                if !seen.insert(cur) {
-                    break;
-                }
-                run.push(cur);
-                if self.is_junction(cur) {
-                    break;
-                }
-                let next = self
-                    .neighbours(cur)
+/// Kinds of the roads `cmd` would remove from `w`, in `Preview::removed`
+/// order.
+fn removed_kinds(w: &World, cmd: &Command) -> Vec<RoadKind> {
+    match cmd {
+        Command::RemoveRoad { .. } | Command::BulldozeArea { .. } | Command::Bulldoze { .. } => w
+            .preview(cmd)
+            .map(|p| {
+                p.removed
                     .iter()
-                    .copied()
-                    .find(|&n| n != prev && !seen.contains(&n));
-                match next {
-                    Some(n) => {
-                        prev = cur;
-                        cur = n;
-                    }
-                    None => break,
+                    .map(|c| kind_along(w, c).unwrap_or(RoadKind::Street))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Check `ops` in order on a copy of `base`; steps that fail are left out
+/// and the rest carry on (so the valid part can still be drawn). Returns
+/// the checked plan and the world after it.
+pub fn evaluate(base: &World, ops: &[Op]) -> (Evaluated, World) {
+    let mut w = base.clone();
+    let mut out = Evaluated::default();
+    for (i, op) in ops.iter().enumerate() {
+        if let Op::RemoveSerials(lo, hi) = op {
+            // One segment at a time: a removal may merge the others.
+            for _ in 0..10_000 {
+                let Some((s, len)) = w
+                    .roads
+                    .segments
+                    .iter()
+                    .find(|(_, s)| (*lo..*hi).contains(&s.serial))
+                    .map(|(s, seg)| (s, seg.length))
+                else {
+                    break;
+                };
+                let cmd = Command::RemoveRoad {
+                    segment: s,
+                    from_m: 0.0,
+                    to_m: len,
+                };
+                let kinds = removed_kinds(&w, &cmd);
+                let res = w.apply(cmd.clone());
+                let failed = res.is_err();
+                out.push_step(i, cmd, res, kinds);
+                if failed {
+                    break;
                 }
             }
-            halves.push(run);
-        }
-        let mut out: Vec<Cell> = halves.first().cloned().unwrap_or_default();
-        out.reverse();
-        out.push(c);
-        if let Some(h) = halves.get(1) {
-            out.extend(h);
-        }
-        Some(out)
-    }
-
-    /// Shortest run of road cells from `a` to `b` along the road (both
-    /// included), searching at most `limit` cells.
-    pub fn route(&self, a: Cell, b: Cell, limit: usize) -> Option<Vec<Cell>> {
-        if !self.is_road(a) || !self.is_road(b) {
-            return None;
-        }
-        let mut prev: HashMap<Cell, Cell> = HashMap::new();
-        let mut q = VecDeque::from([a]);
-        prev.insert(a, a);
-        while let Some(c) = q.pop_front() {
-            if c == b {
-                let mut path = vec![b];
-                let mut cur = b;
-                while cur != a {
-                    cur = prev[&cur];
-                    path.push(cur);
-                }
-                path.reverse();
-                return Some(path);
-            }
-            if prev.len() > limit {
-                return None;
-            }
-            for &n in self.neighbours(c) {
-                if let std::collections::hash_map::Entry::Vacant(e) = prev.entry(n) {
-                    e.insert(c);
-                    q.push_back(n);
-                }
-            }
-        }
-        None
-    }
-}
-
-/// `RoadStretch` (for `WorldHighlight`) from an ordered cell run.
-pub fn stretch_info(world: &World, cells: &[Cell]) -> RoadStretch {
-    let roads = &world.roads;
-    let mut segments = Vec::new();
-    for w in cells.windows(2) {
-        if let Some(s) = roads.piece(w[0], w[1])
-            && segments.last() != Some(&s)
-            && !segments.contains(&s)
-        {
-            segments.push(s);
-        }
-    }
-    // Polyline: the ends and every change of direction.
-    let mut points: Vec<[f32; 2]> = Vec::new();
-    for (i, &c) in cells.iter().enumerate() {
-        let turn = i == 0
-            || i + 1 == cells.len()
-            || (cells[i].x - cells[i - 1].x, cells[i].y - cells[i - 1].y)
-                != (cells[i + 1].x - cells[i].x, cells[i + 1].y - cells[i].y);
-        if turn {
-            points.push(c.center());
-        }
-    }
-    RoadStretch {
-        segments,
-        points,
-        cells: cells.to_vec(),
-    }
-}
-
-// ---------------------------------------------------------------- zoning
-
-/// Which side of travel along `cells` the point `p` lies on: +1 or -1
-/// (judged against the piece nearest to `p`).
-pub fn side_of(cells: &[Cell], p: [f32; 2]) -> i32 {
-    let mut best: Option<(f32, i32)> = None;
-    for w in cells.windows(2) {
-        let (a, b) = (w[0].center(), w[1].center());
-        let d = [b[0] - a[0], b[1] - a[1]];
-        let m = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
-        let r = [p[0] - m[0], p[1] - m[1]];
-        let dist = r[0] * r[0] + r[1] * r[1];
-        let cross = d[0] * r[1] - d[1] * r[0];
-        let s = if cross >= 0.0 { 1 } else { -1 };
-        if best.is_none_or(|(bd, _)| dist < bd) {
-            best = Some((dist, s));
-        }
-    }
-    best.map(|(_, s)| s).unwrap_or(1)
-}
-
-/// Land beside the road run `cells` on `side` (+1 / -1 of travel), up to
-/// `depth` cells from the road, not on a road. Sorted.
-pub fn frontage(cells: &[Cell], side: i32, depth: i32, road: &RoadCells) -> Vec<Cell> {
-    let mut out = BTreeSet::new();
-    for w in cells.windows(2) {
-        let (p, q) = (w[0], w[1]);
-        let d = (q.x - p.x, q.y - p.y);
-        let dd = d.0 * d.0 + d.1 * d.1;
-        let len = (dd as f32).sqrt();
-        for oy in -depth - 1..=depth + 1 {
-            for ox in -depth - 1..=depth + 1 {
-                let c = p.offset(ox, oy);
-                let cr = d.0 * oy - d.1 * ox;
-                if cr.signum() != side {
-                    continue;
-                }
-                let dist = cr.abs() as f32 / len;
-                let along = d.0 * ox + d.1 * oy;
-                if dist <= depth as f32 + 0.01 && (0..=dd).contains(&along) && c.in_bounds() && !road.is_road(c) {
-                    out.insert(c);
-                }
-            }
-        }
-    }
-    out.into_iter().collect()
-}
-
-/// The enclosed block containing `start`: non-road cells reachable without
-/// crossing a road (4-neighbourhood, so diagonal roads close a block too).
-/// `None` when the area reaches the map edge or is larger than `limit`.
-pub fn enclosed_block(start: Cell, road: &RoadCells, limit: usize) -> Option<Vec<Cell>> {
-    if !start.in_bounds() || road.is_road(start) {
-        return None;
-    }
-    let mut seen = BTreeSet::from([start]);
-    let mut q = VecDeque::from([start]);
-    while let Some(c) = q.pop_front() {
-        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            let n = c.offset(dx, dy);
-            if !n.in_bounds() {
-                return None;
-            }
-            if road.is_road(n) || seen.contains(&n) {
-                continue;
-            }
-            seen.insert(n);
-            if seen.len() > limit {
-                return None;
-            }
-            q.push_back(n);
-        }
-    }
-    Some(seen.into_iter().collect())
-}
-
-/// Row runs of a cell set as rectangles (each holds only cells of the set).
-pub fn row_runs(cells: &[Cell]) -> Vec<CellRect> {
-    let mut sorted: Vec<Cell> = cells.to_vec();
-    sorted.sort_by_key(|c| (c.y, c.x));
-    sorted.dedup();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < sorted.len() {
-        let start = sorted[i];
-        let mut end = start;
-        while i + 1 < sorted.len() && sorted[i + 1].y == start.y && sorted[i + 1].x == end.x + 1 {
-            i += 1;
-            end = sorted[i];
-        }
-        out.push(CellRect::from_corners(start, end));
-        i += 1;
-    }
-    out
-}
-
-/// Zoning commands for exactly `cells`.
-pub fn zone_commands(cells: &[Cell], zone: Option<Zone>) -> Vec<Command> {
-    row_runs(cells)
-        .into_iter()
-        .map(|r| Command::SetZone {
-            min: r.min,
-            max: r.max,
-            zone,
-        })
-        .collect()
-}
-
-/// Land depth zoned beside a road by the frontage tools.
-pub const LOT_DEPTH: i32 = balance::ZONE_ROAD_REACH;
-
-// ---------------------------------------------------------------- bulldozing along roads
-
-/// Cells to bulldoze so that exactly the pieces of the run `cells` go,
-/// without touching any other road: every cell of the run except junctions
-/// (bulldozing a junction cell would cut the crossing road too). The run's
-/// two ends stay unless they are dead ends, so a drag removes the road
-/// between the two points.
-pub fn bulldoze_run_cells(cells: &[Cell], road: &RoadCells, keep_ends: bool) -> Vec<Cell> {
-    let n = cells.len();
-    cells
-        .iter()
-        .enumerate()
-        .filter(|&(i, &c)| {
-            let end = i == 0 || i + 1 == n;
-            let dead_end = road.degree.get(&c) == Some(&1);
-            !road.is_junction(c) && !road.highway.contains(&c) && (!end || !keep_ends || dead_end)
-        })
-        .map(|(_, &c)| c)
-        .collect()
-}
-
-/// Bulldoze commands for exactly `cells` (row and column runs merged).
-pub fn bulldoze_commands(cells: &[Cell]) -> Vec<Command> {
-    let set: BTreeSet<Cell> = cells.iter().copied().collect();
-    let mut done: BTreeSet<Cell> = BTreeSet::new();
-    let mut out = Vec::new();
-    for &c in &set {
-        if done.contains(&c) {
             continue;
         }
-        // Grow along x, else along y.
-        let mut ex = c;
-        while set.contains(&ex.offset(1, 0)) && !done.contains(&ex.offset(1, 0)) {
-            ex = ex.offset(1, 0);
+        match resolve(&w, op) {
+            Ok(cmd) => {
+                let kinds = removed_kinds(&w, &cmd);
+                let res = w.apply(cmd.clone());
+                out.push_step(i, cmd, res, kinds);
+            }
+            Err(e) => out.steps.push(Step {
+                op: i,
+                cmd: None,
+                result: Err(e),
+                removed_kinds: Vec::new(),
+            }),
         }
-        let mut ey = c;
-        while set.contains(&ey.offset(0, 1)) && !done.contains(&ey.offset(0, 1)) {
-            ey = ey.offset(0, 1);
-        }
-        let end = if ex.x - c.x >= ey.y - c.y { ex } else { ey };
-        for k in CellRect::from_corners(c, end).cells() {
-            done.insert(k);
-        }
-        out.push(Command::Bulldoze { min: c, max: end });
     }
-    out
-}
-
-/// Road cells that are road in `before` and not in `after`.
-pub fn cleared_road_cells(before: &World, after: &World, cells: &[Cell]) -> Vec<Cell> {
-    let (gb, ga) = (before.grid_view(), after.grid_view());
-    let set: BTreeSet<Cell> = cells.iter().copied().collect();
-    set.into_iter().filter(|&c| gb.is_road(c) && !ga.is_road(c)).collect()
+    (out, w)
 }
 
 // ---------------------------------------------------------------- undo
 
-/// Every unit road piece of the network (ordered cell pairs).
-#[cfg(test)]
-pub fn pieces(world: &World) -> BTreeSet<(Cell, Cell)> {
-    piece_kinds(world).into_keys().collect()
-}
-
-/// Every unit road piece with its kind.
-pub fn piece_kinds(world: &World) -> BTreeMap<(Cell, Cell), RoadKind> {
-    let mut out = BTreeMap::new();
-    for l in RoadIndex::build(world).lines {
-        if let Some(cells) = l.a.straight_line_to(l.b) {
-            for w in cells.windows(2) {
-                out.insert(if w[0] <= w[1] { (w[0], w[1]) } else { (w[1], w[0]) }, l.kind);
-            }
-        }
-    }
-    out
-}
-
-/// How to take back one construction action.
+/// How to take an action back.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UndoRecord {
-    /// Roads built: change upgraded pieces back to their old kind (no
-    /// refund), bulldoze `cells` (exactly the new pieces), then give back
-    /// the zoning the road cleared.
     Roads {
-        new_pieces: BTreeSet<(Cell, Cell)>,
-        /// Pieces that changed kind, with the kind they had before.
-        restore_kinds: Vec<((Cell, Cell), RoadKind)>,
-        cells: Vec<Cell>,
-        rezone: Vec<(Cell, Zone)>,
         label: String,
+        /// Serials of the segments the action built.
+        new_serials: (u64, u64),
+        /// Parts whose kind changed, with the kind before.
+        restore_kinds: Vec<(Curve, RoadKind)>,
+        /// Road the action removed, with its kind.
+        rebuild: Vec<(Curve, RoadKind)>,
+        /// Buildings the action demolished (cannot come back).
+        lost_buildings: usize,
     },
-    /// Zoning changed: put each cell's previous zone back.
     Zones {
-        restore: Vec<(Cell, Option<Zone>)>,
         label: String,
+        restore: Vec<(CellRef, Option<Zone>)>,
     },
 }
 
@@ -630,153 +299,77 @@ impl UndoRecord {
     }
 }
 
-/// Undo record for building roads: `before` and `after` are the world
-/// before and after the action. `Err` with the reason when the new road
-/// cannot be removed without touching roads that were there before (a
-/// one-cell link between two existing roads).
-pub fn undo_for_roads(before: &World, after: &World, label: String) -> Result<UndoRecord, String> {
-    let (old, new) = (piece_kinds(before), piece_kinds(after));
-    let new_pieces: BTreeSet<(Cell, Cell)> = new.keys().filter(|p| !old.contains_key(p)).copied().collect();
-    let restore_kinds: Vec<((Cell, Cell), RoadKind)> = new
-        .iter()
-        .filter_map(|(p, k)| old.get(p).filter(|ok| *ok != k).map(|ok| (*p, *ok)))
-        .collect();
-    if new_pieces.is_empty() && restore_kinds.is_empty() {
-        return Err("nothing new was built".into());
-    }
-    let mut touching: BTreeMap<Cell, (usize, usize)> = BTreeMap::new();
-    for &(p, q) in new.keys() {
-        let fresh = new_pieces.contains(&(p, q));
-        for c in [p, q] {
-            let e = touching.entry(c).or_default();
-            if fresh {
-                e.0 += 1;
-            } else {
-                e.1 += 1;
-            }
+/// The undo record of a road action (build, change of kind, removal)
+/// checked as `eval` on `before`, leaving `after`.
+pub fn undo_for_roads(before: &World, after: &World, eval: &Evaluated, label: String) -> UndoRecord {
+    let mut restore_kinds = Vec::new();
+    for seg in after.roads.segments.values() {
+        if seg.serial >= before.roads.next_serial {
+            continue;
+        }
+        if let Some(k) = kind_along(before, &seg.curve)
+            && k != seg.kind
+        {
+            restore_kinds.push((seg.curve, k));
         }
     }
-    let cells: Vec<Cell> = touching
-        .iter()
-        .filter(|(_, (fresh, old))| *fresh > 0 && *old == 0)
-        .map(|(&c, _)| c)
-        .collect();
-    let set: BTreeSet<Cell> = cells.iter().copied().collect();
-    if new_pieces.iter().any(|(p, q)| !set.contains(p) && !set.contains(q)) {
-        return Err("a new piece joins two roads that were already there".into());
-    }
-    let grid = before.grid_view();
-    let rezone = cells
-        .iter()
-        .filter_map(|&c| {
-            let z = grid.get(c)?.zone?;
-            Some((c, z))
-        })
-        .collect();
-    let rec = UndoRecord::Roads {
-        new_pieces,
-        restore_kinds,
-        cells,
-        rezone,
+    UndoRecord::Roads {
         label,
-    };
-    // Prove it on the after-world.
-    check_undo(after, &rec)?;
-    Ok(rec)
+        new_serials: (before.roads.next_serial, after.roads.next_serial),
+        restore_kinds,
+        rebuild: eval.removed(),
+        lost_buildings: eval.buildings().len(),
+    }
 }
 
-/// Commands that take back the road part of `rec`: old kinds first, then
-/// the new pieces.
-fn road_undo_commands(rec: &UndoRecord) -> Vec<Command> {
-    let UndoRecord::Roads {
-        restore_kinds, cells, ..
-    } = rec
-    else {
-        return Vec::new();
-    };
-    let mut cmds: Vec<Command> = restore_kinds
-        .iter()
-        .map(|&((p, q), kind)| Command::BuildRoad { from: p, to: q, kind })
-        .collect();
-    cmds.extend(bulldoze_commands(cells));
-    cmds
+/// The undo record of a zoning action changing `cells`.
+pub fn undo_for_zones(before: &World, cells: &[CellRef], label: String) -> UndoRecord {
+    UndoRecord::Zones {
+        label,
+        restore: cells
+            .iter()
+            .filter_map(|&c| Some((c, before.zoning.cell(c)?.zone)))
+            .collect(),
+    }
 }
 
-/// Commands that undo `rec` on `world`, or why it cannot be undone any
-/// more (the roads or zoning changed since). Road undo bulldozes: it costs
-/// the usual demolition fee and nothing is refunded.
-pub fn undo_commands(world: &World, rec: &UndoRecord) -> Result<Vec<Command>, String> {
+/// The operations that take `rec` back in `world` now.
+pub fn undo_ops(world: &World, rec: &UndoRecord) -> Vec<Op> {
     match rec {
-        UndoRecord::Roads { cells, rezone, .. } => {
-            check_undo(world, rec)?;
-            let _ = cells;
-            let mut cmds = road_undo_commands(rec);
-            let mut by_zone: BTreeMap<u8, (Zone, Vec<Cell>)> = BTreeMap::new();
-            for &(c, z) in rezone {
-                by_zone.entry(z as u8).or_insert((z, Vec::new())).1.push(c);
+        UndoRecord::Roads {
+            new_serials,
+            restore_kinds,
+            rebuild,
+            ..
+        } => {
+            let mut ops = Vec::new();
+            if new_serials.1 > new_serials.0 {
+                ops.push(Op::RemoveSerials(new_serials.0, new_serials.1));
             }
-            for (_, (z, cs)) in by_zone {
-                cmds.extend(zone_commands(&cs, Some(z)));
-            }
-            Ok(cmds)
-        }
-        UndoRecord::Zones { restore, .. } => {
-            let mut by_zone: BTreeMap<Option<u8>, (Option<Zone>, Vec<Cell>)> = BTreeMap::new();
-            let grid = world.grid_view();
-            for &(c, z) in restore {
-                let now = grid.get(c).map(|cd| (cd.zone, cd.occupant));
-                if now.is_some_and(|(zn, occ)| zn != z && occ == Occupant::Empty) {
-                    by_zone.entry(z.map(|z| z as u8)).or_insert((z, Vec::new())).1.push(c);
+            for (c, k) in restore_kinds {
+                if kind_along(world, c).is_some_and(|now| now != *k) {
+                    ops.push(Op::Kind(*c, *k));
                 }
             }
-            if by_zone.is_empty() {
-                return Err("the zoning has changed since (built on or rezoned)".into());
+            for (c, k) in rebuild {
+                ops.push(Op::Cmd(Command::BuildCurve { curve: *c, kind: *k }));
             }
-            Ok(by_zone
-                .into_values()
-                .flat_map(|(z, cs)| zone_commands(&cs, z))
-                .collect())
+            ops
         }
-    }
-}
-
-fn check_undo(world: &World, rec: &UndoRecord) -> Result<(), String> {
-    let UndoRecord::Roads {
-        new_pieces,
-        restore_kinds,
-        ..
-    } = rec
-    else {
-        return Ok(());
-    };
-    let now = piece_kinds(world);
-    if !new_pieces.iter().all(|p| now.contains_key(p)) || !restore_kinds.iter().all(|(p, _)| now.contains_key(p)) {
-        return Err("part of that road is already gone".into());
-    }
-    let base = scratch(world);
-    let (eval, after) = evaluate(&base, road_undo_commands(rec));
-    if !eval.ok() {
-        return Err("the sim would refuse it".into());
-    }
-    let mut want = now;
-    for p in new_pieces {
-        want.remove(p);
-    }
-    for (p, k) in restore_kinds {
-        want.insert(*p, *k);
-    }
-    if piece_kinds(&after) != want {
-        return Err("roads built since are in the way".into());
-    }
-    Ok(())
-}
-
-/// Undo record for a zoning action: each changed cell's previous zone.
-pub fn undo_for_zones(before: &World, changed: &[Cell], label: String) -> UndoRecord {
-    let grid = before.grid_view();
-    UndoRecord::Zones {
-        restore: changed.iter().filter_map(|&c| Some((c, grid.get(c)?.zone))).collect(),
-        label,
+        UndoRecord::Zones { restore, .. } => {
+            let mut by_zone: BTreeMap<u8, (Option<Zone>, Vec<CellRef>)> = BTreeMap::new();
+            for &(c, z) in restore {
+                let now = world.zoning.cell(c);
+                if now.is_some_and(|zc| zc.zone != z && zc.building.is_none()) {
+                    let key = z.map_or(0, |z| z as u8 + 1);
+                    by_zone.entry(key).or_insert((z, Vec::new())).1.push(c);
+                }
+            }
+            by_zone
+                .into_values()
+                .map(|(zone, cells)| Op::Cmd(Command::ZoneCells { cells, zone }))
+                .collect()
+        }
     }
 }
 
@@ -790,298 +383,127 @@ mod tests {
         w
     }
 
-    fn build(w: &mut World, legs: &[(Cell, Cell)]) {
-        for &(a, b) in legs {
-            w.apply(Command::BuildRoad {
-                from: a,
-                to: b,
-                kind: citysim_sim::RoadKind::Street,
-            })
-            .expect("road");
-        }
+    fn road(a: [f32; 2], b: [f32; 2]) -> Op {
+        Op::Cmd(Command::BuildCurve {
+            curve: Curve::straight(a, b),
+            kind: RoadKind::Street,
+        })
     }
 
-    const STUB_END: Cell = Cell::new(11, 128);
-
     #[test]
-    fn path_is_judged_leg_after_leg() {
+    fn a_chain_checks_each_piece_after_the_ones_before() {
         let w = rich();
-        let base = scratch(&w);
-        let pts = [STUB_END, Cell::new(20, 128), Cell::new(20, 120), Cell::new(28, 120)];
-        let plan = plan_roads(&base, &legs_of(&pts), RoadChoice::Street);
-        assert!(plan.eval.ok());
-        assert_eq!(plan.eval.cost, 25 * balance::ROAD_COST_PER_CELL);
-        assert_eq!(plan.length_m, 25.0 * CELL_SIZE);
-        // A path that doubles back over itself pays for each piece once.
-        let pts = [STUB_END, Cell::new(20, 128), Cell::new(15, 128)];
-        let plan = plan_roads(&base, &legs_of(&pts), RoadChoice::Street);
-        assert_eq!(plan.eval.cost, 9 * balance::ROAD_COST_PER_CELL);
-    }
-
-    #[test]
-    fn path_running_out_of_money_midway_is_refused() {
-        let mut w = World::new(1);
-        w.economy.money = 20 * balance::ROAD_COST_PER_CELL;
-        let base = scratch(&w);
-        let pts = [STUB_END, Cell::new(26, 128), Cell::new(26, 120)];
-        let plan = plan_roads(&base, &legs_of(&pts), RoadChoice::Street);
-        assert!(plan.legs[0].error.is_none());
-        assert!(matches!(
-            plan.legs[1].error,
-            Some(CommandError::InsufficientFunds { .. })
-        ));
-    }
-
-    #[test]
-    fn scratch_previews_equal_the_real_world() {
-        let mut w = rich();
-        build(&mut w, &[(STUB_END, Cell::new(30, 128))]);
-        w.apply(Command::SetZone {
-            min: Cell::new(12, 126),
-            max: Cell::new(30, 127),
-            zone: Some(Zone::Residential),
-        })
-        .unwrap();
-        let s = scratch(&w);
-        for cmd in [
-            Command::BuildRoad {
-                from: Cell::new(20, 120),
-                to: Cell::new(20, 135),
-                kind: citysim_sim::RoadKind::Street,
-            },
-            Command::Bulldoze {
-                min: Cell::new(14, 128),
-                max: Cell::new(16, 128),
-            },
-            Command::SetZone {
-                min: Cell::new(10, 120),
-                max: Cell::new(40, 140),
-                zone: Some(Zone::Commercial),
-            },
-        ] {
-            assert_eq!(w.preview(&cmd), s.preview(&cmd), "{cmd:?}");
-        }
-    }
-
-    #[test]
-    fn block_grid_has_outline_and_inner_streets() {
-        let legs = block_legs(Cell::new(10, 10), Cell::new(20, 25), Some(5));
-        assert_eq!(legs.len(), 4 + 1 + 2, "{legs:?}");
-        assert!(legs.contains(&(Cell::new(15, 10), Cell::new(15, 25))));
-        assert!(legs.contains(&(Cell::new(10, 15), Cell::new(20, 15))));
-        assert!(legs.contains(&(Cell::new(10, 20), Cell::new(20, 20))));
-        assert_eq!(block_legs(Cell::new(1, 1), Cell::new(1, 9), Some(5)).len(), 1);
-        assert!(block_legs(Cell::new(1, 1), Cell::new(1, 1), None).is_empty());
-        assert_eq!(
-            block_corner(Cell::new(10, 10), Cell::new(22, 7), Some(5)),
-            Cell::new(20, 5)
-        );
-        assert_eq!(
-            block_corner(Cell::new(10, 10), Cell::new(11, 10), Some(5)),
-            Cell::new(15, 10)
-        );
-        // A block grid builds as one valid plan.
-        let plan = plan_roads(
-            &scratch(&rich()),
-            &block_legs(Cell::new(40, 40), Cell::new(50, 50), Some(5)),
-            RoadChoice::Street,
-        );
-        assert!(plan.eval.ok());
-        assert_eq!(plan.eval.cost, (4 * 10 + 2 * 10) * balance::ROAD_COST_PER_CELL);
-    }
-
-    fn town() -> World {
-        let mut w = rich();
-        build(
-            &mut w,
-            &[
-                (STUB_END, Cell::new(20, 128)),
-                (Cell::new(20, 128), Cell::new(20, 120)),
-                (Cell::new(20, 120), Cell::new(30, 120)),
-                (Cell::new(30, 120), Cell::new(30, 128)),
-                (Cell::new(30, 128), Cell::new(20, 128)),
-                (Cell::new(30, 128), Cell::new(40, 128)),
-            ],
-        );
-        w
-    }
-
-    #[test]
-    fn stretches_run_between_junctions() {
-        let w = town();
-        let rc = RoadCells::build(&RoadIndex::build(&w));
-        // (20, 128) and (30, 128) are junctions; the loop's top is one stretch
-        // from (20, 128) round the corners to (30, 128).
-        let s = rc.stretch_cells(Cell::new(25, 120)).unwrap();
-        assert_eq!(s.first(), Some(&Cell::new(20, 128)));
-        assert_eq!(s.last(), Some(&Cell::new(30, 128)));
-        assert_eq!(s.len(), 9 + 10 + 8);
-        assert!(rc.stretch_cells(Cell::new(20, 128)).is_none(), "junction");
-        let east = rc.stretch_cells(Cell::new(35, 128)).unwrap();
-        assert_eq!(
-            (east[0], *east.last().unwrap()),
-            (Cell::new(30, 128), Cell::new(40, 128))
-        );
-        let r = rc.route(Cell::new(25, 120), Cell::new(35, 128), 500).unwrap();
-        assert_eq!(r.first(), Some(&Cell::new(25, 120)));
-        assert_eq!(r.last(), Some(&Cell::new(35, 128)));
-    }
-
-    #[test]
-    fn frontage_and_block_fill() {
-        let w = town();
-        let rc = RoadCells::build(&RoadIndex::build(&w));
-        let east = rc.stretch_cells(Cell::new(35, 128)).unwrap();
-        // North of the eastbound road (y < 128): side of a point above it.
-        let side = side_of(&east, [35.5 * CELL_SIZE, 125.0 * CELL_SIZE]);
-        let f = frontage(&east, side, LOT_DEPTH, &rc);
-        assert!(f.iter().all(|c| c.y == 126 || c.y == 127), "{f:?}");
-        assert!(f.contains(&Cell::new(35, 126)) && f.contains(&Cell::new(40, 127)));
-        assert!(!f.iter().any(|c| c.x < 30));
-        // The loop's inside is an enclosed block of 9 x 7 cells.
-        let inside = enclosed_block(Cell::new(25, 125), &rc, 5000).unwrap();
-        assert_eq!(inside.len(), 9 * 7);
-        assert!(enclosed_block(Cell::new(60, 60), &rc, 5000).is_none(), "open land");
-        let cmds = zone_commands(&inside, Some(Zone::Residential));
-        assert_eq!(cmds.len(), 7);
-        let (eval, _) = evaluate(&scratch(&w), cmds);
-        // Within two cells of a road: all but the 5 x 3 middle.
-        assert_eq!(eval.cells.len(), 9 * 7 - 5 * 3);
-    }
-
-    #[test]
-    fn bulldozing_a_stretch_leaves_other_roads_alone() {
-        let w = town();
-        let rc = RoadCells::build(&RoadIndex::build(&w));
-        let s = rc.stretch_cells(Cell::new(25, 120)).unwrap();
-        let cells = bulldoze_run_cells(&s, &rc, false);
-        let (eval, after) = evaluate(&scratch(&w), bulldoze_commands(&cells));
-        assert!(eval.ok());
-        let gone: BTreeSet<_> = pieces(&w).difference(&pieces(&after)).copied().collect();
-        assert_eq!(gone.len(), s.len() - 1);
-        // Everything still there except that stretch.
-        assert!(!pieces(&after).contains(&(Cell::new(20, 127), Cell::new(20, 128))));
-        assert!(pieces(&after).contains(&(Cell::new(29, 128), Cell::new(30, 128))));
-        // A partial drag between two points keeps the points.
-        let run = rc.route(Cell::new(22, 120), Cell::new(26, 120), 100).unwrap();
-        let cells = bulldoze_run_cells(&run, &rc, true);
-        assert_eq!(cells, vec![Cell::new(23, 120), Cell::new(24, 120), Cell::new(25, 120)]);
-    }
-
-    #[test]
-    fn undo_removes_exactly_the_new_road() {
-        let mut w = town();
-        w.apply(Command::SetZone {
-            min: Cell::new(31, 126),
-            max: Cell::new(50, 127),
-            zone: Some(Zone::Commercial),
-        })
-        .unwrap();
-        let before = w.clone();
-        // A T off the existing road, with a corner, through zoned land.
-        build(
-            &mut w,
-            &[
-                (Cell::new(35, 128), Cell::new(45, 118)),
-                (Cell::new(45, 118), Cell::new(45, 110)),
-            ],
-        );
-        let rec = undo_for_roads(&before, &w, "road".into()).unwrap();
-        let cmds = undo_commands(&w, &rec).unwrap();
-        for c in cmds {
-            w.apply(c).unwrap();
-        }
-        assert_eq!(pieces(&w), pieces(&before));
-        assert_eq!(
-            before.grid_view().get(Cell::new(37, 126)).unwrap().zone,
-            Some(Zone::Commercial)
-        );
-        assert_eq!(
-            w.grid_view().get(Cell::new(37, 126)).unwrap().zone,
-            Some(Zone::Commercial)
-        );
-        w.check_invariants().unwrap();
-        // A one-piece link between two old roads cannot be taken back alone.
-        let mut w = town();
-        build(
-            &mut w,
-            &[
-                (Cell::new(20, 110), Cell::new(30, 110)),
-                (Cell::new(20, 111), Cell::new(30, 111)),
-            ],
-        );
-        let before = w.clone();
-        build(&mut w, &[(Cell::new(25, 110), Cell::new(25, 111))]);
-        assert!(undo_for_roads(&before, &w, "x".into()).is_err());
-    }
-
-    #[test]
-    fn avenue_over_a_street_previews_and_undoes_as_an_upgrade() {
-        let mut w = town();
-        let base = scratch(&w);
-        // Along the existing street (30..40, 128) and on into new land.
-        let legs = [(Cell::new(30, 128), Cell::new(50, 128))];
-        let plan = plan_roads(&base, &legs, RoadChoice::Avenue);
-        assert!(plan.eval.ok(), "{:?}", plan.eval.errors);
-        assert_eq!(plan.eval.upgraded, 10);
-        assert_eq!(plan.eval.new_pieces, 10);
-        assert_eq!(plan.legs[0].upgrade_cells.len(), 11);
-        let before = w.clone();
-        w.apply(plan.eval.cmds[0].clone()).unwrap();
-        let rec = undo_for_roads(&before, &w, "avenue".into()).unwrap();
-        for c in undo_commands(&w, &rec).unwrap() {
-            w.apply(c).unwrap();
-        }
-        assert_eq!(piece_kinds(&w), piece_kinds(&before));
-        w.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn row_runs_cover_exactly_the_cells() {
-        let cells = vec![Cell::new(1, 1), Cell::new(2, 1), Cell::new(4, 1), Cell::new(1, 2)];
-        let runs = row_runs(&cells);
-        assert_eq!(runs.len(), 3);
-        let n: i32 = runs.iter().map(|r| r.width() * r.height()).sum();
-        assert_eq!(n, 4);
-    }
-}
-
-#[cfg(test)]
-mod perf {
-    use super::*;
-
-    /// Timing of a preview in a ~5,000-resident city (`cargo test --release
-    /// -p citysim preview_cost -- --ignored --nocapture`).
-    #[test]
-    #[ignore]
-    fn preview_cost_in_a_big_city() {
-        use citysim_sim::scenarios::GridPlayer;
-        let mut w = World::new(1);
-        let mut player = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
-        while w.stats.population < 5_000 && w.time.day <= 60 {
-            player.act(&mut w);
-            w.step();
-        }
-        let t0 = std::time::Instant::now();
-        let base = scratch(&w);
-        let t1 = std::time::Instant::now();
-        let legs = [
-            (Cell::new(100, 100), Cell::new(110, 100)),
-            (Cell::new(110, 100), Cell::new(110, 110)),
+        let ops = [
+            road([92.0, 1028.0], [200.0, 1028.0]),
+            road([200.0, 1028.0], [200.0, 940.0]),
+            // Runs right beside the second piece: refused, the rest stays.
+            road([203.0, 960.0], [203.0, 1000.0]),
         ];
-        let plan = plan_roads(&base, &legs, RoadChoice::Street);
-        let t2 = std::time::Instant::now();
-        let idx = RoadIndex::build(&w);
-        let t3 = std::time::Instant::now();
-        println!(
-            "pop {} segments {}: scratch {:?}, 2-leg plan {:?} (ok {}), road index {:?}",
-            w.stats.population,
-            w.roads.segments.len(),
-            t1 - t0,
-            t2 - t1,
-            plan.eval.ok(),
-            t3 - t2
+        let (e, after) = evaluate(&scratch(&w), &ops);
+        assert_eq!(e.steps.len(), 3);
+        assert!(e.steps[0].result.is_ok() && e.steps[1].result.is_ok());
+        assert!(e.steps[2].result.is_err());
+        assert!(!e.ok());
+        assert!((e.length_m - 196.0).abs() < 0.5, "{}", e.length_m);
+        assert_eq!(after.roads.segments.len(), 3);
+        // The second piece joins the first one's end: one node there.
+        assert_eq!(e.nodes().iter().filter(|n| dist(n.0, [200.0, 1028.0]) < 0.5).count(), 1);
+    }
+
+    #[test]
+    fn undo_takes_a_road_back_and_restores_a_kind() {
+        let mut w = rich();
+        let before = scratch(&w);
+        let ops = [road([92.0, 1028.0], [300.0, 1028.0])];
+        let (e, after) = evaluate(&before, &ops);
+        for c in e.cmds() {
+            w.apply(c).unwrap();
+        }
+        let rec = undo_for_roads(&before, &after, &e, "road".into());
+        let (u, _) = evaluate(&scratch(&w), &undo_ops(&w, &rec));
+        assert!(u.ok(), "{:?}", u.first_error());
+        for c in u.cmds() {
+            w.apply(c).unwrap();
+        }
+        assert_eq!(w.roads.segments.len(), 1, "only the highway stub is left");
+        // An avenue over part of a street, then undo.
+        let mut w = rich();
+        w.apply(Command::BuildCurve {
+            curve: Curve::straight([92.0, 1028.0], [300.0, 1028.0]),
+            kind: RoadKind::Street,
+        })
+        .unwrap();
+        let before = scratch(&w);
+        let part = Curve::straight([150.0, 1028.0], [250.0, 1028.0]);
+        let (e, after) = evaluate(&before, &[Op::Kind(part, RoadKind::Avenue)]);
+        assert!(e.ok(), "{:?}", e.first_error());
+        assert!(e.cost > 0);
+        for c in e.cmds() {
+            w.apply(c).unwrap();
+        }
+        assert_eq!(kind_along(&w, &part), Some(RoadKind::Avenue));
+        let rec = undo_for_roads(&before, &after, &e, "avenue".into());
+        let (u, _) = evaluate(&scratch(&w), &undo_ops(&w, &rec));
+        assert!(u.ok(), "{:?}", u.first_error());
+        for c in u.cmds() {
+            w.apply(c).unwrap();
+        }
+        assert_eq!(kind_along(&w, &part), Some(RoadKind::Street));
+    }
+
+    #[test]
+    fn undo_of_a_removal_rebuilds_the_road() {
+        let mut w = rich();
+        w.apply(Command::BuildCurve {
+            curve: Curve::straight([92.0, 1028.0], [300.0, 1028.0]),
+            kind: RoadKind::Avenue,
+        })
+        .unwrap();
+        let before = scratch(&w);
+        let part = Curve::straight([200.0, 1028.0], [300.0, 1028.0]);
+        let (e, after) = evaluate(&before, &[Op::Remove(part)]);
+        assert!(e.ok(), "{:?}", e.first_error());
+        assert_eq!(e.removed().len(), 1);
+        assert_eq!(e.removed()[0].1, RoadKind::Avenue);
+        for c in e.cmds() {
+            w.apply(c).unwrap();
+        }
+        let rec = undo_for_roads(&before, &after, &e, "removal".into());
+        let (u, _) = evaluate(&scratch(&w), &undo_ops(&w, &rec));
+        assert!(u.ok(), "{:?}", u.first_error());
+        for c in u.cmds() {
+            w.apply(c).unwrap();
+        }
+        assert_eq!(kind_along(&w, &part), Some(RoadKind::Avenue));
+    }
+
+    #[test]
+    fn zoning_undo_puts_the_old_zones_back() {
+        let mut w = rich();
+        w.apply(Command::BuildCurve {
+            curve: Curve::straight([92.0, 1028.0], [300.0, 1028.0]),
+            kind: RoadKind::Street,
+        })
+        .unwrap();
+        let quad = [[150.0, 1010.0], [250.0, 1010.0], [250.0, 1024.0], [150.0, 1024.0]];
+        let before = scratch(&w);
+        let (e, _) = evaluate(
+            &before,
+            &[Op::Cmd(Command::ZoneArea {
+                quad,
+                zone: Some(Zone::Residential),
+            })],
         );
-        let _ = idx;
+        let cells = e.zone_cells();
+        assert!(!cells.is_empty());
+        for c in e.cmds() {
+            w.apply(c).unwrap();
+        }
+        let rec = undo_for_zones(&before, &cells, "zoning".into());
+        let (u, _) = evaluate(&scratch(&w), &undo_ops(&w, &rec));
+        for c in u.cmds() {
+            w.apply(c).unwrap();
+        }
+        assert!(cells.iter().all(|&c| w.zoning.cell(c).unwrap().zone.is_none()));
     }
 }

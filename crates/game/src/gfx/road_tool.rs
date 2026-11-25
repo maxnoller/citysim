@@ -6,9 +6,8 @@
 //! guide lines, and the junctions the road would create (end, join, T,
 //! crossing).
 //!
-//! Drawn from [`CurveToolView`], gfx's own description of the tool state.
-//! It is filled by the interface through `shared` once that publishes the
-//! free-form tool; until then `CITYSIM_GFX_TOOLDEMO=4|5|6` fills it from
+//! Drawn from `shared::CurveToolView`, written by the interface's road
+//! tool. `CITYSIM_GFX_TOOLDEMO=4|5|6` fills it from
 //! real `World::preview` results on the road-shape demo town
 //! (`CITYSIM_DEMO=shapes`) (`4`: a curved
 //! street from the avenue across a street into another, `5`: an avenue
@@ -28,31 +27,7 @@ use citysim_sim::{Command, Curve, RoadKind};
 use super::heights;
 use super::mesh_util::MeshBuilder;
 use super::road_geom::{self, Frame, SegLayout, lift, strip};
-use crate::shared::{GameSet, Guide, GuideKind, SimWorld, SnapTarget};
-
-/// What the free-form road tool shows right now (sim metres).
-#[derive(Resource, Debug, Clone, PartialEq, Default)]
-pub struct CurveToolView {
-    pub active: bool,
-    pub kind: Option<RoadKind>,
-    /// The road as it would be, split at its nodes, with the kind of change.
-    pub pieces: Vec<(Curve, PieceChange)>,
-    /// Curves the sim refuses (the whole drawn road, or the leg in error).
-    pub refused: Vec<Curve>,
-    /// Where the sim says the problem is.
-    pub error_at: Option<[f32; 2]>,
-    /// Control points: start, corners, live end.
-    pub points: Vec<[f32; 2]>,
-    /// Tangent handles: (anchor, handle tip).
-    pub handles: Vec<([f32; 2], [f32; 2])>,
-    /// Tightest bend: (point, its centre of curvature, radius, too tight).
-    pub tightest: Option<([f32; 2], [f32; 2], f32, bool)>,
-    /// The snapped point and what it snapped to.
-    pub snap: Option<([f32; 2], SnapTarget)>,
-    pub guides: Vec<Guide>,
-    /// Junctions it would make or use.
-    pub nodes: Vec<([f32; 2], NodeChange)>,
-}
+use crate::shared::{CurveToolView, GameSet, Guide, GuideKind, SimWorld, SnapTarget};
 
 #[derive(Component)]
 struct ToolPart(usize);
@@ -92,7 +67,6 @@ pub struct RoadToolPlugin;
 impl Plugin for RoadToolPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<XrayMaterial>::default())
-            .init_resource::<CurveToolView>()
             .add_systems(Startup, setup)
             .add_systems(Update, draw.in_set(GameSet::Render));
         let demo: u32 = std::env::var("CITYSIM_GFX_TOOLDEMO")

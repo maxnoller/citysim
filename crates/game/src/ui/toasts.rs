@@ -2,12 +2,11 @@
 //! slide in and auto-dismiss. Rejected commands become error toasts.
 
 use bevy::prelude::*;
-use citysim_sim::{CellRect, Command};
 
-use super::context::{error_text, zone_noop_reason};
+use super::context::error_text;
 use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{approach, label, layout, panel};
-use crate::shared::{GameSet, LastCommand, SimWorld};
+use crate::shared::{GameSet, LastCommand};
 
 pub struct ToastsPlugin;
 
@@ -89,45 +88,14 @@ fn kind_style(kind: ToastKind) -> (char, Color) {
     }
 }
 
-/// Every rejected command as a toast in the sim's own terms; zoning that
-/// changed nothing says why (the sim accepts it as a no-op).
-fn command_toasts(
-    last: Res<LastCommand>,
-    sim: Res<SimWorld>,
-    tools: Res<super::tools::ToolState>,
-    mut out: MessageWriter<Toast>,
-) {
+/// Every rejected command as a toast in the sim's own terms (the tools
+/// check their plans first and say themselves when a plan changes nothing).
+fn command_toasts(last: Res<LastCommand>, mut out: MessageWriter<Toast>) {
     if !last.is_changed() {
         return;
     }
-    match &last.result {
-        Some((_, Err(e))) => {
-            out.write(Toast::new(ToastKind::Error, error_text(e)));
-        }
-        // A multi-command plan (frontage, fill, undo) is summarised by the tool.
-        Some((Command::SetZone { min, max, zone }, Ok(o))) if o.cells.is_empty() && !tools.batch_frame => {
-            let (reason, color) = zone_noop_reason(&sim.world, CellRect::from_corners(*min, *max), *zone);
-            let kind = if color == t::WARNING {
-                ToastKind::Warning
-            } else {
-                ToastKind::Info
-            };
-            let what = if zone.is_some() {
-                "Nothing zoned"
-            } else {
-                "Nothing unzoned"
-            };
-            out.write(Toast::new(kind, format!("{what}: {}", lower_first(&reason))));
-        }
-        _ => {}
-    }
-}
-
-fn lower_first(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_lowercase().chain(c).collect(),
-        None => String::new(),
+    if let Some((_, Err(e))) = &last.result {
+        out.write(Toast::new(ToastKind::Error, error_text(e)));
     }
 }
 

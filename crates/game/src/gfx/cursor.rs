@@ -289,6 +289,20 @@ fn rect_ring(m: &mut MeshBuilder, x0: f32, z0: f32, x1: f32, z1: f32, y: f32, w:
     m.quad_up(q(x1 - w, z0 + w, x1, z1 - w), c);
 }
 
+/// Outline of a quad (any rotation), `w` wide inside its edges.
+fn quad_ring(m: &mut MeshBuilder, q: &[[f32; 2]; 4], y: f32, w: f32, c: [f32; 4]) {
+    let p = q.map(Vec2::from);
+    let center = (p[0] + p[1] + p[2] + p[3]) * 0.25;
+    for i in 0..4 {
+        let (a, b) = (p[i], p[(i + 1) % 4]);
+        let (ai, bi) = (
+            a + (center - a).normalize_or_zero() * w * std::f32::consts::SQRT_2,
+            b + (center - b).normalize_or_zero() * w * std::f32::consts::SQRT_2,
+        );
+        m.quad_up([a, b, bi, ai].map(|v| Vec3::new(v.x, y, v.y)), c);
+    }
+}
+
 fn cell_quad(m: &mut MeshBuilder, c: Cell, inset: f32, y: f32, col: [f32; 4]) {
     m.quad_up(cell_corners(c, inset, y), col);
 }
@@ -418,6 +432,10 @@ fn draw_ghost(
                         }
                     }
                 }
+            }
+            if let Some(q) = preview.area {
+                let edge = lin(mix(base, Color::WHITE, 0.3).with_alpha(0.95));
+                quad_ring(&mut m, &q, y + 0.01, 0.5, edge);
             }
             if let Some(r) = preview.rect {
                 let (x0, z0) = (r.min.x as f32 * CELL_SIZE, r.min.y as f32 * CELL_SIZE);

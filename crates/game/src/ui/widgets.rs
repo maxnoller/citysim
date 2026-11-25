@@ -44,8 +44,26 @@ pub enum UiAction {
     ZoneMode(ZoneMode),
     BulldozeMode(BulldozeMode),
     RoadKind(RoadChoice),
-    /// Step the block tool's block size by this many options.
+    /// Step the grid tool's block size by this many options.
     BlockSize(i32),
+    /// Switch one snapping rule on or off.
+    Snap(super::tools::SnapRule),
+    /// Step the parallel-road distance by this many options.
+    ParallelStep(i32),
+    /// Frontage zoning depth in cells.
+    ZoneDepth(u8),
+    /// People views: show a person, a building's people, a car.
+    Person(citysim_sim::CitizenId),
+    Place(citysim_sim::BuildingId),
+    Vehicle(citysim_sim::VehicleId),
+    /// Follow the person / car shown (again: stop).
+    Follow,
+    StopFollow,
+    /// Back to the previous people view.
+    PeopleBack,
+    ClosePeople,
+    /// Open / close the city-wide people view.
+    CityPeople,
     OpenSettings,
     CloseSettings,
     /// Index into `settings::UI_SCALES`.
@@ -292,6 +310,7 @@ pub struct ActiveCtx<'a> {
     pub modes: &'a ToolModes,
     pub kind: &'a RoadChoice,
     pub display: &'a DisplaySettings,
+    pub opts: &'a super::tools::ToolOptions,
 }
 
 pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
@@ -311,6 +330,10 @@ pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
         UiAction::UiScale(i) => cx.state.ui_scale == i,
         UiAction::EdgeScroll(on) => cx.display.edge_scroll == on,
         UiAction::LotMarkers(on) => cx.display.lot_markers == on,
+        UiAction::Snap(r) => cx.opts.rule(r),
+        UiAction::ZoneDepth(d) => matches!(cx.tool, ActiveTool::Zone(_)) && cx.opts.zone_depth == d,
+        UiAction::Follow => cx.state.following,
+        UiAction::CityPeople => cx.state.city_people_open,
         _ => false,
     }
 }
@@ -353,6 +376,7 @@ fn button_visuals(
     modes: Res<ToolModes>,
     kind: Res<RoadChoice>,
     display: Res<DisplaySettings>,
+    opts: Res<super::tools::ToolOptions>,
     mut buttons: Query<(
         Entity,
         &UiButton,
@@ -374,6 +398,7 @@ fn button_visuals(
         modes: &modes,
         kind: &kind,
         display: &display,
+        opts: &opts,
     };
     let k = approach(time.delta_secs(), 0.06);
     for (e, b, hovered, mut anim, mut bg, mut border, mut tf) in &mut buttons {
