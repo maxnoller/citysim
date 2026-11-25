@@ -12,10 +12,13 @@ services drive the budget.
 
 ## Features
 
-- Straight and 45° roads drawn from the highway stub, with live preview, price and the reason when a road is not
-  possible; bulldozer for roads and buildings.
-- Residential, commercial and industrial zoning within two cells of a road; buildings grow by demand and level up from
-  small houses, shops and sheds to apartment blocks and offices.
+- Straight and 45° roads drawn as multi-corner paths that snap to road ends, junctions, T-junctions, extensions,
+  perpendicular and parallel alignments and the spacing of the neighbouring block, with live length, price and the
+  reason when a road is not possible; streets and avenues (drawing an avenue over a street upgrades it); a block tool
+  for whole street grids; undo; bulldozer for rectangles or whole road stretches.
+- Residential, commercial and industrial zoning within two cells of a road, by rectangle, along a road's frontage or by
+  filling an enclosed block; buildings grow by demand and level up from small houses, shops and sheds to apartment
+  blocks and offices.
 - Agent traffic: commuters, shopping trips and delivery trucks drive in real time through junctions that work like
   simple traffic lights; a traffic overlay shows each road direction green / amber / red.
 - Budget by category (taxes per zone type, road upkeep, city services), a daily history chart and a tax slider.
@@ -42,12 +45,16 @@ The save slot is `~/.local/share/citysim/city.citysave` on Linux (`~/Library/App
 
 | Input | Action |
 |---|---|
-| Left click / drag | Use the current tool (roads: click start and end, or drag; zones and bulldozer: drag a rectangle) |
-| Right click, Esc | Cancel the current action; Esc again returns to Inspect, then opens the pause menu |
-| I | Inspect (hover buildings and roads for live numbers) |
-| R | Road tool |
+| Left click / drag | Use the current tool (roads: click corners, double-click or Enter builds the path, or drag one straight road; zones and bulldozer: drag a rectangle, or the mode chosen with Tab) |
+| Right click, Esc | Roads: right click builds the path, Esc cancels it; other tools: cancel the current action. Esc again returns to Inspect, then opens the pause menu |
+| I | Inspect (hover buildings and roads for live numbers; click pins the card) |
+| R | Road tool (press again to switch street / avenue) |
+| J | Junctions: hover for lights, phases and queues; click to switch automatic / traffic lights / priority |
 | Z | Zone tool (press again to cycle residential / commercial / industrial / de-zone) |
 | B | Bulldozer |
+| Tab | Next mode of the tool (road: path / block / junctions; zone: rectangle / along a road / fill a block; bulldozer: rectangle / road) |
+| Alt · Backspace · [ ] | Hold to place without snapping · remove the last road corner · block size of the block tool |
+| Ctrl+Z | Undo the last road or zoning action (removing a road costs the demolition fee, no refund) |
 | T | Traffic overlay · O cycles overlays (zones, traffic) |
 | Space · 1 2 3 | Pause · speed 1x / 3x / 6x |
 | WASD or arrows · Q / E | Pan · rotate (Shift pans faster) |
