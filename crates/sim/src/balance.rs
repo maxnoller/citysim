@@ -120,7 +120,7 @@ pub const EVENING_DEPART_SPREAD_H: f32 = 9.0;
 /// per household per day, deterministic). The rest commute "off screen" and
 /// switch between home and work instantly. Keeps traffic proportional to
 /// the city without every worker being on the road at once.
-pub const COMMUTE_DRIVE_SHARE: f32 = 0.5;
+pub const COMMUTE_DRIVE_SHARE: f32 = 0.35;
 
 // ------------------------------------------------------------- vehicles ----
 
@@ -147,12 +147,12 @@ pub const MIN_GAP_M: f32 = 5.5;
 /// lane at street speed.
 pub const FOLLOW_HEADWAY_S: f32 = 0.5;
 /// Acceleration, m/s².
-pub const ACCELERATION: f32 = 3.0;
+pub const ACCELERATION: f32 = 3.5;
 /// Comfortable braking used towards stop lines and junctions, m/s².
 pub const BRAKING: f32 = 4.0;
 /// Speed at which cars turn at junctions (degree >= 3), m/s. Straight-on
 /// traffic keeps its speed.
-pub const JUNCTION_SPEED: f32 = 8.0;
+pub const JUNCTION_SPEED: f32 = 9.0;
 /// Cars stop this far before a node they may not enter yet, metres.
 pub const STOP_LINE_M: f32 = 0.6;
 /// Per-driver speed variation: each car drives at `1 ± this` of the
@@ -175,9 +175,30 @@ pub const JUNCTION_CLEARANCE_S: f32 = 0.35;
 /// A car facing yellow keeps going (clears the junction) when faster than
 /// this, m/s: it could not stop comfortably at the line.
 pub const YELLOW_GO_SPEED: f32 = 4.0;
+/// Speed of a U-turn through a junction box, m/s.
+pub const UTURN_SPEED: f32 = 3.0;
+/// The front car of a lane decides whether it may enter the junction
+/// ahead from this far (or its braking distance, if longer), metres.
+pub const DECIDE_DISTANCE_M: f32 = 45.0;
+/// A car may enter a junction behind a queue on its out-lane that is
+/// moving off faster than this (m/s) even without a full car spacing yet.
+pub const EXIT_MOVING_SPEED: f32 = 3.0;
+/// Critical gaps, seconds: a permissive left turn (and same-class cars)
+/// leaves this much time to a conflicting car with precedence, a car on a
+/// give-way approach this much to the major road.
+pub const PERMISSIVE_GAP_S: f32 = 2.5;
+pub const GIVE_WAY_GAP_S: f32 = 3.5;
+/// A car not moving inside a junction box for this long is taken off the
+/// road (deadlock breaker; only road edits can cause it).
+pub const BOX_DEADLOCK_S: f32 = 20.0;
+/// A lane change takes this long (renderers ease `lane_shift` over it), s.
+pub const LANE_CHANGE_S: f32 = 1.2;
+/// Cars move into the lane their next turn needs within this distance of
+/// the stop line, metres.
+pub const LANE_PREPARE_M: f32 = 90.0;
 /// Extra stop-line distance beyond the carriageways of the crossing roads,
 /// metres (crossings, kerb radius).
-pub const JUNCTION_MARGIN_M: f32 = 1.0;
+pub const JUNCTION_MARGIN_M: f32 = 0.5;
 
 // -------------------------------------------------------------- signals ----
 

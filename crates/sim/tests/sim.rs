@@ -39,7 +39,7 @@ fn demand_responds_in_the_right_direction() {
     let mut p = Some(GridPlayer::new(&[Zone::Residential]));
     run_to(&mut w, &mut p, DAY / 2);
     assert!(w.stats.households > 0 && w.stats.employed == 0);
-    let (d, _) = demand::target(&w);
+    let (d, attract) = demand::target(&w);
     assert!(d.residential < empty.residential - 0.3, "{d:?}");
     assert!(d.commercial > 0.5 && d.industrial > 0.5, "{d:?}");
     // The published demand follows (smoothed).
@@ -50,13 +50,19 @@ fn demand_responds_in_the_right_direction() {
     );
 
     // Adding jobs makes housing attractive again.
-    scenarios::zone(&mut w, (20, 129), (30, 133), Zone::Commercial);
-    scenarios::road(&mut w, (20, 133), (30, 133));
-    scenarios::zone(&mut w, (20, 129), (30, 132), Zone::Commercial);
+    // (A block of its own: the housing player's blocks leave no free land.)
+    w.economy.money += 20_000;
+    assert!(scenarios::road(&mut w, (30, 128), (75, 128)));
+    assert!(scenarios::road(&mut w, (60, 128), (60, 133)));
+    assert!(scenarios::road(&mut w, (60, 133), (75, 133)));
+    assert!(scenarios::road(&mut w, (75, 128), (75, 133)));
+    scenarios::zone(&mut w, (61, 129), (74, 132), Zone::Commercial);
     run_to(&mut w, &mut p, DAY / 2 + 6 * HOUR);
-    let (d2, _) = demand::target(&w);
+    // (The pull of jobs; the demand bar itself also counts the empty
+    // housing built meanwhile.)
+    let (d2, attract2) = demand::target(&w);
     assert!(w.stats.jobs > 0);
-    assert!(d2.residential > d.residential, "{d:?} -> {d2:?}");
+    assert!(attract2 > attract, "{d:?} -> {d2:?} {:?}", w.stats);
 }
 
 #[test]

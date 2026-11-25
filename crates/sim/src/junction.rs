@@ -538,31 +538,36 @@ pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec
 }
 
 /// Major arms of a priority junction: the highest-class opposite pair (the
-/// straight-through road), or the two highest-class arms.
-fn mark_major(arms: &mut [Arm], roads: &RoadNetwork) {
+/// straight-through road), or the two highest-class arms. When two pairs
+/// are equally good (a crossing of two equal streets) no arm is major and
+/// the junction works first come, first served (all-way give-way).
+fn mark_major(arms: &mut [Arm]) {
     let deg = arms.len();
     if deg < 3 {
         return;
     }
-    let len = |i: usize| roads.segments[arms[i].segment].length;
-    let mut best: Option<((u8, u8, u32), usize, usize)> = None;
+    let mut best: Option<((u8, u8), usize, usize)> = None;
+    let mut tie = false;
     for i in 0..deg {
         for j in i + 1..deg {
             let straight = arms[i].opposite == Some(j as u8);
-            let key = (
-                arms[i].kind.rank() + arms[j].kind.rank(),
-                u8::from(straight),
-                (len(i) + len(j)) as u32,
-            );
-            if best.as_ref().is_none_or(|b| key > b.0) {
-                best = Some((key, i, j));
+            let key = (arms[i].kind.rank() + arms[j].kind.rank(), u8::from(straight));
+            match &best {
+                Some(b) if key == b.0 => tie = true,
+                Some(b) if key < b.0 => {}
+                _ => {
+                    best = Some((key, i, j));
+                    tie = false;
+                }
             }
         }
     }
     for a in arms.iter_mut() {
         a.major = false;
     }
-    if let Some((_, i, j)) = best {
+    // Two equally good through roads (a crossing of equal streets): no
+    // major road, everyone gives way first come, first served.
+    if let Some((_, i, j)) = best.filter(|_| !tie) {
         arms[i].major = true;
         arms[j].major = true;
     }
@@ -665,7 +670,7 @@ fn resolve(setting: JunctionSetting, arms: &[Arm], busy: bool) -> JunctionContro
 /// geometry did not change) the signal state of `old`.
 pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionState>) -> JunctionState {
     let (mut arms, movements) = build_geometry(roads, n);
-    mark_major(&mut arms, roads);
+    mark_major(&mut arms);
     let conflicts = build_conflicts(roads.nodes[n].pos, &movements);
     let deg = arms.len();
     let setting = old.map_or(JunctionSetting::Auto, |o| o.setting);
