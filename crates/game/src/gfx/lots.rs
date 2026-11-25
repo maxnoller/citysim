@@ -60,8 +60,8 @@ fn chunk_hash(cells: &[CellView], free: &HashMap<CellRef, Zone>) -> u64 {
 /// Wooden peg with a zone-coloured tip.
 fn peg(m: &mut MeshBuilder, p: Vec2, tip: Color) {
     let wood = Color::srgb_u32(0xB08A5B);
-    m.box_yaw(Vec3::new(p.x, 0.0, p.y), Vec3::new(0.12, 0.5, 0.12), 0.6, wood, wood);
-    m.box_yaw(Vec3::new(p.x, 0.5, p.y), Vec3::new(0.16, 0.16, 0.16), 0.6, tip, tip);
+    m.box_yaw(Vec3::new(p.x, 0.0, p.y), Vec3::new(0.09, 0.42, 0.09), 0.6, wood, wood);
+    m.box_yaw(Vec3::new(p.x, 0.42, p.y), Vec3::new(0.13, 0.13, 0.13), 0.6, tip, tip);
 }
 
 /// Taut string between two pegs.
@@ -74,8 +74,8 @@ fn string(m: &mut MeshBuilder, a: Vec2, b: Vec2, color: Color) {
     let mid = (a + b) * 0.5;
     let yaw = -d.y.atan2(d.x);
     m.box_yaw(
-        Vec3::new(mid.x, 0.4, mid.y),
-        Vec3::new(len, 0.05, 0.05),
+        Vec3::new(mid.x, 0.34, mid.y),
+        Vec3::new(len, 0.03, 0.03),
         yaw,
         color,
         color,
@@ -111,8 +111,10 @@ fn chunk_mesh(cells: &[CellView], free: &HashMap<CellRef, Zone>) -> Option<Mesh>
     for c in cells {
         let Some(z) = c.zone else { continue };
         let base = zone_color(z);
-        let tint = mix(base, Color::WHITE, 0.15);
-        let paint = lin(mix(base, palette::GRASS_LIGHT, 0.3));
+        // Soft surveyor's string: zone colour washed towards white, so a
+        // street of empty lots does not read as a row of fences.
+        let tint = mix(base, Color::WHITE, 0.55);
+        let paint = lin(mix(base, palette::GRASS_LIGHT, 0.62));
         let centre = c.center();
         for (k, n) in neighbours(c.cell).into_iter().enumerate() {
             if free.get(&n) == Some(&z) {
@@ -121,7 +123,7 @@ fn chunk_mesh(cells: &[CellView], free: &HashMap<CellRef, Zone>) -> Option<Mesh>
             let (a, b) = (c.quad[k], c.quad[(k + 1) % 4]);
             let inward = (centre - (a + b) * 0.5).normalize_or_zero();
             // Painted border on the grass, inside the edge.
-            let w = 0.45;
+            let w = 0.3;
             let (a2, b2) = (a + inward * 0.35, b + inward * 0.35);
             m.quad_up(
                 [a2, b2, b2 + inward * w, a2 + inward * w].map(|p| Vec3::new(p.x, 0.04, p.y)),
