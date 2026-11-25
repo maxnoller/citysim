@@ -37,13 +37,23 @@ fn centre(w: &World, b: BuildingId) -> [f32; 2] {
 /// and two shops: the nearest one and one far away.
 fn driver_at_home(w: &mut World) -> (CitizenId, BuildingId, BuildingId) {
     let now = w.time.tick;
-    let (hid, id) = w
+    let shop_pos: Vec<[f32; 2]> = w
+        .buildings
+        .iter()
+        .filter(|(_, b)| b.kind == Zone::Commercial)
+        .map(|(b, _)| centre(w, b))
+        .collect();
+    // The household with a car living nearest to a shop.
+    let (_, hid, id) = w
         .households
         .iter()
-        .find_map(|(hid, h)| {
+        .filter_map(|(hid, h)| {
             let d = h.citizens.iter().copied().find(|&c| w.citizens[c].drives())?;
-            (h.cars > 0).then_some((hid, d))
+            let hp = centre(w, h.home);
+            let near = shop_pos.iter().map(|&p| geom::dist(hp, p)).fold(f32::MAX, f32::min);
+            (h.cars > 0).then_some((near, hid, d))
         })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
         .expect("a household with a car");
     let home = w.households[hid].home;
     for m in w.households[hid].citizens.clone() {
