@@ -18,6 +18,7 @@ mod legend;
 mod loading;
 mod menu;
 mod people;
+mod people_panel;
 mod plan;
 mod pointer;
 mod readout;
@@ -100,7 +101,12 @@ impl Plugin for UiPlugin {
                 menu::MenuPlugin,
                 tooltip::TooltipPlugin,
             ))
-            .add_plugins((fiscal::FiscalPlugin, settings::SettingsPlugin, loading::LoadingPlugin))
+            .add_plugins((
+                fiscal::FiscalPlugin,
+                settings::SettingsPlugin,
+                loading::LoadingPlugin,
+                people_panel::PeoplePanelPlugin,
+            ))
             .add_systems(PostStartup, fallback_ui_camera)
             .add_systems(PreUpdate, scale_ui);
         if let Some(dir) = std::env::var_os("CITYSIM_UI_SHOTS").filter(|d| !d.is_empty()) {

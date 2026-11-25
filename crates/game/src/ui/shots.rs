@@ -680,19 +680,38 @@ fn steps() -> Vec<Step> {
         },
         Step {
             name: "people-follow-car",
-            wait: 2.5,
+            wait: 2.0,
             setup: |w| {
                 reset(w);
+                // Someone driving with the longest way still to go.
                 let s = sim(w);
-                let who = s.citizens.iter().find_map(|(id, c)| match &c.location {
-                    citysim_sim::citizens::Location::Travelling(j) if j.vehicle.is_some() => Some(id),
-                    _ => None,
-                });
+                let now = s.time.tick;
+                let who = s
+                    .citizens
+                    .iter()
+                    .filter_map(|(id, c)| match &c.location {
+                        citysim_sim::citizens::Location::Travelling(j)
+                            if j.vehicle.is_some_and(|v| s.vehicles.contains_key(v)) =>
+                        {
+                            Some((j.due_tick.saturating_sub(now), id))
+                        }
+                        _ => None,
+                    })
+                    .max_by_key(|x| x.0)
+                    .map(|x| x.1);
                 if let Some(id) = who {
                     w.write_message(UiAction::Person(id));
                     w.write_message(UiAction::Follow);
+                    let at = super::people::person_position(sim(w), id).unwrap_or_default();
+                    w.write_message(crate::shared::CameraGoTo {
+                        focus: at,
+                        distance: Some(110.0),
+                    });
                 }
                 w.resource_mut::<CameraOverride>().0 = None;
+                // Hold the moment: people get out on the calendar long
+                // before their car finishes its drive.
+                w.resource_mut::<SimClock>().paused = true;
             },
         },
         Step {

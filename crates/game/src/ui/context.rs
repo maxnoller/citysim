@@ -496,10 +496,15 @@ pub fn inspect_card(world: &World, target: &WorldTarget) -> Option<Card> {
 /// A car or truck: who is in it and where it goes.
 fn vehicle_card(world: &World, id: citysim_sim::VehicleId) -> Option<Card> {
     let v = world.vehicles.get(id)?;
-    let view = super::people::vehicle_sheet(world, id)?;
-    let mut card = Card::new(icon::CAR, t::ACCENT);
-    card.title = view.title.clone();
-    for l in view.lines.iter().take(MAX_ROWS - 1) {
+    let (title, lines) = super::people::vehicle_lines(world, id)?;
+    let truck = world
+        .traffic
+        .trips
+        .get(id)
+        .is_some_and(|t| t.purpose == citysim_sim::TripPurpose::Goods);
+    let mut card = Card::new(if truck { icon::TRUCK } else { icon::CAR }, t::ACCENT);
+    card.title = title;
+    for l in lines.iter().take(MAX_ROWS - 1) {
         card.rows
             .push(Row::new(l.label.clone(), l.value.clone(), tone_color(l.tone)));
     }
@@ -1057,9 +1062,11 @@ fn update_pinned(
     let Some((mut node, mut vis, computed, _)) = root.iter_mut().find(|r| *r.3 == CardRoot(1)) else {
         return;
     };
+    // Buildings and cars open the people panel instead.
     let target = highlight
         .selected
         .clone()
+        .filter(|t| matches!(t, WorldTarget::Road(_) | WorldTarget::Junction { .. }))
         .filter(|_| !ui.menu_open && *tool == ActiveTool::Inspect);
     let Some(target) = target else {
         vis.set_if_neq(Visibility::Hidden);

@@ -50,6 +50,7 @@ fn control_keys(
     mouse: Res<ButtonInput<MouseButton>>,
     over_ui: Res<PointerOverUi>,
     tools: Res<ToolState>,
+    people: Res<super::people_panel::PeopleView>,
     tool: Res<ActiveTool>,
     quality: Res<GraphicsQuality>,
     mut ui: ResMut<UiState>,
@@ -62,6 +63,10 @@ fn control_keys(
             out.write(UiAction::CloseMenu);
         } else if ui.budget_open {
             ui.budget_open = false;
+        } else if ui.city_people_open {
+            out.write(UiAction::CityPeople);
+        } else if !people.stack.is_empty() {
+            out.write(UiAction::ClosePeople);
         } else if *tool != ActiveTool::Inspect {
             out.write(UiAction::Tool(ActiveTool::Inspect));
         } else {

@@ -112,12 +112,6 @@ impl GridFrame {
     pub fn depth_m(&self) -> f32 {
         self.nv as f32 * self.block_m
     }
-    /// The four corners (the far ones equal the near ones while `nv` is 0).
-    pub fn corners(&self) -> [[f32; 2]; 4] {
-        let w = mul(self.u, self.width_m());
-        let d = mul(self.v, self.depth_m());
-        [self.a, add(self.a, w), add(add(self.a, w), d), add(self.a, d)]
-    }
     /// Every street, the ones along `u` first (build order).
     pub fn streets(&self) -> Vec<Curve> {
         let mut out = Vec::new();
@@ -496,14 +490,6 @@ impl Stretch {
         out
     }
 
-    /// Centre-line curves of the part between `s0` and `s1`.
-    pub fn curves(&self, world: &World, s0: f32, s1: f32) -> Vec<Curve> {
-        self.ranges(s0, s1)
-            .into_iter()
-            .filter_map(|(s, a, b)| world.roads.segments.get(s).map(|seg| seg.curve.sub(a, b)))
-            .collect()
-    }
-
     /// The whole stretch as a polyline (for highlights).
     pub fn polyline(&self, world: &World) -> Vec<[f32; 2]> {
         let mut out: Vec<[f32; 2]> = Vec::new();
@@ -625,8 +611,7 @@ mod tests {
         assert!((at - 25.0).abs() < 0.2, "{at}");
         let r = st.ranges(10.0, 60.0);
         assert_eq!(r.len(), 2);
-        let curves = st.curves(&w, 10.0, 60.0);
-        let total: f32 = curves.iter().map(|c| c.length()).sum();
+        let total: f32 = r.iter().map(|(_, a, b)| b - a).sum();
         assert!((total - 50.0).abs() < 0.1, "{total}");
     }
 }

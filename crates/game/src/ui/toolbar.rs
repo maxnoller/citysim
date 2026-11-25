@@ -52,7 +52,7 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::INSPECT,
                     Tooltip {
                         title: "Inspect",
-                        desc: "Hover buildings and roads to see residents, jobs and traffic.",
+                        desc: "Hover buildings, roads and cars; click a home, workplace or car to meet its people.",
                         key: Some("I"),
                         price: None,
                     },
@@ -64,9 +64,9 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::ROAD,
                     Tooltip {
                         title: "Road",
-                        desc: "Click corners and double-click to build, or drag one straight road. Snaps to roads and grids; Alt for free placement. R again: street / avenue.",
+                        desc: "Straight, curved, continuous roads and street grids at any angle. Snaps to roads, angles and lots; Alt for free placement. R again: street / avenue.",
                         key: Some("R"),
-                        price: Some(format!("${} per cell", balance::ROAD_COST_PER_CELL)),
+                        price: Some(format!("${} per 8 m", balance::ROAD_COST_PER_CELL)),
                     },
                 );
                 tool_button(
@@ -76,7 +76,7 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::ZONE,
                     Tooltip {
                         title: "Zone",
-                        desc: "Drag a rectangle, click a road side, or fill a block. Buildings grow by demand. Tab switches mode.",
+                        desc: "Paint lots, zone a road side, fill an area or drag a rectangle along the lots. Buildings grow by demand. Tab switches mode.",
                         key: Some("Z"),
                         price: Some("Free".into()),
                     },
@@ -88,9 +88,9 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                     icon::BULLDOZE,
                     Tooltip {
                         title: "Bulldoze",
-                        desc: "Drag over roads and buildings, or click a road to remove it between junctions. Tab switches mode.",
+                        desc: "Click a road (between junctions) or a building; drag along a road for a part, or drag an area. Tab switches mode.",
                         key: Some("B"),
-                        price: Some(format!("${} per cleared cell", balance::BULLDOZE_COST_PER_CELL)),
+                        price: None,
                     },
                 );
                 tool_button(
@@ -127,6 +127,19 @@ fn spawn_toolbar(mut commands: Commands, fonts: Res<UiFonts>) {
                         title: "Zones overlay",
                         desc: "Show zoning in strong colours. O cycles overlays.",
                         key: Some("O"),
+                        price: None,
+                    },
+                );
+                bar.spawn(super::widgets::vdivider(26.0));
+                tool_button(
+                    bar,
+                    fonts,
+                    UiAction::CityPeople,
+                    icon::USERS,
+                    Tooltip {
+                        title: "People",
+                        desc: "Who lives in the city: ages, households, work, what everyone is doing, why people are unhappy.",
+                        key: Some("P"),
                         price: None,
                     },
                 );

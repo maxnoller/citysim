@@ -177,22 +177,10 @@ pub mod icon {
     pub const UPGRADE: char = '\u{e420}'; // arrow-big-up-dash
     pub const CAR: char = '\u{e1d5}';
     pub const TRUCK: char = '\u{e194}';
-    pub const USER: char = '\u{e19f}';
     pub const FOLLOW: char = '\u{e1db}'; // locate-fixed
-    pub const MAP_PIN: char = '\u{e111}';
-    pub const HEART: char = '\u{e0f2}';
-    pub const BED: char = '\u{e2c1}';
-    pub const SHOPPING: char = '\u{e15b}';
-    pub const COFFEE: char = '\u{e096}';
-    pub const CHART: char = '\u{e609}'; // chart-bar-stacked
-    pub const BOOK: char = '\u{e05f}';
-    pub const CLOCK: char = '\u{e087}';
     pub const ARROW_RIGHT: char = '\u{e049}';
-    pub const BABY: char = '\u{e2ce}';
-    pub const FROWN: char = '\u{e0db}';
     pub const RULER: char = '\u{e14b}';
     pub const LASSO: char = '\u{e1ce}';
-    pub const EYE: char = '\u{e0ba}';
 }
 
 // ---------------------------------------------------------------- fonts

@@ -65,18 +65,6 @@ pub enum SnapRule {
     Extensions,
 }
 
-impl SnapRule {
-    pub const ALL: [SnapRule; 7] = [
-        SnapRule::Nodes,
-        SnapRule::Roads,
-        SnapRule::Angles,
-        SnapRule::Lengths,
-        SnapRule::Lattice,
-        SnapRule::Parallel,
-        SnapRule::Extensions,
-    ];
-}
-
 /// Tool options (the options bar).
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct ToolOptions {

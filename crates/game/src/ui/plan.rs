@@ -126,6 +126,7 @@ impl Evaluated {
         self.steps.iter().find_map(|s| s.result.as_ref().err())
     }
 
+    #[cfg(test)]
     pub fn ok(&self) -> bool {
         self.first_error().is_none()
     }
