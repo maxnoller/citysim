@@ -123,7 +123,7 @@ impl World {
     /// Validate `cmd` and report its cost and affected cells, without
     /// changing anything. Ok exactly when `apply` would succeed.
     pub fn preview(&self, cmd: &Command) -> Result<Preview, CommandError> {
-        command::plan(self, cmd).map(|p| p.preview())
+        command::plan(self, cmd).map(|p| p.preview(self))
     }
 
     /// Validate and execute `cmd`. On error nothing changes.
@@ -288,11 +288,23 @@ impl World {
     /// match the graph, building cells match buildings). For tests/debug.
     pub fn check_invariants(&self) -> Result<(), String> {
         self.roads.validate()?;
+        // Segments by the cells their bounds touch (one cell of margin).
+        let n = MAP_CELLS as usize;
+        let mut buckets: Vec<Vec<crate::SegmentId>> = vec![Vec::new(); n * n];
+        for (s, seg) in self.roads.segments.iter() {
+            let (lo, hi) = seg.curve.bounds();
+            let (a, b) = (Cell::from_pos(lo), Cell::from_pos(hi));
+            for y in (a.y - 1).max(0)..=(b.y + 1).min(MAP_CELLS - 1) {
+                for x in (a.x - 1).max(0)..=(b.x + 1).min(MAP_CELLS - 1) {
+                    buckets[y as usize * n + x as usize].push(s);
+                }
+            }
+        }
         for y in 0..MAP_CELLS {
             for x in 0..MAP_CELLS {
                 let c = Cell::new(x, y);
                 let cd = self.grid.get(c).expect("in bounds");
-                let covered = self.roads.covers(c.center());
+                let covered = command::road_over(&self.roads, &buckets[y as usize * n + x as usize], c);
                 match cd.occupant {
                     Occupant::Road if !covered => return Err(format!("{c:?} marked road but no road there")),
                     Occupant::Road => {}

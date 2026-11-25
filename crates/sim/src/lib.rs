@@ -26,6 +26,7 @@
 //! `(x, y)` is `((x + 0.5) * CELL_SIZE, (y + 0.5) * CELL_SIZE)`.
 
 pub mod balance;
+pub(crate) mod build;
 pub mod buildings;
 pub mod citizens;
 pub mod command;

@@ -221,7 +221,11 @@ fn diagonal_road() {
     let mut w = blank();
     let out = road(&mut w, (1, 1), (6, 6)).unwrap();
     assert_eq!(out.cells.len(), 6);
-    assert_eq!(out.cost, 5 * balance::ROAD_COST_PER_CELL);
+    // Priced by the metre: a diagonal piece is sqrt(2) cells long.
+    assert_eq!(
+        out.cost,
+        (5.0 * 2f64.sqrt() * balance::ROAD_COST_PER_CELL as f64).round() as i64
+    );
     let seg = w.roads.segments.values().next().unwrap();
     assert!((seg.length - 5.0 * CELL_SIZE * 2f32.sqrt()).abs() < 1e-3);
     assert!(w.grid.is_road(c(3, 3)) && !w.grid.is_road(c(3, 4)));
@@ -241,35 +245,23 @@ fn diagonals_crossing_at_a_cell_centre_intersect() {
 }
 
 #[test]
-fn diagonals_crossing_between_centres_rejected() {
+fn diagonals_crossing_between_centres_make_a_junction() {
     let mut w = blank();
     road(&mut w, (0, 0), (5, 5)).unwrap();
-    // (0,5)->(5,0) has odd parity: it would cross between centres.
-    assert_eq!(
-        road(&mut w, (0, 5), (5, 0)),
-        Err(CommandError::DiagonalCrossing(c(2, 3)))
-    );
+    // (0,5)->(5,0) crosses the first between cell centres: a junction at
+    // the shared cell corner, both roads split there.
+    let out = road(&mut w, (0, 5), (5, 0)).unwrap();
+    assert_eq!(out.nodes.iter().filter(|n| n.change == NodeChange::Crossing).count(), 1);
+    let x = w.roads.node_at([24.0, 24.0]).expect("crossing node");
+    assert_eq!(w.roads.nodes[x].segments.len(), 4);
+    assert_eq!(w.roads.segments.len(), 4);
+    check(&w);
     // The minimal X inside one 2x2 block.
     let mut w = blank();
     road(&mut w, (3, 3), (4, 4)).unwrap();
-    assert_eq!(
-        road(&mut w, (4, 3), (3, 4)),
-        Err(CommandError::DiagonalCrossing(c(4, 3)))
-    );
-    assert_eq!(
-        road(&mut w, (3, 4), (4, 3)),
-        Err(CommandError::DiagonalCrossing(c(3, 4)))
-    );
-    assert_eq!(w.roads.segments.len(), 1);
-    // Preview reports the same error.
-    assert!(
-        w.preview(&Command::BuildRoad {
-            from: c(4, 3),
-            to: c(3, 4),
-            kind: citysim_sim::RoadKind::Street,
-        })
-        .is_err()
-    );
+    road(&mut w, (4, 3), (3, 4)).unwrap();
+    assert_eq!(w.roads.segments.len(), 4);
+    check(&w);
 }
 
 #[test]
@@ -785,7 +777,14 @@ fn random_edits_keep_graph_valid() {
         );
         if let Err(e) = res {
             assert!(
-                matches!(e, CommandError::OutOfBounds | CommandError::DiagonalCrossing(_)),
+                matches!(
+                    e,
+                    CommandError::OutOfBounds
+                        | CommandError::TooClose { .. }
+                        | CommandError::TooShort { .. }
+                        | CommandError::SharpAngle { .. }
+                        | CommandError::TooManyArms { .. }
+                ),
                 "step {i}: unexpected {e:?}"
             );
         }
@@ -877,6 +876,6 @@ fn building_visual_fields_round_trip() {
     let b = &loaded.buildings[id];
     assert_eq!(
         (b.facing, b.seed, b.created_tick, b.size()),
-        (Facing::MinusX, 0xDEAD_BEEF, 1234, (2, 3))
+        (Facing::MinusX, 0xDEAD_BEEF, 1234, (3, 2))
     );
 }

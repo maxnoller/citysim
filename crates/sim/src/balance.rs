@@ -782,6 +782,8 @@ pub const AVENUE_MIN_RADIUS_M: f32 = 24.0;
 /// Shortest segment a command may leave behind, metres (between any two
 /// nodes, including those made by splits and crossings).
 pub const MIN_SEGMENT_M: f32 = 4.0;
+/// Most arms a node may have.
+pub const MAX_NODE_ARMS: usize = 6;
 /// Smallest angle between two arms at a node, degrees.
 pub const MIN_ARM_ANGLE_DEG: f32 = 25.0;
 /// A road end this close to an existing node joins it; this close to an
