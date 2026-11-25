@@ -100,7 +100,13 @@ fn string(m: &mut MeshBuilder, a: Vec2, b: Vec2, color: Color) {
     }
     let mid = (a + b) * 0.5;
     let yaw = -d.y.atan2(d.x);
-    m.box_yaw(Vec3::new(mid.x, 0.4, mid.y), Vec3::new(len, 0.05, 0.05), yaw, color, color);
+    m.box_yaw(
+        Vec3::new(mid.x, 0.4, mid.y),
+        Vec3::new(len, 0.05, 0.05),
+        yaw,
+        color,
+        color,
+    );
 }
 
 /// "Lot" sign on a post at `p`, facing `face`.

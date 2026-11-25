@@ -7,6 +7,7 @@ mod camera;
 mod city_material;
 mod cursor;
 mod daynight;
+mod guides;
 mod lots;
 mod mesh_util;
 mod noise;
@@ -51,6 +52,7 @@ impl Plugin for GfxPlugin {
             stats::StatsPlugin,
             signals::SignalsPlugin,
             lots::LotsPlugin,
+            guides::GuidesPlugin,
         ));
     }
 }

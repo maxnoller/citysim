@@ -36,7 +36,7 @@ impl BuildingModels {
         self.meshes.len()
     }
 
-    fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
+    pub fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
         self.meshes
             .entry(key)
             .or_insert_with(|| {
@@ -51,6 +51,11 @@ impl BuildingModels {
 
 #[derive(Component)]
 pub(super) struct BuildingVisual;
+
+/// Drawn building per sim building: (parent entity, model key, model child
+/// transform). Highlights draw over these.
+#[derive(Resource, Default)]
+pub struct BuildingEntities(pub HashMap<BuildingId, (Entity, ModelKey, Transform)>);
 
 #[derive(Component)]
 struct Growing {
@@ -292,10 +297,12 @@ pub struct BuildingsPlugin;
 
 impl Plugin for BuildingsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BuildingModels>().add_systems(
-            Update,
-            (sync_buildings, animate_buildings).chain().in_set(GameSet::Render),
-        );
+        app.init_resource::<BuildingModels>()
+            .init_resource::<BuildingEntities>()
+            .add_systems(
+                Update,
+                (sync_buildings, animate_buildings).chain().in_set(GameSet::Render),
+            );
     }
 }
 
@@ -344,6 +351,7 @@ fn sync_buildings(
     mut models: ResMut<BuildingModels>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut spawned: Local<Spawned>,
+    mut index: ResMut<BuildingEntities>,
 ) {
     let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
     if spawned.key == Some(key) {
@@ -380,6 +388,7 @@ fn sync_buildings(
             .is_some_and(|b| model_key(b) == *k && b.facing == *f && inset_of(b) == *i && !reloaded);
         if !keep {
             commands.entity(*e).remove::<Growing>().insert(Shrinking { start: now });
+            index.0.remove(id);
         }
         keep
     });
@@ -425,6 +434,7 @@ fn sync_buildings(
         } else {
             ec.insert(tf);
         }
+        index.0.insert(id, (ec.id(), mk, model_tf));
         spawned.entities.insert(id, (ec.id(), mk, b.facing, inset));
     }
 }

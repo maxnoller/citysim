@@ -7,13 +7,16 @@
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use citysim_sim::{CELL_SIZE, Cell};
+use citysim_sim::{CELL_SIZE, Cell, RoadKind};
 
 use super::heights;
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix};
+use super::road_geom;
 use super::zones::zone_color;
-use crate::shared::{ActiveTool, GameSet, HoveredCell, PreviewKind, ToolPreview, cell_center, cell_corners};
+use crate::shared::{
+    ActiveTool, GameSet, HoveredCell, PathPreview, PreviewKind, RoadChoice, ToolPreview, cell_center, cell_corners,
+};
 
 /// Grid radius around the cursor, cells.
 const GRID_R: i32 = 14;
@@ -231,8 +234,14 @@ fn cell_quad(m: &mut MeshBuilder, c: Cell, inset: f32, y: f32, col: [f32; 4]) {
     m.quad_up(cell_corners(c, inset, y), col);
 }
 
-/// Translucent road from `a` to `b` (Bevy positions on the ground).
+/// Translucent road from `a` to `b` (Bevy positions on the ground) drawn
+/// as a street.
 fn road_ghost(m: &mut MeshBuilder, a: Vec3, b: Vec3, valid: bool) {
+    road_ghost_kind(m, a, b, valid, RoadKind::Street);
+}
+
+/// Translucent road of `kind` (its real width) from `a` to `b`.
+fn road_ghost_kind(m: &mut MeshBuilder, a: Vec3, b: Vec3, valid: bool, kind: RoadKind) {
     let y = heights::GHOST;
     let d = (b - a).with_y(0.0);
     let len = d.length();
@@ -245,7 +254,8 @@ fn road_ghost(m: &mut MeshBuilder, a: Vec3, b: Vec3, valid: bool) {
     let body = lin(base.with_alpha(0.55));
     let edge = lin(mix(base, Color::WHITE, 0.4).with_alpha(0.95));
     let at = |t: f32, o: f32| a.with_y(y) + dir * t + n * o;
-    let (h, walk) = (2.75, 1.25);
+    let st = road_geom::style(kind);
+    let (h, walk) = (st.h, st.walk);
     m.quad_up(
         [
             at(0.0, -h - walk),
@@ -260,11 +270,25 @@ fn road_ghost(m: &mut MeshBuilder, a: Vec3, b: Vec3, valid: bool) {
         m.quad_up([at(0.0, o0), at(len, o0), at(len, o1), at(0.0, o1)], edge);
     }
     if valid {
-        // Centre dashes.
-        let mut t = 1.0;
-        while t + 2.0 < len {
-            m.quad_up([at(t, -0.12), at(t + 2.0, -0.12), at(t + 2.0, 0.12), at(t, 0.12)], edge);
-            t += 4.0;
+        // Centre dashes (a solid median for avenues, with lane dashes).
+        if st.median > 0.0 {
+            m.quad_up([at(0.0, -0.3), at(len, -0.3), at(len, 0.3), at(0.0, 0.3)], edge);
+        }
+        let lanes: &[f32] = if st.median > 0.0 { &[-3.25, 3.25] } else { &[0.0] };
+        for &o in lanes {
+            let mut t = 1.0;
+            while t + 2.0 < len {
+                m.quad_up(
+                    [
+                        at(t, o - 0.12),
+                        at(t + 2.0, o - 0.12),
+                        at(t + 2.0, o + 0.12),
+                        at(t, o + 0.12),
+                    ],
+                    edge,
+                );
+                t += 4.0;
+            }
         }
     } else {
         // Diagonal hatching.
@@ -291,13 +315,62 @@ fn road_ghost(m: &mut MeshBuilder, a: Vec3, b: Vec3, valid: bool) {
     }
 }
 
+fn kind_of(c: RoadChoice) -> RoadKind {
+    match c {
+        RoadChoice::Street => RoadKind::Street,
+        RoadChoice::Avenue => RoadKind::Avenue,
+    }
+}
+
+/// The whole multi-leg road being drawn: every leg at its real width (red
+/// where the sim would refuse it), cells that would be upgraded marked
+/// amber, and the corners placed so far.
+fn path_ghost(m: &mut MeshBuilder, path: &PathPreview) {
+    let kind = kind_of(path.kind);
+    for leg in &path.legs {
+        road_ghost_kind(
+            m,
+            cell_center(leg.from, 0.0),
+            cell_center(leg.to, 0.0),
+            leg.error.is_none(),
+            kind,
+        );
+        let amber = lin(palette::TRAFFIC_BUSY.with_alpha(0.6));
+        for &c in &leg.upgrade_cells {
+            cell_quad(m, c, 1.2, heights::GHOST + 0.02, amber);
+        }
+    }
+    let y = heights::GHOST + 0.04;
+    for (i, &c) in path.points.iter().enumerate() {
+        let p = cell_center(c, y);
+        let placed = i < path.placed;
+        let col = if placed {
+            lin(Color::WHITE.with_alpha(0.95))
+        } else {
+            lin(palette::TOOL_OK.with_alpha(0.9))
+        };
+        let r = if placed { 1.1 } else { 1.5 };
+        let ring: Vec<Vec3> = (0..16)
+            .map(|k| {
+                p + Vec3::new(
+                    (k as f32 / 16.0 * std::f32::consts::TAU).cos() * r,
+                    0.0,
+                    (k as f32 / 16.0 * std::f32::consts::TAU).sin() * r,
+                )
+            })
+            .collect();
+        m.fan_up(p, &ring, col);
+    }
+}
+
 fn draw_ghost(
     mut commands: Commands,
     preview: Res<ToolPreview>,
+    path: Res<PathPreview>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(Entity, &mut Visibility), With<GhostMesh>>,
 ) {
-    if !preview.is_changed() {
+    if !preview.is_changed() && !path.is_changed() {
         return;
     }
     let Ok((entity, mut vis)) = q.single_mut() else { return };
@@ -305,6 +378,7 @@ fn draw_ghost(
     let valid = preview.is_valid();
     match preview.kind {
         PreviewKind::None => {}
+        PreviewKind::Road if !path.legs.is_empty() || !path.points.is_empty() => path_ghost(&mut m, &path),
         PreviewKind::Road => {
             if let Some((from, to)) = preview.line {
                 road_ghost(&mut m, cell_center(from, 0.0), cell_center(to, 0.0), valid);
