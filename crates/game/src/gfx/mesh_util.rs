@@ -16,7 +16,7 @@ use super::palette::lin;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Glow {
-    None = 0,
+    // 0: no glow (the default tag).
     /// A window: lit in the evening, a varying share per building.
     Window = 1,
     /// Street lamp head: on from dusk to dawn.
@@ -165,6 +165,24 @@ impl MeshBuilder {
         self.push(q[2], n, cols[2]);
         self.push(q[3], n, cols[3]);
         self.idx.extend([i, i + 1, i + 2, i, i + 2, i + 3]);
+    }
+
+    /// Triangle whose front faces `n` whatever the input winding.
+    pub fn tri_facing(&mut self, a: Vec3, b: Vec3, c: Vec3, n: Vec3, color: Color) {
+        if (b - a).cross(c - a).dot(n) >= 0.0 {
+            self.tri(a, b, c, color);
+        } else {
+            self.tri(a, c, b, color);
+        }
+    }
+
+    /// Planar quad whose front faces `n` whatever the input winding.
+    pub fn quad_facing(&mut self, q: [Vec3; 4], n: Vec3, color: Color) {
+        if (q[1] - q[0]).cross(q[2] - q[0]).dot(n) >= 0.0 {
+            self.quad(q[0], q[1], q[2], q[3], color);
+        } else {
+            self.quad(q[3], q[2], q[1], q[0], color);
+        }
     }
 
     /// Horizontal triangle facing +Y whatever the input winding.
