@@ -111,11 +111,44 @@ fn tool_demo(
 
     use crate::shared::*;
     let world = &sim.world;
-    tool.set_if_neq(ActiveTool::Road);
     let case: u32 = std::env::var("CITYSIM_GFX_TOOLDEMO")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
+    // 4-6: the free-form road tool (`road_tool`).
+    if (4..=6).contains(&case) {
+        return;
+    }
+    // 7: de-zoning the zoned cells round a spot (on whatever lattices).
+    if case == 7 {
+        tool.set_if_neq(ActiveTool::Zone(None));
+        let at = std::env::var("CITYSIM_GFX_TOOLDEMO_AT")
+            .ok()
+            .and_then(|s| {
+                let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                (v.len() == 2).then(|| Vec2::new(v[0], v[1]))
+            })
+            .unwrap_or(Vec2::new(900.0, 1150.0));
+        let zone_cells: Vec<citysim_sim::CellRef> = world
+            .zoning
+            .cells()
+            .filter(|(c, z)| {
+                z.zone.is_some()
+                    && world
+                        .zoning
+                        .cell_center(*c)
+                        .is_some_and(|p| Vec2::from(p).distance(at) < 60.0)
+            })
+            .map(|(c, _)| c)
+            .collect();
+        preview.set_if_neq(ToolPreview {
+            kind: PreviewKind::Zone(None),
+            zone_cells,
+            ..default()
+        });
+        return;
+    }
+    tool.set_if_neq(ActiveTool::Road);
     let leg = |a: (i32, i32), b: (i32, i32), ok: bool| PathLeg {
         from: Cell::new(a.0, a.1),
         to: Cell::new(b.0, b.1),

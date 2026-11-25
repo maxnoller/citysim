@@ -165,16 +165,45 @@ fn draw_tree(m: &mut MeshBuilder, t: &Tree, cheap: bool) {
     }
 }
 
+/// Zoned or built cells (their quads on whatever lattice), bucketed by
+/// 16 m squares, for clearing trees from them.
+struct Taken(HashMap<IVec2, Vec<[Vec2; 4]>>);
+
+impl Taken {
+    fn new(world: &World) -> Taken {
+        let mut out: HashMap<IVec2, Vec<[Vec2; 4]>> = HashMap::new();
+        for (c, zc) in world.zoning.cells() {
+            if zc.zone.is_none() && zc.building.is_none() {
+                continue;
+            }
+            let Some(q) = world.zoning.cell_corners(c) else {
+                continue;
+            };
+            let q = q.map(Vec2::from);
+            let lo = q.iter().fold(Vec2::splat(f32::MAX), |a, p| a.min(*p));
+            let hi = q.iter().fold(Vec2::splat(f32::MIN), |a, p| a.max(*p));
+            let (b0, b1) = (chunk_of(lo, 16.0), chunk_of(hi, 16.0));
+            for y in b0.y..=b1.y {
+                for x in b0.x..=b1.x {
+                    out.entry(IVec2::new(x, y)).or_default().push(q);
+                }
+            }
+        }
+        Taken(out)
+    }
+
+    fn contains(&self, p: Vec2) -> bool {
+        self.0.get(&chunk_of(p, 16.0)).is_some_and(|qs| {
+            qs.iter()
+                .any(|q| citysim_sim::zoning::in_quad(&q.map(|v| v.into()), p.into()))
+        })
+    }
+}
+
 /// Whether a tree may stand at `p`: away from the drawn roads, and not on
 /// zoned or built land.
-fn open(world: &World, edges: &RoadEdges, p: Vec2) -> bool {
-    if let Some(c) = world.zoning.cell_at(p.into())
-        && let Some(zc) = world.zoning.cell(c)
-        && (zc.zone.is_some() || zc.building.is_some())
-    {
-        return false;
-    }
-    edges.clearance(p) > 2.5
+fn open(taken: &Taken, edges: &RoadEdges, p: Vec2) -> bool {
+    !taken.contains(p) && edges.clearance(p) > 2.5
 }
 
 /// What a tree chunk depends on: zoning cells with a zone or building whose
@@ -237,6 +266,7 @@ fn rebuild_trees(
     state.key = Some(key);
     let world = &sim.world;
     let hashes = chunk_hashes(world);
+    let taken = Taken::new(world);
     let dens = quality_settings(*quality).tree_density;
     let n = MAP_CELLS / CHUNK;
     let mut trees = Vec::new();
@@ -256,7 +286,7 @@ fn rebuild_trees(
                     cell_trees(x, y, &mut trees);
                     for t in trees
                         .iter()
-                        .filter(|t| keep(t, dens) && open(world, &edges, Vec2::new(t.pos.x, t.pos.z)))
+                        .filter(|t| keep(t, dens) && open(&taken, &edges, Vec2::new(t.pos.x, t.pos.z)))
                     {
                         draw_tree(&mut m, t, false);
                         draw_tree(&mut far, t, true);
