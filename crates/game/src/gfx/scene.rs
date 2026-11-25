@@ -239,6 +239,7 @@ fn ground_axis() -> Vec<f32> {
 fn ground_mesh() -> Mesh {
     let axis = ground_axis();
     let mut b = MeshBuilder::new();
+    b.tag = [super::mesh_util::Glow::Ground as u32 as f32, 0.0];
     let col: Vec<Vec<[f32; 4]>> = axis
         .iter()
         .map(|&z| axis.iter().map(|&x| lin(grass_color(x, z))).collect())

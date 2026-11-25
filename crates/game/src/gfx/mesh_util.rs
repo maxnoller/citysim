@@ -31,6 +31,9 @@ pub enum Glow {
     Always = 6,
     /// Shop front / lobby glass: warmly lit after dark.
     Shop = 7,
+    /// Not a light: the ground, which the shader gives grass detail,
+    /// wildflowers near the camera and farmland beyond the map.
+    Ground = 8,
 }
 
 /// Flat-shaded, vertex-coloured triangle soup.
