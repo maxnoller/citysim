@@ -1266,10 +1266,8 @@ fn junction_sheet(out: &str) {
     );
     build(
         &mut w,
-        Curve::from_tangents(at(120.0, -110.0), [0.0, 1.0], at(80.0, 0.0), [-0.5, 0.866]).map_or_else(
-            || Curve::through_corner(at(120.0, -110.0), at(120.0, -50.0), at(80.0, 0.0)),
-            |c| c,
-        ),
+        Curve::from_tangents(at(120.0, -110.0), [0.0, 1.0], at(80.0, 0.0), [-0.5, 0.866])
+            .unwrap_or_else(|| Curve::through_corner(at(120.0, -110.0), at(120.0, -50.0), at(80.0, 0.0))),
         RoadKind::Street,
     );
     let hub = at(60.0, 120.0);

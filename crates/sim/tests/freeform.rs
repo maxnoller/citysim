@@ -187,9 +187,11 @@ fn rand_command(w: &W, r: &mut Rng) -> Command {
         }
         _ => {
             let cells: Vec<_> = w.zoning.cells().map(|(c, _)| c).collect();
-            let pick: Vec<_> = (0..10)
-                .filter_map(|_| (!cells.is_empty()).then(|| cells[r.below(cells.len() as u32) as usize]))
-                .collect();
+            let pick: Vec<_> = if cells.is_empty() {
+                Vec::new()
+            } else {
+                (0..10).map(|_| cells[r.below(cells.len() as u32) as usize]).collect()
+            };
             Command::ZoneCells {
                 cells: pick,
                 zone: if r.below(3) == 0 { None } else { Some(Zone::Residential) },
