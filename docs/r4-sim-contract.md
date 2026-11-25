@@ -165,3 +165,27 @@ Changes to items listed above:
   pays a little more upkeep than when junction cells were counted once (about +7 % on a block grid).
 - Zone cells under a road are `blocked: Some(Blocked::Road)` and lose their zone; cells beyond a road's end are no
   longer zoneable (they never fronted a road).
+
+### 2026-11-25 (third push: traffic, organic town, car bodies)
+
+Additions:
+- `scenarios::organic(&mut World) -> Vec<(Curve, CommandError)>`: the free-form demo town (curved avenue, a grid
+  turned by 17°, a ring, a cul-de-sac estate, two works quarters), laid out with `BuildCurve` / `ZoneArea` only; call
+  it inside `scenarios::prebuilt` (it costs more than a new game's money). It grows past 3,000 residents in about 12
+  days and reaches about 3,300–3,500 by day 25. Also `scenarios::curve_road`, `zone_quad`, `first_hit`.
+- `junction::Movement::preferred`: turn paths now exist from every in-lane; `preferred` marks the lanes drivers
+  should use (kerb lane right, inner lane left, any lane straight). Draw only preferred ones if you show turn arrows.
+- `balance::CAR_BODY_M` = 4.4 × 1.9 m and `balance::TRUCK_BODY_M` = 5.3 × 2.2 m (length, width): draw vehicles within
+  these (queues keep 5.5 m between centres, so a longer truck would overlap the car behind).
+- `traffic::car_bodies(&World)` and `traffic::overlapping_bodies(..)`: vehicle rectangles at their drawing poses.
+- `TrafficState::stopped_share`: share of cars on the road standing (at a light, in a queue, giving way).
+- Debug (not saved): `traffic::debug_node_denials`, `debug_gave_up`, `debug_gave_up_reasons`,
+  `debug_last_block_sync_ns`.
+
+Changed meaning:
+- `Stats::avg_speed` / `TrafficState::avg_speed`: mean speed of the cars that are moving (was: of all cars, standing
+  ones included, which read 5–10 km/h at rush hour because most cars wait at lights). Show `stopped_share` beside it
+  if you want the waiting picture.
+- Nodes with fewer than three arms are never signalled (`junction_control` is `Priority`, no lights to draw), even
+  when busy. A node where the road kind changes (highway → avenue, avenue → street) has a short merge box like a
+  lane-count change, so `junction_shape` returns a shape there.
