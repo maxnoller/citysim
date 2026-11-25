@@ -21,6 +21,10 @@ const SHRINK_SECS: f32 = 0.35;
 /// a loaded save) just appear.
 const ANIMATE_IF_YOUNGER: u64 = 3 * citysim_sim::TICKS_PER_SECOND as u64;
 
+/// New buildings stand as a building site this long (sim ticks): first
+/// foundations, then the frame with scaffolding (and a crane when tall).
+pub const SITE_TICKS: u64 = 3 * citysim_sim::balance::TICKS_PER_HOUR as u64;
+
 /// Camera distance (m) where buildings cross-fade to their simplified model.
 pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
 
@@ -28,12 +32,25 @@ pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
 #[derive(Resource, Default)]
 pub struct BuildingModels {
     meshes: HashMap<ModelKey, (Handle<Mesh>, Handle<Mesh>)>,
+    sites: HashMap<(ModelKey, u8), Handle<Mesh>>,
 }
 
 impl BuildingModels {
     /// Number of distinct building models (each has two levels of detail).
     pub fn count(&self) -> usize {
         self.meshes.len()
+    }
+
+    fn site(&mut self, key: ModelKey, stage: u8, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        // Sites only depend on the lot, the tier and the stage.
+        let k = ModelKey {
+            variant: key.variant % 4,
+            ..key
+        };
+        self.sites
+            .entry((k, stage))
+            .or_insert_with(|| meshes.add(building_gen::site(k, stage).build()))
+            .clone()
     }
 
     pub fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
@@ -56,6 +73,25 @@ pub(super) struct BuildingVisual;
 /// transform). Highlights draw over these.
 #[derive(Resource, Default)]
 pub struct BuildingEntities(pub HashMap<BuildingId, (Entity, ModelKey, Transform)>);
+
+/// A building still under construction (its children show the site).
+#[derive(Component)]
+struct Site {
+    id: BuildingId,
+    key: ModelKey,
+    model_tf: Transform,
+    stage: u8,
+}
+
+fn site_stage(age: u64) -> Option<u8> {
+    if age >= SITE_TICKS {
+        None
+    } else if age < SITE_TICKS / 2 {
+        Some(0)
+    } else {
+        Some(1)
+    }
+}
 
 #[derive(Component)]
 struct Growing {
@@ -301,7 +337,9 @@ impl Plugin for BuildingsPlugin {
             .init_resource::<BuildingEntities>()
             .add_systems(
                 Update,
-                (sync_buildings, animate_buildings).chain().in_set(GameSet::Render),
+                (sync_buildings, advance_sites, animate_buildings)
+                    .chain()
+                    .in_set(GameSet::Render),
             );
     }
 }
@@ -405,6 +443,27 @@ fn sync_buildings(
         // scale the parent freely.
         let model_tf = Transform::from_translation(rot.inverse() * Vec3::new(inset.shift.x, 0.0, inset.shift.y))
             .with_scale(inset.local_scale(b.facing));
+        let age = world.time.tick.saturating_sub(b.created_tick);
+        if !reloaded && let Some(stage) = site_stage(age) {
+            let mesh = models.site(mk, stage, &mut meshes);
+            let mut ec = commands.spawn((
+                BuildingVisual,
+                Visibility::default(),
+                Site {
+                    id,
+                    key: mk,
+                    model_tf,
+                    stage,
+                },
+                tf,
+            ));
+            ec.with_children(|p| {
+                p.spawn((model_tf, Mesh3d(mesh), MeshMaterial3d(mats.lit.clone())));
+            });
+            index.0.insert(id, (ec.id(), mk, model_tf));
+            spawned.entities.insert(id, (ec.id(), mk, b.facing, inset));
+            continue;
+        }
         let (detail, far) = models.get(mk, &mut meshes);
         let mut ec = commands.spawn((BuildingVisual, Visibility::default()));
         ec.with_children(|p| {
@@ -436,6 +495,75 @@ fn sync_buildings(
         }
         index.0.insert(id, (ec.id(), mk, model_tf));
         spawned.entities.insert(id, (ec.id(), mk, b.facing, inset));
+    }
+}
+
+/// Move building sites on: foundations -> frame -> the finished building
+/// (which then grows in).
+#[allow(clippy::too_many_arguments)]
+fn advance_sites(
+    mut commands: Commands,
+    sim: Res<SimWorld>,
+    time: Res<Time<Real>>,
+    mats: Res<WorldMaterials>,
+    mut models: ResMut<BuildingModels>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut sites: Query<(Entity, &mut Site, &mut Transform, &Children), Without<Shrinking>>,
+) {
+    let world = &sim.world;
+    for (e, mut site, mut tf, children) in &mut sites {
+        let Some(b) = world.buildings.get(site.id) else {
+            continue;
+        };
+        let stage = site_stage(world.time.tick.saturating_sub(b.created_tick));
+        if stage == Some(site.stage) {
+            continue;
+        }
+        for c in children.iter() {
+            commands.entity(c).despawn();
+        }
+        let model_tf = site.model_tf;
+        match stage {
+            Some(st) => {
+                site.stage = st;
+                let mesh = models.site(site.key, st, &mut meshes);
+                commands.entity(e).with_children(|p| {
+                    p.spawn((model_tf, Mesh3d(mesh), MeshMaterial3d(mats.lit.clone())));
+                });
+            }
+            None => {
+                let (detail, far) = models.get(site.key, &mut meshes);
+                tf.scale = Vec3::new(0.9, 0.01, 0.9);
+                commands
+                    .entity(e)
+                    .remove::<Site>()
+                    .insert(Growing {
+                        start: time.elapsed_secs(),
+                    })
+                    .with_children(|p| {
+                        p.spawn((
+                            model_tf,
+                            Mesh3d(detail),
+                            MeshMaterial3d(mats.lit.clone()),
+                            VisibilityRange {
+                                start_margin: 0.0..0.0,
+                                end_margin: LOD_DISTANCE,
+                                use_aabb: false,
+                            },
+                        ));
+                        p.spawn((
+                            model_tf,
+                            Mesh3d(far),
+                            MeshMaterial3d(mats.lit.clone()),
+                            VisibilityRange {
+                                start_margin: LOD_DISTANCE,
+                                end_margin: 1e6..1e6,
+                                use_aabb: false,
+                            },
+                        ));
+                    });
+            }
+        }
     }
 }
 

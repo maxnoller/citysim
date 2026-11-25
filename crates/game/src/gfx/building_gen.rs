@@ -1416,6 +1416,254 @@ fn shed(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8) {
     }
 }
 
+// ------------------------------------------------------------------ building sites
+
+/// Storeys a finished building of `key` will roughly have (for the frame).
+fn site_storeys(key: ModelKey) -> u32 {
+    let big = key.cells.0 >= 2 && key.cells.1 >= 2;
+    match (key.kind, key.level) {
+        (Zone::Industrial, _) => 1,
+        (_, 0 | 1) => 1,
+        (_, 2) => 2,
+        _ => 4 + u32::from(big),
+    }
+}
+
+/// A building site on the lot of `key`: hoarding round the lot, a
+/// foundation slab, a portacabin and materials (`stage` 0); then the bare
+/// frame with scaffolding and, for tall buildings, a tower crane (1).
+pub fn site(key: ModelKey, stage: u8) -> MeshBuilder {
+    let mut m = MeshBuilder::with_ground_ao(0.25);
+    let mut rng = Stream::new(key.variant as u32 * 31 + key.level as u32 * 7 + key.cells.0 as u32 * 3 + stage as u32);
+    let w = key.cells.0 as f32 * citysim_sim::CELL_SIZE;
+    let d = key.cells.1 as f32 * citysim_sim::CELL_SIZE;
+    let lot = Rect {
+        x0: -w * 0.5,
+        x1: w * 0.5,
+        z0: -d * 0.5,
+        z1: d * 0.5,
+    };
+    let mud = mix(palette::EARTH, Color::srgb_u32(0x8A7558), 0.5);
+    lot_ground(&mut m, lot, mud);
+    let body = Rect {
+        x0: lot.x0 + 1.2,
+        x1: lot.x1 - 1.2,
+        z0: lot.z0 + 1.2,
+        z1: lot.z1 - 2.2,
+    };
+    let concrete = Color::srgb_u32(0xB9B6AE);
+    m.cuboid2(
+        Vec3::new(body.x0, 0.0, body.z0),
+        Vec3::new(body.x1, 0.35, body.z1),
+        shade(concrete, 0.85),
+        concrete,
+    );
+    // Hoarding: white panels with an orange band, a gap for the gate.
+    let white = Color::srgb_u32(0xEEEDE8);
+    let orange = palette::INDUSTRY_STRIPE;
+    let e = 0.25;
+    let gate = (lot.cx() - 1.6, lot.cx() + 1.6);
+    let mut panel = |a: Vec2, b: Vec2| {
+        let mid = (a + b) * 0.5;
+        let dvec = b - a;
+        let yaw = -dvec.y.atan2(dvec.x);
+        let len = dvec.length();
+        if len < 0.1 {
+            return;
+        }
+        m.box_yaw(
+            Vec3::new(mid.x, 0.0, mid.y),
+            Vec3::new(len, 1.9, 0.06),
+            yaw,
+            white,
+            white,
+        );
+        m.box_yaw(
+            Vec3::new(mid.x, 1.3, mid.y),
+            Vec3::new(len + 0.01, 0.25, 0.08),
+            yaw,
+            orange,
+            orange,
+        );
+    };
+    panel(Vec2::new(lot.x0 + e, lot.z0 + e), Vec2::new(lot.x1 - e, lot.z0 + e));
+    panel(Vec2::new(lot.x0 + e, lot.z0 + e), Vec2::new(lot.x0 + e, lot.z1 - e));
+    panel(Vec2::new(lot.x1 - e, lot.z0 + e), Vec2::new(lot.x1 - e, lot.z1 - e));
+    panel(Vec2::new(lot.x0 + e, lot.z1 - e), Vec2::new(gate.0, lot.z1 - e));
+    panel(Vec2::new(gate.1, lot.z1 - e), Vec2::new(lot.x1 - e, lot.z1 - e));
+    // Portacabin and a sand heap.
+    let cabin = Color::srgb_u32(0x3F7FB8);
+    let cx = if rng.chance(0.5) { lot.x0 + 1.9 } else { lot.x1 - 1.9 };
+    if key.cells.0 >= 2 || stage == 0 {
+        m.cuboid2(
+            Vec3::new(cx - 1.3, 0.0, lot.z1 - 2.0),
+            Vec3::new(cx + 1.3, 2.4, lot.z1 - 0.6),
+            cabin,
+            shade(cabin, 1.2),
+        );
+    }
+    let sand = Color::srgb_u32(0xD8C08A);
+    m.cone(
+        Vec3::new(lot.cx() + rng.range(-1.5, 1.5), 0.0, lot.z1 - 1.4),
+        0.9,
+        0.8,
+        7,
+        sand,
+        0.1,
+    );
+    lot_props::pallets(&mut m, &mut rng, Vec2::new(lot.x0 + 1.4, body.z0 + 1.0));
+    if stage == 0 {
+        // Footings and rebar stubs.
+        let steel = Color::srgb_u32(0x6E5A4A);
+        let mut x = body.x0 + 0.3;
+        while x < body.x1 {
+            for z in [body.z0 + 0.3, body.z1 - 0.3] {
+                m.cuboid(
+                    Vec3::new(x - 0.05, 0.35, z - 0.05),
+                    Vec3::new(x + 0.05, 1.3, z + 0.05),
+                    steel,
+                );
+            }
+            x += 1.6;
+        }
+        return m;
+    }
+    // Bare frame: columns and floor slabs.
+    let storeys = site_storeys(key);
+    let sh = if key.kind == Zone::Industrial { 5.0 } else { 3.0 };
+    let top = 0.35 + storeys as f32 * sh;
+    let grey = Color::srgb_u32(0xA7A49C);
+    let step = if body.w() > 10.0 {
+        3.5
+    } else {
+        (body.w() / 2.0).max(1.8)
+    };
+    let mut x = body.x0;
+    while x <= body.x1 + 0.01 {
+        for z in [body.z0, body.cz(), body.z1] {
+            m.cuboid(
+                Vec3::new(x - 0.15, 0.35, z - 0.15),
+                Vec3::new(x + 0.15, top, z + 0.15),
+                grey,
+            );
+        }
+        x += step;
+    }
+    for k in 1..=storeys {
+        let y = 0.35 + k as f32 * sh;
+        m.cuboid2(
+            Vec3::new(body.x0 - 0.1, y - 0.25, body.z0 - 0.1),
+            Vec3::new(body.x1 + 0.1, y, body.z1 + 0.1),
+            shade(concrete, 0.8),
+            concrete,
+        );
+    }
+    // Scaffold along the front: poles, boards and a safety net.
+    let pole = Color::srgb_u32(0xC9CCCF);
+    let board = Color::srgb_u32(0xC49A5A);
+    let zf = body.z1 + 0.9;
+    let mut x = body.x0 - 0.2;
+    while x <= body.x1 + 0.3 {
+        for z in [body.z1 + 0.25, zf] {
+            m.cuboid(
+                Vec3::new(x - 0.04, 0.0, z - 0.04),
+                Vec3::new(x + 0.04, top + 1.0, z + 0.04),
+                pole,
+            );
+        }
+        x += 2.0;
+    }
+    for k in 1..=storeys {
+        let y = 0.35 + k as f32 * sh - 0.3;
+        m.cuboid(
+            Vec3::new(body.x0 - 0.2, y, body.z1 + 0.25),
+            Vec3::new(body.x1 + 0.3, y + 0.06, zf),
+            board,
+        );
+    }
+    let net = Color::srgba(0.32, 0.62, 0.42, 1.0);
+    m.detail_only(|m| {
+        m.quad_facing(
+            [
+                Vec3::new(body.x0 - 0.2, 1.0, zf + 0.05),
+                Vec3::new(body.x1 + 0.3, 1.0, zf + 0.05),
+                Vec3::new(body.x1 + 0.3, top * 0.6, zf + 0.05),
+                Vec3::new(body.x0 - 0.2, top * 0.6, zf + 0.05),
+            ],
+            Vec3::Z,
+            net,
+        );
+    });
+    // Tower crane for tall buildings.
+    if storeys >= 4 {
+        let yellow = palette::ACCENTS[2];
+        let c = Vec3::new(body.x0 - 0.2, 0.0, body.z0 + 0.6);
+        let h = top + 9.0;
+        let mast = 0.9;
+        m.cuboid2(
+            c - Vec3::new(1.0, 0.0, 1.0),
+            c + Vec3::new(1.0, 0.6, 1.0),
+            concrete,
+            concrete,
+        );
+        for (dx, dz) in [(0.0, 0.0), (mast, 0.0), (0.0, mast), (mast, mast)] {
+            let p = c + Vec3::new(dx - mast * 0.5, 0.0, dz - mast * 0.5);
+            m.cuboid(p - Vec3::new(0.07, 0.0, 0.07), p + Vec3::new(0.07, h, 0.07), yellow);
+        }
+        let mut y = 1.5;
+        while y < h {
+            m.cuboid(
+                c + Vec3::new(-mast * 0.5, y, -mast * 0.5),
+                c + Vec3::new(mast * 0.5, y + 0.08, mast * 0.5),
+                yellow,
+            );
+            y += 1.5;
+        }
+        // Jib over the building, counter-jib with its weight, the cab.
+        let jib = (body.w() + 6.0).min(26.0);
+        m.cuboid(
+            c + Vec3::new(-mast * 0.5, h, -0.4),
+            c + Vec3::new(jib, h + 0.8, 0.4),
+            yellow,
+        );
+        m.cuboid(
+            c + Vec3::new(-7.0, h, -0.45),
+            c + Vec3::new(-mast * 0.5, h + 0.7, 0.45),
+            yellow,
+        );
+        m.cuboid2(
+            c + Vec3::new(-6.8, h - 1.2, -0.7),
+            c + Vec3::new(-5.0, h, 0.7),
+            concrete,
+            concrete,
+        );
+        m.cuboid2(
+            c + Vec3::new(-0.6, h - 1.4, -0.7),
+            c + Vec3::new(0.6, h, 0.7),
+            yellow,
+            shade(yellow, 1.1),
+        );
+        m.cuboid(
+            c + Vec3::new(-0.2, h + 0.8, -0.2),
+            c + Vec3::new(0.2, h + 3.2, 0.2),
+            yellow,
+        );
+        // Hook line.
+        let hx = jib * 0.6;
+        m.cuboid(
+            c + Vec3::new(hx - 0.02, top + 1.0, -0.02),
+            c + Vec3::new(hx + 0.02, h, 0.02),
+            Color::srgb_u32(0x3A3D40),
+        );
+        m.cuboid(
+            c + Vec3::new(hx - 0.25, top + 0.6, -0.25),
+            c + Vec3::new(hx + 0.25, top + 1.0, 0.25),
+            palette::INDUSTRY_STRIPE,
+        );
+    }
+    m
+}
+
 // ------------------------------------------------------------------ entry
 
 /// Build the model for `key`.
