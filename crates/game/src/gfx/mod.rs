@@ -7,6 +7,7 @@ mod camera;
 mod city_material;
 mod cursor;
 mod daynight;
+mod lots;
 mod mesh_util;
 mod noise;
 mod overlay;
@@ -49,6 +50,7 @@ impl Plugin for GfxPlugin {
             trees::TreesPlugin,
             stats::StatsPlugin,
             signals::SignalsPlugin,
+            lots::LotsPlugin,
         ));
     }
 }
