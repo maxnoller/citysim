@@ -229,6 +229,9 @@ pub fn budget_now(world: &World) -> Budget {
 
 /// Called once when a new day starts.
 pub(crate) fn end_of_day(world: &mut World) {
+    // Households that left at midnight are gone from both the bill and the
+    // summary.
+    crate::stats::update(world);
     let b = budget_now(world);
     let e = &mut world.economy;
     e.money += b.income() - b.expenses();
