@@ -1111,6 +1111,499 @@ fn watch(out: &str, args: &[String]) {
     ffmpeg_png(&sheet, out);
 }
 
+/// A polyline of `width` metres (pixels from the view).
+fn polyline(c: &mut Canvas, v: &View, pts: &[[f32; 2]], width: f32, col: Rgb) {
+    for w in pts.windows(2) {
+        c.poly(&strip(v, w[0], w[1], width * 0.5, 0.0), col, 1.0);
+    }
+}
+
+fn outline(c: &mut Canvas, v: &View, pts: &[[f32; 2]], width: f32, col: Rgb) {
+    let mut p: Vec<[f32; 2]> = pts.to_vec();
+    if let Some(&f) = pts.first() {
+        p.push(f);
+    }
+    polyline(c, v, &p, width, col);
+}
+
+fn turn_rgb(t: junction::Turn) -> Rgb {
+    match t {
+        junction::Turn::Straight => [120, 200, 255],
+        junction::Turn::Right => [120, 230, 120],
+        junction::Turn::Left => [250, 170, 60],
+        junction::Turn::UTurn => [200, 120, 220],
+    }
+}
+
+/// Lattice colours for cell plots.
+fn lattice_rgb(l: LatticeId) -> Rgb {
+    const P: [Rgb; 8] = [
+        [96, 176, 104],
+        [92, 140, 220],
+        [214, 170, 70],
+        [200, 110, 160],
+        [80, 190, 190],
+        [230, 120, 90],
+        [160, 160, 230],
+        [190, 200, 90],
+    ];
+    P[l.0 as usize % P.len()]
+}
+
+/// Cells of every lattice: usable ones in their lattice colour (bright
+/// edge on the road side), blocked ones by why.
+fn draw_cells(c: &mut Canvas, w: &World, v: &View, by_lattice: bool) {
+    for (cr, cd) in w.zoning.cells() {
+        let Some(q) = w.zoning.cell_corners(cr) else { continue };
+        if !in_view(v, c, q[0], 60.0) {
+            continue;
+        }
+        let ctr = [(q[0][0] + q[2][0]) * 0.5, (q[0][1] + q[2][1]) * 0.5];
+        let shrink = |p: [f32; 2], k: f32| v.px([p[0] + (ctr[0] - p[0]) * k, p[1] + (ctr[1] - p[1]) * k]);
+        let col = match cd.blocked {
+            Some(Blocked::Road) => [90, 90, 96],
+            Some(Blocked::Contested) => [235, 80, 60],
+            Some(Blocked::Building) => [140, 60, 140],
+            None if !cd.covered => [70, 70, 60],
+            None => {
+                if by_lattice {
+                    lattice_rgb(cr.lattice)
+                } else {
+                    cd.zone.map_or([120, 150, 110], zone_rgb)
+                }
+            }
+        };
+        let alpha = if cd.blocked.is_some() { 0.55 } else { 0.8 };
+        c.poly(&q.map(|p| shrink(p, 0.08)), col, alpha);
+        // Two fronts (a shared corner cell): a white dot.
+        if cd.fronts.count_ones() >= 2 && cd.usable() {
+            let p = v.px(ctr);
+            c.disc(p[0], p[1], 0.9 * v.k, [250, 250, 250]);
+        }
+    }
+}
+
+fn draw_blocks(c: &mut Canvas, w: &World, v: &View) {
+    for b in &w.zoning.blocks {
+        let Some(q) = w.zoning.block_corners(b) else { continue };
+        if !in_view(v, c, q[0], 200.0) {
+            continue;
+        }
+        outline(c, v, &q, 0.35, [250, 250, 250]);
+    }
+}
+
+/// A small world without the highway (for close-up sheets).
+fn sheet_world() -> World {
+    let mut w = World::new(3);
+    w.economy.money = i64::MAX / 4;
+    w
+}
+
+fn build(w: &mut World, c: Curve, k: RoadKind) {
+    if let Err(e) = w.apply(Command::BuildCurve { curve: c, kind: k }) {
+        panic!("refused {c:?}: {e} at {:?}", e.at());
+    }
+}
+
+/// A curved avenue meeting curved and straight streets, lanes drawn, cars
+/// driving.
+fn curve_sheet(out: &str) {
+    let mut w = World::new(11);
+    scenarios::prebuilt(&mut w, |w| {
+        scenarios::organic(w);
+    });
+    for _ in 0..(5 * balance::TICKS_PER_DAY + 8 * balance::TICKS_PER_HOUR - balance::START_TICK_OF_DAY) {
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([560.0, 948.0], wpx, hpx - 64, 5.0);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, true, true);
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    let curved = w.roads.segments.values().filter(|s| !s.curve.is_straight()).count();
+    let tightest = w
+        .roads
+        .segments
+        .values()
+        .map(|s| s.curve.min_radius().0)
+        .fold(f32::INFINITY, f32::min);
+    header(
+        &mut cv,
+        "CURVED AVENUE: LANES, KERBS AND CARS FOLLOW THE CURVE",
+        &format!(
+            "{} OF {} SEGMENTS CURVED, TIGHTEST RADIUS {:.0} M, {} CARS, 08:00",
+            curved,
+            w.roads.segments.len(),
+            tightest,
+            w.vehicles.len()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// Junctions at odd angles: outlines, arm cut lines and every turn path.
+fn junction_sheet(out: &str) {
+    let mut w = sheet_world();
+    let o = [600.0, 600.0];
+    let at = |dx: f32, dy: f32| [o[0] + dx, o[1] + dy];
+    // An avenue crossed by a street at 35 degrees, a curved street joining
+    // it at 60, and a five-arm junction of streets.
+    build(
+        &mut w,
+        Curve::straight(at(-160.0, 0.0), at(160.0, 0.0)),
+        RoadKind::Avenue,
+    );
+    let d35 = [libm::cosf(35f32.to_radians()), libm::sinf(35f32.to_radians())];
+    build(
+        &mut w,
+        Curve::straight(
+            at(-90.0 * d35[0] - 40.0, -90.0 * d35[1]),
+            at(90.0 * d35[0] - 40.0, 90.0 * d35[1]),
+        ),
+        RoadKind::Street,
+    );
+    build(
+        &mut w,
+        Curve::from_tangents(at(120.0, -110.0), [0.0, 1.0], at(80.0, 0.0), [-0.5, 0.866])
+            .unwrap_or_else(|| Curve::through_corner(at(120.0, -110.0), at(120.0, -50.0), at(80.0, 0.0))),
+        RoadKind::Street,
+    );
+    let hub = at(60.0, 120.0);
+    for deg in [0.0f32, 80.0, 150.0, 215.0, 290.0] {
+        let d = [libm::cosf(deg.to_radians()), libm::sinf(deg.to_radians())];
+        build(
+            &mut w,
+            Curve::straight(hub, [hub[0] + d[0] * 70.0, hub[1] + d[1] * 70.0]),
+            RoadKind::Street,
+        );
+    }
+    traffic_sync(&mut w);
+    let (wpx, hpx) = (1620usize, 760usize);
+    let mut shapes = 0;
+    let mut paths = 0;
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    let panels = [at(-40.0, 0.0), at(80.0, -6.0), hub];
+    for (k, &centre) in panels.iter().enumerate() {
+        let pw = wpx / 3;
+        let view = View::centred(centre, pw - 6, hpx - 64, 6.5);
+        let mut map = Canvas::new(pw - 6, hpx - 64, GRASS);
+        draw_world_opts(&mut map, &w, &view, false, false);
+        for (n, node) in w.roads.nodes.iter() {
+            if geom::dist(node.pos, centre) > 30.0 {
+                continue;
+            }
+            let Some(sh) = junction::junction_shape(&w, n, 0.0) else {
+                continue;
+            };
+            shapes += 1;
+            outline(&mut map, &view, &sh.outline, 0.2, [255, 255, 255]);
+            for a in &sh.arms {
+                polyline(&mut map, &view, &[a.left, a.right], 0.3, [255, 140, 40]);
+            }
+            if let Some(j) = w.traffic.junction_states.get(n).filter(|j| j.arms.len() >= 3) {
+                for m in &j.movements {
+                    if m.turn == junction::Turn::UTurn {
+                        continue;
+                    }
+                    paths += 1;
+                    polyline(&mut map, &view, &m.curve.flatten(0.03), 0.16, turn_rgb(m.turn));
+                }
+            }
+        }
+        cv.blit(&map, k * pw + 3, 64);
+    }
+    header(
+        &mut cv,
+        "JUNCTIONS AT ANY ANGLE: OUTLINE, ARM CUT LINES, TURN PATHS",
+        &format!(
+            "AVENUE X STREET AT 35 DEG, CURVED STREET T, 5 ARMS: {shapes} SURFACES, {paths} PATHS (BLUE STRAIGHT, GREEN RIGHT, ORANGE LEFT)"
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+fn traffic_sync(w: &mut World) {
+    // One step builds junction states for the new roads.
+    w.step();
+}
+
+/// Blocks along an S-curve: straight blocks along the kerbs, wedge gaps
+/// outside each bend, overlaps trimmed inside, cells under the road
+/// blocked.
+fn blocks_sheet(out: &str) {
+    let mut w = sheet_world();
+    let a = [300.0, 700.0];
+    let b = [560.0, 600.0];
+    let c2 = [820.0, 560.0];
+    build(
+        &mut w,
+        Curve::from_tangents(a, [1.0, 0.0], b, [0.894, -0.447]).expect("bend 1"),
+        RoadKind::Street,
+    );
+    build(
+        &mut w,
+        Curve::from_tangents(b, [0.894, -0.447], c2, [1.0, 0.0]).expect("bend 2"),
+        RoadKind::Street,
+    );
+    // A straight street crossing it (its blocks lose where they overlap).
+    build(
+        &mut w,
+        Curve::straight([600.0, 500.0], [560.0, 760.0]),
+        RoadKind::Street,
+    );
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([560.0, 630.0], wpx, hpx - 64, 2.6);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_cells(&mut map, &w, &view, true);
+    draw_world_opts(&mut map, &w, &view, false, false);
+    draw_blocks(&mut map, &w, &view);
+    let n = |f: &dyn Fn(&ZoneCell) -> bool| w.zoning.cells().filter(|(_, c)| f(c)).count();
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    header(
+        &mut cv,
+        "ZONE BLOCKS ALONG AN S-CURVE (WHITE: BLOCK OUTLINES, COLOUR: LATTICE)",
+        &format!(
+            "{} BLOCKS ON {} LATTICES. CELLS: {} USABLE, {} CONTESTED (RED), {} UNDER ROADS (GREY)",
+            w.zoning.blocks.len(),
+            w.zoning.lattices().count() - 1,
+            n(&|c| c.usable()),
+            n(&|c| c.blocked == Some(Blocked::Contested)),
+            n(&|c| c.blocked == Some(Blocked::Road)),
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// A right-angle grid on the world lattice (corner cells shared by two
+/// roads) next to a grid turned by 22 degrees that keeps its own lattice;
+/// where they meet the older grid keeps the cells.
+fn lattice_sheet(out: &str) {
+    let mut w = sheet_world();
+    let c = |x: i32, y: i32| Cell::new(x, y).center();
+    for y in [60, 65, 70] {
+        build(&mut w, Curve::straight(c(40, y), c(60, y)), RoadKind::Street);
+    }
+    for x in [40, 50, 60] {
+        build(&mut w, Curve::straight(c(x, 60), c(x, 70)), RoadKind::Street);
+    }
+    let th = 22f32.to_radians();
+    let (u, v2) = ([libm::cosf(th), libm::sinf(th)], [-libm::sinf(th), libm::cosf(th)]);
+    let o = c(67, 57);
+    let p = |i: f32, j: f32| [o[0] + u[0] * i + v2[0] * j, o[1] + u[1] * i + v2[1] * j];
+    for j in [0.0, 40.0, 80.0] {
+        build(&mut w, Curve::straight(p(0.0, j), p(160.0, j)), RoadKind::Street);
+    }
+    for i in [0.0, 80.0, 160.0] {
+        build(&mut w, Curve::straight(p(i, 0.0), p(i, 80.0)), RoadKind::Street);
+    }
+    // A link between them.
+    build(&mut w, Curve::straight(c(60, 65), p(0.0, 40.0)), RoadKind::Street);
+    let zone = |w: &mut World, q: [[f32; 2]; 4]| {
+        let _ = w.apply(Command::ZoneArea {
+            quad: q,
+            zone: Some(Zone::Residential),
+        });
+    };
+    zone(&mut w, [c(38, 58), c(62, 58), c(62, 72), c(38, 72)]);
+    zone(
+        &mut w,
+        [p(-10.0, -10.0), p(170.0, -10.0), p(170.0, 90.0), p(-10.0, 90.0)],
+    );
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([540.0, 540.0], wpx, hpx - 64, 3.4);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_cells(&mut map, &w, &view, true);
+    draw_world_opts(&mut map, &w, &view, false, false);
+    let shared = w
+        .zoning
+        .cells()
+        .filter(|(c, x)| c.lattice == LatticeId::WORLD && x.usable() && x.fronts.count_ones() >= 2)
+        .count();
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    header(
+        &mut cv,
+        "A RIGHT-ANGLE GRID SHARES ONE LATTICE; A GRID TURNED 22 DEG KEEPS ITS OWN",
+        &format!(
+            "LATTICES {}, SHARED CORNER CELLS (WHITE DOTS) {shared}, CONTESTED CELLS (RED) {}",
+            w.zoning.lattices().count(),
+            w.zoning
+                .cells()
+                .filter(|(_, x)| x.blocked == Some(Blocked::Contested))
+                .count()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// Cars queueing on a curved approach to a signalised junction.
+fn queue_sheet(out: &str) {
+    let mut w = sheet_world();
+    // A crossing of avenues whose south arm is a quarter circle.
+    build(
+        &mut w,
+        Curve::straight([440.0, 640.0], [840.0, 640.0]),
+        RoadKind::Avenue,
+    );
+    build(
+        &mut w,
+        Curve::straight([640.0, 440.0], [640.0, 640.0]),
+        RoadKind::Avenue,
+    );
+    build(
+        &mut w,
+        Curve::from_tangents([470.0, 800.0], [1.0, 0.0], [640.0, 640.0], [0.0, -1.0]).expect("curved arm"),
+        RoadKind::Avenue,
+    );
+    build(
+        &mut w,
+        Curve::straight([300.0, 800.0], [470.0, 800.0]),
+        RoadKind::Avenue,
+    );
+    let mut k = 0usize;
+    let ends = [[450.0, 640.0], [830.0, 640.0], [640.0, 450.0]];
+    for t in 0..(3 * 60 * TICKS_PER_SECOND) {
+        if t % 7 == 0 {
+            // Most traffic comes up the curve; some crosses it.
+            if k % 4 == 3 {
+                traffic::debug_request(&mut w, ends[k % 2], ends[(k + 1) % 2]);
+            } else {
+                traffic::debug_request(&mut w, [310.0, 800.0], ends[k % 3]);
+            }
+            k += 1;
+        }
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([590.0, 690.0], wpx, hpx - 64, 4.6);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, false, true);
+    let on_curve = w
+        .vehicles
+        .values()
+        .filter(|v| v.segment.is_some_and(|s| !w.roads.segments[s].curve.is_straight()) && v.stopped())
+        .count();
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    header(
+        &mut cv,
+        "A QUEUE ON A CURVED APPROACH TO A SIGNAL (RED CARS STAND)",
+        &format!(
+            "{} CARS ON THE ROADS, {on_curve} STANDING ON THE CURVE, IN BOTH LANES, BY ARC LENGTH",
+            w.vehicles.len()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// The organic town, zoomed in on the turned grid and the avenue.
+fn organic_zoom(out: &str, days: u32) {
+    let mut w = World::new(11);
+    scenarios::prebuilt(&mut w, |w| {
+        scenarios::organic(w);
+    });
+    for _ in 0..(days * balance::TICKS_PER_DAY + 8 * balance::TICKS_PER_HOUR - balance::START_TICK_OF_DAY) {
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([520.0, 800.0], wpx, hpx - 64, 2.4);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, true, true);
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    let turned = w
+        .buildings
+        .values()
+        .filter(|b| {
+            let r = b.rotation().to_degrees().rem_euclid(90.0);
+            r > 1.0 && r < 89.0
+        })
+        .count();
+    header(
+        &mut cv,
+        "ORGANIC TOWN: LOTS AND BUILDINGS AT THEIR ROAD'S ANGLE (BRIGHT EDGE = FRONT)",
+        &format!(
+            "DAY {} 08:00  POP {}  BUILDINGS {} ({} TURNED OFF THE AXES)  CARS {}",
+            w.time.day,
+            w.stats.population,
+            w.buildings.len(),
+            turned,
+            w.vehicles.len()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// The organic town through one day, top-down (20-30 s).
+fn organic_video(out: &str, seconds: u32) {
+    let mut w = World::new(11);
+    scenarios::prebuilt(&mut w, |w| {
+        scenarios::organic(w);
+    });
+    // Grow it first, to midnight of day 12.
+    while w.time.day < 12 || w.time.tick_of_day != 0 {
+        w.step();
+    }
+    let (wpx, hpx) = (1280usize, 800usize);
+    let fps = 25u32;
+    let frames = seconds * fps;
+    let per_frame = balance::TICKS_PER_DAY / frames;
+    let mut child = Proc::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s"])
+        .arg(format!("{wpx}x{hpx}"))
+        .args([
+            "-r",
+            &fps.to_string(),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "20",
+            out,
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("ffmpeg");
+    let stdin = child.stdin.as_mut().expect("stdin");
+    for f in 0..frames {
+        for _ in 0..per_frame {
+            w.step();
+        }
+        // Slow pan from the turned grid over the avenue to the ring.
+        let t = f as f32 / frames as f32;
+        let c = [430.0 + 260.0 * t, 820.0 + 220.0 * t];
+        let view = View::centred(c, wpx, hpx - 48, 1.45);
+        let mut map = Canvas::new(wpx, hpx - 48, GRASS);
+        draw_world_opts(&mut map, &w, &view, true, true);
+        let mut cv = Canvas::new(wpx, hpx, GRASS);
+        cv.blit(&map, 0, 48);
+        cv.rect(0.0, 0.0, wpx as f32, 48.0, [22, 24, 28]);
+        let h = w.time.hour();
+        cv.text(
+            12,
+            14,
+            &format!(
+                "ORGANIC TOWN  {:02}:{:02}  POP {}  CARS {}",
+                h as u32,
+                ((h - h.floor()) * 60.0) as u32,
+                w.stats.population,
+                w.vehicles.len()
+            ),
+            2,
+            [235, 235, 235],
+        );
+        stdin.write_all(&cv.px).expect("write frame");
+    }
+    drop(child.stdin.take());
+    child.wait().expect("ffmpeg");
+}
+
 /// Header bar with a title and a line of numbers.
 fn header(cv: &mut Canvas, title: &str, info: &str) {
     cv.rect(0.0, 0.0, cv.w as f32, 64.0, [22, 24, 28]);
@@ -1173,6 +1666,13 @@ fn main() {
         "day" => day(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
         "watch" => watch(&out, &args[2..]),
         "organic" => organic(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0)),
-        _ => panic!("modes: signal, lots, video, day, watch, organic"),
+        "curve" => curve_sheet(&out),
+        "junctions" => junction_sheet(&out),
+        "blocks" => blocks_sheet(&out),
+        "lattices" => lattice_sheet(&out),
+        "queue" => queue_sheet(&out),
+        "organic-zoom" => organic_zoom(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(12)),
+        "organic-video" => organic_video(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(25)),
+        _ => panic!("modes: signal, lots, video, day, watch, organic, curve, junctions, blocks, lattices, queue"),
     }
 }
