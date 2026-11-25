@@ -61,6 +61,8 @@ pub mod zoning;
 
 #[cfg(test)]
 mod people_tests;
+#[cfg(test)]
+mod trip_tests;
 
 pub use buildings::{Building, BuildingId, Facing, Footprint};
 pub use citizens::{
@@ -73,7 +75,7 @@ pub use command::{
 pub use curve::{Curve, Pose};
 pub use demand::Demand;
 pub use derived::Access;
-pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus};
+pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus, RunningCosts};
 pub use geom::{Cell, CellRect};
 pub use grid::{CellData, GridView, Occupant, Zone};
 pub use growth::{BuildingMeta, GrowthState};

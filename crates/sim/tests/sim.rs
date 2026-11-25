@@ -130,13 +130,28 @@ fn no_jobs_means_unemployment_and_people_leave() {
         .collect();
     assert!(workers.len() > 5, "{}", workers.len());
     assert!(w.stats.unemployment > 0.99);
+    let people: Vec<CitizenId> = workers.iter().flat_map(|&h| w.households[h].citizens.clone()).collect();
+    // Follow the people, not the household: two jobless singles may move in
+    // together (a couple), which dissolves one household into the other.
+    let mut tracked: std::collections::BTreeSet<HouseholdId> = workers.iter().copied().collect();
     let mut austerity = std::collections::BTreeSet::new();
     let mut broke = std::collections::BTreeSet::new();
-    while w.time.tick < 3 * DAY {
+    let mut left = std::collections::BTreeSet::new();
+    let mut gone = std::collections::BTreeSet::new();
+    let mut last_members: std::collections::BTreeMap<HouseholdId, Vec<CitizenId>> = Default::default();
+    // Four midnights: two broke singles who move in together pool their
+    // money, and the couple's own count of broke days starts again.
+    while w.time.tick < 4 * DAY {
         let t = w.time.tick + 1;
         run_to(&mut w, &mut p, t);
-        for &h in &workers {
+        for &c in &people {
+            if let Some(ci) = w.citizens.get(c) {
+                tracked.insert(ci.household);
+            }
+        }
+        for &h in &tracked {
             if let Some(hh) = w.households.get(h) {
+                last_members.insert(h, hh.citizens.clone());
                 if hh.austerity {
                     austerity.insert(h);
                 }
@@ -144,15 +159,25 @@ fn no_jobs_means_unemployment_and_people_leave() {
                 if hh.money < 2 * hh.rent.max(1) {
                     broke.insert(h);
                 }
+            } else if gone.insert(h)
+                && last_members
+                    .get(&h)
+                    .is_none_or(|m| m.iter().all(|&c| !w.citizens.contains_key(c)))
+            {
+                // Gone with all its members (not merged into a partner's).
+                left.insert(h);
             }
         }
     }
     assert!(
-        workers.iter().all(|h| !w.households.contains_key(*h)),
-        "jobless households left within three midnights"
+        people.iter().all(|c| !w.citizens.contains_key(*c)),
+        "jobless households left within four midnights"
     );
-    assert_eq!(austerity.len(), workers.len(), "every one of them cut spending first");
-    assert_eq!(broke.len(), workers.len(), "their money ran out");
+    assert!(left.len() * 2 >= workers.len(), "{} of {}", left.len(), workers.len());
+    for h in &left {
+        assert!(austerity.contains(h), "{h:?} cut spending before it left");
+        assert!(broke.contains(h), "{h:?} left when its money ran out");
+    }
     w.check_sim_invariants().unwrap();
 }
 
@@ -195,7 +220,8 @@ fn path_exists_and_vehicles_arrive() {
     );
 }
 
-/// Mean car speed over all ticks with cars, and the final average commute.
+/// Mean speed of all cars (moving or standing in queues) over the ticks
+/// with cars, the final average commute, and the population.
 fn run_layout(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32, u32) {
     let mut w = World::new(8);
     scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, grid));
@@ -207,7 +233,8 @@ fn run_layout(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32, u32)
         }
         w.step();
         if w.time.day + 2 > days && w.stats.vehicles_on_road > 20 {
-            speed += w.stats.avg_speed as f64;
+            // `avg_speed` averages the moving cars only.
+            speed += (w.stats.avg_speed * (1.0 - w.traffic.stopped_share)) as f64;
             n += 1;
             commute.push(w.stats.avg_commute_s);
         }
@@ -332,16 +359,26 @@ fn bulldozing_under_traffic_never_panics() {
 fn economy_books_taxes_and_upkeep_daily() {
     let mut w = World::new(15);
     let mut p = Some(GridPlayer::new(&Zone::ALL));
-    run_to(&mut w, &mut p, 3 * DAY + 1);
+    run_to(&mut w, &mut p, 2 * DAY + 1);
     let e = &w.economy;
-    assert_eq!(e.history.len(), 3);
+    assert_eq!(e.history.len(), 2);
     let b = e.last_day;
     assert!(b.residential_tax > 0 && b.commercial_tax + b.industrial_tax > 0);
     let day = e.history.last().unwrap();
+    // Road upkeep by road class and traffic lights, services by city size
+    // and density: the categories add up to the budget's lines.
+    let costs = e.last_day_costs;
+    assert_eq!(b.road_upkeep, costs.road_upkeep());
+    assert_eq!(b.services, costs.services());
     assert_eq!(
-        b.road_upkeep,
-        day.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
+        costs.streets + costs.highway,
+        (day.road_cells - w.stats.avenue_cells) as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
     );
+    assert_eq!(
+        costs.signals,
+        costs.signal_count as i64 * balance::SIGNAL_UPKEEP_PER_DAY
+    );
+    assert!(costs.services_city_size > 0 && costs.services_base > costs.services_city_size);
     assert_eq!(day.income - day.expenses, b.income() - b.expenses());
     assert_eq!(e.last_day_income, b.income());
     assert_eq!(e.last_day_expenses, b.expenses());
@@ -364,7 +401,7 @@ fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
     let mut player = World::new(16);
     let mut p = Some(GridPlayer::new(&Zone::ALL));
     let hundred_cells = 100 * balance::ROAD_COST_PER_CELL;
-    for _ in 0..4 * DAY {
+    for _ in 0..DAY {
         over.step();
         good.step();
         let next = player.time.tick + 1;
@@ -374,7 +411,7 @@ fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
     assert!(over.economy.money < 0, "{}", over.economy.money);
     assert!(good.economy.money > 0, "{}", good.economy.money);
     // Its roads cost more to keep than its town pays (the young player city
-    // is about break-even on day 4 and in profit later).
+    // is about break-even on day 1 and in profit later).
     let (over_net, player_net) = (over.economy.last_day.net(), player.economy.last_day.net());
     assert!(
         over_net < 0 && over_net < player_net - 1000,

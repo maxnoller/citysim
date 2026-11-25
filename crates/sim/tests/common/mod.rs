@@ -269,12 +269,30 @@ pub fn check_bulldoze(before: &World, after: &World, rect: CellRect, cells: &[Ce
         .flat_map(|&(a, b, _)| [a, b])
         .filter(|&x| rect.contains(x))
         .collect();
-    for b in before
-        .buildings
-        .values()
-        .filter(|b| b.footprint.rect().intersects(&rect))
-    {
-        reported.extend(b.footprint.rect().cells());
+    let rect_quad = {
+        let (lo, hi) = (rect.min.center(), rect.max.center());
+        let h = CELL_SIZE / 2.0;
+        [
+            [lo[0] - h, lo[1] - h],
+            [hi[0] + h, lo[1] - h],
+            [hi[0] + h, hi[1] + h],
+            [lo[0] - h, hi[1] + h],
+        ]
+    };
+    for b in before.buildings.values() {
+        // A building on the world lattice reports its cells, one on another
+        // lattice the cell under its centre.
+        if b.footprint.lattice == citysim_sim::LatticeId::WORLD {
+            if !b.footprint.rect().intersects(&rect) {
+                continue;
+            }
+            reported.extend(b.footprint.rect().cells());
+        } else {
+            if !convex_quads_overlap(&b.corners(), &rect_quad) {
+                continue;
+            }
+            reported.insert(Cell::from_pos(b.center()));
+        }
         assert!(!after.buildings.values().any(|a| a == b), "{b:?} survived");
     }
     assert_eq!(cells, reported.into_iter().collect::<Vec<_>>().as_slice());
@@ -285,6 +303,28 @@ pub fn check_bulldoze(before: &World, after: &World, rect: CellRect, cells: &[Ce
         let cell = c(i % MAP_CELLS, i / MAP_CELLS);
         assert_eq!(view.is_road(cell), covered.contains(&cell), "{cell:?} after {rect:?}");
     }
+}
+
+/// Two convex quads overlap by more than touching (separating axes, as
+/// the bulldozer decides).
+fn convex_quads_overlap(a: &[[f32; 2]; 4], b: &[[f32; 2]; 4]) -> bool {
+    for q in [a, b] {
+        for i in 0..4 {
+            let (p, r) = (q[i], q[(i + 1) % 4]);
+            let l = ((r[0] - p[0]).powi(2) + (r[1] - p[1]).powi(2)).sqrt().max(1e-6);
+            let n = [(p[1] - r[1]) / l, (r[0] - p[0]) / l];
+            let proj = |x: &[[f32; 2]; 4]| {
+                x.iter()
+                    .map(|v| v[0] * n[0] + v[1] * n[1])
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), d| (lo.min(d), hi.max(d)))
+            };
+            let ((a0, a1), (b0, b1)) = (proj(a), proj(b));
+            if a1 <= b0 + 0.04 || b1 <= a0 + 0.04 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Road graph valid and the grid's road cells exactly the cells roads pass

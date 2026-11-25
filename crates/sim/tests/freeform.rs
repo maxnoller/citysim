@@ -16,17 +16,18 @@ fn grown(seed: u64, days: u32) -> World {
     w
 }
 
-/// Round-3 saves (format 5) load: roads become straight curves, buildings
-/// keep their place, zoning and people; the town keeps running.
+/// World-grid saves (format 4, decoded through the frozen round-3 road,
+/// grid and building types) load: roads become straight curves, buildings
+/// keep their place, zoning and households; the town keeps running. Format 5
+/// (the unreleased first citizens layout) is refused.
 #[test]
-fn round3_saves_load_and_keep_running() {
+fn grid_saves_load_and_keep_running() {
     let w = grown(17, 1);
     assert!(w.stats.population > 100, "{}", w.stats.population);
-    let old = save::v5::save_as_v5(&w);
-    assert_eq!(&old[4..8], &5u32.to_le_bytes());
-    let mut l = World::load(&old).expect("round-3 save loads");
-    assert_eq!(l.stats.population, w.stats.population);
-    assert_eq!(l.citizens.len(), w.citizens.len());
+    let old = save::v4::save_as_v4(&w);
+    assert_eq!(&old[4..8], &4u32.to_le_bytes());
+    let mut l = World::load(&old).expect("grid save loads");
+    assert_eq!(l.households.len(), w.households.len());
     assert_eq!(l.roads.segments.len(), w.roads.segments.len());
     for (id, s) in w.roads.segments.iter() {
         let t = &l.roads.segments[id];
@@ -53,6 +54,9 @@ fn round3_saves_load_and_keep_running() {
     let new = l.save();
     assert_eq!(&new[4..8], &save::FORMAT_VERSION.to_le_bytes());
     assert!(World::load(&new).unwrap() == l);
+    let mut v5 = new.clone();
+    v5[4..8].copy_from_slice(&5u32.to_le_bytes());
+    assert_eq!(World::load(&v5).err(), Some(save::LoadError::UnsupportedVersion(5)));
 }
 
 /// The organic town is laid out with world-space commands only, none

@@ -610,10 +610,11 @@ fn plan_area(world: &World, quad: &[[f32; 2]; 4], rect: Option<CellRect>) -> Res
         if a[0] > hi[0] || b[0] < lo[0] || a[1] > hi[1] || b[1] < lo[1] {
             continue;
         }
-        for p in build::parts_in_quad(&world.roads, s, quad, rect.is_some()) {
-            removed.push(seg.curve.sub(p.lo, p.hi));
-            parts.push(p);
-        }
+        parts.extend(build::parts_in_quad(&world.roads, s, quad, rect.is_some()));
+    }
+    let parts = build::merge_parts(&world.roads, parts);
+    for p in &parts {
+        removed.push(world.roads.segments[p.segment].curve.sub(p.lo, p.hi));
     }
     let mut buildings = Vec::new();
     let mut bcells: Vec<Cell> = Vec::new();

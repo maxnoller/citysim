@@ -1,7 +1,8 @@
 //! Step timing over a full day in a big city (default 20,000 citizens, the
 //! hierarchy player's blocks all laid out and grown with demand held high),
-//! with extra trips through the rush so about 2,500 cars are on the road at
-//! the peak. Each slow step is re-timed on clones (best of 5) to separate
+//! with extra trips through the rush if fewer than 2,500 cars are on the
+//! road at the peak (every car trip is drawn now, up to the vehicle budget,
+//! so the city's own traffic usually fills it). Each slow step is re-timed on clones (best of 5) to separate
 //! real cost from OS noise (other processes on the machine).
 //!
 //! cargo run -p citysim_sim --release --example bench [population] [cars]
@@ -46,7 +47,8 @@ fn main() {
         w.time.day,
         t0.elapsed().as_secs_f64()
     );
-    // Advance to 06:00 of the next day, then time a full day.
+    // Advance to 06:00 (demand no longer forced: the city stays near its
+    // size), then time a full day.
     while w.time.tick_of_day != 6 * balance::TICKS_PER_HOUR {
         w.step();
     }
@@ -83,6 +85,14 @@ fn main() {
         w.step();
         let dt = t.elapsed().as_nanos();
         peak = peak.max(w.vehicles.len());
+        if w.time.tick_of_day.is_multiple_of(2 * balance::TICKS_PER_HOUR) {
+            println!(
+                "  {:02}:00 cars {} waiting to start {}",
+                w.time.tick_of_day / balance::TICKS_PER_HOUR,
+                w.vehicles.len(),
+                w.traffic.pending.len()
+            );
+        }
         times.push(dt);
         if let Some(before) = before
             && (worst.len() < 5 || dt > worst.last().unwrap().0)

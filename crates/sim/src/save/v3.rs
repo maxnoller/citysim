@@ -361,7 +361,7 @@ impl WorldV3 {
         let day = self.time.day;
         let mut w = World::new(self.seed);
         w.rng = self.rng;
-        w.time = self.time;
+        w.time = super::v4::upgrade_time(self.time);
         w.roads = roads;
         w.buildings = upgrade_buildings(self.buildings);
         w.households = self.households.map_values(|h| h.upgrade(day));

@@ -738,7 +738,7 @@ pub(crate) fn parts_in_quad(roads: &RoadNetwork, s: SegmentId, quad: &[[f32; 2];
         let t = seg.pose(d, 0.0).dir;
         crate::CELL_SIZE * 0.5 / t[0].abs().max(t[1].abs()).max(0.5)
     };
-    spans
+    let mut out: Vec<Part> = spans
         .into_iter()
         // Touching a corner or an edge is not running inside.
         .filter(|&(lo, hi)| hi - lo > 0.05)
@@ -749,6 +749,71 @@ pub(crate) fn parts_in_quad(roads: &RoadNetwork, s: SegmentId, quad: &[[f32; 2];
                 part(roads, s, lo, hi)
             }
         })
+        .collect();
+    if cells {
+        // A cell piece cut by a node that is not on a cell centre (two
+        // diagonals crossing at a cell corner): the widening runs on into
+        // the segment that continues straight through that node.
+        let mut more = Vec::new();
+        for p in &out {
+            let l = seg.length;
+            for (at_a, over) in [(true, half(p.lo) - p.lo), (false, p.hi + half(p.hi) - l)] {
+                if over <= 0.05 || (at_a && p.lo > 0.01) || (!at_a && p.hi < l - 0.01) {
+                    continue;
+                }
+                let node = if at_a { seg.a } else { seg.b };
+                let pos = roads.nodes[node].pos;
+                let c = crate::Cell::from_pos(pos).center();
+                if (c[0] - pos[0]).abs() < 0.05 && (c[1] - pos[1]).abs() < 0.05 {
+                    continue;
+                }
+                // Direction away from the node along `s`.
+                let d0 = if at_a {
+                    seg.pose(0.0, 0.0).dir
+                } else {
+                    let d = seg.pose(l, 0.0).dir;
+                    [-d[0], -d[1]]
+                };
+                for &t in &roads.nodes[node].segments {
+                    let ts = &roads.segments[t];
+                    if t == s || ts.kind == RoadKind::Highway {
+                        continue;
+                    }
+                    let (d, from_a) = if ts.a == node {
+                        (ts.pose(0.0, 0.0).dir, true)
+                    } else {
+                        let d = ts.pose(ts.length, 0.0).dir;
+                        ([-d[0], -d[1]], false)
+                    };
+                    if geom::dot(d, d0) > -0.999 {
+                        continue;
+                    }
+                    let (a, b) = if from_a {
+                        (0.0, over)
+                    } else {
+                        (ts.length - over, ts.length)
+                    };
+                    more.extend(part(roads, t, a, b));
+                }
+            }
+        }
+        out.extend(more);
+    }
+    out
+}
+
+/// Union overlapping parts of the same segment (normalised again).
+pub(crate) fn merge_parts(roads: &RoadNetwork, mut parts: Vec<Part>) -> Vec<Part> {
+    parts.sort_by(|a, b| a.segment.cmp(&b.segment).then(a.lo.total_cmp(&b.lo)));
+    let mut out: Vec<Part> = Vec::with_capacity(parts.len());
+    for p in parts {
+        match out.last_mut() {
+            Some(q) if q.segment == p.segment && p.lo <= q.hi + 0.01 => q.hi = q.hi.max(p.hi),
+            _ => out.push(p),
+        }
+    }
+    out.into_iter()
+        .filter_map(|p| part(roads, p.segment, p.lo, p.hi))
         .collect()
 }
 

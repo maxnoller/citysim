@@ -27,7 +27,9 @@ use crate::junction::{self, JunctionState, Turn};
 use crate::path::{self, Target};
 use crate::roads::RoadSegment;
 use crate::side::SideTable;
-use crate::{HouseholdId, NodeId, RoadNetwork, SegmentId, TICKS_PER_SECOND, World, balance, geom, households};
+use crate::{
+    BuildingId, HouseholdId, NodeId, RoadNetwork, SegmentId, TICKS_PER_SECOND, World, balance, geom, households,
+};
 
 new_key_type! {
     /// Stable id of a [`Vehicle`].
@@ -167,15 +169,27 @@ pub struct Trip {
     pub needs_route: bool,
     /// In the re-plan queue.
     pub queued: bool,
-    /// The citizen driving (none for trucks, cars of households that left,
-    /// and cars whose people already arrived on the calendar). Passengers:
-    /// `inspect::occupants`.
+    /// The citizen driving (none for trucks and for cars of households
+    /// leaving the city, see `party`). The people in a car stay in it from
+    /// departure to arrival. Passengers: `inspect::occupants`.
     pub citizen: Option<CitizenId>,
-    /// The citizen whose trip this car draws (stays set after they got out
-    /// at their calendar arrival; their commute statistics come from it).
+    /// The citizen whose trip this car draws (the driver; stays set if the
+    /// driver leaves the city mid-trip, for their commute statistics).
     pub owner: Option<CitizenId>,
     /// Where the trip started.
     pub from: Place,
+    /// Buildings at the two ends (`None`: the highway entry, or a building
+    /// that has since been removed is still named here; check it exists).
+    pub from_building: Option<BuildingId>,
+    pub to_building: Option<BuildingId>,
+    /// People aboard who are no longer citizens (a household moving out of
+    /// the city drives away with this many). 0 for citizens' trips (count
+    /// them with `inspect::occupants`) and trucks.
+    pub party: u8,
+    /// Goods aboard a truck, units (0 for cars).
+    pub cargo: f32,
+    /// Tick the car pulled out onto the road.
+    pub started_tick: u64,
 }
 
 /// A trip waiting for its car to be put on the road.
@@ -188,6 +202,30 @@ pub struct Departure {
     pub from: Place,
     pub to: Place,
     pub requested_tick: u64,
+    /// See [`Trip::from_building`], [`Trip::to_building`], [`Trip::party`],
+    /// [`Trip::cargo`].
+    pub from_building: Option<BuildingId>,
+    pub to_building: Option<BuildingId>,
+    pub party: u8,
+    pub cargo: f32,
+}
+
+impl Departure {
+    /// A trip of `purpose` between two places, requested now.
+    pub(crate) fn new(world: &World, purpose: TripPurpose, from: Place, to: Place) -> Departure {
+        Departure {
+            household: None,
+            citizen: None,
+            purpose,
+            from,
+            to,
+            requested_tick: world.time.tick,
+            from_building: None,
+            to_building: None,
+            party: 0,
+            cargo: 0.0,
+        }
+    }
 }
 
 /// How a trip ended, reported to the household.
@@ -214,6 +252,10 @@ pub(crate) struct Ended {
     pub purpose: TripPurpose,
     pub end: TripEnd,
     pub to: Place,
+    pub to_building: Option<BuildingId>,
+    /// Where the car was when the trip ended (its people go on from there
+    /// when it was taken off the road).
+    pub at: Option<[f32; 2]>,
 }
 
 /// All traffic state that is not on the vehicles themselves.
@@ -284,26 +326,57 @@ pub fn shortest_path(roads: &RoadNetwork, from: NodeId, to: NodeId) -> Option<Ve
 /// Queue a trip. The car appears once a route is found and the driveway is
 /// clear.
 pub(crate) fn request(world: &mut World, household: Option<HouseholdId>, purpose: TripPurpose, from: Place, to: Place) {
-    request_for(world, household, None, purpose, from, to);
+    let mut d = Departure::new(world, purpose, from, to);
+    d.household = household;
+    request_trip(world, d);
 }
 
-/// Queue a trip driven by `citizen`.
-pub(crate) fn request_for(
-    world: &mut World,
-    household: Option<HouseholdId>,
-    citizen: Option<CitizenId>,
-    purpose: TripPurpose,
-    from: Place,
-    to: Place,
-) {
-    world.traffic.pending.push_back(Departure {
-        household,
-        citizen,
-        purpose,
-        from,
-        to,
-        requested_tick: world.time.tick,
-    });
+/// Queue a trip (see [`Departure`]).
+pub(crate) fn request_trip(world: &mut World, dep: Departure) {
+    world.traffic.pending.push_back(dep);
+}
+
+/// A household left the city while `party` of its members were in car
+/// `id`: the car takes them out to the highway instead.
+pub(crate) fn move_out(world: &mut World, id: VehicleId, party: u8) {
+    let Some(t) = world.traffic.trips.get_mut(id) else {
+        return;
+    };
+    t.purpose = TripPurpose::MoveOut;
+    t.to = Place::Entry;
+    t.to_building = None;
+    t.citizen = None;
+    t.party = party;
+    t.needs_route = true;
+    queue_replan(&mut world.traffic, id, true);
+    if let Some(v) = world.vehicles.get_mut(id) {
+        v.household = None;
+    }
+}
+
+/// The people in car `id` change their mind: it heads for `to` instead
+/// (they turn back home when the shop or venue they were driving to has
+/// closed).
+pub(crate) fn redirect(world: &mut World, id: VehicleId, to: Place, to_building: Option<BuildingId>) {
+    let Some(t) = world.traffic.trips.get_mut(id) else {
+        return;
+    };
+    t.to = to;
+    t.to_building = to_building;
+    t.needs_route = true;
+    queue_replan(&mut world.traffic, id, true);
+}
+
+/// Cars allowed on the road (and waiting to start) at once: 125 per 1,000
+/// residents, at least 150, at most `balance::MAX_VEHICLES`.
+pub fn vehicle_budget(world: &World) -> usize {
+    (world.citizens.len() * balance::VEHICLES_PER_1000 / 1000).clamp(balance::MIN_VEHICLE_BUDGET, balance::MAX_VEHICLES)
+}
+
+/// Is there room in the vehicle budget ([`vehicle_budget`]) for one more
+/// car?
+pub fn has_room(world: &World) -> bool {
+    world.vehicles.len() + world.traffic.pending.len() < vehicle_budget(world)
 }
 
 fn resolve(world: &World, place: Place) -> Option<Access> {
@@ -365,7 +438,9 @@ fn queue_replan(traffic: &mut TrafficState, id: VehicleId, urgent: bool) {
 }
 
 pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, ended: &mut Vec<Ended>) {
-    let household = world.vehicles.remove(id).and_then(|v| v.household);
+    let car = world.vehicles.remove(id);
+    let at = car.as_ref().map(|v| v.pos);
+    let household = car.and_then(|v| v.household);
     if let Some(trip) = world.traffic.trips.remove(id) {
         if let TripEnd::Arrived(s) | TripEnd::GaveUp(s) = end {
             world.traffic.trips_today += 1;
@@ -385,6 +460,8 @@ pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, end
             purpose: trip.purpose,
             end,
             to: trip.to,
+            to_building: trip.to_building,
+            at,
         });
     }
 }
@@ -610,6 +687,8 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
 fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
     let mut tries = world.traffic.pending.len().min(balance::DEPARTURES_PER_TICK);
     let mut lanes: Option<Vec<(usize, f32)>> = None;
+    let mut marks = std::mem::take(&mut world.cache.depart_marks);
+    let mut marked: Vec<usize> = Vec::new();
     while tries > 0 && *budget > 0 {
         tries -= 1;
         let Some(dep) = world.traffic.pending.pop_front() else {
@@ -627,6 +706,8 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             purpose: dep.purpose,
             end,
             to: dep.to,
+            to_building: dep.to_building,
+            at: None,
         };
         let waited = world.time.tick.saturating_sub(dep.requested_tick);
         if waited > secs_to_ticks(balance::MAX_DEPARTURE_WAIT_S) {
@@ -640,10 +721,29 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         let from_seg = world.roads.segments[from.segment].clone();
         // Cars per lane, for the driveway check (built on first use).
         let lanes = lanes.get_or_insert_with(|| {
+            // Only the segments this tick's departures start on (the first
+            // `tries` in the queue; blocked ones go to its back).
+            marks.resize(world.roads.segments.slot_count(), false);
+            marked.push(key_index(from.segment));
+            for d in world.traffic.pending.iter().take(tries) {
+                if let Some(a) = resolve(world, d.from) {
+                    marked.push(key_index(a.segment));
+                }
+            }
+            for &i in &marked {
+                marks[i] = true;
+            }
             let mut l: Vec<(usize, f32)> = world
                 .vehicles
                 .values()
-                .filter_map(|v| v.segment.map(|s| (lane_of(s, v.forward), v.progress)))
+                .filter_map(|v| {
+                    let s = v.segment?;
+                    marks
+                        .get(key_index(s))
+                        .copied()
+                        .unwrap_or(false)
+                        .then(|| (lane_of(s, v.forward), v.progress))
+                })
                 .collect();
             l.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
             l
@@ -762,6 +862,11 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 citizen: dep.citizen,
                 owner: dep.citizen,
                 from: dep.from,
+                from_building: dep.from_building,
+                to_building: dep.to_building,
+                party: dep.party,
+                cargo: dep.cargo,
+                started_tick: world.time.tick,
             },
         );
         if let Some(c) = dep.citizen {
@@ -772,6 +877,10 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             h.vehicle = Some(id);
         }
     }
+    for i in marked {
+        marks[i] = false;
+    }
+    world.cache.depart_marks = marks;
 }
 
 /// The car of `driver` started: they and their passengers are in it.

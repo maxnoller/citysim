@@ -27,6 +27,11 @@ pub struct PlacePeople {
     pub staff_present: u16,
     /// Shoppers and leisure visitors inside right now.
     pub visitors: u16,
+    /// Everyone inside right now who does not live here (staff on shift,
+    /// shoppers, visitors, children who came along), in no particular
+    /// order. Residents at home: their household's members
+    /// (`inspect::inside` lists both).
+    pub guests: Vec<CitizenId>,
     /// Goods on the shelves (commercial), units (one unit = what one
     /// person uses in a day).
     pub stock: f32,
@@ -237,6 +242,25 @@ pub(crate) fn catch_up_need(world: &mut World, id: CitizenId) {
     c.need_tick = now;
 }
 
+/// Is `id` inside `b` as a guest (not at home)?
+fn guest_in(world: &World, id: CitizenId, location: &Location) -> Option<BuildingId> {
+    let b = location.building()?;
+    let home = world.households.get(world.citizens.get(id)?.household)?.home;
+    (b != home && world.buildings.contains_key(b)).then_some(b)
+}
+
+/// Take `id` off the guest list of the building they are in (before they
+/// leave it, or the city).
+pub(crate) fn leave_guests(world: &mut World, id: CitizenId) {
+    let Some(c) = world.citizens.get(id) else { return };
+    if let Some(b) = guest_in(world, id, &c.location)
+        && let Some(p) = world.people.places.get_mut(b)
+        && let Some(i) = p.guests.iter().position(|&g| g == id)
+    {
+        p.guests.swap_remove(i);
+    }
+}
+
 /// Move a citizen and set what they are doing. The only place that
 /// changes `location` and `activity`.
 pub(crate) fn set_place(world: &mut World, id: CitizenId, activity: Activity, location: Location, until: u64) {
@@ -244,6 +268,12 @@ pub(crate) fn set_place(world: &mut World, id: CitizenId, activity: Activity, lo
     let Some(c) = world.citizens.get(id) else { return };
     let (old_a, old_l, hid) = (c.activity, c.location, c.household);
     presence(world, old_a, &old_l, -1);
+    if old_l != location {
+        leave_guests(world, id);
+        if let Some(b) = guest_in(world, id, &location) {
+            place(world, b).guests.push(id);
+        }
+    }
     let c = &mut world.citizens[id];
     c.activity = activity;
     c.location = location;
@@ -302,6 +332,8 @@ pub(crate) fn hire(world: &mut World, id: CitizenId, workplace: BuildingId, shif
         });
         c.unemployed_days = 0;
         c.hopeless_commutes = 0;
+        // A new commute: estimated until the first trip there.
+        c.commute_ticks = 0;
         c.log(day, LifeEvent::GotJob(workplace));
     });
     world.people.events_today.hired += 1;
@@ -464,6 +496,7 @@ pub(crate) fn check(world: &World) -> Result<(), String> {
     let mut staff: std::collections::BTreeMap<BuildingId, u16> = Default::default();
     let mut visitors: std::collections::BTreeMap<BuildingId, u16> = Default::default();
     let mut workers: std::collections::BTreeMap<BuildingId, Vec<CitizenId>> = Default::default();
+    let mut guests: std::collections::BTreeMap<BuildingId, Vec<CitizenId>> = Default::default();
     for (id, c) in world.citizens.iter() {
         let Some(h) = world.households.get(c.household) else {
             return Err(format!("{id:?} has missing household"));
@@ -484,6 +517,9 @@ pub(crate) fn check(world: &World) -> Result<(), String> {
             Location::In(b) => {
                 if !world.buildings.contains_key(*b) {
                     return Err(format!("{id:?} is in a missing building"));
+                }
+                if *b != h.home {
+                    guests.entry(*b).or_default().push(id);
                 }
                 match c.activity {
                     Activity::Working => *staff.entry(*b).or_default() += 1,
@@ -546,6 +582,17 @@ pub(crate) fn check(world: &World) -> Result<(), String> {
         if have != want {
             return Err(format!("{b:?} workers list wrong"));
         }
+        let mut have = pl.guests.clone();
+        have.sort_unstable();
+        let mut want = guests.remove(&b).unwrap_or_default();
+        want.sort_unstable();
+        if have != want {
+            return Err(format!(
+                "{b:?} guest list wrong: {} listed, {} inside",
+                have.len(),
+                want.len()
+            ));
+        }
         for &hid in &pl.households {
             if world.households.get(hid).is_none_or(|h| h.home != b) {
                 return Err(format!("{b:?} lists {hid:?} which does not live there"));
@@ -554,6 +601,9 @@ pub(crate) fn check(world: &World) -> Result<(), String> {
     }
     if let Some((b, _)) = workers.into_iter().next() {
         return Err(format!("{b:?} has workers but no list"));
+    }
+    if let Some((b, _)) = guests.into_iter().next() {
+        return Err(format!("{b:?} has people inside but no list"));
     }
     for (hid, h) in world.households.iter() {
         if !world
