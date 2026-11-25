@@ -173,7 +173,8 @@ pub struct Job {
 /// How a trip is made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum TravelMode {
-    /// Driving one of the household's cars (on screen or off screen).
+    /// Driving one of the household's cars (on the road, or off screen when
+    /// the vehicle budget is used up).
     #[default]
     Driving,
     /// Riding with a household member who drives (children, car-sharing
@@ -183,6 +184,9 @@ pub enum TravelMode {
     /// `balance::CARLESS_TIME_FACTOR` times as long (a lift, a bus, a long
     /// walk; pedestrians and transit come in stage 3).
     NoCar,
+    /// A short trip on foot (within `balance::WALK_MAX_M`), off screen;
+    /// takes about as long as the drive would.
+    Walking,
 }
 
 /// A trip in progress.
@@ -201,17 +205,15 @@ pub struct Journey {
     /// it has started. `None` while the car waits to start, and for trips
     /// made off screen.
     pub vehicle: Option<VehicleId>,
-    /// Tick the trip started.
+    /// Tick the trip started (they left the building).
     pub departed_tick: u64,
     /// Off-screen trips: tick of arrival. `None` for trips by a car on the
-    /// road (or waiting to start), which end when the car arrives or at
-    /// `due_tick`, whichever comes first.
+    /// road (or waiting to start), which end when the car arrives, however
+    /// long that takes: the people stay in it from departure to arrival.
     pub arrive_tick: Option<u64>,
-    /// Latest arrival on the calendar. A car drawn on the road moves in real
-    /// time (a minute's drive is hours of calendar time, see `balance`), so
-    /// its people get out at this tick at the latest
-    /// (`balance::TRIP_DUE_FACTOR`, `MIN_TRIP_H`, `MAX_TRIP_H`); the car
-    /// then finishes its drive on screen without them.
+    /// Expected arrival (for display: the off-screen arrival, or for a car
+    /// the departure plus the expected door-to-door time). A car on the
+    /// road may arrive later or earlier; nobody gets out before it arrives.
     pub due_tick: u64,
 }
 
@@ -444,6 +446,10 @@ pub struct Citizen {
     /// Duration of their last commute (vehicle seconds; estimated for trips
     /// made off screen). 0 = none yet.
     pub last_commute_s: f32,
+    /// Door-to-door ticks their last trip to work took (waiting for the car
+    /// to start included). They leave home this long (plus a margin) before
+    /// their next shift. 0 = no trip to work yet (the estimate is used).
+    pub commute_ticks: u32,
     /// Consecutive commutes over `balance::HOPELESS_COMMUTE_S`.
     pub hopeless_commutes: u8,
     /// Consecutive midnights in the workforce without a job.

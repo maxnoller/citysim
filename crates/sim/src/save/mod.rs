@@ -4,8 +4,11 @@
 //! [`World`], then optionally an extension block (postcard, starts with its
 //! own version number).
 //!
-//! Version 5 (round 3: citizens, household money and goods, the population
-//! bookkeeping) is written now. Older saves still load:
+//! Version 6 (citizens, household money and goods, the population
+//! bookkeeping; the 16-minute day, people bound to their cars, trips that
+//! name their buildings, party and cargo) is written now. Version 5 was the
+//! unreleased first citizens layout and does not load. Older saves still
+//! load (their clock keeps its time of day on the longer day):
 //!
 //! * Version 4 (round 2: avenues, lanes, junction control, fiscal state)
 //!   decodes into the frozen round-2 types in [`v4`].
@@ -37,6 +40,9 @@ pub mod v5;
 pub const MAGIC: &[u8; 4] = b"CSIM";
 /// Bump when the World layout changes incompatibly.
 pub const FORMAT_VERSION: u32 = 6;
+/// Versions between the oldest loadable and this one that do not load
+/// (5: the unreleased first citizens layout).
+const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
@@ -158,7 +164,7 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
         return Err(LoadError::BadMagic);
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().expect("4 bytes"));
-    if !(OLDEST_LOADABLE_VERSION..=FORMAT_VERSION).contains(&version) {
+    if !(OLDEST_LOADABLE_VERSION..=FORMAT_VERSION).contains(&version) || UNLOADABLE_VERSIONS.contains(&version) {
         return Err(LoadError::UnsupportedVersion(version));
     }
     let corrupt = |e: postcard::Error| LoadError::Corrupt(e.to_string());
@@ -169,10 +175,6 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
         }
         4 => {
             let (old, rest): (v4::WorldV4, &[u8]) = postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?;
-            (old.upgrade(), rest)
-        }
-        5 => {
-            let (old, rest): (v5::WorldV5, &[u8]) = postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?;
             (old.upgrade(), rest)
         }
         _ => postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?,

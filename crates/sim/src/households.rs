@@ -277,6 +277,7 @@ pub(crate) fn new_citizen(world: &mut World, hid: HouseholdId, age_days: u32, ro
         happiness: Default::default(),
         journal: Vec::new(),
         last_commute_s: 0.0,
+        commute_ticks: 0,
         hopeless_commutes: 0,
         unemployed_days: 0,
         worked_day: 0,
@@ -323,8 +324,9 @@ pub(crate) fn remove_member(world: &mut World, id: CitizenId) -> Option<Citizen>
     people::fire(world, id, false);
     let c = world.citizens.get(id)?;
     let hid = c.household;
-    // Off the books: presence and workforce.
+    // Off the books: presence, guest lists and workforce.
     people::set_place(world, id, Activity::Home, c.location, 0);
+    people::leave_guests(world, id);
     let home = world.households.get(hid).map(|h| h.home);
     let c = world.citizens.remove(id)?;
     let n = &mut world.people.activity_counts[Activity::Home.index()];
@@ -332,7 +334,9 @@ pub(crate) fn remove_member(world: &mut World, id: CitizenId) -> Option<Citizen>
     if c.in_workforce() {
         world.people.workforce = world.people.workforce.saturating_sub(1);
     }
-    // A car they drive keeps going without them.
+    // A car they drive keeps going without them (callers turn the cars of
+    // a household leaving town into its move out first); a car still
+    // waiting to start is not needed any more.
     if let Location::Travelling(j) = c.location
         && j.mode != TravelMode::Passenger
     {
@@ -341,9 +345,7 @@ pub(crate) fn remove_member(world: &mut World, id: CitizenId) -> Option<Citizen>
         {
             t.citizen = None;
         }
-        for d in world.traffic.pending.iter_mut().filter(|d| d.citizen == Some(id)) {
-            d.citizen = None;
-        }
+        world.traffic.pending.retain(|d| d.citizen != Some(id));
     }
     if let Some(h) = world.households.get_mut(hid) {
         h.citizens.retain(|&m| m != id);
@@ -384,16 +386,34 @@ pub(crate) fn insert(world: &mut World, h: Household) -> HouseholdId {
 }
 
 /// Remove a household and all its members from the city, freeing its home
-/// and their jobs. `drive_out`: a car drives out to the highway (when
-/// nobody is on the road already).
+/// and their jobs. Members out in a car drive on out of the city in it
+/// (their trip becomes the household's move out); `drive_out`: when nobody
+/// is on the road, a car with the whole household drives out to the
+/// highway.
 pub(crate) fn leave(world: &mut World, id: HouseholdId, drive_out: bool) {
     let Some(h) = world.households.get(id) else { return };
-    let on_road = h.vehicle;
     let home = h.home;
     let members = h.citizens.clone();
     let n = members.len() as u32;
+    // Cars on the road with members in them, and how many each carries.
+    let mut cars: Vec<(crate::VehicleId, u8)> = Vec::new();
+    for &m in &members {
+        let Some(c) = world.citizens.get(m) else { continue };
+        if let Location::Travelling(j) = &c.location
+            && let Some(v) = j.vehicle
+            && world.vehicles.contains_key(v)
+        {
+            match cars.iter_mut().find(|x| x.0 == v) {
+                Some(x) => x.1 = x.1.saturating_add(1),
+                None => cars.push((v, 1)),
+            }
+        }
+    }
     for m in members {
         remove_member(world, m);
+    }
+    for &(v, party) in &cars {
+        traffic::move_out(world, v, party);
     }
     let Some(h) = world.households.remove(id) else { return };
     world.people.known_households = world.households.len();
@@ -414,10 +434,15 @@ pub(crate) fn leave(world: &mut World, id: HouseholdId, drive_out: bool) {
     world.people.events_today.households_left += 1;
     world.people.events_today.citizens_left += n;
     if drive_out
-        && on_road.is_none()
+        && cars.is_empty()
+        && n > 0
+        && traffic::has_room(world)
         && let Some(from) = place_of(world, home)
     {
-        traffic::request(world, None, TripPurpose::MoveOut, from, Place::Entry);
+        let mut d = traffic::Departure::new(world, TripPurpose::MoveOut, from, Place::Entry);
+        d.from_building = Some(home);
+        d.party = n.min(u8::MAX as u32) as u8;
+        traffic::request_trip(world, d);
         people::count_trip(world, TripPurpose::MoveOut);
     }
 }

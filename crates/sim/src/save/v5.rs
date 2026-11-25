@@ -1,33 +1,25 @@
-//! The round-3 save layout (format version 5), frozen: copies of the
-//! round-3 definitions of every type whose layout changed with free-form
-//! roads (road segments without curves, buildings on a world-grid
-//! rectangle, the world grid, junction turn paths as quadratics, and the
-//! World itself). Unchanged types are reused from the live crate. Never edit
-//! them. Version 4 and 3 reuse these types where their layout was the same.
+//! The world-grid layouts of rounds 1-3, frozen: copies of the round-3
+//! definitions of every type whose layout changed with free-form roads (road
+//! segments without curves, buildings on a world-grid rectangle, the world
+//! grid, junction turn paths as quadratics). Never edit them. Formats 4 and
+//! 3 decode through these types. Format 5 itself (the unreleased first
+//! citizens layout) no longer loads: its people types changed with the
+//! 16-minute day.
 //!
-//! Conversions: `WorldV5::upgrade` makes a live world; roads become straight
-//! curves (serials in slot order), buildings stand on lattice 0, zone cells
-//! and buildings move onto the blocks of their roads after loading
-//! (`zoning::adopt_grid`), junction geometry is rebuilt (settings and
-//! timers kept by the live rebuild).
-
-use std::collections::VecDeque;
+//! Conversions: roads become straight curves (serials in slot order),
+//! buildings stand on lattice 0, zone cells and buildings move onto the
+//! blocks of their roads after loading (`zoning::adopt_grid`), junction
+//! geometry is rebuilt (settings and timers kept by the live rebuild).
 
 use serde::{Deserialize, Serialize};
 
-use crate::citizens::{Citizen, CitizenId};
-use crate::economy::Economy;
 use crate::geom::CellRect;
 use crate::growth::{BuildingMeta, GrowthState};
 use crate::junction::{Arm, JunctionControl, JunctionSetting, JunctionState, Movement, SignalPlan, SignalState, Turn};
-use crate::people::People;
 use crate::roads::{NodeId, RoadKind, RoadNetwork, RoadNode, RoadSegment, SegmentId};
 use crate::side::SideTable;
-use crate::stats::Stats;
-use crate::traffic::{Departure, JunctionMove, TrafficState, Trip, Vehicle, VehicleId};
-use crate::{
-    Building, BuildingId, Demand, Facing, Footprint, Household, HouseholdId, IdMap, Rng, SimTime, Versions, World, Zone,
-};
+use crate::traffic::{JunctionMove, Vehicle, VehicleId};
+use crate::{Building, BuildingId, Facing, Footprint, HouseholdId, IdMap, Versions, World, Zone};
 
 // ------------------------------------------------------------------ roads ----
 
@@ -524,155 +516,4 @@ impl VersionsV5 {
             buildings: v.buildings,
         }
     }
-}
-
-// ---------------------------------------------------------------- traffic ----
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TrafficStateV5 {
-    pub trips: SideTable<VehicleId, Trip>,
-    pub junction_states: SideTable<NodeId, JunctionStateV5>,
-    pub junctions_version: u64,
-    pub pending: VecDeque<Departure>,
-    pub replan: VecDeque<VehicleId>,
-    pub roads_version: u64,
-    pub avg_commute_s: f32,
-    pub avg_speed: f32,
-    pub peak_today: u32,
-    pub peak_yesterday: u32,
-    pub trips_today: u32,
-    pub errand_acc: [f32; 2],
-    pub congestion_share: f32,
-    pub peak_congestion_today: f32,
-    pub peak_congestion_yesterday: f32,
-    pub stuck_removed: u32,
-    pub deadlocks_resolved: u32,
-    pub control_version: u64,
-}
-
-impl TrafficStateV5 {
-    /// Junction geometry and the vehicles' anchoring are redone on the
-    /// first tick (`junctions_version` / `roads_version` reset).
-    pub(crate) fn upgrade(self) -> TrafficState {
-        TrafficState {
-            trips: self.trips,
-            junction_states: upgrade_junctions(self.junction_states),
-            junctions_version: 0,
-            pending: self.pending,
-            replan: self.replan,
-            roads_version: 0,
-            avg_commute_s: self.avg_commute_s,
-            avg_speed: self.avg_speed,
-            peak_today: self.peak_today,
-            peak_yesterday: self.peak_yesterday,
-            trips_today: self.trips_today,
-            errand_acc: self.errand_acc,
-            congestion_share: self.congestion_share,
-            peak_congestion_today: self.peak_congestion_today,
-            peak_congestion_yesterday: self.peak_congestion_yesterday,
-            stuck_removed: self.stuck_removed,
-            deadlocks_resolved: self.deadlocks_resolved,
-            control_version: self.control_version,
-            stopped_share: 0.0,
-        }
-    }
-
-    pub(crate) fn of(t: &TrafficState) -> TrafficStateV5 {
-        TrafficStateV5 {
-            trips: t.trips.clone(),
-            junction_states: junctions_of(&t.junction_states),
-            junctions_version: t.junctions_version,
-            pending: t.pending.clone(),
-            replan: t.replan.clone(),
-            roads_version: t.roads_version,
-            avg_commute_s: t.avg_commute_s,
-            avg_speed: t.avg_speed,
-            peak_today: t.peak_today,
-            peak_yesterday: t.peak_yesterday,
-            trips_today: t.trips_today,
-            errand_acc: t.errand_acc,
-            congestion_share: t.congestion_share,
-            peak_congestion_today: t.peak_congestion_today,
-            peak_congestion_yesterday: t.peak_congestion_yesterday,
-            stuck_removed: t.stuck_removed,
-            deadlocks_resolved: t.deadlocks_resolved,
-            control_version: t.control_version,
-        }
-    }
-}
-
-// ------------------------------------------------------------------ world ----
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorldV5 {
-    seed: u64,
-    rng: Rng,
-    time: SimTime,
-    roads: RoadNetworkV5,
-    grid: GridV5,
-    buildings: IdMap<BuildingId, BuildingV5>,
-    households: IdMap<HouseholdId, Household>,
-    vehicles: IdMap<VehicleId, VehicleV5>,
-    economy: Economy,
-    demand: Demand,
-    stats: Stats,
-    versions: VersionsV5,
-    traffic: TrafficStateV5,
-    growth: GrowthStateV5,
-    citizens: IdMap<CitizenId, Citizen>,
-    people: People,
-}
-
-impl WorldV5 {
-    pub(crate) fn upgrade(self) -> World {
-        let mut w = World::new(self.seed);
-        w.rng = self.rng;
-        w.time = self.time;
-        w.roads = self.roads.upgrade();
-        w.buildings = upgrade_buildings(self.buildings);
-        w.households = self.households;
-        w.vehicles = upgrade_vehicles(self.vehicles);
-        w.economy = self.economy;
-        w.demand = self.demand;
-        w.stats = self.stats;
-        w.versions = self.versions.upgrade();
-        w.traffic = self.traffic.upgrade();
-        w.growth = self.growth.upgrade();
-        w.citizens = self.citizens;
-        w.people = self.people;
-        w.cache = Default::default();
-        crate::zoning::adopt_grid(&mut w, &self.grid.zones());
-        w
-    }
-}
-
-/// Write a version-5 save of a world (round-3 layout): used by tests to
-/// check that round-3 saves load. Curves become chords, buildings must
-/// stand on lattice 0.
-pub fn save_as_v5(w: &World) -> Vec<u8> {
-    let world = WorldV5 {
-        seed: w.seed,
-        rng: w.rng.clone(),
-        time: w.time.clone(),
-        roads: RoadNetworkV5::of(&w.roads),
-        grid: GridV5::of_world(w),
-        buildings: buildings_of(&w.buildings),
-        households: w.households.clone(),
-        vehicles: vehicles_of(&w.vehicles),
-        economy: w.economy.clone(),
-        demand: w.demand,
-        stats: w.stats.clone(),
-        versions: VersionsV5::of(&w.versions),
-        traffic: TrafficStateV5::of(&w.traffic),
-        growth: GrowthStateV5::of(&w.growth),
-        citizens: w.citizens.clone(),
-        people: w.people.clone(),
-    };
-    let mut out = Vec::new();
-    out.extend_from_slice(super::MAGIC);
-    out.extend_from_slice(&5u32.to_le_bytes());
-    out.extend_from_slice(&postcard::to_stdvec(&world).expect("serialisable"));
-    let ext = postcard::to_stdvec(&(1u32, super::ExtensionV1::of(w))).expect("serialisable");
-    out.extend_from_slice(&ext);
-    out
 }

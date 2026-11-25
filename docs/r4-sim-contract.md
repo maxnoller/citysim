@@ -189,3 +189,14 @@ Changed meaning:
 - Nodes with fewer than three arms are never signalled (`junction_control` is `Priority`, no lights to draw), even
   when busy. A node where the road kind changes (highway → avenue, avenue → street) has a short merge box like a
   lane-count change, so `junction_shape` returns a shape there.
+
+### 2026-11-25 (final)
+
+- Give-up rule: a car waiting at a red light needs twice `STUCK_REMOVE_AFTER_S` (120 s, longer than any signal
+  cycle) before it gives up; other waiting counts as before.
+- Departing cars are checked for a clear driveway where they really start (outside the junction box).
+- `zoning::frontage` stops at bends sharper than 45° (not only at junctions and dead ends).
+- Growth picks lots from candidate lists that change only with zoning or roads (no visible API change).
+- Measured (release, this machine): zone-block regeneration after one road edit 0.35–0.47 ms in a 10,000-resident
+  city; 20,000 citizens with 2,830 cars at the rush peak: mean step 1.35 ms, max 3.9 ms (r4 before: 1.25 ms, 3.8 ms);
+  10,000-resident hierarchy city: no step over 5 ms in the spikes run.

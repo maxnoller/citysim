@@ -290,6 +290,13 @@ impl World {
             {
                 return Err(format!("{vid:?} household {h:?} is gone"));
             }
+            if let Some(t) = self.traffic.trips.get(vid)
+                && t.citizen.is_none()
+                && t.owner.is_some()
+                && t.purpose != crate::TripPurpose::MoveOut
+            {
+                return Err(format!("{vid:?} drives on without its driver ({:?})", t.purpose));
+            }
             if let Some(c) = self.traffic.trips.get(vid).and_then(|t| t.citizen) {
                 let Some(ci) = self.citizens.get(c) else {
                     return Err(format!("{vid:?} driver {c:?} is gone"));
