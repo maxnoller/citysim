@@ -500,6 +500,7 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             if let Some(j) = world.traffic.junction_states.get_mut(change.node) {
                 crate::junction::set_setting(j, change.setting_after);
             }
+            world.traffic.control_version += 1;
         }
     }
     Outcome {

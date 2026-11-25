@@ -49,7 +49,7 @@ pub const STARTING_MONEY: i64 = 30_000;
 pub const ROAD_COST_PER_CELL: i64 = 65;
 /// Cost of one cell of avenue. Upgrading a street to an avenue costs the
 /// difference; downgrading is free (no refund).
-pub const AVENUE_COST_PER_CELL: i64 = 170;
+pub const AVENUE_COST_PER_CELL: i64 = 140;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
@@ -58,7 +58,7 @@ pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// or two; a mesh many times bigger than its town still sinks it.
 pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 1;
 /// Daily upkeep per avenue cell.
-pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 3;
+pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 2;
 /// Daily cost of city services per resident (police, fire, schools...,
 /// abstracted), charged at midnight with road upkeep. Keeps the margin per
 /// resident moderate (residents and their jobs pay ~$2.1 a day in taxes at
@@ -120,7 +120,7 @@ pub const EVENING_DEPART_SPREAD_H: f32 = 9.0;
 /// per household per day, deterministic). The rest commute "off screen" and
 /// switch between home and work instantly. Keeps traffic proportional to
 /// the city without every worker being on the road at once.
-pub const COMMUTE_DRIVE_SHARE: f32 = 0.35;
+pub const COMMUTE_DRIVE_SHARE: f32 = 0.2;
 
 // ------------------------------------------------------------- vehicles ----
 
@@ -181,8 +181,17 @@ pub const UTURN_SPEED: f32 = 3.0;
 /// ahead from this far (or its braking distance, if longer), metres.
 pub const DECIDE_DISTANCE_M: f32 = 45.0;
 /// A car may enter a junction behind a queue on its out-lane that is
-/// moving off faster than this (m/s) even without a full car spacing yet.
+/// moving off faster than this (m/s) without a full car spacing yet, when
+/// that lane is long (the queue cannot stop right behind the box).
 pub const EXIT_MOVING_SPEED: f32 = 3.0;
+/// No lane changes and no cars pulling out of driveways this close behind
+/// a junction box, metres (cars leaving the box need the room).
+pub const NO_LANE_CHANGE_AFTER_BOX_M: f32 = 10.0;
+/// All-way stops (crossings of equal roads): a car may only enter once it
+/// stood at the line, i.e. slower than this (m/s) within this distance of
+/// it (m).
+pub const STOP_SIGN_SPEED: f32 = 1.0;
+pub const STOP_SIGN_DISTANCE_M: f32 = 1.5;
 /// Critical gaps, seconds: a permissive left turn (and same-class cars)
 /// leaves this much time to a conflicting car with precedence, a car on a
 /// give-way approach this much to the major road.
@@ -225,12 +234,24 @@ pub const SIGNAL_PROGRESSION_SPEED: f32 = 14.0;
 /// Auto control turns a priority junction into signals when its busiest
 /// minute of vehicle time yesterday let in at least this many vehicles,
 /// and back below the lower number.
-pub const AUTO_SIGNAL_PER_MINUTE: u16 = 70;
-pub const AUTO_PRIORITY_PER_MINUTE: u16 = 40;
+pub const AUTO_SIGNAL_PER_MINUTE: u16 = 40;
+pub const AUTO_PRIORITY_PER_MINUTE: u16 = 22;
 
 /// Route planning: fixed cost of passing a junction, seconds (prefers
 /// straighter routes with fewer junctions).
 pub const ROUTE_JUNCTION_COST_S: f32 = 1.5;
+/// Route planning: expected wait at a junction by how the approach is
+/// controlled, seconds (replaces `ROUTE_JUNCTION_COST_S` once junctions
+/// are known): through on the major road, giving way, an all-way stop, a
+/// signal's main road and its side roads. Makes trips prefer arterials.
+pub const ROUTE_MAJOR_S: f32 = 0.5;
+pub const ROUTE_GIVE_WAY_S: f32 = 4.0;
+pub const ROUTE_ALL_WAY_S: f32 = 5.0;
+pub const ROUTE_SIGNAL_MAIN_S: f32 = 3.0;
+pub const ROUTE_SIGNAL_SIDE_S: f32 = 8.0;
+/// Route planning: turning back the way the car came at a node, seconds
+/// (only when nothing else works).
+pub const ROUTE_UTURN_COST_S: f32 = 30.0;
 /// Route planning: expected wait per car already on a segment direction
 /// that ends at a junction, multiplied by that direction's congestion.
 pub const ROUTE_QUEUE_COST_S: f32 = 2.0;
@@ -264,11 +285,11 @@ pub const ACCESS_SEARCH_CELLS: i32 = 4;
 pub const ERRAND_INTERVAL_TICKS: u64 = 10;
 /// One-way shopping runs per household per day (half home -> shop, half
 /// back), mostly 10:00-20:00.
-pub const SHOP_TRIPS_PER_HOUSEHOLD_PER_DAY: f32 = 0.3;
+pub const SHOP_TRIPS_PER_HOUSEHOLD_PER_DAY: f32 = 0.15;
 /// Goods trips per filled industrial job per day, mostly 05:00-19:00.
-pub const GOODS_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY: f32 = 0.25;
+pub const GOODS_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY: f32 = 0.15;
 /// Share of goods trips that leave for / come from the highway.
-pub const GOODS_VIA_HIGHWAY_SHARE: f32 = 0.3;
+pub const GOODS_VIA_HIGHWAY_SHARE: f32 = 0.2;
 /// Errand destinations: nearest of this many random candidates.
 pub const ERRAND_SAMPLES: usize = 3;
 

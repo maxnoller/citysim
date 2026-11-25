@@ -211,6 +211,8 @@ pub struct TrafficState {
     /// taken off the road, and junction deadlocks that had to be cleared.
     pub stuck_removed: u32,
     pub deadlocks_resolved: u32,
+    /// Bumped whenever a junction's control changes (routing costs follow).
+    pub control_version: u64,
 }
 
 pub(crate) const DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
@@ -229,7 +231,7 @@ pub fn shortest_path(roads: &RoadNetwork, from: NodeId, to: NodeId) -> Option<Ve
     let mut scratch = path::PathScratch::default();
     let mut budget = i64::MAX;
     scratch
-        .search(roads, &[(from, 0.0)], Target::Node(to), &mut budget)
+        .search(roads, &[], &[(from, 0.0)], Target::Node(to), &mut budget)
         .map(|f| f.segments)
 }
 
@@ -521,11 +523,14 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             } else {
                 let end = if v.forward { seg.b } else { seg.a };
                 let remaining = path::drive_time(seg, v.forward, seg.length - v.progress);
-                match world
-                    .cache
-                    .path
-                    .search(&world.roads, &[(end, remaining)], Target::Access(dest), budget)
-                {
+                let cache = &mut world.cache;
+                match cache.path.search(
+                    &world.roads,
+                    &cache.route_delay,
+                    &[(end, remaining)],
+                    Target::Access(dest),
+                    budget,
+                ) {
                     Some(found) => (found.segments, Some(found.last_node)),
                     None => {
                         remove_vehicle(world, id, TripEnd::Vanished, ended);
@@ -610,10 +615,10 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                     ),
                 ],
             };
-            match world
-                .cache
+            let cache = &mut world.cache;
+            match cache
                 .path
-                .search(&world.roads, &sources, Target::Access(to), budget)
+                .search(&world.roads, &cache.route_delay, &sources, Target::Access(to), budget)
             {
                 Some(found) => (found.first == from_seg.b, found.segments, Some(found.last_node)),
                 None => {
@@ -630,6 +635,11 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         // Start on the road, not inside a junction box.
         let progress = if world.cache.setbacks_key == Some(world.traffic.junctions_version) {
             let (lo, hi) = crate::drive::lane_range(&world.cache.setbacks, from.segment, forward, from_seg.length);
+            let lo = if lo > 0.0 {
+                (lo + balance::NO_LANE_CHANGE_AFTER_BOX_M).min(hi)
+            } else {
+                lo
+            };
             progress.clamp(lo, hi)
         } else {
             progress
@@ -729,6 +739,7 @@ fn update_loads(world: &mut World) {
                 j.busy = busy;
                 let setting = j.setting;
                 junction::set_setting(j, setting);
+                world.traffic.control_version += 1;
             }
         }
     }
@@ -740,6 +751,18 @@ fn update_loads(world: &mut World) {
     t.peak_today = t.peak_today.max(n as u32);
     t.congestion_share = if nseg > 0 { jammed as f32 / nseg as f32 } else { 0.0 };
     t.peak_congestion_today = t.peak_congestion_today.max(t.congestion_share);
+}
+
+/// Debug counters: front cars refused entry at the stop line, by reason
+/// `[conflict in box, no room beyond, signal, yielding]` (not saved).
+pub fn debug_denials(world: &World) -> [u64; 4] {
+    world.cache.denials
+}
+
+/// Debug counters: junction entries by turn `[straight, right, left,
+/// u-turn]` (not saved).
+pub fn debug_turns(world: &World) -> [u64; 4] {
+    world.cache.turns
 }
 
 /// Queue a household-less trip between two positions (tests, tools).

@@ -58,6 +58,62 @@ pub(crate) fn build_setbacks(
     out
 }
 
+/// Expected wait at the junction a segment direction leads to, by its
+/// control and this approach's role there (routing costs).
+pub(crate) fn build_route_delays(
+    roads: &RoadNetwork,
+    states: &crate::side::SideTable<NodeId, JunctionState>,
+) -> Vec<[f32; 2]> {
+    let mut out = vec![[0.0f32; 2]; roads.segments.slot_count()];
+    for (s, seg) in roads.segments.iter() {
+        let wait = |n: NodeId| {
+            let Some(j) = states.get(n).filter(|j| j.arms.len() >= 3) else {
+                return 0.0;
+            };
+            let Some(arm) = j.arm_of(s) else { return 0.0 };
+            match j.control {
+                JunctionControl::Signal => {
+                    let main = j
+                        .plan
+                        .as_ref()
+                        .and_then(|p| p.phases.get(p.main as usize))
+                        .is_some_and(|ph| ph.arms.contains(&(arm as u8)));
+                    if main {
+                        balance::ROUTE_SIGNAL_MAIN_S
+                    } else {
+                        balance::ROUTE_SIGNAL_SIDE_S
+                    }
+                }
+                JunctionControl::Priority => {
+                    if j.arms[arm].major {
+                        balance::ROUTE_MAJOR_S
+                    } else if j.arms.iter().any(|a| a.major) {
+                        balance::ROUTE_GIVE_WAY_S
+                    } else {
+                        balance::ROUTE_ALL_WAY_S
+                    }
+                }
+            }
+        };
+        // Travel a -> b waits at b, b -> a at a.
+        out[key_index(s)] = [wait(seg.b), wait(seg.a)];
+    }
+    out
+}
+
+/// Make sure the stop lines and routing delays match the junctions.
+pub(crate) fn ensure_tables(world: &mut World) {
+    if world.cache.setbacks_key != Some(world.traffic.junctions_version) {
+        world.cache.setbacks = build_setbacks(&world.roads, &world.traffic.junction_states);
+        world.cache.setbacks_key = Some(world.traffic.junctions_version);
+    }
+    let key = (world.traffic.junctions_version, world.traffic.control_version);
+    if world.cache.route_delay_key != Some(key) {
+        world.cache.route_delay = build_route_delays(&world.roads, &world.traffic.junction_states);
+        world.cache.route_delay_key = Some(key);
+    }
+}
+
 /// Drivable stretch of a segment direction, metres from the node it is
 /// entered by: from the end of the box behind to the stop line ahead.
 pub(crate) fn lane_range(setbacks: &[[f32; 2]], s: SegmentId, forward: bool, len: f32) -> (f32, f32) {
@@ -150,6 +206,7 @@ struct Front {
     to_lane: u8,
     exit_key: usize,
     exit_start: f32,
+    exit_stop: f32,
     /// Allowed to enter (decided this tick).
     permit: bool,
     /// Reaches the stop line this tick.
@@ -202,10 +259,7 @@ fn gap_s(j: &JunctionState, mine: u8, theirs: u8) -> f32 {
 pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
     let now = world.time.tick;
     // Stop lines for the current junction geometry.
-    if world.cache.setbacks_key != Some(world.traffic.junctions_version) {
-        world.cache.setbacks = build_setbacks(&world.roads, &world.traffic.junction_states);
-        world.cache.setbacks_key = Some(world.traffic.junctions_version);
-    }
+    ensure_tables(world);
 
     // Vehicles that lost their road.
     let lost: Vec<VehicleId> = world
@@ -229,7 +283,8 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
     } = world;
     let roads: &RoadNetwork = roads;
     let traffic: &mut TrafficState = traffic;
-    let setbacks: &[[f32; 2]] = &cache.setbacks;
+    let setbacks_vec: Vec<[f32; 2]> = std::mem::take(&mut cache.setbacks);
+    let setbacks: &[[f32; 2]] = &setbacks_vec;
     let nkeys = roads.segments.slot_count() * 2 * LANE_SLOTS;
 
     // Lane lists (front first) and box lists.
@@ -296,7 +351,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         let Some(m) = j.movement(a, v.lane, b) else { continue };
         let mv = &j.movements[m];
         let to_len = roads.segments[st.to].length;
-        let (exit_start, _) = lane_range(setbacks, st.to, st.to_forward, to_len);
+        let (exit_start, exit_stop) = lane_range(setbacks, st.to, st.to_forward, to_len);
         let reach = (v.speed + balance::ACCELERATION * DT) * DT + 0.02;
         fronts.push(Front {
             idx: i,
@@ -318,6 +373,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             to_lane: mv.to_lane,
             exit_key: lane_key(st.to, st.to_forward, mv.to_lane),
             exit_start,
+            exit_stop,
             permit: false,
             reaches: d_line <= reach,
         });
@@ -348,14 +404,24 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         while b1 < boxed.len() && boxed[b1].0 == slot {
             b1 += 1;
         }
+        let denials = &mut cache.denials;
         let j = traffic.junction_states.get_mut(node).expect("front has a junction");
         let mut occupied: Vec<usize> = boxed[b0..b1].iter().map(|b| b.1 as usize).collect();
-        // Precedence order.
+        // Precedence order: class, then the platoon being served (a busy
+        // stream keeps going for a few cars before the junction switches),
+        // then first come, first served.
+        let in_batch = |f: &Front| {
+            j.control == JunctionControl::Priority
+                && j.phase_count < balance::PHASE_MAX_CARS
+                && (f.arm == j.last_served
+                    || j.arms.get(f.arm as usize).and_then(|a| a.opposite) == Some(j.last_served))
+        };
         let mut order: Vec<usize> = (k..e).collect();
         order.sort_by(|&x, &y| {
             let (fx, fy) = (&fronts[x], &fronts[y]);
             class(j, fy)
                 .cmp(&class(j, fx))
+                .then(in_batch(fy).cmp(&in_batch(fx)))
                 .then(fx.eta.total_cmp(&fy.eta))
                 .then(fy.wait.cmp(&fx.wait))
                 .then(fx.idx.cmp(&fy.idx))
@@ -366,8 +432,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             // Room beyond the box.
             if ok {
                 // Room for this car behind the last one on the out-lane
-                // (and those still in the box heading there), or a queue
-                // that is moving off.
+                // (and those still in the box heading there).
                 let room = rear[f.exit_key] - f.exit_start;
                 let ahead = balance::VEHICLE_SPACING_M * inbox[f.exit_key] as f32;
                 let empty = rear[f.exit_key].is_infinite();
@@ -375,7 +440,9 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     inbox[f.exit_key] == 0 || roads.segments[f.to].length > ahead + balance::MIN_GAP_M
                 } else {
                     room >= ahead + balance::MIN_GAP_M
-                        || (rear_speed[f.exit_key] > balance::EXIT_MOVING_SPEED && room >= ahead + 2.0)
+                        || (rear_speed[f.exit_key] > balance::EXIT_MOVING_SPEED
+                            && room >= ahead + 2.0
+                            && f.exit_stop - f.exit_start > 4.0 * balance::VEHICLE_SPACING_M)
                 };
             }
             if ok {
@@ -387,7 +454,12 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         }
                         _ => false,
                     },
-                    JunctionControl::Priority => true,
+                    // All-way stop (no major road): every car halts at
+                    // the line before it goes.
+                    JunctionControl::Priority => {
+                        j.arms.iter().any(|a| a.major)
+                            || (f.speed < balance::STOP_SIGN_SPEED && f.d_line < balance::STOP_SIGN_DISTANCE_M)
+                    }
                 };
             }
             if ok {
@@ -416,6 +488,23 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 }
             }
             fronts[fi].permit = ok;
+            if !ok && f.d_line < 1.0 {
+                let reason = if occupied.iter().any(|&o| j.conflict(f.movement, o)) {
+                    0
+                } else if j.control == JunctionControl::Signal && j.movement_aspect(f.movement) != Some(Aspect::Green) {
+                    2
+                } else {
+                    let room = rear[f.exit_key] - f.exit_start;
+                    if rear[f.exit_key].is_finite()
+                        && room < balance::VEHICLE_SPACING_M * inbox[f.exit_key] as f32 + balance::MIN_GAP_M
+                    {
+                        1
+                    } else {
+                        3
+                    }
+                };
+                denials[reason] += 1;
+            }
             if ok && f.reaches {
                 occupied.push(f.movement);
                 inbox[f.exit_key] = inbox[f.exit_key].saturating_add(1);
@@ -598,6 +687,20 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         v.lane_shift = 0.0;
                         j.entered_minute = j.entered_minute.saturating_add(1);
                         j.clear_at = now;
+                        cache.turns[match f.turn {
+                            Turn::Straight => 0,
+                            Turn::Right => 1,
+                            Turn::Left => 2,
+                            Turn::UTurn => 3,
+                        }] += 1;
+                        let arm = j.arm_of(s).unwrap_or(0) as u8;
+                        let same = arm == j.last_served || j.arms[arm as usize].opposite == Some(j.last_served);
+                        if same {
+                            j.phase_count = j.phase_count.saturating_add(1);
+                        } else {
+                            j.last_served = arm;
+                            j.phase_count = 1;
+                        }
                         leader = Some(stop + jm.distance);
                     }
                     _ => {
@@ -662,6 +765,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             .map_or(0.0, |t| (now - t.requested_tick.min(now)) as f32 * DT);
         done.push((id, TripEnd::GaveUp(secs)));
     }
+    world.cache.setbacks = setbacks_vec;
     for (id, f) in done {
         traffic::remove_vehicle(world, id, f, ended);
     }
@@ -768,21 +872,27 @@ fn lane_changes(world: &mut World) {
         let s = v.segment.expect("listed");
         let seg = &roads.segments[s];
         let n = seg.lane_count();
-        let (_, stop) = lane_range(setbacks, s, v.forward, seg.length);
+        let (start, stop) = lane_range(setbacks, s, v.forward, seg.length);
         let d_line = stop - p;
-        // Lanes the next movement can be made from.
+        // Not right behind a junction: cars leaving its box need the room.
+        if p < start + balance::NO_LANE_CHANGE_AFTER_BOX_M {
+            continue;
+        }
+        // Lanes the next movement can be made from (all lanes when the
+        // junction is still far).
+        let mut allowed: Vec<u8> = (0..n).collect();
         let mut need: Option<u8> = None;
         if let Some(st) = next_step(roads, s, v.forward, &v.route)
             && let Some(j) = traffic.junction_states.get(st.node)
             && let (Some(a), Some(b)) = (j.arm_of(s), j.arm_of(st.to))
+            && d_line < balance::LANE_PREPARE_M
         {
-            let allowed: Vec<u8> = j.movements_between(a, b).map(|(_, m)| m.from_lane).collect();
-            if !allowed.is_empty() && !allowed.contains(&v.lane) && d_line < balance::LANE_PREPARE_M {
-                need = allowed.iter().copied().min_by_key(|l| l.abs_diff(v.lane));
-            }
-            if need.is_none() && d_line < balance::LANE_PREPARE_M && !allowed.is_empty() {
-                // Already in a usable lane near the junction: stay.
-                continue;
+            let ok: Vec<u8> = j.movements_between(a, b).map(|(_, m)| m.from_lane).collect();
+            if !ok.is_empty() {
+                if !ok.contains(&v.lane) {
+                    need = ok.iter().copied().min_by_key(|l| l.abs_diff(v.lane));
+                }
+                allowed = ok;
             }
         } else if v.route.is_empty() && v.lane > 0 {
             need = Some(0);
@@ -790,15 +900,25 @@ fn lane_changes(world: &mut World) {
         let want = match need {
             Some(l) => l,
             None => {
-                if d_line < 20.0 {
+                if d_line < 12.0 {
                     continue;
                 }
-                let my = key;
-                let (g_me, s_me, _, _) = around(my, p, id);
+                let (g_me, s_me, _, _) = around(key, p, id);
                 let other = if v.lane == 0 { 1 } else { 0 };
+                if !allowed.contains(&other) {
+                    continue;
+                }
                 let okey = lane_key(s, v.forward, other) as u32;
                 let (g_o, _, _, _) = around(okey, p, id);
-                if v.lane == 0 {
+                let near = d_line < balance::LANE_PREPARE_M;
+                if near {
+                    // Queue up in the emptier usable lane.
+                    if g_o > g_me + 12.0 && g_me < 60.0 {
+                        other
+                    } else {
+                        continue;
+                    }
+                } else if v.lane == 0 {
                     // Overtake a slow car or queue ahead.
                     if g_me < 40.0 && s_me + 2.0 < speed.max(seg.speed_limit * 0.6) && g_o > g_me + 15.0 {
                         1
@@ -842,4 +962,46 @@ fn lane_changes(world: &mut World) {
         v.lane_shift = v.lane as f32 - want as f32;
         v.lane = want;
     }
+}
+
+/// Lateral offset of a vehicle from the centre line, metres to the right of
+/// travel, including an unfinished lane change.
+pub fn lane_offset(kind: crate::RoadKind, lane: u8, shift: f32) -> f32 {
+    let here = kind.lane_offset_m(lane);
+    if shift > 0.0 {
+        here + shift * (kind.lane_offset_m(lane.saturating_add(1)) - here)
+    } else if shift < 0.0 {
+        here - shift * (kind.lane_offset_m(lane.saturating_sub(1)) - here)
+    } else {
+        here
+    }
+}
+
+/// Exact drawing pose of a vehicle: position in its lane (or on its
+/// junction curve) and unit travel direction. `Vehicle::pos` is on the
+/// centre line; this adds the lane offset.
+pub fn vehicle_pose(world: &World, v: &traffic::Vehicle) -> ([f32; 2], [f32; 2]) {
+    if let Some(jm) = &v.junction
+        && let Some(m) = world
+            .traffic
+            .junction_states
+            .get(jm.node)
+            .and_then(|j| j.movements.get(jm.movement as usize))
+    {
+        return m.pose_at(jm.distance);
+    }
+    let Some(s) = v.segment.filter(|&s| world.roads.segments.contains_key(s)) else {
+        return (v.pos, [1.0, 0.0]);
+    };
+    let (a, b) = world.roads.segment_ends(s);
+    let d = crate::geom::sub(b, a);
+    let l = crate::geom::dot(d, d).sqrt().max(1e-6);
+    let dir = if v.forward {
+        [d[0] / l, d[1] / l]
+    } else {
+        [-d[0] / l, -d[1] / l]
+    };
+    let off = lane_offset(world.roads.segments[s].kind, v.lane, v.lane_shift);
+    let r = crate::junction::right_of(dir);
+    ([v.pos[0] + r[0] * off, v.pos[1] + r[1] * off], dir)
 }
