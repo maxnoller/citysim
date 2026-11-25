@@ -1,0 +1,21 @@
+[package]
+name = "citysim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["gfx", "ui"]
+# 3D drawing and the camera (src/gfx). Disable to check ui builds alone.
+gfx = []
+# 2D interface, tools, input, save/load (src/ui). Disable to check gfx alone.
+ui = []
+
+[dependencies]
+citysim_sim.workspace = true
+bevy.workspace = true
+slotmap.workspace = true
+
+[lints]
+workspace = true

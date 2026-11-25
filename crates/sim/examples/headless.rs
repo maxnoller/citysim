@@ -1,0 +1,300 @@
+//! Headless balance runs: scripted cities played through `Command`s only.
+//!
+//! ```text
+//! cargo run -p citysim_sim --release --example headless            # all
+//! cargo run -p citysim_sim --release --example headless -- grid artery
+//! ```
+//!
+//! Prints one line per in-game day and writes hourly CSVs to
+//! `target/headless/<scenario>.csv` (override with `CITYSIM_HEADLESS_OUT`).
+//! "min" is real minutes assuming the player runs at 2.5x on average.
+//! Money columns: `income` (taxes), `upkeep` (roads), `svc` (services),
+//! `net` (income - upkeep - services, before construction), `d/100c`
+//! (days of net income that pay for 100 road cells).
+
+use std::fmt::Write as _;
+use std::time::Instant;
+
+use citysim_sim::scenarios::{self, GridPlayer};
+use citysim_sim::{TICKS_PER_SECOND, World, Zone, balance};
+
+/// Blocks `[R, C, I]` the "upfront" player lays out on day one (~290 road
+/// cells, ~60 % of the start money).
+const UPFRONT_BLOCKS: [usize; 3] = [8, 3, 3];
+
+/// Average game speed assumed when converting ticks to real minutes.
+const ASSUMED_SPEED: f64 = 2.5;
+
+struct Scenario {
+    name: &'static str,
+    about: &'static str,
+    days: u32,
+}
+
+const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "grid",
+        about: "sensible player: grid blocks following demand, all zone types",
+        days: 20,
+    },
+    Scenario {
+        name: "upfront",
+        about: "lays out a district of 14 blocks on day one with its own money, then follows demand",
+        days: 20,
+    },
+    Scenario {
+        name: "res_only",
+        about: "player who zones only residential",
+        days: 10,
+    },
+    Scenario {
+        name: "two_grid",
+        about: "static two districts, grid streets (good layout)",
+        days: 8,
+    },
+    Scenario {
+        name: "artery",
+        about: "static two districts, everything off one junction (bad layout)",
+        days: 8,
+    },
+    Scenario {
+        name: "artery_fixed",
+        about: "bad layout, second connections added at the start of day 4",
+        days: 8,
+    },
+    Scenario {
+        name: "overbuilt",
+        about: "a road mesh far bigger than its town (pre-built), a little zoning",
+        days: 10,
+    },
+];
+
+fn minutes(tick: u64) -> f64 {
+    tick as f64 / TICKS_PER_SECOND as f64 / ASSUMED_SPEED / 60.0
+}
+
+fn run(sc: &Scenario, out_dir: &str) {
+    let mut w = World::new(7);
+    let mut player = None;
+    match sc.name {
+        "grid" => player = Some(GridPlayer::new(&Zone::ALL)),
+        "upfront" => {
+            let mut p = GridPlayer::new(&Zone::ALL);
+            p.build_ahead(&mut w, UPFRONT_BLOCKS);
+            println!(
+                "upfront: built {} road cells, ${} left",
+                w.stats.road_cells, w.economy.money
+            );
+            player = Some(p);
+        }
+        "res_only" => player = Some(GridPlayer::new(&[Zone::Residential])),
+        // The static layouts lay every road on day one; they get that
+        // construction for free and then run on the normal economy.
+        "two_grid" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, true)),
+        "artery" | "artery_fixed" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false)),
+        "overbuilt" => scenarios::prebuilt(&mut w, scenarios::overbuilt),
+        _ => unreachable!(),
+    }
+    println!("\n=== {} — {}", sc.name, sc.about);
+    println!(
+        "{:>3} {:>5} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6} {:>5} {:>9} {:>7} {:>7} {:>6} {:>6} {:>6}  demand R/C/I",
+        "day",
+        "min",
+        "pop",
+        "hh",
+        "jobs",
+        "unemp",
+        "bldg",
+        "peakV",
+        "comm_s",
+        "spd",
+        "jam",
+        "money",
+        "income",
+        "upkeep",
+        "svc",
+        "net",
+        "d/100c"
+    );
+    let mut csv = String::from(
+        "tick,day,hour,minutes,population,households,jobs,employed,unemployment,buildings,vehicles,avg_commute_s,avg_speed,congested,money,dem_r,dem_c,dem_i,waiting\n",
+    );
+    let total = sc.days as u64 * balance::TICKS_PER_DAY as u64;
+    let (mut sum_ns, mut max_ns, mut n, mut max_at) = (0u128, 0u128, 0u64, 0u64);
+    let (mut rush_sum, mut rush_n, mut rush_max) = (0u128, 0u64, 0u128);
+    let mut reached_5k: Option<u64> = None;
+    let mut speed_acc = (0.0f64, 0u32);
+    let mut jam_max = 0.0f32;
+    for _ in 0..total {
+        if let Some(p) = player.as_mut() {
+            p.act(&mut w);
+        }
+        if sc.name == "artery_fixed" && w.time.day == 4 && w.time.tick_of_day == 0 {
+            scenarios::add_connections(&mut w);
+        }
+        let t0 = Instant::now();
+        w.step();
+        let dt = t0.elapsed().as_nanos();
+        sum_ns += dt;
+        if dt > max_ns {
+            max_ns = dt;
+            max_at = w.time.tick;
+        }
+        n += 1;
+        if w.stats.population >= 4500 && w.stats.vehicles_on_road >= 100 {
+            rush_sum += dt;
+            rush_n += 1;
+            rush_max = rush_max.max(dt);
+        }
+        if reached_5k.is_none() && w.stats.population >= 5000 {
+            reached_5k = Some(w.time.tick);
+        }
+        if w.stats.vehicles_on_road > 0 {
+            speed_acc.0 += w.stats.avg_speed as f64;
+            speed_acc.1 += 1;
+        }
+        jam_max = jam_max.max(w.stats.congestion_share * 100.0);
+        if w.time.tick.is_multiple_of(balance::TICKS_PER_HOUR as u64 / 2) {
+            let s = &w.stats;
+            let d = &w.demand;
+            let _ = writeln!(
+                csv,
+                "{},{},{:.2},{:.3},{},{},{},{},{:.3},{},{},{:.1},{:.2},{},{},{:.3},{:.3},{:.3},{}",
+                w.time.tick,
+                w.time.day,
+                w.time.hour(),
+                minutes(w.time.tick),
+                s.population,
+                s.households,
+                s.jobs,
+                s.employed,
+                s.unemployment,
+                s.buildings,
+                s.vehicles_on_road,
+                s.avg_commute_s,
+                s.avg_speed,
+                s.congested_segments,
+                w.economy.money,
+                d.residential,
+                d.commercial,
+                d.industrial,
+                s.waiting_departures
+            );
+        }
+        if w.time.tick_of_day == 0 {
+            let h = w.economy.history.last().copied().unwrap_or_default();
+            let spd = if speed_acc.1 > 0 {
+                speed_acc.0 / speed_acc.1 as f64 * 3.6
+            } else {
+                0.0
+            };
+            let b = h.budget;
+            let per_100 = if b.net() > 0 {
+                format!("{:.2}", 100.0 * balance::ROAD_COST_PER_CELL as f64 / b.net() as f64)
+            } else {
+                "-".into()
+            };
+            println!(
+                "{:>3} {:>5.1} {:>6} {:>5} {:>5} {:>5.2} {:>5} {:>5} {:>6.1} {:>6.1} {:>5.1} {:>9} {:>7} {:>7} {:>6} {:>6} {:>6}  {:+.2} {:+.2} {:+.2}",
+                h.day,
+                minutes(w.time.tick),
+                h.population,
+                h.households,
+                h.jobs,
+                w.stats.unemployment,
+                h.buildings,
+                h.peak_vehicles,
+                h.avg_commute_s,
+                spd,
+                jam_max,
+                h.money,
+                h.income,
+                b.road_upkeep,
+                b.services,
+                b.net(),
+                per_100,
+                h.demand[0],
+                h.demand[1],
+                h.demand[2],
+            );
+            speed_acc = (0.0, 0);
+            jam_max = 0.0;
+        }
+    }
+    w.check_invariants().expect("invariants");
+    println!(
+        "step: mean {:.1} us, max {:.2} ms (tick {max_at}) over {} steps; at >=4500 pop & >=100 cars: mean {:.1} us, max {:.2} ms ({} steps)",
+        sum_ns as f64 / n as f64 / 1e3,
+        max_ns as f64 / 1e6,
+        n,
+        if rush_n > 0 {
+            rush_sum as f64 / rush_n as f64 / 1e3
+        } else {
+            0.0
+        },
+        rush_max as f64 / 1e6,
+        rush_n
+    );
+    match reached_5k {
+        Some(t) => println!(
+            "reached 5,000 residents on day {} ({:.1} real min at {ASSUMED_SPEED}x)",
+            t / balance::TICKS_PER_DAY as u64 + 1,
+            minutes(t)
+        ),
+        None => println!("did not reach 5,000 residents (final {})", w.stats.population),
+    }
+    if let Some(p) = &player {
+        println!(
+            "blocks built: {}; waited for money {:.0} s in total, longest {:.0} s (real time at {ASSUMED_SPEED}x)",
+            p.blocks_built,
+            minutes(p.money_wait_ticks) * 60.0,
+            minutes(p.longest_money_wait_ticks) * 60.0
+        );
+    }
+    let money_max = w.economy.history.iter().map(|h| h.money).max().unwrap_or(0);
+    let money_min = w.economy.history.iter().map(|h| h.money).min().unwrap_or(0);
+    println!(
+        "money: lowest ${money_min}, highest ${money_max}, final ${}",
+        w.economy.money
+    );
+    let path = format!("{out_dir}/{}.csv", sc.name);
+    std::fs::write(&path, csv).expect("write csv");
+    let mut days = String::from(
+        "day,minutes,population,peak_vehicles,peak_congestion,avg_commute_s,money,income,expenses,\
+         residential_tax,commercial_tax,industrial_tax,road_upkeep,services,road_cells\n",
+    );
+    for h in &w.economy.history {
+        let b = h.budget;
+        let _ = writeln!(
+            days,
+            "{},{:.3},{},{},{:.4},{:.1},{},{},{},{},{},{},{},{},{}",
+            h.day,
+            minutes(h.day as u64 * balance::TICKS_PER_DAY as u64),
+            h.population,
+            h.peak_vehicles,
+            h.peak_congestion,
+            h.avg_commute_s,
+            h.money,
+            h.income,
+            h.expenses,
+            b.residential_tax,
+            b.commercial_tax,
+            b.industrial_tax,
+            b.road_upkeep,
+            b.services,
+            h.road_cells
+        );
+    }
+    std::fs::write(format!("{out_dir}/{}_days.csv", sc.name), days).expect("write csv");
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let out_dir = std::env::var("CITYSIM_HEADLESS_OUT").unwrap_or_else(|_| "target/headless".into());
+    std::fs::create_dir_all(&out_dir).expect("output dir");
+    for sc in SCENARIOS {
+        if args.is_empty() || args.iter().any(|a| a == sc.name) {
+            run(sc, &out_dir);
+        }
+    }
+}

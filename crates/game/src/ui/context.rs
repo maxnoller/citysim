@@ -1,0 +1,1033 @@
+//! Context card next to the cursor: what the next click does and what it
+//! costs (red with the sim's reason when it is not possible); with Inspect,
+//! the hovered building, road or zoned lot with live numbers from the sim.
+
+use bevy::prelude::*;
+use bevy::ui::ComputedNode;
+use bevy::window::PrimaryWindow;
+use citysim_sim::{
+    Building, BuildingId, Cell, CellRect, CommandError, Occupant, RoadKind, RoadSegment, World, Zone, balance,
+};
+
+use super::UiState;
+use super::format;
+use super::theme::{self as t, UiFonts, icon};
+use super::tools::{Action, ToolState};
+use super::widgets::{approach, label, layout, number, zone_icon, zone_name};
+use crate::shared::{
+    ActiveTool, CONGESTION_BUSY, CONGESTION_JAM, GameSet, HoveredCell, PointerOverUi, PreviewKind, SimWorld,
+    ToolPreview,
+};
+
+pub struct ContextPlugin;
+
+impl Plugin for ContextPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_card)
+            .add_systems(Update, update_card.in_set(GameSet::Render));
+    }
+}
+
+#[derive(Component)]
+struct CardRoot;
+
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum CardPart {
+    IconBox,
+    Icon,
+    Title,
+    /// One label / value row.
+    Row(usize),
+    RowLabel(usize),
+    RowValue(usize),
+    Hint,
+    Bar,
+    BarFill,
+}
+
+/// Rows a card can show.
+pub const MAX_ROWS: usize = 5;
+
+/// One line of a card: a muted label on the left and a value on the right
+/// (an empty label lets the value read as a plain line).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub label: String,
+    pub value: String,
+    pub color: Color,
+}
+
+impl Row {
+    pub fn new(label: impl Into<String>, value: impl Into<String>, color: Color) -> Row {
+        Row {
+            label: label.into(),
+            value: value.into(),
+            color,
+        }
+    }
+
+    pub fn line(value: impl Into<String>, color: Color) -> Row {
+        Row::new("", value, color)
+    }
+}
+
+/// What the card shows this frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Card {
+    pub glyph: char,
+    pub color: Color,
+    pub title: String,
+    pub title_color: Color,
+    /// Up to [`MAX_ROWS`]; the meter (if any) sits below the first row.
+    pub rows: Vec<Row>,
+    pub hint: String,
+    /// Fill fraction and colour of a small meter (occupancy, congestion).
+    pub bar: Option<(f32, Color)>,
+}
+
+impl Card {
+    fn new(glyph: char, color: Color) -> Card {
+        Card {
+            glyph,
+            color,
+            title: String::new(),
+            title_color: t::TEXT,
+            rows: Vec::new(),
+            hint: String::new(),
+            bar: None,
+        }
+    }
+}
+
+/// Player-facing reason for a rejected command (from the sim's own error).
+pub fn error_text(e: &CommandError) -> String {
+    match e {
+        CommandError::OutOfBounds => "That's outside the map".into(),
+        CommandError::ZeroLength => "Pick a second point for the road".into(),
+        CommandError::NotStraight => "Roads must be straight or at 45 degrees".into(),
+        CommandError::BlockedByBuilding(_) => "A building is in the way. Bulldoze it first".into(),
+        CommandError::DiagonalCrossing(_) => "Diagonal roads can't cross between cells".into(),
+        CommandError::InsufficientFunds { cost, money } => format!(
+            "Not enough money: costs {}, you have {}",
+            format::money(*cost),
+            format::money(*money)
+        ),
+        CommandError::InvalidTaxRate(_) => format!(
+            "Tax rate must be between 0% and {}",
+            format::percent(balance::MAX_TAX_RATE)
+        ),
+    }
+}
+
+fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
+    let fonts = fonts.into_inner();
+    commands
+        .spawn((
+            Name::new("Context card"),
+            CardRoot,
+            layout(Node {
+                position_type: PositionType::Absolute,
+                min_width: px(190),
+                padding: UiRect::new(px(t::S3 + 2.0), px(t::S4 + 2.0), px(t::S3 + 1.0), px(t::S3 + 2.0)),
+                column_gap: px(t::S3 + 2.0),
+                align_items: AlignItems::Start,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(t::RADIUS_SM + 1.0)),
+                ..default()
+            }),
+            BackgroundColor(t::PANEL_RAISED),
+            BorderColor::all(t::PANEL_BORDER),
+            BoxShadow(vec![ShadowStyle {
+                color: t::alpha(Color::BLACK, 0.4),
+                x_offset: px(0),
+                y_offset: px(5),
+                spread_radius: px(0),
+                blur_radius: px(16),
+            }]),
+            GlobalZIndex(90),
+            UiTransform::default(),
+            Visibility::Hidden,
+        ))
+        .with_children(|card| {
+            card.spawn((
+                CardPart::IconBox,
+                layout(Node {
+                    width: px(28),
+                    height: px(28),
+                    margin: UiRect::top(px(1)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border_radius: BorderRadius::all(px(t::RADIUS_SM)),
+                    flex_shrink: 0.0,
+                    ..default()
+                }),
+                BackgroundColor(t::alpha(t::ACCENT, 0.16)),
+            ))
+            .with_child((
+                super::widgets::icon(fonts, icon::ROAD, t::ICON_SM + 1.0, t::ACCENT),
+                CardPart::Icon,
+            ));
+            card.spawn(layout(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(1),
+                flex_grow: 1.0,
+                ..default()
+            }))
+            .with_children(|col| {
+                col.spawn((
+                    label(fonts, "", t::FONT_BODY, t::W_SEMIBOLD, t::TEXT),
+                    CardPart::Title,
+                    Node {
+                        margin: UiRect::bottom(px(1)),
+                        ..default()
+                    },
+                ));
+                for i in 0..MAX_ROWS {
+                    col.spawn((
+                        CardPart::Row(i),
+                        layout(Node {
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Baseline,
+                            column_gap: px(t::S5),
+                            display: Display::None,
+                            ..default()
+                        }),
+                    ))
+                    .with_children(|r| {
+                        r.spawn((
+                            label(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED),
+                            CardPart::RowLabel(i),
+                        ));
+                        r.spawn((
+                            number(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT),
+                            CardPart::RowValue(i),
+                        ));
+                    });
+                    if i == 0 {
+                        col.spawn((
+                            CardPart::Bar,
+                            layout(Node {
+                                height: px(4),
+                                width: percent(100),
+                                margin: UiRect::new(px(0), px(0), px(t::S2), px(t::S2 + 1.0)),
+                                border_radius: BorderRadius::all(px(2)),
+                                overflow: Overflow::clip(),
+                                ..default()
+                            }),
+                            BackgroundColor(t::WELL),
+                        ))
+                        .with_child((
+                            CardPart::BarFill,
+                            layout(Node {
+                                height: percent(100),
+                                width: percent(0),
+                                border_radius: BorderRadius::all(px(2)),
+                                ..default()
+                            }),
+                            BackgroundColor(t::ACCENT),
+                        ));
+                    }
+                }
+                col.spawn((
+                    label(fonts, "", t::FONT_CAPTION + 0.5, t::W_REGULAR, t::TEXT_MUTED),
+                    CardPart::Hint,
+                    Node {
+                        margin: UiRect::top(px(t::S1)),
+                        ..default()
+                    },
+                ));
+            });
+        });
+}
+
+/// Traffic band of a direction's `congestion_in`, as the overlay draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Band {
+    Free,
+    Busy,
+    Jammed,
+}
+
+impl Band {
+    pub fn of(congestion: f32) -> Band {
+        if congestion >= CONGESTION_JAM {
+            Band::Jammed
+        } else if congestion >= CONGESTION_BUSY {
+            Band::Busy
+        } else {
+            Band::Free
+        }
+    }
+
+    pub fn color(self) -> Color {
+        match self {
+            Band::Free => t::POSITIVE,
+            Band::Busy => t::WARNING,
+            Band::Jammed => t::NEGATIVE,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Band::Free => "free",
+            Band::Busy => "busy",
+            Band::Jammed => "jammed",
+        }
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", format::group(n as u64), if n == 1 { one } else { many })
+}
+
+/// "Eastbound" etc. for travel from `from` to `to` (sim metres; -y is north,
+/// the top of the screen in the default view).
+pub fn heading_name(from: [f32; 2], to: [f32; 2]) -> &'static str {
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    if dx == 0.0 && dy == 0.0 {
+        return "Either way";
+    }
+    // Compass bearing: 0 = north (-y), clockwise.
+    let bearing = dx.atan2(-dy).to_degrees().rem_euclid(360.0);
+    const NAMES: [&str; 8] = [
+        "Northbound",
+        "Northeast",
+        "Eastbound",
+        "Southeast",
+        "Southbound",
+        "Southwest",
+        "Westbound",
+        "Northwest",
+    ];
+    NAMES[((bearing + 22.5) / 45.0) as usize % 8]
+}
+
+pub fn pct(f: f32) -> String {
+    format!("{}%", (f * 100.0).round() as i64)
+}
+
+pub fn kmh(mps: f32) -> String {
+    format!("{} km/h", (mps * 3.6).round() as i64)
+}
+
+/// Card for the current tool and preview; `None` hides it.
+pub fn tool_card(
+    tool: ActiveTool,
+    action: Action,
+    preview: &ToolPreview,
+    world: &World,
+    hovered: Option<Cell>,
+) -> Option<Card> {
+    let mut card = Card::new(icon::INSPECT, t::ACCENT);
+    let cost_text = |cost: i64| if cost > 0 { format::money(cost) } else { "free".into() };
+    let money = world.economy.money;
+    match tool {
+        ActiveTool::Inspect => return inspect_card(world, hovered?),
+        ActiveTool::Road => {
+            card.glyph = icon::ROAD;
+            match action {
+                Action::Road { held, .. } if preview.kind == PreviewKind::Road => {
+                    let n = preview.cells.len();
+                    if let Some(e) = &preview.error {
+                        card.title = "Can't build here".into();
+                        card.rows.push(Row::line(error_text(e), t::NEGATIVE));
+                    } else if preview.cost == 0 {
+                        card.title = "Road already built".into();
+                        card.rows.push(Row::line(plural(n, "cell", "cells"), t::TEXT_MUTED));
+                    } else {
+                        card.title = "Build road".into();
+                        card.rows.push(Row::line(
+                            format!("{} · {}", plural(n, "cell", "cells"), cost_text(preview.cost)),
+                            t::TEXT,
+                        ));
+                    }
+                    card.hint = if preview.error.is_some() {
+                        "Pick another end point · Right-click to cancel".into()
+                    } else if held {
+                        "Release to build · Right-click to cancel".into()
+                    } else {
+                        "Click to build · Right-click to cancel".into()
+                    };
+                }
+                Action::Road { .. } => {
+                    card.title = "Road".into();
+                    card.rows.push(Row::line("Move to the end point", t::TEXT));
+                    card.hint = "Right-click to cancel".into();
+                }
+                _ => {
+                    hovered?;
+                    card.title = "Road".into();
+                    card.rows.push(Row::line(
+                        format!("{} per cell", format::money(balance::ROAD_COST_PER_CELL)),
+                        t::TEXT_MUTED,
+                    ));
+                    if money < balance::ROAD_COST_PER_CELL {
+                        card.rows
+                            .push(Row::line(format!("You have {}", format::money(money)), t::NEGATIVE));
+                    }
+                    card.hint = "Click a start point, or drag".into();
+                }
+            }
+        }
+        ActiveTool::Zone(zone) => {
+            hovered.or(preview.rect.map(|r| r.max))?;
+            card.glyph = zone_icon(zone);
+            card.color = t::zone_color(zone);
+            card.title = match zone {
+                Some(_) => format!("Zone {}", zone_name(zone).to_lowercase()),
+                None => "Remove zoning".into(),
+            };
+            let n = preview.cells.len();
+            let dragging = matches!(action, Action::Rect { .. });
+            if let Some(e) = &preview.error {
+                card.rows.push(Row::line(error_text(e), t::NEGATIVE));
+            } else if n == 0 {
+                let (s, c) = match preview.rect {
+                    Some(r) => zone_noop_reason(world, r, zone),
+                    None => ("Nothing to zone here".into(), t::TEXT_MUTED),
+                };
+                card.rows.push(Row::line(s, c));
+            } else {
+                let what = if zone.is_some() { "free" } else { "unzoned, free" };
+                card.rows
+                    .push(Row::line(format!("{} · {what}", plural(n, "cell", "cells")), t::TEXT));
+            }
+            card.hint = if dragging {
+                "Release to apply · Right-click to cancel".into()
+            } else {
+                "Drag a rectangle · Z switches type".into()
+            };
+        }
+        ActiveTool::Bulldoze => {
+            hovered.or(preview.rect.map(|r| r.max))?;
+            card.glyph = icon::BULLDOZE;
+            card.color = t::NEGATIVE;
+            card.title = "Bulldoze".into();
+            let n = preview.cells.len();
+            if let Some(e) = &preview.error {
+                card.rows.push(Row::line(error_text(e), t::NEGATIVE));
+            } else if n == 0 {
+                card.rows.push(Row::line("Nothing to remove", t::TEXT_MUTED));
+            } else {
+                card.rows.push(Row::line(
+                    format!("{} · {}", plural(n, "cell", "cells"), cost_text(preview.cost)),
+                    t::TEXT,
+                ));
+            }
+            card.hint = if matches!(action, Action::Rect { .. }) {
+                "Release to clear · Right-click to cancel".into()
+            } else {
+                "Drag over roads and buildings".into()
+            };
+        }
+    }
+    if preview.error.is_some() {
+        card.title_color = t::NEGATIVE;
+        card.color = t::NEGATIVE;
+        card.glyph = icon::ALERT;
+    }
+    Some(card)
+}
+
+/// Why zoning `rect` with `zone` (or removing zoning, `None`) changes
+/// nothing. The sim only (un)zones empty cells that are not already that
+/// zone, and zones them only within `ZONE_ROAD_REACH` of a road; this names
+/// whichever of those rules stopped it, judged cell by cell.
+pub fn zone_noop_reason(world: &World, rect: CellRect, zone: Option<Zone>) -> (String, Color) {
+    let Some(rect) = rect.clamp_to_map() else {
+        return ("That's outside the map".into(), t::TEXT_MUTED);
+    };
+    let (mut road, mut built, mut same, mut far) = (0usize, 0usize, 0usize, 0usize);
+    for c in rect.cells() {
+        let Some(cd) = world.grid.get(c) else { continue };
+        match cd.occupant {
+            Occupant::Road => road += 1,
+            Occupant::Building(_) => built += 1,
+            Occupant::Empty if cd.zone == zone => same += 1,
+            Occupant::Empty => far += 1,
+        }
+    }
+    let total = road + built + same + far;
+    let one = rect.width() == 1 && rect.height() == 1;
+    if far > 0 {
+        // Only zoning can be refused for distance (unzoning never is).
+        return (
+            format!(
+                "Too far from a road (zones need one within {} cells)",
+                balance::ZONE_ROAD_REACH
+            ),
+            t::WARNING,
+        );
+    }
+    let already = match zone {
+        Some(z) => format!("Already {}", zone_name(Some(z)).to_lowercase()),
+        None => "Not zoned".into(),
+    };
+    let s = if road == total {
+        if one {
+            "Roads can't be zoned; zone the land beside them".into()
+        } else {
+            "Only road here; zone the land beside it".into()
+        }
+    } else if built == total {
+        if one {
+            "A building stands here; bulldoze it to rezone".into()
+        } else {
+            "Buildings stand here; bulldoze them to rezone".into()
+        }
+    } else if same == total {
+        already
+    } else if same > 0 {
+        format!("{already}; the rest is road or built on")
+    } else {
+        "Only roads and buildings here".into()
+    };
+    (s, t::TEXT_MUTED)
+}
+
+fn zone_slot(z: Zone) -> usize {
+    match z {
+        Zone::Residential => 0,
+        Zone::Commercial => 1,
+        Zone::Industrial => 2,
+    }
+}
+
+/// Inspect card for whatever is on `cell`.
+pub fn inspect_card(world: &World, cell: Cell) -> Option<Card> {
+    let cd = world.grid.get(cell)?;
+    match cd.occupant {
+        Occupant::Building(id) => building_card(world, id, world.buildings.get(id)?),
+        Occupant::Road => road_card(world, cell),
+        Occupant::Empty => {
+            let zone = cd.zone?;
+            let mut card = Card::new(zone_icon(Some(zone)), t::zone_color(Some(zone)));
+            card.title = format!("{} zone", zone_name(Some(zone)));
+            card.rows.push(Row::line("Empty lot", t::TEXT_MUTED));
+            card.hint = "Buildings grow here while demand is positive".into();
+            Some(card)
+        }
+    }
+}
+
+fn building_card(world: &World, id: BuildingId, b: &Building) -> Option<Card> {
+    let zone = Some(b.kind);
+    let mut card = Card::new(zone_icon(zone), t::zone_color(zone));
+    let what = match b.kind {
+        Zone::Residential => "Homes",
+        Zone::Commercial => "Shops & offices",
+        Zone::Industrial => "Industry",
+    };
+    let max_level = balance::MAX_LEVEL[zone_slot(b.kind)];
+    card.title = format!("{what} · level {} of {max_level}", b.level);
+    let of = |a: u32, b: u32| format!("{} / {}", format::group(a as u64), format::group(b as u64));
+    let fill = if b.capacity > 0 {
+        b.occupied as f32 / b.capacity as f32
+    } else {
+        0.0
+    };
+    card.bar = Some((fill, card.color));
+    match b.kind {
+        Zone::Residential => {
+            card.rows
+                .push(Row::new("Residents", of(b.occupied, b.capacity), t::TEXT));
+            let (mut homes, mut jobless) = (0usize, 0usize);
+            for h in world.households.values().filter(|h| h.home == id) {
+                homes += 1;
+                jobless += h.job.is_none() as usize;
+            }
+            if homes > 0 {
+                // One worker per household (the sim's workforce).
+                card.rows.push(Row::new(
+                    "Households",
+                    match jobless {
+                        0 => format!("{} · all employed", format::group(homes as u64)),
+                        n if n == homes => format!("{} · none employed", format::group(homes as u64)),
+                        n => format!(
+                            "{} · {} employed",
+                            format::group(homes as u64),
+                            format::group((homes - n) as u64)
+                        ),
+                    },
+                    if jobless > 0 { t::WARNING } else { t::TEXT },
+                ));
+            }
+            card.hint = "Residents drive to work and to the shops".into();
+        }
+        _ => {
+            card.rows.push(Row::new("Workers", of(b.occupied, b.capacity), t::TEXT));
+            let open = b.capacity.saturating_sub(b.occupied);
+            card.rows.push(Row::new(
+                "Open jobs",
+                format::group(open as u64),
+                if open > 0 { t::TEXT } else { t::TEXT_MUTED },
+            ));
+            card.hint = if b.kind == Zone::Industrial {
+                "Workers drive in; trucks deliver goods to shops".into()
+            } else {
+                "Workers drive in; residents come to shop".into()
+            };
+        }
+    }
+    // At-risk state, from the sim's own bookkeeping (`world.growth`).
+    let meta = world.growth.meta.get(id).copied().unwrap_or_default();
+    let now = world.time.tick;
+    if let Some(since) = meta.unreachable_since {
+        card.rows.push(Row::line("Cut off from the road network", t::NEGATIVE));
+        card.rows.push(Row::line(
+            format!(
+                "Abandoned in ~{} unless reconnected",
+                hours_text(abandon_in_ticks(since, now))
+            ),
+            t::NEGATIVE,
+        ));
+    }
+    if b.occupied == 0 {
+        let who = if b.kind == Zone::Residential {
+            "residents"
+        } else {
+            "workers"
+        };
+        let young = now.saturating_sub(b.created_tick) < balance::TICKS_PER_DAY as u64;
+        if young {
+            card.rows
+                .push(Row::line(format!("New · waiting for {who}"), t::TEXT_MUTED));
+        } else {
+            // Counted at midnight; abandoned at the midnight that reaches
+            // `ABANDON_EMPTY_DAYS`.
+            let left = balance::ABANDON_EMPTY_DAYS.saturating_sub(meta.empty_days).max(1);
+            card.rows.push(Row::line(
+                if left == 1 {
+                    format!("No {who} · abandoned at midnight if still empty")
+                } else {
+                    format!("No {who} · abandoned after {left} more empty midnights")
+                },
+                t::WARNING,
+            ));
+        }
+    }
+    if card.rows.iter().any(|r| r.color == t::NEGATIVE) {
+        card.color = t::NEGATIVE;
+        card.glyph = icon::ALERT;
+    }
+    card.rows.truncate(MAX_ROWS);
+    Some(card)
+}
+
+fn road_card(world: &World, cell: Cell) -> Option<Card> {
+    let roads = &world.roads;
+    let pos = cell.center();
+    let ids: Vec<_> = if let Some(s) = roads.segment_through(pos) {
+        vec![s]
+    } else if let Some(n) = roads.node_at(pos) {
+        roads.nodes[n].segments.clone()
+    } else {
+        Vec::new()
+    };
+    let segs: Vec<&RoadSegment> = ids.iter().filter_map(|&s| roads.segments.get(s)).collect();
+    if segs.is_empty() {
+        return None;
+    }
+    let highway = segs.iter().any(|s| s.kind == RoadKind::Highway);
+    let worst = segs.iter().map(|s| s.congestion()).fold(0.0f32, f32::max);
+    let band = Band::of(worst);
+    let mut card = Card::new(icon::ROAD, band.color());
+    card.title = match (highway, segs.len()) {
+        (true, _) => "Highway".into(),
+        (false, n) if n >= 3 => format!("Intersection · {n} ways"),
+        _ => "Street".into(),
+    };
+    let verdict = match band {
+        Band::Free => "Free flow",
+        Band::Busy => "Busy",
+        Band::Jammed => "Jammed",
+    };
+    card.rows.push(Row::new("Traffic", verdict, band.color()));
+    card.bar = Some((worst, band.color()));
+    let dir_row = |name: &str, s: &RoadSegment, forward: bool| {
+        let d = RoadSegment::dir(forward);
+        let c = s.congestion_in(forward);
+        let b = Band::of(c);
+        Row::new(
+            name,
+            format!(
+                "{} / {} · {}",
+                format::group(s.load[d].round() as u64),
+                plural(s.capacity[d].floor().max(1.0) as usize, "car", "cars"),
+                b.word()
+            ),
+            b.color(),
+        )
+    };
+    if let [s] = segs[..] {
+        let (pa, pb) = (roads.node_pos(s.a), roads.node_pos(s.b));
+        card.rows.push(dir_row(heading_name(pa, pb), s, true));
+        card.rows.push(dir_row(heading_name(pb, pa), s, false));
+    } else {
+        // At a node: the fullest approach direction among its roads.
+        let mut best: Option<(f32, usize, bool)> = None;
+        for (i, s) in segs.iter().enumerate() {
+            for forward in [true, false] {
+                let c = s.congestion_in(forward);
+                if best.is_none_or(|(b, ..)| c > b) {
+                    best = Some((c, i, forward));
+                }
+            }
+        }
+        if let Some((_, i, forward)) = best {
+            let s = segs[i];
+            let (pa, pb) = (roads.node_pos(s.a), roads.node_pos(s.b));
+            let (from, to) = if forward { (pa, pb) } else { (pb, pa) };
+            card.rows
+                .push(dir_row(&format!("Fullest: {}", heading_name(from, to)), s, forward));
+        }
+    }
+    // Cars on these segments right now (the sim's per-direction loads are
+    // vehicle counts) and how fast they actually go.
+    let (mut n, mut speed) = (0u32, 0.0f32);
+    for v in world.vehicles.values() {
+        if v.segment.is_some_and(|s| ids.contains(&s)) {
+            n += 1;
+            speed += v.speed;
+        }
+    }
+    card.rows.push(Row::new(
+        "Cars on it now",
+        if n > 0 {
+            format!("{} · avg {}", format::group(n as u64), kmh(speed / n as f32))
+        } else {
+            "none".into()
+        },
+        t::TEXT,
+    ));
+    let limit = segs.iter().map(|s| s.speed_limit).fold(0.0f32, f32::max);
+    card.hint = match band {
+        Band::Free => format!("Speed limit {}", kmh(limit)),
+        Band::Busy => format!("Cars slow down here · limit {}", kmh(limit)),
+        Band::Jammed => format!(
+            "Over {} full: cars crawl (~{}) · add a route",
+            pct(CONGESTION_JAM),
+            kmh(JAM_CRAWL_MPS)
+        ),
+    };
+    card.rows.truncate(MAX_ROWS);
+    Some(card)
+}
+
+/// Ticks until a building cut off since tick `since` is abandoned: the
+/// grace period runs out, then the next hourly reachability check removes it.
+pub fn abandon_in_ticks(since: u64, now: u64) -> u64 {
+    let due = since + balance::ABANDON_UNREACHABLE_GRACE_TICKS;
+    let hour = balance::REACHABILITY_CHECK_INTERVAL_TICKS;
+    (due.div_ceil(hour) * hour).saturating_sub(now)
+}
+
+/// In-game hours, rounded up ("1 h", "17 h").
+pub fn hours_text(ticks: u64) -> String {
+    let h = ticks.div_ceil(balance::TICKS_PER_HOUR as u64).max(1);
+    format!("{h} h")
+}
+
+/// Speed cars crawl below on a jammed road (shared.rs: ~12 km/h at
+/// `CONGESTION_JAM`).
+pub const JAM_CRAWL_MPS: f32 = 12.0 / 3.6;
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_card(
+    time: Res<Time<Real>>,
+    tool: Res<ActiveTool>,
+    state: Res<ToolState>,
+    preview: Res<ToolPreview>,
+    hovered: Res<HoveredCell>,
+    over_ui: Res<PointerOverUi>,
+    ui: Res<UiState>,
+    sim: Res<SimWorld>,
+    ui_scale: Res<UiScale>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut root: Query<
+        (
+            &mut Node,
+            &mut Visibility,
+            &ComputedNode,
+            &mut UiTransform,
+            &mut BorderColor,
+        ),
+        (With<CardRoot>, Without<CardPart>),
+    >,
+    mut parts: CardParts,
+    mut slide: Local<f32>,
+    mut cache: Local<CardCache>,
+) {
+    let Ok((mut node, mut vis, computed, mut tf, mut border)) = root.single_mut() else {
+        return;
+    };
+    let cursor = window
+        .single()
+        .ok()
+        .and_then(|w| w.cursor_position().map(|c| (c, Vec2::new(w.width(), w.height()))));
+    // Rebuild the card only when what it describes changed, and a few
+    // times a second for live numbers; texts are touched only on change.
+    let hidden = ui.menu_open || over_ui.0 && !state.busy();
+    let key = (*tool, state.action, hovered.0, hidden, sim.generation);
+    cache.age += time.delta_secs();
+    if cache.key != Some(key) || preview.is_changed() || cache.age >= CARD_REFRESH_S {
+        cache.key = Some(key);
+        cache.age = 0.0;
+        cache.card = if hidden {
+            None
+        } else {
+            tool_card(*tool, state.action, &preview, &sim.world, hovered.0)
+        };
+    }
+    let (Some(card), Some((cursor, win))) = (cache.card.clone(), cursor) else {
+        vis.set_if_neq(Visibility::Hidden);
+        cache.shown = None;
+        *slide = 0.0;
+        return;
+    };
+    if cache.shown.as_ref() != Some(&card) {
+        apply_card(&card, &mut parts);
+        cache.shown = Some(card.clone());
+    }
+    let invalid = card.title_color == t::NEGATIVE;
+    border.set_if_neq(BorderColor::all(if invalid {
+        t::alpha(t::NEGATIVE, 0.55)
+    } else {
+        t::PANEL_BORDER
+    }));
+    // Place beside the cursor, flipping to stay inside the window.
+    let scale = ui_scale.0.max(0.01);
+    let cursor = cursor / scale;
+    let screen = win / scale;
+    let size = computed.size * computed.inverse_scale_factor;
+    let off = Vec2::new(22.0, 22.0);
+    let mut pos = cursor + off;
+    if pos.x + size.x > screen.x - t::EDGE {
+        pos.x = cursor.x - off.x - size.x;
+    }
+    if pos.y + size.y > screen.y - t::EDGE - t::TOOL_BUTTON - 2.0 * t::EDGE {
+        pos.y = cursor.y - off.y * 0.6 - size.y;
+    }
+    pos = pos.max(Vec2::splat(t::EDGE));
+    let (left, top) = (px(pos.x.round()), px(pos.y.round()));
+    if node.left != left || node.top != top {
+        node.left = left;
+        node.top = top;
+    }
+    if *slide < 1.0 {
+        *slide += (1.0 - *slide) * approach(time.delta_secs(), 0.05);
+        if *slide > 0.995 {
+            *slide = 1.0;
+        }
+        tf.translation = Val2::px(0.0, (1.0 - *slide) * 5.0);
+    }
+    if size.x > 0.0 {
+        vis.set_if_neq(Visibility::Inherited);
+    }
+}
+
+/// Last card built by `update_card` and what it was built from.
+#[derive(Default)]
+struct CardCache {
+    key: Option<(ActiveTool, Action, Option<Cell>, bool, u64)>,
+    age: f32,
+    card: Option<Card>,
+    /// Card currently written into the entities.
+    shown: Option<Card>,
+}
+
+/// Seconds between refreshes of the live numbers on a card.
+const CARD_REFRESH_S: f32 = 0.25;
+
+type CardParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static CardPart,
+        Option<&'static mut Text>,
+        Option<&'static mut TextColor>,
+        Option<&'static mut BackgroundColor>,
+        Option<&'static mut Node>,
+    ),
+    Without<CardRoot>,
+>;
+
+fn apply_card(card: &Card, parts: &mut CardParts) {
+    for (part, text, color, bg, pnode) in parts.iter_mut() {
+        match *part {
+            CardPart::IconBox => {
+                if let Some(mut bg) = bg {
+                    bg.set_if_neq(BackgroundColor(t::alpha(card.color, 0.16)));
+                }
+            }
+            CardPart::Icon => set_text(text, color, card.glyph.to_string(), card.color),
+            CardPart::Title => set_text(text, color, card.title.clone(), card.title_color),
+            CardPart::Row(i) => set_display(pnode, i < card.rows.len()),
+            CardPart::RowLabel(i) => {
+                if let Some(r) = card.rows.get(i) {
+                    set_display(pnode, !r.label.is_empty());
+                    set_text(text, color, r.label.clone(), t::TEXT_MUTED);
+                }
+            }
+            CardPart::RowValue(i) => {
+                if let Some(r) = card.rows.get(i) {
+                    set_text(text, color, r.value.clone(), r.color);
+                }
+            }
+            CardPart::Hint => {
+                let show = !card.hint.is_empty();
+                set_text(text, color, card.hint.clone(), t::TEXT_FAINT);
+                set_display(pnode, show);
+            }
+            CardPart::Bar => set_display(pnode, card.bar.is_some() && !card.rows.is_empty()),
+            CardPart::BarFill => {
+                if let Some((f, c)) = card.bar {
+                    if let Some(mut bg) = bg {
+                        bg.set_if_neq(BackgroundColor(c));
+                    }
+                    if let Some(mut n) = pnode {
+                        let w = percent((f.clamp(0.0, 1.0) * 100.0).max(2.0));
+                        if n.width != w {
+                            n.width = w;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn set_text(text: Option<Mut<Text>>, color: Option<Mut<TextColor>>, s: String, c: Color) {
+    if let Some(mut text) = text
+        && text.0 != s
+    {
+        text.0 = s;
+    }
+    if let Some(mut color) = color {
+        color.set_if_neq(TextColor(c));
+    }
+}
+
+fn set_display(node: Option<Mut<Node>>, show: bool) {
+    if let Some(mut n) = node {
+        let d = if show { Display::Flex } else { Display::None };
+        if n.display != d {
+            n.display = d;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use citysim_sim::Command;
+
+    #[test]
+    fn bands_follow_the_shared_thresholds() {
+        assert_eq!(Band::of(0.0), Band::Free);
+        assert_eq!(Band::of(CONGESTION_BUSY - 0.01), Band::Free);
+        assert_eq!(Band::of(CONGESTION_BUSY), Band::Busy);
+        assert_eq!(Band::of(CONGESTION_JAM), Band::Jammed);
+        assert_eq!(Band::of(1.0), Band::Jammed);
+    }
+
+    #[test]
+    fn headings() {
+        assert_eq!(heading_name([0.0, 0.0], [8.0, 0.0]), "Eastbound");
+        assert_eq!(heading_name([0.0, 0.0], [0.0, -8.0]), "Northbound");
+        assert_eq!(heading_name([0.0, 0.0], [-8.0, 8.0]), "Southwest");
+    }
+
+    #[test]
+    fn insufficient_funds_names_both_amounts() {
+        let e = CommandError::InsufficientFunds {
+            cost: 1_250,
+            money: -40,
+        };
+        assert_eq!(error_text(&e), "Not enough money: costs $1,250, you have \u{2212}$40");
+    }
+
+    #[test]
+    fn road_card_reads_the_sim() {
+        let mut w = World::new(1);
+        w.apply(Command::BuildRoad {
+            from: Cell::new(11, 128),
+            to: Cell::new(30, 128),
+        })
+        .unwrap();
+        let card = inspect_card(&w, Cell::new(20, 128)).expect("road card");
+        assert_eq!(card.title, "Street");
+        assert_eq!(card.rows[0].value, "Free flow");
+        assert!(card.rows.iter().any(|r| r.label == "Eastbound"));
+        assert!(card.rows.iter().any(|r| r.label == "Westbound"));
+    }
+
+    #[test]
+    fn broke_road_preview_shows_the_sims_reason() {
+        let mut w = World::new(1);
+        w.economy.money = -300;
+        let cmd = Command::BuildRoad {
+            from: Cell::new(11, 128),
+            to: Cell::new(20, 128),
+        };
+        let p = super::super::tools::compute_preview(&w, cmd);
+        let start = Cell::new(11, 128);
+        let card = tool_card(
+            ActiveTool::Road,
+            Action::Road { start, held: false },
+            &p,
+            &w,
+            Some(Cell::new(20, 128)),
+        )
+        .expect("card");
+        let cost = format::money(9 * balance::ROAD_COST_PER_CELL);
+        let want = format!("Not enough money: costs {cost}, you have \u{2212}$300");
+        assert_eq!(card.rows[0].value, want, "{:?}", card.rows);
+    }
+
+    fn zone_card(w: &World, cell: Cell, zone: Option<Zone>) -> String {
+        let cmd = Command::SetZone {
+            min: cell,
+            max: cell,
+            zone,
+        };
+        let p = super::super::tools::compute_preview(w, cmd);
+        let card = tool_card(ActiveTool::Zone(zone), Action::Idle, &p, w, Some(cell)).expect("card");
+        card.rows[0].value.clone()
+    }
+
+    #[test]
+    fn zone_hover_says_why_nothing_changes() {
+        let mut w = World::new(1);
+        w.apply(Command::BuildRoad {
+            from: Cell::new(11, 128),
+            to: Cell::new(30, 128),
+        })
+        .unwrap();
+        let r = Some(Zone::Residential);
+        let lot = Cell::new(20, 129);
+        assert_eq!(zone_card(&w, lot, r), "1 cell · free");
+        w.apply(Command::SetZone {
+            min: lot,
+            max: lot,
+            zone: r,
+        })
+        .unwrap();
+        // The reported bug: an already zoned lot is not "needs a road".
+        assert_eq!(zone_card(&w, lot, r), "Already residential");
+        assert!(zone_card(&w, Cell::new(20, 128), r).starts_with("Roads can't be zoned"));
+        assert!(zone_card(&w, Cell::new(20, 140), r).starts_with("Too far from a road"));
+        assert_eq!(zone_card(&w, Cell::new(20, 130), None), "Not zoned");
+        assert_eq!(zone_card(&w, lot, None), "1 cell · unzoned, free");
+    }
+
+    #[test]
+    fn cut_off_countdown_follows_the_hourly_check() {
+        let grace = balance::ABANDON_UNREACHABLE_GRACE_TICKS;
+        let hour = balance::REACHABILITY_CHECK_INTERVAL_TICKS;
+        // Found cut off at an hourly check: exactly one day to go.
+        assert_eq!(abandon_in_ticks(10 * hour, 10 * hour), grace);
+        assert_eq!(hours_text(abandon_in_ticks(10 * hour, 10 * hour)), "24 h");
+        assert_eq!(hours_text(abandon_in_ticks(10 * hour, 10 * hour + grace - 5)), "1 h");
+    }
+}
