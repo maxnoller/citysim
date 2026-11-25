@@ -870,7 +870,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             });
         if v.speed >= balance::WAIT_SPEED {
             t.wait_ticks = 0;
-        } else if !at_red || now % 2 == 0 {
+        } else if !at_red || now.is_multiple_of(2) {
             // At a red light the timer runs at half speed: giving up takes
             // twice `STUCK_REMOVE_AFTER_S`, longer than any signal cycle.
             t.wait_ticks += 1;
