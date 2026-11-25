@@ -78,6 +78,11 @@ const SCENARIOS: &[Scenario] = &[
         days: 8,
     },
     Scenario {
+        name: "organic",
+        about: "free-form roads: curved avenue, turned grid, ring, cul-de-sacs (pre-built)",
+        days: 25,
+    },
+    Scenario {
         name: "overbuilt",
         about: "a road mesh far bigger than its town (pre-built), a little zoning",
         days: 10,
@@ -110,6 +115,10 @@ fn run(sc: &Scenario, out_dir: &str) {
         "two_grid" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, true)),
         "artery" | "artery_fixed" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false)),
         "overbuilt" => scenarios::prebuilt(&mut w, scenarios::overbuilt),
+        "organic" => scenarios::prebuilt(&mut w, |w| {
+            let refused = scenarios::organic(w);
+            assert!(refused.is_empty(), "organic layout refused: {refused:?}");
+        }),
         _ => unreachable!(),
     }
     println!("\n=== {} — {}", sc.name, sc.about);

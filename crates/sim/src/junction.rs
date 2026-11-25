@@ -478,6 +478,38 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
         let cap = 3.0 * arms.iter().map(|a| a.kind.half_width_m()).fold(0.0, f32::max) + 2.0;
         arms[i].setback = sb.min(cap).min(len * 0.4);
     }
+    // Curved arms: the formula above uses the directions at the node. Push
+    // each stop line out until it clears the other arms' carriageways
+    // along their real curves.
+    if deg >= 2 && node.segments.iter().any(|&s| !roads.segments[s].curve.is_straight()) {
+        for i in 0..deg {
+            let len = roads.segments[arms[i].segment].length;
+            let cap = (len * 0.4).max(arms[i].setback);
+            let hw = arms[i].kind.half_width_m();
+            let clear = |sb: f32| {
+                let p = arm_pose(roads, n, arms[i].segment, sb);
+                let r = right_of(p.dir);
+                let probes = [
+                    p.pos,
+                    [p.pos[0] + r[0] * hw, p.pos[1] + r[1] * hw],
+                    [p.pos[0] - r[0] * hw, p.pos[1] - r[1] * hw],
+                ];
+                (0..deg).all(|j| {
+                    if j == i || arms[i].opposite == Some(j as u8) {
+                        return true;
+                    }
+                    let seg = &roads.segments[arms[j].segment];
+                    let need = arms[j].kind.half_width_m() + 0.3;
+                    probes.iter().all(|&q| seg.nearest(q).1 >= need)
+                })
+            };
+            let mut sb = arms[i].setback;
+            while sb < cap && !clear(sb) {
+                sb = (sb + 0.5).min(cap);
+            }
+            arms[i].setback = sb;
+        }
+    }
     // A road that changes width without a junction (a lane ends, e.g. the
     // highway or an avenue continuing as a street): a short merge box, so
     // cars waiting to merge stop clear of the stream they join and the
@@ -757,6 +789,11 @@ pub(crate) fn auto_control(arms: &[Arm], busy: bool) -> JunctionControl {
 }
 
 fn resolve(setting: JunctionSetting, arms: &[Arm], busy: bool) -> JunctionControl {
+    // Nodes with fewer than three arms (bends, curve joins, lane changes)
+    // have no signal plan: they are never signalled, however busy.
+    if arms.len() < 3 {
+        return JunctionControl::Priority;
+    }
     match setting {
         JunctionSetting::Auto => auto_control(arms, busy),
         JunctionSetting::Signal => JunctionControl::Signal,

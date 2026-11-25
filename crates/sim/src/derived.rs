@@ -80,6 +80,15 @@ pub(crate) struct Derived {
     pub denials: [u64; 4],
     /// Debug counters: junction entries by turn `[straight, right, left, u-turn]`.
     pub turns: [u64; 4],
+    /// Debug: denials per node slot, by reason (as `denials`).
+    pub node_denials: Vec<[u32; 4]>,
+    /// Debug: cars that gave up, `(tick, segment, forward, metres before the
+    /// stop line, lane)`.
+    pub gave_up: Vec<(u64, SegmentId, bool, f32, u8)>,
+    /// Debug: last stop-line refusal reason per vehicle slot (255: none),
+    /// and the reasons of the cars that gave up.
+    pub last_denial: Vec<u8>,
+    pub gave_up_reasons: [u32; 5],
 }
 
 impl PartialEq for Derived {

@@ -197,6 +197,7 @@ impl WorldV4 {
             stuck_removed: t.stuck_removed,
             deadlocks_resolved: t.deadlocks_resolved,
             control_version: t.control_version,
+            stopped_share: 0.0,
         };
         let mut w = World::new(self.seed);
         w.rng = self.rng;
