@@ -135,7 +135,7 @@ fn keys() -> [Key; 5] {
             glow: c(0x34436E),
             glow_strength: 0.25,
             ambient: Color::srgb(0.42, 0.55, 1.0),
-            ambient_brightness: 330.0,
+            ambient_brightness: 210.0,
         },
         Key {
             elevation: -6.0,
@@ -145,7 +145,7 @@ fn keys() -> [Key; 5] {
             glow: c(0xB0707A),
             glow_strength: 0.5,
             ambient: Color::srgb(0.62, 0.7, 0.95),
-            ambient_brightness: 560.0,
+            ambient_brightness: 430.0,
         },
         Key {
             elevation: -0.5,
@@ -157,7 +157,7 @@ fn keys() -> [Key; 5] {
             // Warmth goes to the sky; the ground light stays nearly neutral
             // so grass reads green, not brown, at dawn and dusk.
             ambient: Color::srgb(0.86, 0.87, 0.94),
-            ambient_brightness: 860.0,
+            ambient_brightness: 680.0,
         },
         Key {
             elevation: 7.0,
@@ -242,7 +242,7 @@ pub fn day_light(hour: f32) -> DayLight {
     let (light_dir, light_color, light_lux) = if elevation > -4.0 {
         // A low sun still lights the town well (from about 40 % just above
         // the horizon), in a soft peach rather than deep orange.
-        let k = smoothstep(-4.0, 4.0, elevation) * 0.42 + smoothstep(4.0, 20.0, elevation) * 0.58;
+        let k = smoothstep(-4.0, 4.0, elevation) * 0.55 + smoothstep(4.0, 20.0, elevation) * 0.45;
         let warm = smoothstep(2.0, 22.0, elevation);
         let color = mix(Color::srgb_u32(0xFFC594), palette::SUN, warm);
         // Keep shadows from going infinitely long at the horizon.
@@ -250,7 +250,7 @@ pub fn day_light(hour: f32) -> DayLight {
         (-d, color, 6_200.0 * k)
     } else {
         let k = ((-4.0 - elevation) / 8.0).clamp(0.0, 1.0);
-        (-to_moon, Color::srgb(0.62, 0.74, 1.0), 1_500.0 * k)
+        (-to_moon, Color::srgb(0.62, 0.74, 1.0), 1_000.0 * k)
     };
     DayLight {
         hour,
