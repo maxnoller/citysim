@@ -48,6 +48,16 @@ pub(crate) struct Derived {
     /// `traffic.junctions_version` `setbacks_key`.
     pub setbacks: Vec<[f32; 2]>,
     pub setbacks_key: Option<u64>,
+    /// Expected junction wait per segment slot and direction, for routing
+    /// (`drive::build_route_delays`), for `(junctions_version,
+    /// control_version)` `route_delay_key`.
+    pub route_delay: Vec<[f32; 2]>,
+    pub route_delay_key: Option<(u64, u64)>,
+    /// Debug counters: front cars at the stop line refused entry, by reason
+    /// `[conflict in box, no room beyond, signal, yielding]`.
+    pub denials: [u64; 4],
+    /// Debug counters: junction entries by turn `[straight, right, left, u-turn]`.
+    pub turns: [u64; 4],
 }
 
 impl PartialEq for Derived {

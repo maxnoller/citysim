@@ -33,6 +33,21 @@ struct Scenario {
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
+        name: "hierarchy",
+        about: "round 2: avenues as arterials, streets inside the blocks, grows to 10,000",
+        days: 45,
+    },
+    Scenario {
+        name: "streets",
+        about: "round 2: the same blocks with streets only, grows to 10,000",
+        days: 45,
+    },
+    Scenario {
+        name: "single_artery",
+        about: "round 2: the same blocks hanging off one spine, grows to 10,000",
+        days: 45,
+    },
+    Scenario {
         name: "grid",
         about: "sensible player: grid blocks following demand, all zone types",
         days: 20,
@@ -77,7 +92,9 @@ fn run(sc: &Scenario, out_dir: &str) {
     let mut w = World::new(7);
     let mut player = None;
     match sc.name {
-        "grid" => player = Some(GridPlayer::new(&Zone::ALL)),
+        "grid" | "streets" => player = Some(GridPlayer::new(&Zone::ALL)),
+        "hierarchy" => player = Some(GridPlayer::hierarchy()),
+        "single_artery" => player = Some(GridPlayer::single_artery()),
         "upfront" => {
             let mut p = GridPlayer::new(&Zone::ALL);
             p.build_ahead(&mut w, UPFRONT_BLOCKS);
@@ -141,6 +158,10 @@ fn run(sc: &Scenario, out_dir: &str) {
             max_at = w.time.tick;
         }
         n += 1;
+        if sc.days > 30 && w.stats.population >= 10_500 {
+            // The 10,000 runs stop a little past the goal.
+            break;
+        }
         if w.stats.population >= 4500 && w.stats.vehicles_on_road >= 100 {
             rush_sum += dt;
             rush_n += 1;
@@ -194,7 +215,7 @@ fn run(sc: &Scenario, out_dir: &str) {
             } else {
                 "-".into()
             };
-            println!(
+            print!(
                 "{:>3} {:>5.1} {:>6} {:>5} {:>5} {:>5.2} {:>5} {:>5} {:>6.1} {:>6.1} {:>5.1} {:>9} {:>7} {:>7} {:>6} {:>6} {:>6}  {:+.2} {:+.2} {:+.2}",
                 h.day,
                 minutes(w.time.tick),
@@ -216,6 +237,17 @@ fn run(sc: &Scenario, out_dir: &str) {
                 h.demand[0],
                 h.demand[1],
                 h.demand[2],
+            );
+            let dn = citysim_sim::traffic::debug_denials(&w);
+            println!(
+                "  stuck {} dl {} deny c{}k r{}k s{}k y{}k {:?}",
+                w.traffic.stuck_removed,
+                w.traffic.deadlocks_resolved,
+                dn[0] / 1000,
+                dn[1] / 1000,
+                dn[2] / 1000,
+                dn[3] / 1000,
+                w.economy.fiscal.state
             );
             speed_acc = (0.0, 0);
             jam_max = 0.0;

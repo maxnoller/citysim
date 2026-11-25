@@ -30,8 +30,10 @@
 //! * `Priority`: the major road (higher class, then the straight-through
 //!   pair) has right of way; the others give way and enter on a gap.
 //!
-//! `JunctionSetting::Auto` picks signals where an avenue or the highway
-//! meets the junction or where it was busy yesterday, priority otherwise.
+//! `JunctionSetting::Auto` picks signals where avenues (or an avenue and
+//! the highway) meet, where a street crosses an avenue, and where a
+//! junction was busy yesterday; elsewhere priority, so a side street
+//! joining an avenue (a T) gives way to it until it gets busy.
 //! The player overrides it per junction with `Command::SetJunctionControl`.
 
 use serde::{Deserialize, Serialize};
@@ -181,6 +183,9 @@ pub struct SignalPlan {
     pub coordinated: bool,
     pub cycle_s: f32,
     pub offset_s: f32,
+    /// Index of the main road's through phase (where a coordinated signal
+    /// starts its cycle and a new signal starts).
+    pub main: u8,
 }
 
 /// Live state of a signal.
@@ -604,6 +609,7 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
     let main_group = groups.remove(main);
     groups.insert(0, main_group);
     let mut phases = Vec::new();
+    let mut main = 0u8;
     for (k, g) in groups.iter().enumerate() {
         let wide = g.len() == 2 && g.iter().any(|&a| arms[a as usize].lanes_in >= 2);
         if wide {
@@ -613,6 +619,9 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
                 min_green_s: balance::SIGNAL_LEFT_MIN_GREEN_S,
                 max_green_s: balance::SIGNAL_LEFT_MAX_GREEN_S,
             });
+        }
+        if k == 0 {
+            main = phases.len() as u8;
         }
         phases.push(SignalPhase {
             arms: g.clone(),
@@ -627,7 +636,10 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
     }
     // Coordination along avenues: the main group is an avenue pair.
     let g0 = &groups[0];
-    let coordinated = g0.len() == 2 && g0.iter().all(|&a| arms[a as usize].kind == RoadKind::Avenue);
+    // Only where arterials meet: a street crossing is served on demand.
+    let coordinated = g0.len() == 2
+        && g0.iter().all(|&a| arms[a as usize].kind == RoadKind::Avenue)
+        && arms.iter().all(|a| a.kind.rank() >= RoadKind::Avenue.rank());
     let cycle_s = balance::SIGNAL_COORD_CYCLE_S;
     let offset_s = if coordinated {
         // Canonical axis direction (pointing to +x, or +y when vertical).
@@ -646,12 +658,24 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
         coordinated,
         cycle_s,
         offset_s,
+        main,
     }
 }
 
 /// Control `Auto` resolves to.
 pub(crate) fn auto_control(arms: &[Arm], busy: bool) -> JunctionControl {
-    if busy || arms.iter().any(|a| a.kind.rank() >= RoadKind::Avenue.rank()) {
+    // Arterials meeting (avenues, the highway), or a street crossing an
+    // avenue: signals. A side street joining an avenue (a T) gives way
+    // until it gets busy.
+    let arterial = arms.iter().filter(|a| a.kind.rank() >= RoadKind::Avenue.rank()).count();
+    let through_pair = arterial == 2
+        && arms.iter().enumerate().any(|(i, a)| {
+            a.kind.rank() >= RoadKind::Avenue.rank()
+                && a.opposite
+                    .is_some_and(|o| arms[o as usize].kind.rank() >= RoadKind::Avenue.rank() && o as usize != i)
+        });
+    let crossing = arterial >= 1 && arms.len() >= 4;
+    if busy || arterial >= 3 || (arterial == 2 && !through_pair) || crossing {
         JunctionControl::Signal
     } else {
         JunctionControl::Priority
@@ -685,7 +709,7 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
         .is_some_and(|o| o.arms.len() == arms.len() && o.arms.iter().zip(&arms).all(|(a, b)| a.segment == b.segment));
     let signal = match old {
         Some(o) if same_shape && o.plan == plan => o.signal,
-        _ => SignalState::default(),
+        _ => fresh_signal(plan.as_ref()),
     };
     JunctionState {
         setting,
@@ -706,13 +730,23 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
     }
 }
 
+/// A signal starting on its main through phase.
+fn fresh_signal(plan: Option<&SignalPlan>) -> SignalState {
+    let main = plan.map_or(0, |p| p.main);
+    SignalState {
+        phase: main,
+        next: main,
+        ..SignalState::default()
+    }
+}
+
 /// Change the setting of a junction state and re-resolve its control.
 pub(crate) fn set_setting(j: &mut JunctionState, setting: JunctionSetting) {
     j.setting = setting;
     let c = resolve(setting, &j.arms, j.busy);
     if c != j.control {
         j.control = c;
-        j.signal = SignalState::default();
+        j.signal = fresh_signal(j.plan.as_ref());
     }
 }
 
@@ -753,8 +787,9 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
     let np = plan.phases.len();
     let s = &mut j.signal;
     if s.phase as usize >= np {
-        *s = SignalState::default();
+        *s = fresh_signal(Some(plan));
     }
+    let main = plan.main;
     s.ticks += 1;
     match s.stage {
         SignalStage::Green => {
@@ -777,18 +812,17 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
                 let c = ticks(plan.cycle_s).max(1) as u64;
                 let t = (now + c - (ticks(plan.offset_s) as u64 % c)) % c;
                 let clear = ticks(balance::SIGNAL_YELLOW_S + balance::SIGNAL_ALL_RED_S) as u64;
-                if s.phase == 0 {
+                if s.phase == main {
                     // The avenue keeps green until its share of the cycle
                     // is used (a platoon is on its way).
                     let hold = (c as f32 * balance::SIGNAL_COORD_MAIN_SHARE) as u64;
-                    end = end && t >= hold && t + clear < c;
-                    if !mine && t < hold {
-                        end = false;
-                    }
+                    // An empty avenue gaps out early (the phase returns
+                    // at the next cycle start anyway).
+                    end = end && (!mine || t >= hold) && t + clear < c;
                 } else if t + clear >= c {
                     // Force-off so the avenue turns green on time.
                     end = true;
-                    next = 0;
+                    next = main as usize;
                 }
             }
             if end {
