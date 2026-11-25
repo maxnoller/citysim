@@ -329,7 +329,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                     info_tip(
                         "Average commute",
                         "Average door-to-door drive to work, in real seconds at normal speed (the game \
-                         clock runs faster). Over 70 seconds and fewer people want to move in.",
+                         clock runs faster). Over 130 seconds and fewer people want to move in.",
                     ),
                 ))
                 .with_children(|c| {
@@ -376,7 +376,7 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                     UiAction::Speed(0),
                     1,
                     "Normal speed",
-                    "One in-game day every four minutes.",
+                    "One in-game day every 16 minutes.",
                     "1",
                 );
                 spawn_speed_button(
@@ -393,9 +393,18 @@ fn spawn_top_bar(mut commands: Commands, fonts: Res<UiFonts>) {
                     fonts,
                     UiAction::Speed(2),
                     3,
-                    "Fastest",
+                    "Faster",
                     "Six times normal speed.",
                     "3",
+                );
+                spawn_speed_button(
+                    c,
+                    fonts,
+                    UiAction::Speed(3),
+                    4,
+                    "Fastest",
+                    "Twelve times normal speed: a day in 80 seconds.",
+                    "4",
                 );
             });
         });
@@ -452,7 +461,7 @@ fn spawn_speed_button(
             accent,
         },
         Node {
-            width: px(if arrows == 3 { 46.0 } else { 40.0 }),
+            width: px(40.0 + arrows.saturating_sub(2) as f32 * 6.0),
             height: px(t::TOP_BAR_H - 2.0 * t::S2 - 2.0),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
@@ -703,9 +712,13 @@ mod tests {
 
     #[test]
     fn hud_texts_match_the_sim_clock() {
-        // The tooltips say "four minutes" and "over 70 seconds".
-        assert_eq!(balance::TICKS_PER_DAY, 4 * 60 * citysim_sim::TICKS_PER_SECOND);
-        assert_eq!(balance::COMMUTE_OK_S, 70.0);
+        // The speed tooltips say "16 minutes" and "a day in 80 seconds".
+        assert_eq!(balance::TICKS_PER_DAY, 16 * 60 * citysim_sim::TICKS_PER_SECOND);
+        assert_eq!(
+            balance::TICKS_PER_DAY / crate::shared::SPEEDS[3] / citysim_sim::TICKS_PER_SECOND,
+            80
+        );
+        assert_eq!(balance::COMMUTE_OK_S, 130.0);
     }
 
     #[test]

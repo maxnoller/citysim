@@ -85,7 +85,7 @@ fn control_keys(
     if keys.just_pressed(KeyCode::Space) {
         out.write(UiAction::TogglePause);
     }
-    for (i, key) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3]
+    for (i, key) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4]
         .into_iter()
         .enumerate()
     {

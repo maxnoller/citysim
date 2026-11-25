@@ -4,7 +4,7 @@
 //! building's people, a car and the whole city. Built from
 //! `citysim_sim::inspect`; nothing here knows about panels or colours.
 
-use citysim_sim::citizens::{Activity, Citizen, CitizenId, HappinessPart, JobTier, LifeEvent, LifeStage, TravelMode};
+use citysim_sim::citizens::{Activity, CitizenId, HappinessPart, JobTier, LifeEvent, LifeStage, TravelMode};
 use citysim_sim::households::HouseholdKind;
 use citysim_sim::inspect::{self, AGE_BANDS};
 use citysim_sim::{BuildingId, Place, TripPurpose, VehicleId, World, Zone, balance};
@@ -244,27 +244,6 @@ pub fn tier_word(t: JobTier) -> &'static str {
     }
 }
 
-/// Happiness part in plain words, good side and bad side.
-pub fn part_words(p: HappinessPart, v: f32) -> &'static str {
-    let good = v >= 0.7;
-    match (p, good) {
-        (HappinessPart::Employment, true) => "Has the work they want",
-        (HappinessPart::Employment, false) => "Worried about work",
-        (HappinessPart::Commute, true) => "Easy commute",
-        (HappinessPart::Commute, false) => "Commute takes too long",
-        (HappinessPart::Affordability, true) => "Rent is manageable",
-        (HappinessPart::Affordability, false) => "Rent and bills are a struggle",
-        (HappinessPart::Access, true) => "Shops and nights out nearby",
-        (HappinessPart::Access, false) => "Few shops or places to go nearby",
-        (HappinessPart::Taxes, true) => "Taxes are fair",
-        (HappinessPart::Taxes, false) => "Taxes are too high",
-        (HappinessPart::Finances, true) => "City services work",
-        (HappinessPart::Finances, false) => "City services are being cut",
-        (HappinessPart::Housing, true) => "Happy with their home",
-        (HappinessPart::Housing, false) => "Wants a home of their own",
-    }
-}
-
 pub fn part_title(p: HappinessPart) -> &'static str {
     match p {
         HappinessPart::Employment => "Work",
@@ -412,76 +391,63 @@ pub struct Sheet {
     pub inside: Option<BuildingId>,
 }
 
-/// Where a person is on the map now: in their car, in a building, or on
-/// the way off screen (between the two buildings, by the clock).
+/// Where a person is on the map now: in their car (at its drawn lane
+/// pose), in a building, or on the way off screen.
 pub fn person_position(world: &World, id: CitizenId) -> Option<[f32; 2]> {
     let v = inspect::citizen(world, id)?;
-    if let Some(b) = v.inside {
-        return world.buildings.get(b).map(|b| b.center());
-    }
-    let t = v.trip?;
-    if let Some(car) = t.vehicle.and_then(|c| world.vehicles.get(c)) {
+    if let Some(car) = v.trip.and_then(|t| t.vehicle).and_then(|c| world.vehicles.get(c)) {
         return Some(citysim_sim::drive::vehicle_pose(world, car).0);
     }
-    let to = world.buildings.get(t.to)?.center();
-    let from = t.from.and_then(|b| world.buildings.get(b)).map_or(to, |b| b.center());
-    let f = match t.eta_tick {
-        Some(eta) if eta > t.departed_tick => {
-            (world.time.tick.saturating_sub(t.departed_tick)) as f32 / (eta - t.departed_tick) as f32
-        }
-        _ => 0.5,
-    }
-    .clamp(0.0, 1.0);
-    Some([from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f])
+    inspect::citizen_pos(world, id)
+}
+
+fn tick_clock(t: u64) -> String {
+    clock(t % balance::TICKS_PER_DAY as u64)
 }
 
 /// What a person is doing, in words, and what comes next.
-fn doing(world: &World, c: &Citizen, v: &inspect::CitizenView<'_>) -> (String, String) {
+fn doing(world: &World, id: CitizenId) -> (String, String) {
+    let Some(p) = inspect::plan(world, id) else {
+        return (String::new(), String::new());
+    };
     let now = world.time.tick;
-    let until = clock(c.until_tick % balance::TICKS_PER_DAY as u64);
-    if let Some(t) = v.trip {
-        let how = match t.mode {
-            TravelMode::Driving => "Driving",
-            TravelMode::Passenger => "Riding",
-            TravelMode::NoCar => "On foot or by lift",
-        };
-        let doing = format!("{how} {} ", purpose_word(t.purpose)).trim_end().to_string();
-        let away = now.saturating_sub(t.departed_tick);
-        let next = match t.eta_tick {
-            Some(eta) => format!(
-                "Arrives at {} ({} on the way)",
-                clock(eta % balance::TICKS_PER_DAY as u64),
-                span(away)
-            ),
-            None => format!("On the way for {}", span(away)),
-        };
-        return (doing, next);
-    }
-    let doing = activity_word(c.activity).to_string();
-    let next = match c.activity {
-        Activity::Working => format!("Shift ends about {until}, then home"),
-        Activity::Sleeping => match c.job {
-            Some(j) if j.shift.works_on(world.time.day + 1) || j.shift.works_on(world.time.day) => {
-                format!("Up about {until} · work at {}", clock(j.shift.start as u64))
-            }
-            _ => format!("Sleeps until about {until}"),
+    let doing = match p.trip {
+        Some(t) => {
+            let how = match t.mode {
+                TravelMode::Driving => "Driving",
+                TravelMode::Passenger => "Riding",
+                TravelMode::NoCar => "Getting a lift",
+                TravelMode::Walking => "Walking",
+            };
+            format!(
+                "{how} {} · {} so far",
+                purpose_word(t.purpose),
+                span(now.saturating_sub(t.departed_tick))
+            )
+        }
+        None => match p.until_tick {
+            Some(u) if u > now => format!("{} until {}", activity_word(p.activity), tick_clock(u)),
+            _ => activity_word(p.activity).to_string(),
         },
-        Activity::Shopping => format!("Shopping until about {until}, then home"),
-        Activity::Leisure => format!("Out until about {until}"),
-        Activity::Home => match c.job {
-            Some(j) if j.shift.works_on(world.time.day) => {
-                let start = j.shift.start as u64;
-                if (world.time.tick_of_day as u64) < start {
-                    format!("Leaves for work before {}", clock(start))
-                } else {
-                    format!("Home for the day · next decides about {until}")
-                }
+    };
+    let next = match p.next {
+        Some(n) => {
+            let when = n.at_tick.map(|t| format!(" at {}", tick_clock(t))).unwrap_or_default();
+            let place = n
+                .place
+                .filter(|_| n.activity != Activity::Home)
+                .map(|b| format!(" · {}", building_name(world, b)))
+                .unwrap_or_default();
+            match (n.activity, n.purpose, p.trip.is_some()) {
+                (_, _, true) => format!("Arrives about{when}, then {}", activity_word(n.activity).to_lowercase()),
+                (Activity::Travelling, Some(TripPurpose::ToWork), _) => format!("Leaves for work{when}{place}"),
+                (Activity::Travelling, Some(TripPurpose::ToHome), _) => format!("Heads home{when}"),
+                (Activity::Travelling, Some(pp), _) => format!("Sets off {}{when}", purpose_word(pp)),
+                (Activity::Sleeping, _, _) => format!("Bed{when}"),
+                (a, _, _) => format!("Then {}{when}{place}", activity_word(a).to_lowercase()),
             }
-            Some(_) => "A day off".into(),
-            None if c.retired => "Retired: shopping and visits".into(),
-            None => format!("At home until about {until}"),
-        },
-        Activity::Travelling => String::new(),
+        }
+        None => String::new(),
     };
     (doing, next)
 }
@@ -519,7 +485,7 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
         ..Default::default()
     };
     // Now and next.
-    let (now, next) = doing(world, c, &v);
+    let (now, next) = doing(world, id);
     let mut sec = Section::new("Now");
     sec.line("", now, Tone::Normal);
     if !next.is_empty() {
@@ -628,11 +594,10 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
         mood_word(c.happiness.total),
         format::percent((c.happiness.total * 100.0).round() / 100.0)
     ));
-    let mut parts: Vec<HappinessPart> = HappinessPart::ALL.to_vec();
-    parts.sort_by(|a, b| c.happiness.part(*a).total_cmp(&c.happiness.part(*b)));
-    for p in parts {
-        let v = c.happiness.part(p);
-        sec.bar(part_title(p), part_words(p, v), v);
+    if let Some(reasons) = inspect::happiness_reasons(world, id) {
+        for r in reasons {
+            sec.bar(part_title(r.part), r.text, r.value);
+        }
     }
     s.sections.push(sec);
     // Journal, newest first.
@@ -670,10 +635,19 @@ pub fn place_sheet(world: &World, id: BuildingId) -> Option<Sheet> {
                 format!("{} of {}", v.occupied, v.capacity),
                 v.occupied as f32 / v.capacity.max(1) as f32,
             );
-            let inside = inspect::residents(world, id)
+            let home = inspect::residents(world, id)
                 .filter(|&c| world.citizens.get(c).is_some_and(|c| c.location.building() == Some(id)))
                 .count();
-            sec.line("In right now", format!("{inside}"), Tone::Normal);
+            let guests = inspect::inside(world, id).count().saturating_sub(home);
+            sec.line(
+                "In right now",
+                if guests > 0 {
+                    format!("{home} at home · {guests} visiting")
+                } else {
+                    format!("{home} at home")
+                },
+                Tone::Normal,
+            );
             sec.line(
                 "Rent",
                 format!("{}/day from all households", format::money(v.rent_per_day)),
@@ -804,9 +778,17 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
         }
     }
     sec.line("Why", purpose_title(v.purpose), Tone::Normal);
-    if let Some(trip) = world.traffic.trips.get(id) {
-        let secs = world.time.tick.saturating_sub(trip.requested_tick) as f32 / citysim_sim::TICKS_PER_SECOND as f32;
-        sec.line("On the road", format!("{secs:.0} s"), Tone::Normal);
+    sec.line(
+        "On the road",
+        format!(
+            "{:.0} s · left {} ago",
+            v.on_road_s,
+            span(world.time.tick.saturating_sub(v.requested_tick))
+        ),
+        Tone::Normal,
+    );
+    if truck && v.cargo > 0.0 {
+        sec.line("Cargo", format!("{:.0} units of goods", v.cargo), Tone::Normal);
     }
     s.sections.push(sec);
     let mut sec = Section::new(format!("In the car · {}", v.occupants));
@@ -815,13 +797,16 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
         let age = world.citizens.get(c).map_or(0, |c| c.age_years());
         sec.link(name(world, c), format!("{age} · {role}"), Target::Person(c));
     }
+    if v.party > 0 {
+        sec.line("", format!("{} people leaving the city", v.party), Tone::Muted);
+    }
     if v.occupants == 0 {
         sec.line(
             "",
             if truck {
                 "A driver from out of town"
             } else {
-                "Driving back without them"
+                "Nobody we know"
             },
             Tone::Muted,
         );

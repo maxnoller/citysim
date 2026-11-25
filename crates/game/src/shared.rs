@@ -71,8 +71,9 @@ impl SimWorld {
     }
 }
 
-/// Steps per fixed update for speed levels 1, 2, 3.
-pub const SPEEDS: [u32; 3] = [1, 3, 6];
+/// Steps per fixed update for speed levels 1 to 4 (a day is 16 minutes at
+/// 1x, 80 seconds at 12x).
+pub const SPEEDS: [u32; 4] = [1, 3, 6, 12];
 
 /// Pause and speed. The fixed timestep runs at `TICKS_PER_SECOND`; each
 /// fixed update performs `steps_per_tick()` sim steps.
