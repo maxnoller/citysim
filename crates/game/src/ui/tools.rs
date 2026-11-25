@@ -390,7 +390,9 @@ fn track_pointer(
             }),
             RoadMode::Junction => None,
         },
-        ActiveTool::Zone(_) if modes.zone == ZoneMode::Frontage => road_snap(&state, cursor, radius),
+        ActiveTool::Zone(_) if modes.zone == ZoneMode::Frontage => {
+            road_snap(&state, cursor, radius).or_else(|| lot_road(&state, cursor))
+        }
         ActiveTool::Bulldoze if modes.bulldoze == BulldozeMode::Road => road_snap(&state, cursor, radius),
         _ => None,
     };
@@ -412,6 +414,30 @@ fn road_snap(state: &ToolState, cursor: [f32; 2], radius: f32) -> Option<Snap> {
     } else {
         None
     }
+}
+
+/// Frontage zoning: the road cell nearest to the pointer within the lot
+/// depth (players point at the land they want zoned, beside the road).
+fn lot_road(state: &ToolState, cursor: [f32; 2]) -> Option<Snap> {
+    let c = Cell::from_pos(cursor);
+    let reach = plan::LOT_DEPTH;
+    let mut best: Option<(f32, Cell)> = None;
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            let r = c.offset(dx, dy);
+            if state.road_cells.is_road(r) {
+                let d = citysim_sim::geom::dist(r.center(), cursor);
+                if best.is_none_or(|(bd, bc)| d < bd || d == bd && (r.x, r.y) < (bc.x, bc.y)) {
+                    best = Some((d, r));
+                }
+            }
+        }
+    }
+    let (_, r) = best?;
+    let mut s = snap::snap_point(&state.index, r.center(), 0.0, false);
+    s.cell = r;
+    s.target = SnapTarget::Road;
+    Some(s)
 }
 
 /// What the tool would do now, from the tool state and the world.
@@ -1282,6 +1308,23 @@ mod tests {
         assert!(plan.doomed_road.contains(&Cell::new(30, 128)));
         assert!(!plan.doomed_road.contains(&Cell::new(20, 128)));
         assert_eq!(plan.doomed_road.len(), 10);
+    }
+
+    #[test]
+    fn frontage_attaches_to_the_road_from_the_lot_behind_it() {
+        let mut w = World::new(1);
+        w.economy.money = 1_000_000;
+        w.apply(Command::BuildRoad {
+            from: Cell::new(11, 128),
+            to: Cell::new(30, 128),
+            kind: citysim_sim::RoadKind::Street,
+        })
+        .unwrap();
+        let s = state_for(&w);
+        // Two cells north of the road, in the second row of lots.
+        let snap = lot_road(&s, Cell::new(20, 126).center()).unwrap();
+        assert_eq!(snap.cell, Cell::new(20, 128));
+        assert!(lot_road(&s, Cell::new(20, 120).center()).is_none());
     }
 
     #[test]

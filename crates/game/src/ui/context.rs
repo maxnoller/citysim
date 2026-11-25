@@ -784,6 +784,23 @@ fn building_card(world: &World, id: BuildingId, b: &Building) -> Option<Card> {
             };
         }
     }
+    // Deep lots: the sim folds the second row into the lot of the building
+    // that fronts the road.
+    let (w, h) = (b.footprint.width(), b.footprint.height());
+    if w * h > 1 {
+        let side = match b.facing {
+            citysim_sim::Facing::PlusX => "east",
+            citysim_sim::Facing::PlusY => "south",
+            citysim_sim::Facing::MinusX => "west",
+            citysim_sim::Facing::MinusY => "north",
+        };
+        let deep = if w == h { "large lot" } else { "deep lot" };
+        card.rows.push(Row::new(
+            "Lot",
+            format!("{w} x {h} cells · {deep}, faces {side}"),
+            t::TEXT_MUTED,
+        ));
+    }
     // At-risk state, from the sim's own bookkeeping (`world.growth`).
     let meta = world.growth.meta.get(id).copied().unwrap_or_default();
     let now = world.time.tick;

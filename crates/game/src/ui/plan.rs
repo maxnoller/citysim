@@ -1059,3 +1059,43 @@ mod tests {
         assert_eq!(n, 4);
     }
 }
+
+#[cfg(test)]
+mod perf {
+    use super::*;
+
+    /// Timing of a preview in a ~5,000-resident city (`cargo test --release
+    /// -p citysim preview_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn preview_cost_in_a_big_city() {
+        use citysim_sim::scenarios::GridPlayer;
+        let mut w = World::new(1);
+        let mut player = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+        while w.stats.population < 5_000 && w.time.day <= 60 {
+            player.act(&mut w);
+            w.step();
+        }
+        let t0 = std::time::Instant::now();
+        let base = scratch(&w);
+        let t1 = std::time::Instant::now();
+        let legs = [
+            (Cell::new(100, 100), Cell::new(110, 100)),
+            (Cell::new(110, 100), Cell::new(110, 110)),
+        ];
+        let plan = plan_roads(&base, &legs, RoadChoice::Street);
+        let t2 = std::time::Instant::now();
+        let idx = RoadIndex::build(&w);
+        let t3 = std::time::Instant::now();
+        println!(
+            "pop {} segments {}: scratch {:?}, 2-leg plan {:?} (ok {}), road index {:?}",
+            w.stats.population,
+            w.roads.segments.len(),
+            t1 - t0,
+            t2 - t1,
+            plan.eval.ok(),
+            t3 - t2
+        );
+        let _ = idx;
+    }
+}
