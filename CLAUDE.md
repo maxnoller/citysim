@@ -92,11 +92,25 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   its busiest minute. New games start at 09:00 (`START_TICK_OF_DAY`). The pinned checksum in `tests/round2.rs` moves
   with any rule change: update it deliberately.
 
-## Dev / headless flags (need `DISPLAY=:0`; llvmpipe works)
+## Dev / headless flags (need a display, see below, except the windowless modes)
 - `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000, streets only) · `hierarchy` (`GridPlayer::hierarchy`,
   ~10,000 with avenues, ~50 s to build in release) · `jam` (bad layout, one overloaded junction): real towns
   built by `citysim_sim::scenarios` through commands and fast-forwarded before the first frame (< 1 s release, a few s
   debug). `CITYSIM_DEMO_POP=n` target, `CITYSIM_DEMO_HOUR=h` stop time (default 8 = morning rush).
+  `organic` = the sim's free-form town (`scenarios::organic`, ~3,400 residents); `shapes` = gfx's road-shape test town
+  (`dev/shapes.rs`: 5-arm junction, a street meeting the avenue at 30°, a T on the outside of a bend, 25° grid, ring).
+  `CITYSIM_DEMO_CACHE=dir` keeps each built demo world as a save and loads it next time (keyed by kind, seed, pop,
+  hour; delete the files after a sim change).
+- `CITYSIM_BENCH=out.json`: windowless benchmark (no winit, no `DISPLAY` needed): renders off screen at
+  `CITYSIM_BENCH_SIZE` (1920x1080) along a fixed camera path for `CITYSIM_BENCH_FRAMES` (1500) after
+  `CITYSIM_BENCH_WARMUP` (240), sim running (`CITYSIM_BENCH_PAUSED=1` stops it), two GPU frames in flight; writes
+  frame-time avg / median / p99 / worst 1 %, GPU ms per pass, triangles, entities, meshes, materials, draw calls, sim
+  step time. Use with a demo and `CITYSIM_GFX_QUALITY`.
+- `CITYSIM_RECORD=dir`: windowless video frames (`frame_00000.png`...) at `CITYSIM_RECORD_FPS` (30) with a fixed time
+  step, camera on a Catmull-Rom path `CITYSIM_RECORD_PATH="t,x,z,yaw,pitch,dist;..."`; join with ffmpeg.
+- Running the game on the owner's desktop: never open a window there; use `xvfb-run -a -s "-screen 0 1920x1080x24"
+  env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE ...` (renders on the GPU, presents slowly) or the windowless modes.
+  `CITYSIM_SHOT_SIZE=1920x1080` sets the autoshot window size.
 - `CITYSIM_AUTOSHOT=out.png` (or `--autoshot`): screenshot then exit 0. `CITYSIM_SHOT_VIEW=wide|street|close`,
   `CITYSIM_SHOT_DELAY=25` (s, default 3), `CITYSIM_SHOT_OVERLAY=none|zones|traffic`. Without a demo it builds
   a small sample city. Example: `CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png CITYSIM_SHOT_DELAY=25 cargo run -p citysim`.
@@ -115,13 +129,21 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`), `CITYSIM_GFX_HOUR=h` (pin the drawn time of
-  day), `CITYSIM_GFX_TOOLDEMO=1|2|3` (gfx-only build: sample road-tool feedback), `CITYSIM_DEMO_AVENUES=1` (demo main
-  road upgraded to an avenue).
+  day), `CITYSIM_GFX_TOOLDEMO=1|2|3` (gfx-only build: sample road-tool feedback; `4|5|6` the free-form road tool
+  from real previews and `7` de-zoning, on `CITYSIM_DEMO=shapes`), `CITYSIM_DEMO_AVENUES=1` (demo main road upgraded
+  to an avenue), `CITYSIM_GFX_SHOWCASE_SITES=x,z` (building sites with cranes at a spot).
 - gfx shaders: `assets/gfx/shaders/city.wesl` (the shared `CityMaterial`: night glow by the vertex `uv.x` tag
   `mesh_util::Glow`, cloud shadows, ground detail) and `sky.wesl`. Day/night lives in `gfx/daynight.rs`.
 - gfx look: one palette (`gfx/palette.rs`), one shared vertex-coloured material for buildings/roads/trees/cars; models
   are generated in code (`building_gen`, `vehicle_gen`, `props`) and cached; LOD via `VisibilityRange` (mesh origin
   must be near the geometry: the cross-fade dither is measured from the entity origin).
+- gfx performance rule: never change a material asset that many meshes use (Bevy re-extracts and re-specialises every
+  mesh using it: 30-60 ms frames). Time-of-day inputs live in a shared `ShaderBuffer` (`WorldMaterials::day`,
+  `DayParams`), brake lights are `MeshTag` bit 0.
+- gfx roads: `road_geom::Frame` samples a segment's curve (two points when straight); everything along a road is a
+  ribbon over it between the arm cuts of `junction::junction_shape`. `gfx/land.rs`: one index of drawn road edges per
+  roads version; building lots, lot markers and zone cells are fitted clear of it in their own frame (`land::fit`).
+  The free-form road tool is drawn from gfx's `road_tool::CurveToolView`.
 
 ## Bevy 0.20 API facts (verify in `~/.cargo/registry/src/*/bevy*-0.20.1`)
 - Events between systems are `Message`s (`#[derive(Message)]`, `add_message`, `MessageWriter::write`); `AppExit`
