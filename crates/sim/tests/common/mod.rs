@@ -63,26 +63,53 @@ pub fn check_consistency(w: &World, after_step: bool) {
         );
         assert!(v.heading.is_finite());
     }
-    // Households: a commuting household has a car or a waiting departure.
+    // Households: a car on the road is driven by a member; no more cars
+    // out (on the road, waiting to start or parked) than it owns.
     for (hid, h) in w.households.iter() {
-        let commuting = matches!(h.state, HouseholdState::CommutingToWork | HouseholdState::CommutingHome);
-        if h.vehicle.is_some() {
-            assert!(commuting, "tick {tick}: {hid:?} has a car but is {:?}", h.state);
-        } else if commuting {
-            let waiting = w.traffic.pending.iter().any(|d| d.household == Some(hid));
+        assert!(h.members >= 1, "tick {tick}: {hid:?} is empty");
+        if let Some(v) = h.vehicle {
+            let driver = w.traffic.trips.get(v).and_then(|t| t.citizen);
             assert!(
-                waiting,
-                "tick {tick}: {hid:?} is {:?} with no car and no departure",
-                h.state
+                driver.is_some_and(|d| h.citizens.contains(&d)),
+                "tick {tick}: {hid:?} car {v:?} not driven by a member"
             );
         }
-        let n = w.traffic.pending.iter().filter(|d| d.household == Some(hid)).count();
+        let waiting = w.traffic.pending.iter().filter(|d| d.household == Some(hid)).count();
+        let cars_out = h.citizens.iter().filter(|&&c| w.citizens[c].has_car).count();
         assert!(
-            n + usize::from(h.vehicle.is_some()) <= 1,
-            "tick {tick}: {hid:?} has {n} departures and car {:?}",
-            h.vehicle
+            cars_out <= h.cars as usize,
+            "tick {tick}: {hid:?} {cars_out} cars out of {}",
+            h.cars
         );
-        assert!(h.members >= 1);
+        assert!(
+            waiting <= h.cars as usize + 1,
+            "tick {tick}: {hid:?} has {waiting} departures for {} cars",
+            h.cars
+        );
+    }
+    // Every citizen is in exactly one place: inside an existing building,
+    // or on a trip (in a car on the road, waiting for it, or off screen).
+    for (cid, c) in w.citizens.iter() {
+        match &c.location {
+            Location::In(b) => assert!(
+                w.buildings.contains_key(*b),
+                "tick {tick}: {cid:?} in a missing building"
+            ),
+            Location::Travelling(j) => {
+                let on_road = j.vehicle.is_some_and(|v| w.vehicles.contains_key(v));
+                let waiting = w.traffic.pending.iter().any(|d| d.citizen == Some(cid));
+                let off_screen = j.arrive_tick.is_some();
+                let riding = j.mode == TravelMode::Passenger;
+                assert!(
+                    on_road || waiting || off_screen || riding,
+                    "tick {tick}: {cid:?} travelling nowhere: {j:?}"
+                );
+                assert!(
+                    !(on_road && off_screen),
+                    "tick {tick}: {cid:?} both on the road and off screen"
+                );
+            }
+        }
     }
     // Buildings: footprint cells point back and stay zoned for the kind.
     for (bid, b) in w.buildings.iter() {
@@ -109,6 +136,10 @@ pub fn check_consistency(w: &World, after_step: bool) {
     assert_eq!(s.vehicles_on_road as usize, w.vehicles.len());
     let pop: u32 = w.households.values().map(|h| h.members as u32).sum();
     assert_eq!(s.population, pop);
+    assert_eq!(s.population as usize, w.citizens.len());
+    let wf = w.citizens.values().filter(|c| c.in_workforce()).count();
+    assert_eq!(s.workforce as usize, wf);
+    assert_eq!(s.employed + s.unemployed, s.workforce);
     let roads = w.grid.cells.iter().filter(|cd| cd.occupant == Occupant::Road).count();
     assert_eq!(
         s.road_cells as usize, roads,
@@ -151,6 +182,29 @@ pub fn check_consistency(w: &World, after_step: bool) {
             }
         }
     }
+}
+
+/// Which top-level parts of two worlds differ (for failure messages).
+pub fn diff(a: &World, b: &World) -> String {
+    let mut out = Vec::new();
+    macro_rules! cmp {
+        ($($f:ident),*) => {$(
+            if a.$f != b.$f {
+                out.push(stringify!($f));
+            }
+        )*};
+    }
+    cmp!(
+        seed, rng, time, roads, grid, buildings, households, vehicles, economy, demand, stats, versions, traffic,
+        growth, citizens, people
+    );
+    if a.people.stats != b.people.stats {
+        out.push("people.stats");
+    }
+    if a.people.places != b.people.places {
+        out.push("people.places");
+    }
+    format!("differ: {out:?}")
 }
 
 /// Heavier structural checks (road graph, grid vs graph).

@@ -466,7 +466,7 @@ fn busy_city_save_load_lockstep() {
     for (i, (x, y)) in sa.iter().zip(&sb).enumerate() {
         assert!(x == y, "save/load broke lockstep by tick {}", cps[i]);
     }
-    assert!(a == b);
+    assert!(a == b, "{}", common::diff(&a, &b));
 }
 
 #[test]

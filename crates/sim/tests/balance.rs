@@ -52,7 +52,11 @@ fn time_start(w: &mut World, limit_s: u64) -> Start {
     while w.time.tick < t0 + limit_s * SECOND {
         w.step();
         let t = Some((w.time.tick - t0) / SECOND);
-        let at_home = || w.households.values().any(|h| h.state == HouseholdState::AtHome);
+        let at_home = || {
+            w.households
+                .values()
+                .any(|h| h.state == HouseholdState::AtHome && !h.citizens.is_empty())
+        };
         if s.building.is_none() && w.stats.buildings > 0 {
             s.building = t;
         }
@@ -252,7 +256,10 @@ fn budget_by_category_and_unemployment_for_the_hud() {
         assert!(d.money < money, "construction comes on top of the budget");
     }
     let s = &w.stats;
-    assert_eq!(s.workforce, s.households);
+    // The workforce: adults (and teens with a part-time job) who want work.
+    let wf = w.citizens.values().filter(|c| c.in_workforce()).count();
+    assert_eq!(s.workforce as usize, wf);
+    assert!(s.workforce > s.households, "two-earner households");
     assert_eq!(s.employed + s.unemployed, s.workforce);
     assert_eq!(s.vacant_jobs, s.jobs - s.employed);
     assert!((s.unemployment - s.unemployed as f32 / s.workforce as f32).abs() < 1e-6);

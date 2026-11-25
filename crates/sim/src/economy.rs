@@ -10,8 +10,9 @@ use crate::{World, Zone, balance};
 /// `road_upkeep` and `services`; the day's net is `income() - expenses()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Budget {
-    /// Taxes paid by residents: residents * `RESIDENT_TAX_BASE_PER_DAY` *
-    /// tax rate.
+    /// Taxes paid by residents: the tax rate times each employed citizen's
+    /// daily wage (rounded per worker), taken from their household's money
+    /// at payday (`people::residential_tax`). Pensions are not taxed.
     pub residential_tax: i64,
     /// Taxes paid per filled commercial job: filled jobs *
     /// `COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY` * tax rate.
@@ -217,7 +218,7 @@ pub fn budget_now(world: &World) -> Budget {
     let level = world.economy.fiscal.service_level as f64;
     let services = (res as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64 * level).round() as i64;
     Budget {
-        residential_tax: tax(res, balance::RESIDENT_TAX_BASE_PER_DAY),
+        residential_tax: crate::people::residential_tax(world),
         commercial_tax: tax(com, balance::COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY),
         industrial_tax: tax(ind, balance::INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY),
         road_upkeep: world.stats.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
@@ -229,10 +230,12 @@ pub fn budget_now(world: &World) -> Budget {
 
 /// Called once when a new day starts.
 pub(crate) fn end_of_day(world: &mut World) {
-    // Households that left at midnight are gone from both the bill and the
-    // summary.
     crate::stats::update(world);
-    let b = budget_now(world);
+    // Wages, pensions, rent; the residential tax comes out of the wages.
+    let tax = crate::life::payday(world);
+    let mut b = budget_now(world);
+    debug_assert_eq!(b.residential_tax, tax);
+    b.residential_tax = tax;
     let e = &mut world.economy;
     e.money += b.income() - b.expenses();
     e.last_day = b;

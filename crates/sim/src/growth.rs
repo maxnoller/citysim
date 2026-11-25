@@ -259,6 +259,7 @@ fn spawn(world: &mut World, z: Zone) -> bool {
     world.growth.meta.insert(id, BuildingMeta::default());
     world.versions.buildings += 1;
     world.versions.grid += 1;
+    crate::errands::stock_up(world, id);
     true
 }
 
@@ -397,6 +398,8 @@ fn upgrade(world: &mut World, z: Zone) -> bool {
     let area = (b.footprint.width() * b.footprint.height()) as u32;
     b.capacity = capacity(z, b.level, area).max(b.capacity);
     world.versions.buildings += 1;
+    // Better jobs pay better.
+    crate::people::retier(world, id);
     true
 }
 

@@ -4,11 +4,19 @@
 //! [`World`], then optionally an extension block (postcard, starts with its
 //! own version number).
 //!
-//! Version 4 (round 2: avenues, lanes, junction control, fiscal state) is
-//! written now. Version-3 saves (round 1) still load: their body decodes
-//! into the frozen round-1 types in [`v3`] and is upgraded (vehicles on
-//! lane 0, junctions on `Auto`, second-row buildings merged into the lot in
-//! front where possible).
+//! Version 5 (round 3: citizens, household money and goods, the population
+//! bookkeeping) is written now. Older saves still load:
+//!
+//! * Version 4 (round 2: avenues, lanes, junction control, fiscal state)
+//!   decodes into the frozen round-2 types in [`v4`].
+//! * Version 3 (round 1) decodes into the frozen round-1 types in [`v3`] and
+//!   is upgraded (vehicles on lane 0, junctions on `Auto`, second-row
+//!   buildings merged into the lot in front where possible).
+//!
+//! Households from both get plausible citizens, money, goods and cars
+//! generated on load (`households::adopt`): the member count, home and job
+//! are kept (the job goes to the first adult), a car on the road gets its
+//! household's worker as driver, shops start with full shelves.
 //!
 //! The extension block carries state added after format version 3 without
 //! breaking it: those fields are `#[serde(skip)]` in the World's types, so
@@ -23,10 +31,11 @@ use serde::{Deserialize, Serialize};
 use crate::{Budget, BuildingId, MAP_CELLS, World, balance};
 
 pub mod v3;
+pub mod v4;
 
 pub const MAGIC: &[u8; 4] = b"CSIM";
 /// Bump when the World layout changes incompatibly.
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
@@ -106,8 +115,9 @@ impl ExtensionV1 {
 /// Derived fields that are not stored at all, recomputed exactly as
 /// `stats::update` computes them.
 fn restore_derived(w: &mut World) {
+    let (_, _, workforce) = crate::stats::labour(w);
     let s = &mut w.stats;
-    s.workforce = s.households;
+    s.workforce = workforce;
     s.vacant_jobs = s.jobs.saturating_sub(s.employed);
 }
 
@@ -150,14 +160,22 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     if !(OLDEST_LOADABLE_VERSION..=FORMAT_VERSION).contains(&version) {
         return Err(LoadError::UnsupportedVersion(version));
     }
-    let (mut world, rest): (World, &[u8]) = if version == 3 {
-        let (old, rest): (v3::WorldV3, &[u8]) =
-            postcard::take_from_bytes(&bytes[8..]).map_err(|e| LoadError::Corrupt(e.to_string()))?;
-        (old.upgrade(), rest)
-    } else {
-        postcard::take_from_bytes(&bytes[8..]).map_err(|e| LoadError::Corrupt(e.to_string()))?
+    let corrupt = |e: postcard::Error| LoadError::Corrupt(e.to_string());
+    let (mut world, rest): (World, &[u8]) = match version {
+        3 => {
+            let (old, rest): (v3::WorldV3, &[u8]) = postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?;
+            (old.upgrade(), rest)
+        }
+        4 => {
+            let (old, rest): (v4::WorldV4, &[u8]) = postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?;
+            (old.upgrade(), rest)
+        }
+        _ => postcard::take_from_bytes(&bytes[8..]).map_err(corrupt)?,
     };
     check_loaded(&world).map_err(LoadError::Corrupt)?;
+    if version >= 5 {
+        check_people(&world).map_err(LoadError::Corrupt)?;
+    }
     if !rest.is_empty() {
         let (ext_version, rest): (u32, &[u8]) =
             postcard::take_from_bytes(rest).map_err(|e| LoadError::Corrupt(format!("extension: {e}")))?;
@@ -172,9 +190,112 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     if version == 3 {
         crate::growth::convert_legacy_lots(&mut world);
         crate::traffic::sync_junctions(&mut world);
-        crate::stats::update(&mut world);
+    }
+    if version < 5 {
+        upgrade_people(&mut world);
     }
     Ok(world)
+}
+
+/// Older saves: give their households citizens, stock the shops, recompute
+/// the statistics.
+fn upgrade_people(w: &mut World) {
+    // Households whose home is gone cannot be adopted.
+    let homeless: Vec<crate::HouseholdId> = w
+        .households
+        .iter()
+        .filter(|(_, h)| !w.buildings.contains_key(h.home))
+        .map(|(id, _)| id)
+        .collect();
+    for h in homeless {
+        w.households.remove(h);
+    }
+    for v in w.vehicles.values_mut() {
+        if v.household.is_some_and(|h| !w.households.contains_key(h)) {
+            v.household = None;
+        }
+    }
+    for d in w.traffic.pending.iter_mut() {
+        if d.household.is_some_and(|h| !w.households.contains_key(h)) {
+            d.household = None;
+        }
+    }
+    // Occupancy as the old households say (a damaged save may disagree).
+    for b in w.buildings.values_mut() {
+        b.occupied = 0;
+    }
+    let mut over = Vec::new();
+    for (hid, h) in w.households.iter() {
+        let b = &mut w.buildings[h.home];
+        if b.occupied + h.members as u32 > b.capacity || h.members == 0 {
+            over.push(hid);
+            continue;
+        }
+        b.occupied += h.members as u32;
+        if let Some(j) = h.job
+            && let Some(jb) = w.buildings.get_mut(j)
+            && jb.kind != crate::Zone::Residential
+            && jb.occupied < jb.capacity
+        {
+            jb.occupied += 1;
+        }
+    }
+    for hid in over {
+        w.households.remove(hid);
+    }
+    for h in w.households.values_mut() {
+        if h.job
+            .is_some_and(|j| w.buildings.get(j).is_none_or(|b| b.kind == crate::Zone::Residential))
+        {
+            h.job = None;
+        }
+    }
+    let shops: Vec<BuildingId> = w.buildings.keys().collect();
+    for b in shops {
+        crate::errands::stock_up(w, b);
+    }
+    w.cache.ensure_roads(&w.roads, w.versions.roads);
+    crate::households::adopt(w);
+    crate::inspect::refresh(w);
+    crate::stats::update(w);
+}
+
+/// References between citizens, households and buildings in a version-5
+/// save (a damaged one could index out of range later).
+fn check_people(w: &World) -> Result<(), String> {
+    for (id, c) in w.citizens.iter() {
+        let Some(h) = w.households.get(c.household) else {
+            return Err(format!("{id:?} has no household"));
+        };
+        if !h.citizens.contains(&id) {
+            return Err(format!("{id:?} not in its household"));
+        }
+        if c.job.is_some_and(|j| !w.buildings.contains_key(j.workplace)) {
+            return Err(format!("{id:?} works nowhere"));
+        }
+        if !c.leisure_need.is_finite() || !c.happiness.total.is_finite() {
+            return Err(format!("{id:?} has bad numbers"));
+        }
+    }
+    for (hid, h) in w.households.iter() {
+        if !w.buildings.contains_key(h.home) {
+            return Err(format!("{hid:?} has no home"));
+        }
+        for &c in &h.citizens {
+            if w.citizens.get(c).is_none_or(|c| c.household != hid) {
+                return Err(format!("{hid:?} lists a stranger"));
+            }
+        }
+        if !h.goods.is_finite() {
+            return Err(format!("{hid:?} has bad goods"));
+        }
+    }
+    for p in w.people.places.values() {
+        if !p.stock.is_finite() {
+            return Err("bad stock".into());
+        }
+    }
+    Ok(())
 }
 
 /// Checks on a decoded world for damage the simulation cannot survive

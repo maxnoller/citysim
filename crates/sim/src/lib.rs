@@ -10,7 +10,9 @@
 
 pub mod balance;
 pub mod buildings;
+pub mod citizens;
 pub mod command;
+pub(crate) mod day;
 pub mod demand;
 pub mod derived;
 pub mod drive;
@@ -21,8 +23,11 @@ pub mod grid;
 pub mod growth;
 pub mod households;
 pub mod idmap;
+pub mod inspect;
 pub mod junction;
+pub mod life;
 pub mod path;
+pub mod people;
 pub mod rng;
 pub mod roads;
 pub mod save;
@@ -34,6 +39,10 @@ pub mod traffic;
 pub mod world;
 
 pub use buildings::{Building, BuildingId, Facing};
+pub use citizens::{
+    Activity, Citizen, CitizenId, Education, Happiness, HappinessPart, HouseholdRole, Job, JobTier, JournalEntry,
+    Journey, LifeEvent, LifeStage, Location, Shift, TravelMode,
+};
 pub use command::{Command, CommandError, JunctionChange, Outcome, Preview};
 pub use demand::Demand;
 pub use derived::Access;
@@ -41,11 +50,13 @@ pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, Fiscal
 pub use geom::{Cell, CellRect};
 pub use grid::{CellData, Grid, Occupant, Zone};
 pub use growth::{BuildingMeta, GrowthState};
-pub use households::{Household, HouseholdId, HouseholdState};
+pub use households::{Household, HouseholdId, HouseholdKind, HouseholdState, Ledger};
 pub use idmap::IdMap;
+pub use inspect::CityPeople;
 pub use junction::{
     ApproachView, Aspect, JunctionControl, JunctionSetting, JunctionState, JunctionView, SignalStage, Turn,
 };
+pub use people::{LifeCounts, People, PeopleDay, PlacePeople};
 pub use rng::Rng;
 pub use roads::{NodeId, RoadKind, RoadNetwork, RoadNode, RoadSegment, SegmentId};
 pub use save::LoadError;

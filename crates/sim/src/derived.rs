@@ -53,6 +53,17 @@ pub(crate) struct Derived {
     /// control_version)` `route_delay_key`.
     pub route_delay: Vec<[f32; 2]>,
     pub route_delay_key: Option<(u64, u64)>,
+    places_key: Option<(u64, usize)>,
+    /// Buildings by kind, in slot order (for random picks of shops, venues,
+    /// factories and free homes), for `versions.buildings`.
+    pub homes: Vec<crate::BuildingId>,
+    pub shops: Vec<crate::BuildingId>,
+    pub factories: Vec<crate::BuildingId>,
+    access_key: Option<(u64, usize)>,
+    /// Distance (m) from each access tile to the nearest shop / leisure
+    /// venue (`ACCESS_TILE` cells per tile side).
+    access_shop: Vec<f32>,
+    access_venue: Vec<f32>,
     /// Debug counters: front cars at the stop line refused entry, by reason
     /// `[conflict in box, no room beyond, signal, yielding]`.
     pub denials: [u64; 4],
@@ -277,6 +288,81 @@ impl Derived {
         self.avenue_cells
     }
 
+    /// Lists of homes, shops and factories (cached per buildings version).
+    pub fn ensure_places(&mut self, buildings: &crate::IdMap<crate::BuildingId, crate::Building>, version: u64) {
+        let key = (version, buildings.len());
+        if self.places_key == Some(key) {
+            return;
+        }
+        self.places_key = Some(key);
+        self.homes.clear();
+        self.shops.clear();
+        self.factories.clear();
+        for (id, b) in buildings.iter() {
+            match b.kind {
+                Zone::Residential => self.homes.push(id),
+                Zone::Commercial => self.shops.push(id),
+                Zone::Industrial => self.factories.push(id),
+            }
+        }
+    }
+
+    /// Distance fields to the nearest shop and leisure venue (any
+    /// commercial building; venues of level 1 count as farther), on tiles of
+    /// `ACCESS_TILE` cells, by a two-pass chamfer transform (cached per
+    /// buildings version).
+    pub fn ensure_access(&mut self, buildings: &crate::IdMap<crate::BuildingId, crate::Building>, version: u64) {
+        let key = (version, buildings.len());
+        if self.access_key == Some(key) {
+            return;
+        }
+        self.access_key = Some(key);
+        let n = ACCESS_TILES * ACCESS_TILES;
+        let tile_m = (ACCESS_TILE as f32) * CELL_SIZE;
+        const FAR: f32 = 1.0e7;
+        self.access_shop.clear();
+        self.access_shop.resize(n, FAR);
+        self.access_venue.clear();
+        self.access_venue.resize(n, FAR);
+        for b in buildings.values() {
+            if b.kind != Zone::Commercial {
+                continue;
+            }
+            let c = Cell::from_pos(rect_center(b.footprint));
+            let (tx, ty) = (c.x / ACCESS_TILE, c.y / ACCESS_TILE);
+            if !(0..ACCESS_TILES as i32).contains(&tx) || !(0..ACCESS_TILES as i32).contains(&ty) {
+                continue;
+            }
+            let i = ty as usize * ACCESS_TILES + tx as usize;
+            self.access_shop[i] = 0.0;
+            let venue = if b.level >= 2 {
+                0.0
+            } else {
+                balance::ACCESS_SMALL_VENUE_M
+            };
+            self.access_venue[i] = self.access_venue[i].min(venue);
+        }
+        for f in [&mut self.access_shop, &mut self.access_venue] {
+            chamfer(f, ACCESS_TILES, tile_m);
+        }
+    }
+
+    /// Distances (m) from a footprint to the nearest shop and venue.
+    /// Requires `ensure_access`; far away when unknown.
+    pub fn access_at(&self, r: Option<CellRect>) -> (f32, f32) {
+        let Some(r) = r else { return (1.0e7, 1.0e7) };
+        let c = Cell::from_pos(rect_center(r));
+        let (tx, ty) = (c.x / ACCESS_TILE, c.y / ACCESS_TILE);
+        if !(0..ACCESS_TILES as i32).contains(&tx) || !(0..ACCESS_TILES as i32).contains(&ty) {
+            return (1.0e7, 1.0e7);
+        }
+        let i = ty as usize * ACCESS_TILES + tx as usize;
+        (
+            self.access_shop.get(i).copied().unwrap_or(1.0e7),
+            self.access_venue.get(i).copied().unwrap_or(1.0e7),
+        )
+    }
+
     /// Number of road cells (cached per grid version).
     pub fn road_cells(&mut self, grid: &Grid, grid_version: u64) -> u32 {
         if self.road_cells_key != Some(grid_version) {
@@ -284,6 +370,53 @@ impl Derived {
             self.road_cells = grid.cells.iter().filter(|c| c.occupant == Occupant::Road).count() as u32;
         }
         self.road_cells
+    }
+}
+
+/// Cells per side of an access tile.
+const ACCESS_TILE: i32 = 4;
+const ACCESS_TILES: usize = (MAP_CELLS / ACCESS_TILE) as usize;
+
+/// Two-pass chamfer distance transform (3-4 weights scaled to metres) over
+/// a square grid of `n` tiles of `tile_m` metres, in place.
+fn chamfer(f: &mut [f32], n: usize, tile_m: f32) {
+    let (a, d) = (tile_m, tile_m * std::f32::consts::SQRT_2);
+    let ix = |x: usize, y: usize| y * n + x;
+    for y in 0..n {
+        for x in 0..n {
+            let mut v = f[ix(x, y)];
+            if x > 0 {
+                v = v.min(f[ix(x - 1, y)] + a);
+            }
+            if y > 0 {
+                v = v.min(f[ix(x, y - 1)] + a);
+                if x > 0 {
+                    v = v.min(f[ix(x - 1, y - 1)] + d);
+                }
+                if x + 1 < n {
+                    v = v.min(f[ix(x + 1, y - 1)] + d);
+                }
+            }
+            f[ix(x, y)] = v;
+        }
+    }
+    for y in (0..n).rev() {
+        for x in (0..n).rev() {
+            let mut v = f[ix(x, y)];
+            if x + 1 < n {
+                v = v.min(f[ix(x + 1, y)] + a);
+            }
+            if y + 1 < n {
+                v = v.min(f[ix(x, y + 1)] + a);
+                if x + 1 < n {
+                    v = v.min(f[ix(x + 1, y + 1)] + d);
+                }
+                if x > 0 {
+                    v = v.min(f[ix(x - 1, y + 1)] + d);
+                }
+            }
+            f[ix(x, y)] = v;
+        }
     }
 }
 
