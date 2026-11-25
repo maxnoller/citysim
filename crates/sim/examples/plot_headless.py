@@ -127,7 +127,7 @@ def main():
             # Only labels ending at about the same x can collide.
             yy = y
             for px, py in sorted(placed, key=lambda p: p[1]):
-                if abs(px - x) < 4 and yy - py < gap:
+                if abs(px - x) < 14 and yy - py < gap:
                     yy = py + gap
             placed.append((x, yy))
             ax.plot([x], [y], "o", color=color, markersize=5, markeredgecolor=SURFACE, markeredgewidth=1.5)

@@ -823,9 +823,8 @@ fn video(out: &str, seconds: u32) {
         .unwrap_or([50.0 * CELL_SIZE, 128.0 * CELL_SIZE]);
     for f in 0..frames {
         // Real time: 20 ticks per second of video over 30 frames.
-        // 30 frames per second, 20 ticks per second: two ticks on every
-        // third frame (real time).
-        let ticks = if f % 3 == 2 { 0 } else { 1 };
+        // 30 frames per second at 2x: 40 ticks per second of video.
+        let ticks = if f % 3 == 2 { 2 } else { 1 };
         for _ in 0..ticks {
             p.act(&mut w);
             w.step();
@@ -846,7 +845,7 @@ fn video(out: &str, seconds: u32) {
             10,
             10,
             &format!(
-                "MORNING RUSH {:02}:{:02}  POP {}  CARS {}  AVG {:.0} KM/H  JAMMED {:.0}%  ({})",
+                "2X  MORNING RUSH {:02}:{:02}  POP {}  CARS {}  AVG {:.0} KM/H  JAMMED {:.0}%  ({})",
                 w.time.hour() as u32,
                 (w.time.hour().fract() * 60.0) as u32,
                 w.stats.population,

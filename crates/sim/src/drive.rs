@@ -306,13 +306,25 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
     });
     let mut rear = vec![f32::INFINITY; nkeys];
     let mut rear_speed = vec![0.0f32; nkeys];
+    let mut on_lane = vec![0u16; nkeys];
     for &(k, p, id) in &cars {
+        on_lane[k as usize] = on_lane[k as usize].saturating_add(1);
         let r = &mut rear[k as usize];
         if p < *r {
             *r = p;
             rear_speed[k as usize] = vehicles[id].speed;
         }
     }
+    // Cars inside boxes by the lane they came from (key, distance in).
+    let mut box_from: Vec<(usize, f32)> = boxed
+        .iter()
+        .map(|b| {
+            let v = &vehicles[b.3];
+            let jm = v.junction.expect("boxed");
+            (lane_key(jm.from, v.forward, jm.from_lane), jm.distance)
+        })
+        .collect();
+    box_from.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
     // Cars inside boxes heading for each out-lane.
     let mut inbox = vec![0u8; nkeys];
     for &(_, _, _, id) in &boxed {
@@ -406,7 +418,24 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         }
         let denials = &mut cache.denials;
         let j = traffic.junction_states.get_mut(node).expect("front has a junction");
-        let mut occupied: Vec<usize> = boxed[b0..b1].iter().map(|b| b.1 as usize).collect();
+        // (movement, lane the car really came from)
+        let mut occupied: Vec<(usize, usize)> = boxed[b0..b1]
+            .iter()
+            .map(|b| {
+                let v = &vehicles[b.3];
+                let jm = v.junction.expect("boxed");
+                (b.1 as usize, lane_key(jm.from, v.forward, jm.from_lane))
+            })
+            .collect();
+        // Conflict with a car in the box: crossing / merging paths, or the
+        // same lane's paths taken by a car from another lane (a car that
+        // could not reach its turning lane borrows that lane's path).
+        let clash = |j: &JunctionState, m: usize, lane: usize, o: (usize, usize)| {
+            j.conflict(m, o.0) || {
+                let (a, b) = (&j.movements[m], &j.movements[o.0]);
+                (a.from_arm, a.from_lane) == (b.from_arm, b.from_lane) && lane != o.1
+            }
+        };
         // Precedence order: class, then the platoon being served (a busy
         // stream keeps going for a few cars before the junction switches),
         // then first come, first served.
@@ -428,7 +457,8 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         });
         for (rank, &fi) in order.iter().enumerate() {
             let f = fronts[fi];
-            let mut ok = !occupied.iter().any(|&o| j.conflict(f.movement, o));
+            let my_lane = cars[f.idx].0 as usize;
+            let mut ok = !occupied.iter().any(|&o| clash(j, f.movement, my_lane, o));
             // Room beyond the box.
             if ok {
                 // Room for this car behind the last one on the out-lane
@@ -442,7 +472,9 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     room >= ahead + balance::MIN_GAP_M
                         || (rear_speed[f.exit_key] > balance::EXIT_MOVING_SPEED
                             && room >= ahead + 2.0
-                            && f.exit_stop - f.exit_start > 4.0 * balance::VEHICLE_SPACING_M)
+                            && f.exit_stop - f.exit_start
+                                > (on_lane[f.exit_key] as f32 + inbox[f.exit_key] as f32 + 2.0)
+                                    * balance::VEHICLE_SPACING_M)
                 };
             }
             if ok {
@@ -489,7 +521,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             }
             fronts[fi].permit = ok;
             if !ok && f.d_line < 1.0 {
-                let reason = if occupied.iter().any(|&o| j.conflict(f.movement, o)) {
+                let reason = if occupied.iter().any(|&o| clash(j, f.movement, my_lane, o)) {
                     0
                 } else if j.control == JunctionControl::Signal && j.movement_aspect(f.movement) != Some(Aspect::Green) {
                     2
@@ -506,7 +538,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 denials[reason] += 1;
             }
             if ok && f.reaches {
-                occupied.push(f.movement);
+                occupied.push((f.movement, my_lane));
                 inbox[f.exit_key] = inbox[f.exit_key].saturating_add(1);
             }
         }
@@ -579,6 +611,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
     }
 
     // Move cars on lanes, lane by lane, front to back.
+    let mut entered: Vec<VehicleId> = Vec::new();
     let mut i = 0;
     while i < cars.len() {
         let key = cars[i].0;
@@ -622,16 +655,13 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     // The nearest car ahead from this lane inside the box,
                     // else the rear of the out-lane.
                     let mut gap = f32::INFINITY;
-                    let in_lane = (m.from_arm, m.from_lane);
-                    let slot = key_index(f.node) as u32;
-                    let lo = boxed.partition_point(|b| b.0 < slot);
-                    let hi = boxed.partition_point(|b| b.0 <= slot);
-                    for b in &boxed[lo..hi] {
-                        if let Some(bm) = j.movements.get(b.1 as usize)
-                            && (bm.from_arm, bm.from_lane) == in_lane
-                        {
-                            gap = gap.min(f.d_line + b.2);
-                        }
+                    let here = key as usize;
+                    let at = box_from.partition_point(|b| b.0 < here);
+                    if let Some(&(k, d)) = box_from.get(at)
+                        && k == here
+                    {
+                        // Sorted by distance: the first is the nearest.
+                        gap = f.d_line + d;
                     }
                     if gap.is_infinite() && rear[f.exit_key].is_finite() {
                         gap = f.d_line + m.length + rear[f.exit_key] - f.exit_start;
@@ -685,6 +715,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         v.heading = libm::atan2f(d[1], d[0]);
                         v.junction = Some(jm);
                         v.lane_shift = 0.0;
+                        entered.push(id);
                         j.entered_minute = j.entered_minute.saturating_add(1);
                         j.clear_at = now;
                         cache.turns[match f.turn {
@@ -731,6 +762,12 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         }
     }
 
+    // Time stuck inside a box counts from entering it.
+    for id in entered {
+        if let Some(t) = traffic.trips.get_mut(id) {
+            t.wait_ticks = 0;
+        }
+    }
     // Waiting, re-planning, giving up; deadlocks inside boxes.
     let replan_ticks = secs_to_ticks(balance::REPLAN_AFTER_WAIT_S) as u32;
     let stuck_ticks = secs_to_ticks(balance::STUCK_REMOVE_AFTER_S) as u32;

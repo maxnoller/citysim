@@ -255,10 +255,10 @@ impl GridPlayer {
         }
     }
 
+    /// The road from the highway stub to the first block (re-laid if it
+    /// was bulldozed; costs nothing when it is there).
     fn link(&self, w: &mut World) {
-        if w.roads.segments.len() == 1 {
-            road_of(w, (11, 128), (20, 128), self.layout.horizontal(128));
-        }
+        road_of(w, (11, 128), (20, 128), self.layout.horizontal(128));
     }
 
     /// Free zoned, empty cells per zone.

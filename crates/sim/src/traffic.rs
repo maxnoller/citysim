@@ -348,12 +348,16 @@ pub(crate) fn sync_network(world: &mut World, ended: &mut Vec<Ended>) {
             let kept = world.traffic.junction_states.get(jm.node).and_then(|j| {
                 let (a, b) = (j.arm_of(jm.from)?, j.arm_of(jm.to)?);
                 let m = j.movement(a, jm.from_lane, b)?;
-                Some((m, j.movements[m].length, j.movements[m].to_lane))
+                Some((m, j.movements[m].length, j.movements[m].to_lane, j.arms[a].setback))
             });
             let seg_ok = world.roads.segments.contains_key(jm.from) && world.roads.segments.contains_key(jm.to);
             let v = &mut world.vehicles[id];
             match kept {
-                Some((m, length, to_lane)) if seg_ok => {
+                Some((m, length, to_lane, setback)) if seg_ok => {
+                    // The segment it left may have been cut or merged:
+                    // stay at its stop line.
+                    let from_len = world.roads.segments[jm.from].length;
+                    v.progress = (from_len - setback).clamp(0.0, from_len);
                     let jm = v.junction.as_mut().expect("checked");
                     jm.movement = m as u16;
                     jm.length = length;
