@@ -206,9 +206,7 @@ fn find_road_near(world: &World, focus: Cell) -> Option<Cell> {
     for y in focus.y - 20..focus.y + 20 {
         for x in focus.x - 20..focus.x + 20 {
             let c = Cell::new(x, y);
-            if grid.is_road(c)
-                && sim.roads.segment_through(c.center()).is_some()
-            {
+            if grid.is_road(c) && sim.roads.segment_through(c.center()).is_some() {
                 let d = c.chebyshev(focus);
                 if best.is_none_or(|(bd, _)| d < bd) {
                     best = Some((d, c));

@@ -577,9 +577,7 @@ pub fn bulldoze_commands(cells: &[Cell]) -> Vec<Command> {
 pub fn cleared_road_cells(before: &World, after: &World, cells: &[Cell]) -> Vec<Cell> {
     let (gb, ga) = (before.grid_view(), after.grid_view());
     let set: BTreeSet<Cell> = cells.iter().copied().collect();
-    set.into_iter()
-        .filter(|&c| gb.is_road(c) && !ga.is_road(c))
-        .collect()
+    set.into_iter().filter(|&c| gb.is_road(c) && !ga.is_road(c)).collect()
 }
 
 // ---------------------------------------------------------------- undo
@@ -777,10 +775,7 @@ fn check_undo(world: &World, rec: &UndoRecord) -> Result<(), String> {
 pub fn undo_for_zones(before: &World, changed: &[Cell], label: String) -> UndoRecord {
     let grid = before.grid_view();
     UndoRecord::Zones {
-        restore: changed
-            .iter()
-            .filter_map(|&c| Some((c, grid.get(c)?.zone)))
-            .collect(),
+        restore: changed.iter().filter_map(|&c| Some((c, grid.get(c)?.zone))).collect(),
         label,
     }
 }
