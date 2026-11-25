@@ -5,8 +5,10 @@
 use bevy::prelude::*;
 use bevy::ui::ComputedNode;
 use bevy::window::PrimaryWindow;
+use citysim_sim::junction;
 use citysim_sim::{
-    Building, BuildingId, Cell, CellRect, CommandError, Occupant, RoadKind, RoadSegment, World, Zone, balance,
+    Aspect, Building, BuildingId, Cell, CellRect, CommandError, JunctionControl, JunctionSetting, Occupant, RoadKind,
+    RoadSegment, SignalStage, World, Zone, balance,
 };
 
 use super::UiState;
@@ -47,7 +49,7 @@ enum CardPart {
 }
 
 /// Rows a card can show.
-pub const MAX_ROWS: usize = 5;
+pub const MAX_ROWS: usize = 8;
 
 /// One line of a card: a muted label on the left and a value on the right
 /// (an empty label lets the value read as a plain line).
@@ -374,8 +376,20 @@ pub fn tool_card(
         ActiveTool::Inspect => return inspect_card(world, hovered?),
         ActiveTool::Road if modes.road == RoadMode::Junction => {
             let c = hovered?;
-            let mut card = inspect_card(world, c).filter(|_| state.road_cells.is_junction(c))?;
-            card.hint = "Junction control arrives with traffic lights".into();
+            let Some(n) = junction::junction_at(world, c) else {
+                card.glyph = icon::WAYPOINTS;
+                card.title = "Junctions".into();
+                card.rows
+                    .push(Row::line("Point at a junction of three or more roads", t::TEXT_MUTED));
+                card.hint = "Lights or priority signs are chosen automatically".into();
+                return Some(card);
+            };
+            let mut card = junction_card(world, n)?;
+            let setting = junction::junction(world, n).map(|j| j.setting).unwrap_or_default();
+            card.hint = format!(
+                "Click: switch to {}",
+                setting_name(next_setting(setting)).to_lowercase()
+            );
             return Some(card);
         }
         ActiveTool::Road => {
@@ -428,6 +442,32 @@ pub fn tool_card(
             } else if legs.is_empty() {
                 card.title = format!("Build {}", name.to_lowercase());
                 card.rows.push(Row::line("Move to the next corner", t::TEXT));
+            } else if plan.eval.new_pieces == 0 && plan.eval.upgraded > 0 {
+                card.title = format!("Upgrade to {}", name.to_lowercase());
+                card.rows.push(Row::line(
+                    format!(
+                        "{} · {} (the difference)",
+                        plural(plan.eval.upgraded as usize, "cell", "cells"),
+                        cost_text(plan.eval.cost)
+                    ),
+                    t::TEXT,
+                ));
+                card.rows.push(Row::line(
+                    format!(
+                        "Upkeep {}/day per cell",
+                        format::money(super::plan::road_kind(kind).upkeep_per_cell())
+                    ),
+                    t::TEXT_MUTED,
+                ));
+            } else if plan.eval.new_pieces == 0 && plan.eval.downgraded > 0 {
+                card.title = format!("Change to {}", name.to_lowercase());
+                card.rows.push(Row::line(
+                    format!(
+                        "{} · free, no refund",
+                        plural(plan.eval.downgraded as usize, "cell", "cells")
+                    ),
+                    t::TEXT,
+                ));
             } else if plan.eval.cost == 0 {
                 card.title = "Road already built".into();
                 card.rows.push(Row::line(plural(cells, "cell", "cells"), t::TEXT_MUTED));
@@ -445,6 +485,15 @@ pub fn tool_card(
                     ),
                     t::TEXT,
                 ));
+                if plan.eval.upgraded > 0 {
+                    card.rows.push(Row::line(
+                        format!(
+                            "Upgrades {} of street",
+                            plural(plan.eval.upgraded as usize, "cell", "cells")
+                        ),
+                        t::ACCENT,
+                    ));
+                }
                 if let Some(r) = block {
                     card.rows.push(Row::line(
                         format!("{} x {} cells", r.width(), r.height()),
@@ -757,6 +806,11 @@ fn building_card(world: &World, id: BuildingId, b: &Building) -> Option<Card> {
 }
 
 fn road_card(world: &World, cell: Cell) -> Option<Card> {
+    if let Some(n) = junction::junction_at(world, cell)
+        && let Some(card) = junction_card(world, n)
+    {
+        return Some(card);
+    }
     let roads = &world.roads;
     let pos = cell.center();
     let ids: Vec<_> = if let Some(s) = roads.segment_through(pos) {
@@ -774,10 +828,12 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
     let worst = segs.iter().map(|s| s.congestion()).fold(0.0f32, f32::max);
     let band = Band::of(worst);
     let mut card = Card::new(icon::ROAD, band.color());
-    card.title = match (highway, segs.len()) {
-        (true, _) => "Highway".into(),
-        (false, n) if n >= 3 => format!("Intersection · {n} ways"),
-        _ => "Street".into(),
+    let avenue = segs.iter().any(|s| s.kind == RoadKind::Avenue);
+    card.title = match (highway, avenue, segs.len()) {
+        (true, ..) => "Highway".into(),
+        (false, _, n) if n >= 3 => format!("Intersection · {n} ways"),
+        (false, true, _) => "Avenue · 2 lanes each way".into(),
+        _ => "Street · 1 lane each way".into(),
     };
     let verdict = match band {
         Band::Free => "Free flow",
@@ -786,20 +842,33 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
     };
     card.rows.push(Row::new("Traffic", verdict, band.color()));
     card.bar = Some((worst, band.color()));
+    // Cars per lane right now, per segment and direction (kerb lane first).
+    let mut lane_cars: std::collections::HashMap<(citysim_sim::SegmentId, bool), [u32; 4]> = Default::default();
+    for v in world.vehicles.values() {
+        if let Some(sid) = v.segment.filter(|s| ids.contains(s)) {
+            lane_cars.entry((sid, v.forward)).or_default()[(v.lane as usize).min(3)] += 1;
+        }
+    }
     let dir_row = |name: &str, s: &RoadSegment, forward: bool| {
         let d = RoadSegment::dir(forward);
         let c = s.congestion_in(forward);
         let b = Band::of(c);
-        Row::new(
-            name,
-            format!(
-                "{} / {} · {}",
-                format::group(s.load[d].round() as u64),
-                plural(s.capacity[d].floor().max(1.0) as usize, "car", "cars"),
-                b.word()
-            ),
-            b.color(),
-        )
+        let mut value = format!(
+            "{} / {} · {}",
+            format::group(s.load[d].round() as u64),
+            plural(s.capacity[d].floor().max(1.0) as usize, "car", "cars"),
+            b.word()
+        );
+        let lanes = s.lane_count() as usize;
+        if lanes > 1 {
+            let id = ids.iter().copied().find(|&i| roads.segments.get(i) == Some(s));
+            let per = id
+                .and_then(|i| lane_cars.get(&(i, forward)).copied())
+                .unwrap_or_default();
+            let parts: Vec<String> = (0..lanes.min(4)).map(|l| per[l].to_string()).collect();
+            value = format!("lanes {} · {value}", parts.join("|"));
+        }
+        Row::new(name, value, b.color())
     };
     if let [s] = segs[..] {
         let (pa, pb) = (roads.node_pos(s.a), roads.node_pos(s.b));
@@ -844,6 +913,11 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
     ));
     let limit = segs.iter().map(|s| s.speed_limit).fold(0.0f32, f32::max);
     card.hint = match band {
+        Band::Free if avenue => format!(
+            "Speed limit {} · upkeep {}/cell a day",
+            kmh(limit),
+            format::money(RoadKind::Avenue.upkeep_per_cell())
+        ),
         Band::Free => format!("Speed limit {}", kmh(limit)),
         Band::Busy => format!("Cars slow down here · limit {}", kmh(limit)),
         Band::Jammed => format!(
@@ -851,6 +925,158 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
             pct(CONGESTION_JAM),
             kmh(JAM_CRAWL_MPS)
         ),
+    };
+    card.rows.truncate(MAX_ROWS);
+    Some(card)
+}
+
+/// Compass name of a direction in sim space (-y is north).
+pub fn compass(d: [f32; 2]) -> &'static str {
+    let bearing = d[0].atan2(-d[1]).to_degrees().rem_euclid(360.0);
+    const NAMES: [&str; 8] = [
+        "north",
+        "north-east",
+        "east",
+        "south-east",
+        "south",
+        "south-west",
+        "west",
+        "north-west",
+    ];
+    NAMES[((bearing + 22.5) / 45.0) as usize % 8]
+}
+
+fn compass_letter(d: [f32; 2]) -> &'static str {
+    match compass(d) {
+        "north" => "N",
+        "north-east" => "NE",
+        "east" => "E",
+        "south-east" => "SE",
+        "south" => "S",
+        "south-west" => "SW",
+        "west" => "W",
+        _ => "NW",
+    }
+}
+
+pub fn aspect_color(a: Aspect) -> Color {
+    match a {
+        Aspect::Green => t::POSITIVE,
+        Aspect::Yellow => t::WARNING,
+        Aspect::Red => t::NEGATIVE,
+    }
+}
+
+fn aspect_word(a: Aspect) -> &'static str {
+    match a {
+        Aspect::Green => "Green",
+        Aspect::Yellow => "Yellow",
+        Aspect::Red => "Red",
+    }
+}
+
+/// "Traffic lights" / "Priority".
+pub fn control_name(c: JunctionControl) -> &'static str {
+    match c {
+        JunctionControl::Signal => "Traffic lights",
+        JunctionControl::Priority => "Priority (give way)",
+    }
+}
+
+/// The setting a click on the junction tool switches to.
+pub fn next_setting(s: JunctionSetting) -> JunctionSetting {
+    match s {
+        JunctionSetting::Auto => JunctionSetting::Signal,
+        JunctionSetting::Signal => JunctionSetting::Priority,
+        JunctionSetting::Priority => JunctionSetting::Auto,
+    }
+}
+
+pub fn setting_name(s: JunctionSetting) -> &'static str {
+    match s {
+        JunctionSetting::Auto => "Automatic",
+        JunctionSetting::Signal => "Traffic lights",
+        JunctionSetting::Priority => "Priority",
+    }
+}
+
+/// Card for the junction at node `n`: control, signal phases, and the
+/// aspect and queue of every approach.
+pub fn junction_card(world: &World, n: citysim_sim::NodeId) -> Option<Card> {
+    let view = junction::junction_view(world, n)?;
+    let state = junction::junction(world, n)?;
+    let signal = view.control == JunctionControl::Signal;
+    let mut card = Card::new(icon::WAYPOINTS, if signal { t::WARNING } else { t::ACCENT });
+    card.title = format!(
+        "{} · {} ways",
+        if signal { "Traffic lights" } else { "Priority junction" },
+        view.approaches.len()
+    );
+    card.rows.push(Row::new(
+        "Control",
+        match view.setting {
+            JunctionSetting::Auto => format!("{} · automatic", control_name(view.control)),
+            _ => format!("{} · set by you", control_name(view.control)),
+        },
+        t::TEXT,
+    ));
+    if let (Some(plan), Some((cur, stage))) = (&state.plan, view.phase) {
+        let names: Vec<String> = plan
+            .phases
+            .iter()
+            .map(|p| {
+                let arms: Vec<&str> = p
+                    .arms
+                    .iter()
+                    .filter_map(|&a| state.arms.get(a as usize).map(|arm| compass_letter(arm.dir)))
+                    .collect();
+                format!("{}{}", arms.join("+"), if p.left_only { " left" } else { "" })
+            })
+            .collect();
+        let now = names.get(cur as usize).cloned().unwrap_or_default();
+        let stage = match stage {
+            SignalStage::Green => "green",
+            SignalStage::Yellow => "yellow",
+            SignalStage::AllRed => "all red",
+        };
+        card.rows.push(Row::new(
+            format!("Phase {} of {}", cur as usize + 1, names.len()),
+            format!("{now} {stage}"),
+            t::TEXT,
+        ));
+        card.rows.push(Row::new("Cycle", names.join(" → "), t::TEXT_MUTED));
+    }
+    for (i, a) in view.approaches.iter().enumerate() {
+        let from = state.arms.get(i).map(|arm| compass(arm.dir)).unwrap_or("?");
+        let queue = if a.queue > 0 {
+            format!("{} waiting", a.queue)
+        } else {
+            "none waiting".into()
+        };
+        let (value, color) = match a.aspect {
+            Some(asp) => {
+                let mut v = aspect_word(asp).to_string();
+                if let Some(l) = a.left_aspect
+                    && l != asp
+                {
+                    v += &format!(", left {}", aspect_word(l).to_lowercase());
+                } else if a.left_protected {
+                    v += ", left protected";
+                }
+                if let Some(s) = a.time_to_change_s.filter(|_| asp != Aspect::Yellow) {
+                    v += &format!(" {}s", s.ceil() as i64);
+                }
+                (format!("{v} · {queue}"), aspect_color(asp))
+            }
+            None if a.major => (format!("Main road · {queue}"), t::TEXT),
+            None => (format!("Gives way · {queue}"), t::TEXT_MUTED),
+        };
+        card.rows.push(Row::new(format!("From {from}"), value, color));
+    }
+    card.hint = if view.peak_per_minute > 0 {
+        format!("Busiest minute yesterday: {} cars", view.peak_per_minute)
+    } else {
+        "J: junction tool to change control".into()
     };
     card.rows.truncate(MAX_ROWS);
     Some(card)

@@ -82,6 +82,12 @@ pub struct Evaluated {
     pub cost: i64,
     /// Cells reported by the accepted commands (deduplicated, sorted).
     pub cells: Vec<Cell>,
+    /// Roads: pieces built new, upgraded (street to avenue) and downgraded.
+    pub new_pieces: u32,
+    pub upgraded: u32,
+    pub downgraded: u32,
+    /// Roads: per command, the cells of pieces that change kind.
+    pub changed_cells: Vec<Vec<Cell>>,
 }
 
 impl Evaluated {
@@ -101,11 +107,20 @@ pub fn evaluate(base: &World, cmds: Vec<Command>) -> (Evaluated, World) {
     let mut errors = Vec::with_capacity(cmds.len());
     let mut cost = 0;
     let mut cells = BTreeSet::new();
+    let (mut new_pieces, mut upgraded, mut downgraded) = (0, 0, 0);
+    let mut changed_cells = Vec::with_capacity(cmds.len());
     for &cmd in &cmds {
+        changed_cells.push(match cmd {
+            Command::BuildRoad { from, to, kind } => kind_changes(&w, from, to, kind),
+            _ => Vec::new(),
+        });
         match w.apply(cmd) {
             Ok(o) => {
                 cost += o.cost;
                 cells.extend(o.cells);
+                new_pieces += o.new_pieces;
+                upgraded += o.upgraded;
+                downgraded += o.downgraded;
                 errors.push(None);
             }
             Err(e) => errors.push(Some(e)),
@@ -117,9 +132,33 @@ pub fn evaluate(base: &World, cmds: Vec<Command>) -> (Evaluated, World) {
             errors,
             cost,
             cells: cells.into_iter().collect(),
+            new_pieces,
+            upgraded,
+            downgraded,
+            changed_cells,
         },
         w,
     )
+}
+
+/// Cells of the pieces of the line `from`..`to` that are built as a
+/// changeable kind other than `kind` (upgrade / downgrade in place).
+fn kind_changes(w: &World, from: Cell, to: Cell, kind: RoadKind) -> Vec<Cell> {
+    let Some(line) = from.straight_line_to(to) else {
+        return Vec::new();
+    };
+    let mut out = BTreeSet::new();
+    for p in line.windows(2) {
+        if let Some(s) = w.roads.piece(p[0], p[1])
+            && let Some(seg) = w.roads.segments.get(s)
+            && seg.kind != kind
+            && RoadKind::BUILDABLE.contains(&seg.kind)
+        {
+            out.insert(p[0]);
+            out.insert(p[1]);
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// The evaluated road path / block grid, for `PathPreview`.
@@ -135,12 +174,12 @@ pub fn plan_roads(base: &World, legs: &[(Cell, Cell)], kind: RoadChoice) -> Road
     let (eval, _) = evaluate(base, cmds);
     let legs = legs
         .iter()
-        .zip(&eval.errors)
-        .map(|(&(from, to), e)| PathLeg {
+        .zip(eval.errors.iter().zip(&eval.changed_cells))
+        .map(|(&(from, to), (e, changed))| PathLeg {
             from,
             to,
             error: e.clone(),
-            upgrade_cells: Vec::new(),
+            upgrade_cells: changed.clone(),
         })
         .collect::<Vec<_>>();
     let length_m = legs.iter().map(|l| leg_length(l.from, l.to)).sum();
@@ -546,12 +585,18 @@ pub fn cleared_road_cells(before: &World, after: &World, cells: &[Cell]) -> Vec<
 // ---------------------------------------------------------------- undo
 
 /// Every unit road piece of the network (ordered cell pairs).
+#[cfg(test)]
 pub fn pieces(world: &World) -> BTreeSet<(Cell, Cell)> {
-    let mut out = BTreeSet::new();
+    piece_kinds(world).into_keys().collect()
+}
+
+/// Every unit road piece with its kind.
+pub fn piece_kinds(world: &World) -> BTreeMap<(Cell, Cell), RoadKind> {
+    let mut out = BTreeMap::new();
     for l in RoadIndex::build(world).lines {
         if let Some(cells) = l.a.straight_line_to(l.b) {
             for w in cells.windows(2) {
-                out.insert(if w[0] <= w[1] { (w[0], w[1]) } else { (w[1], w[0]) });
+                out.insert(if w[0] <= w[1] { (w[0], w[1]) } else { (w[1], w[0]) }, l.kind);
             }
         }
     }
@@ -561,10 +606,13 @@ pub fn pieces(world: &World) -> BTreeSet<(Cell, Cell)> {
 /// How to take back one construction action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UndoRecord {
-    /// Roads built: bulldoze `cells` (exactly the new pieces), then give
-    /// back the zoning the road cleared.
+    /// Roads built: change upgraded pieces back to their old kind (no
+    /// refund), bulldoze `cells` (exactly the new pieces), then give back
+    /// the zoning the road cleared.
     Roads {
         new_pieces: BTreeSet<(Cell, Cell)>,
+        /// Pieces that changed kind, with the kind they had before.
+        restore_kinds: Vec<((Cell, Cell), RoadKind)>,
         cells: Vec<Cell>,
         rezone: Vec<(Cell, Zone)>,
         label: String,
@@ -589,13 +637,17 @@ impl UndoRecord {
 /// cannot be removed without touching roads that were there before (a
 /// one-cell link between two existing roads).
 pub fn undo_for_roads(before: &World, after: &World, label: String) -> Result<UndoRecord, String> {
-    let (old, new) = (pieces(before), pieces(after));
-    let new_pieces: BTreeSet<(Cell, Cell)> = new.difference(&old).copied().collect();
-    if new_pieces.is_empty() {
+    let (old, new) = (piece_kinds(before), piece_kinds(after));
+    let new_pieces: BTreeSet<(Cell, Cell)> = new.keys().filter(|p| !old.contains_key(p)).copied().collect();
+    let restore_kinds: Vec<((Cell, Cell), RoadKind)> = new
+        .iter()
+        .filter_map(|(p, k)| old.get(p).filter(|ok| *ok != k).map(|ok| (*p, *ok)))
+        .collect();
+    if new_pieces.is_empty() && restore_kinds.is_empty() {
         return Err("nothing new was built".into());
     }
     let mut touching: BTreeMap<Cell, (usize, usize)> = BTreeMap::new();
-    for &(p, q) in &new {
+    for &(p, q) in new.keys() {
         let fresh = new_pieces.contains(&(p, q));
         for c in [p, q] {
             let e = touching.entry(c).or_default();
@@ -624,6 +676,7 @@ pub fn undo_for_roads(before: &World, after: &World, label: String) -> Result<Un
         .collect();
     let rec = UndoRecord::Roads {
         new_pieces,
+        restore_kinds,
         cells,
         rezone,
         label,
@@ -633,6 +686,23 @@ pub fn undo_for_roads(before: &World, after: &World, label: String) -> Result<Un
     Ok(rec)
 }
 
+/// Commands that take back the road part of `rec`: old kinds first, then
+/// the new pieces.
+fn road_undo_commands(rec: &UndoRecord) -> Vec<Command> {
+    let UndoRecord::Roads {
+        restore_kinds, cells, ..
+    } = rec
+    else {
+        return Vec::new();
+    };
+    let mut cmds: Vec<Command> = restore_kinds
+        .iter()
+        .map(|&((p, q), kind)| Command::BuildRoad { from: p, to: q, kind })
+        .collect();
+    cmds.extend(bulldoze_commands(cells));
+    cmds
+}
+
 /// Commands that undo `rec` on `world`, or why it cannot be undone any
 /// more (the roads or zoning changed since). Road undo bulldozes: it costs
 /// the usual demolition fee and nothing is refunded.
@@ -640,7 +710,8 @@ pub fn undo_commands(world: &World, rec: &UndoRecord) -> Result<Vec<Command>, St
     match rec {
         UndoRecord::Roads { cells, rezone, .. } => {
             check_undo(world, rec)?;
-            let mut cmds = bulldoze_commands(cells);
+            let _ = cells;
+            let mut cmds = road_undo_commands(rec);
             let mut by_zone: BTreeMap<u8, (Zone, Vec<Cell>)> = BTreeMap::new();
             for &(c, z) in rezone {
                 by_zone.entry(z as u8).or_insert((z, Vec::new())).1.push(c);
@@ -670,20 +741,31 @@ pub fn undo_commands(world: &World, rec: &UndoRecord) -> Result<Vec<Command>, St
 }
 
 fn check_undo(world: &World, rec: &UndoRecord) -> Result<(), String> {
-    let UndoRecord::Roads { new_pieces, cells, .. } = rec else {
+    let UndoRecord::Roads {
+        new_pieces,
+        restore_kinds,
+        ..
+    } = rec
+    else {
         return Ok(());
     };
-    let now = pieces(world);
-    if !new_pieces.is_subset(&now) {
+    let now = piece_kinds(world);
+    if !new_pieces.iter().all(|p| now.contains_key(p)) || !restore_kinds.iter().all(|(p, _)| now.contains_key(p)) {
         return Err("part of that road is already gone".into());
     }
     let base = scratch(world);
-    let (eval, after) = evaluate(&base, bulldoze_commands(cells));
+    let (eval, after) = evaluate(&base, road_undo_commands(rec));
     if !eval.ok() {
         return Err("the sim would refuse it".into());
     }
-    let want: BTreeSet<(Cell, Cell)> = now.difference(new_pieces).copied().collect();
-    if pieces(&after) != want {
+    let mut want = now;
+    for p in new_pieces {
+        want.remove(p);
+    }
+    for (p, k) in restore_kinds {
+        want.insert(*p, *k);
+    }
+    if piece_kinds(&after) != want {
         return Err("roads built since are in the way".into());
     }
     Ok(())
@@ -945,6 +1027,27 @@ mod tests {
         let before = w.clone();
         build(&mut w, &[(Cell::new(25, 110), Cell::new(25, 111))]);
         assert!(undo_for_roads(&before, &w, "x".into()).is_err());
+    }
+
+    #[test]
+    fn avenue_over_a_street_previews_and_undoes_as_an_upgrade() {
+        let mut w = town();
+        let base = scratch(&w);
+        // Along the existing street (30..40, 128) and on into new land.
+        let legs = [(Cell::new(30, 128), Cell::new(50, 128))];
+        let plan = plan_roads(&base, &legs, RoadChoice::Avenue);
+        assert!(plan.eval.ok(), "{:?}", plan.eval.errors);
+        assert_eq!(plan.eval.upgraded, 10);
+        assert_eq!(plan.eval.new_pieces, 10);
+        assert_eq!(plan.legs[0].upgrade_cells.len(), 11);
+        let before = w.clone();
+        w.apply(plan.eval.cmds[0]).unwrap();
+        let rec = undo_for_roads(&before, &w, "avenue".into()).unwrap();
+        for c in undo_commands(&w, &rec).unwrap() {
+            w.apply(c).unwrap();
+        }
+        assert_eq!(piece_kinds(&w), piece_kinds(&before));
+        w.check_invariants().unwrap();
     }
 
     #[test]

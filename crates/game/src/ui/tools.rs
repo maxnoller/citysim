@@ -869,7 +869,39 @@ fn use_tool(
                 }
             }
         }
-        (ActiveTool::Road, RoadMode::Junction) => {}
+        (ActiveTool::Road, RoadMode::Junction) => {
+            if pressed
+                && let Some(c) = hovered.0
+                && let Some(n) = citysim_sim::junction::junction_at(&sim.world, c)
+            {
+                let now = citysim_sim::junction::junction(&sim.world, n)
+                    .map(|j| j.setting)
+                    .unwrap_or_default();
+                let next = super::context::next_setting(now);
+                let cmd = Command::SetJunctionControl { cell: c, control: next };
+                match sim.world.preview(&cmd) {
+                    Ok(p) => {
+                        state.sent = Some(cmd);
+                        out.write(SimCommand(cmd));
+                        let now_control = p.junction.map(|j| j.control_after);
+                        let text = match (next, now_control) {
+                            (citysim_sim::JunctionSetting::Auto, Some(ctl)) => format!(
+                                "Junction back to automatic: {}",
+                                super::context::control_name(ctl).to_lowercase()
+                            ),
+                            (_, Some(ctl)) => {
+                                format!("Junction set to {}", super::context::control_name(ctl).to_lowercase())
+                            }
+                            _ => "Junction control changed".into(),
+                        };
+                        toasts.write(Toast::new(ToastKind::Info, text));
+                    }
+                    Err(e) => {
+                        toasts.write(Toast::new(ToastKind::Error, super::context::error_text(&e)));
+                    }
+                }
+            }
+        }
         // Rectangle modes: zoning, bulldozer, block.
         (t, _)
             if matches!(t, ActiveTool::Road)
