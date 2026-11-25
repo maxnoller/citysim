@@ -1329,7 +1329,7 @@ mod tests {
         })
         .unwrap();
         let card = inspect_card(&w, Cell::new(20, 128)).expect("road card");
-        assert_eq!(card.title, "Street");
+        assert_eq!(card.title, "Street · 1 lane each way");
         assert_eq!(card.rows[0].value, "Free flow");
         assert!(card.rows.iter().any(|r| r.label == "Eastbound"));
         assert!(card.rows.iter().any(|r| r.label == "Westbound"));
