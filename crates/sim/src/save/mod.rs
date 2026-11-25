@@ -193,7 +193,8 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     }
     restore_derived(&mut world);
     world.roads.refresh_tables();
-    crate::zoning::mirror_grid(&mut world);
+    world.cache.ensure_roads(&world.roads, world.versions.roads);
+    world.cache.ensure_zoning(&world.zoning);
     if version == 3 {
         crate::growth::convert_legacy_lots(&mut world);
         crate::traffic::sync_junctions(&mut world);
@@ -262,6 +263,7 @@ fn upgrade_people(w: &mut World) {
         crate::errands::stock_up(w, b);
     }
     w.cache.ensure_roads(&w.roads, w.versions.roads);
+    w.cache.ensure_zoning(&w.zoning);
     crate::households::adopt(w);
     crate::inspect::refresh(w);
     crate::stats::update(w);
@@ -313,8 +315,19 @@ fn check_people(w: &World) -> Result<(), String> {
 /// public fields (tests, dev tooling) must still load.
 fn check_loaded(w: &World) -> Result<(), String> {
     let cells = (MAP_CELLS * MAP_CELLS) as usize;
-    if w.grid.size != MAP_CELLS || w.grid.cells.len() != cells {
-        return Err("grid has the wrong size".into());
+    let _ = cells;
+    if w.zoning.lattice(crate::LatticeId::WORLD).is_none() {
+        return Err("zoning has no world lattice".into());
+    }
+    for b in &w.zoning.blocks {
+        if w.zoning.lattice(b.lattice).is_none() || !w.roads.segments.contains_key(b.segment) {
+            return Err("a zone block points nowhere".into());
+        }
+    }
+    for (c, x) in w.zoning.cells() {
+        if x.building.is_some_and(|b| !w.buildings.contains_key(b)) {
+            return Err(format!("{c:?} holds a missing building"));
+        }
     }
     for (n, node) in w.roads.nodes.iter() {
         if !node.pos.iter().all(|x| x.is_finite()) {

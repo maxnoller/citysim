@@ -114,20 +114,15 @@ pub fn check_consistency(w: &World, after_step: bool) {
     // Buildings: footprint cells point back and stay zoned for the kind.
     for (bid, b) in w.buildings.iter() {
         assert!(b.level >= 1 && b.capacity > 0, "tick {tick}: {bid:?} {b:?}");
-        for cell in b.footprint.rect().cells() {
-            let cd = w.grid.get(cell).expect("footprint in bounds");
-            assert_eq!(cd.occupant, Occupant::Building(bid), "tick {tick}: {cell:?}");
+        for cell in b.footprint.cells() {
+            let cd = w.zoning.cell(cell).expect("footprint cell exists");
+            assert_eq!(cd.building, Some(bid), "tick {tick}: {cell:?}");
             assert_eq!(cd.zone, Some(b.kind), "tick {tick}: {cell:?} zone under {bid:?}");
         }
     }
     // Every building cell belongs to a live building.
     let building_cells: usize = w.buildings.values().map(|b| (b.size().0 * b.size().1) as usize).sum();
-    let marked = w
-        .grid
-        .cells
-        .iter()
-        .filter(|cd| matches!(cd.occupant, Occupant::Building(_)))
-        .count();
+    let marked = w.zoning.cells().filter(|(_, cd)| cd.building.is_some()).count();
     assert_eq!(building_cells, marked, "tick {tick}: stray building cells");
     // Stats match the state.
     let s = &w.stats;
@@ -140,9 +135,10 @@ pub fn check_consistency(w: &World, after_step: bool) {
     let wf = w.citizens.values().filter(|c| c.in_workforce()).count();
     assert_eq!(s.workforce as usize, wf);
     assert_eq!(s.employed + s.unemployed, s.workforce);
-    let roads = w.grid.cells.iter().filter(|cd| cd.occupant == Occupant::Road).count();
+    let metres: f64 = w.roads.segments.values().map(|s| s.length as f64).sum();
     assert_eq!(
-        s.road_cells as usize, roads,
+        s.road_cells,
+        (metres / CELL_SIZE as f64).round() as u32,
         "tick {tick}: cached road cell count stale"
     );
     for x in [
@@ -158,7 +154,7 @@ pub fn check_consistency(w: &World, after_step: bool) {
     let entry = w.roads.entry.expect("entry");
     assert!(w.roads.nodes.contains_key(entry));
     for x in 0..balance::HIGHWAY_STUB_CELLS {
-        assert!(w.grid.is_road(c(x, 128)), "tick {tick}: highway cell {x} lost");
+        assert!(w.grid_view().is_road(c(x, 128)), "tick {tick}: highway cell {x} lost");
     }
     if after_step {
         for (n, node) in w.roads.nodes.iter() {
@@ -195,7 +191,7 @@ pub fn diff(a: &World, b: &World) -> String {
         )*};
     }
     cmp!(
-        seed, rng, time, roads, grid, buildings, households, vehicles, economy, demand, stats, versions, traffic,
+        seed, rng, time, roads, zoning, buildings, households, vehicles, economy, demand, stats, versions, traffic,
         growth, citizens, people
     );
     if a.people.stats != b.people.stats {
@@ -284,13 +280,10 @@ pub fn check_bulldoze(before: &World, after: &World, rect: CellRect, cells: &[Ce
     assert_eq!(cells, reported.into_iter().collect::<Vec<_>>().as_slice());
     after.roads.validate().unwrap();
     let covered: BTreeSet<Cell> = got.iter().flat_map(|&(a, b, _)| [a, b]).collect();
-    for (i, cd) in after.grid.cells.iter().enumerate() {
-        let cell = c(i as i32 % MAP_CELLS, i as i32 / MAP_CELLS);
-        assert_eq!(
-            cd.occupant == Occupant::Road,
-            covered.contains(&cell),
-            "{cell:?} after {rect:?}"
-        );
+    let view = after.grid_view();
+    for i in 0..MAP_CELLS * MAP_CELLS {
+        let cell = c(i % MAP_CELLS, i / MAP_CELLS);
+        assert_eq!(view.is_road(cell), covered.contains(&cell), "{cell:?} after {rect:?}");
     }
 }
 
@@ -299,8 +292,9 @@ pub fn check_bulldoze(before: &World, after: &World, rect: CellRect, cells: &[Ce
 pub fn check_roads(w: &World) {
     w.roads.validate().unwrap();
     let covered: BTreeSet<Cell> = pieces(w).into_iter().flat_map(|(a, b, _)| [a, b]).collect();
-    for (i, cd) in w.grid.cells.iter().enumerate() {
-        let cell = c(i as i32 % MAP_CELLS, i as i32 / MAP_CELLS);
-        assert_eq!(cd.occupant == Occupant::Road, covered.contains(&cell), "{cell:?}");
+    let view = w.grid_view();
+    for i in 0..MAP_CELLS * MAP_CELLS {
+        let cell = c(i % MAP_CELLS, i / MAP_CELLS);
+        assert_eq!(view.is_road(cell), covered.contains(&cell), "{cell:?}");
     }
 }

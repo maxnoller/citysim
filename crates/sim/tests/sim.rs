@@ -88,7 +88,7 @@ fn growth_needs_a_road_connection_to_the_highway() {
         assert!(b.level >= 1 && b.capacity > 0);
         // Facing points at a road within reach.
         let (dx, dy) = b.facing.offset();
-        let front = (1..=2).any(|k| w.grid.is_road(b.footprint.rect().min.offset(dx * k, dy * k)));
+        let front = (1..=2).any(|k| w.grid_view().is_road(b.footprint.rect().min.offset(dx * k, dy * k)));
         assert!(front, "{:?} faces {:?} without a road", b.footprint.rect(), b.facing);
     }
     let seeds: std::collections::BTreeSet<u32> = w.buildings.values().map(|b| b.seed).collect();

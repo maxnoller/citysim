@@ -71,7 +71,7 @@ fn draw(c: &mut Canvas, w: &World, ox: f32) {
     // Zones and buildings.
     for y in Y0 as i32..(Y0 + 80.0) as i32 {
         for x in X0 as i32..(X0 + SPAN_X) as i32 {
-            let cd = w.grid.get(Cell::new(x, y)).unwrap();
+            let cd = w.grid_view().get(Cell::new(x, y)).unwrap();
             let (px, py) = to_px([x as f32 * CELL_SIZE, y as f32 * CELL_SIZE]);
             if py + cell > H as f32 {
                 continue;

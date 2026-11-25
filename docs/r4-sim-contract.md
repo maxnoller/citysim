@@ -132,12 +132,36 @@ Coordinates are unchanged: sim `(x, y)` metres → Bevy `(x, 0, y)`; the right o
 
 ## Status of the implementation
 
-The contract above is complete; behaviour lands in steps on this branch. At the first push:
-- Curves, segment curves and serials, vehicle poses along curves, turn paths as curves, junction shapes: done.
-- `BuildCurve` / `SetRoadKind` / `RemoveRoad` / `BulldozeArea` / `ZoneArea` / `ZoneCells` / `SetNodeControl` accept
-  straight lattice geometry (cell centres, 8-way) only and map onto the cell commands; other curves are refused with
-  `NotStraight` until the free-form builder lands.
-- `world.zoning` mirrors the world grid as lattice 0 (blocks for straight, axis-aligned lattice roads). Not saved
-  yet (rebuilt on load).
+See the dated entries below; the newest says what works.
 
 ## Changes after the first push
+
+### 2026-11-25 (second push: builder, blocks, saves)
+
+Behaviour now behind the contract:
+- `BuildCurve` builds any curve: ends snap to nodes (`SNAP_NODE_M` 1.5 m) or onto roads (`SNAP_ROAD_M` 0.75 m, a T),
+  every crossing splits both roads, a straight road along a collinear straight road changes its kind. Refusals:
+  `TooShort` (any piece or split leftover under `MIN_SEGMENT_M` 4 m), `TooTight` (street 12 m, avenue 24 m),
+  `SharpAngle` (arms under 25°), `TooManyArms` (new: more than 6 arms at a node), `TooClose` (closer than 8 m beside
+  another road away from where they meet), `SelfCrossing`, `BuildingInTheWay`, `OffMap`, `InsufficientFunds`.
+  `BuildRoad` is shorthand for a straight `BuildCurve` (keeps `NotStraight`, `ZeroLength`, `OutOfBounds`,
+  `BlockedByBuilding(Cell)`). Diagonals may cross between cell centres (a junction at the cell corner).
+- `SetRoadKind`, `RemoveRoad`, `BulldozeArea`, `Bulldoze` work on parts of any segment.
+- Zoning is real blocks and lattices (`world.zoning`, saved). Lattice 0 is the world grid; a right-angle grid on
+  the cell lattice is exactly lattice 0 as before. Zoning commands act on `zoning` cells of any lattice.
+- Save format 6. Versions 5, 4 and 3 load (their zoning and buildings move onto lattice 0 / the blocks).
+
+Changes to items listed above:
+- `world.grid` is removed (as announced). New `World::grid_view() -> GridView` answers world-cell questions
+  (`get(Cell) -> Option<CellData { zone, occupant }>`, `is_road(Cell)`); build it once per frame, not per cell.
+  `CellData`, `Occupant` stay for it; `Grid` is gone.
+- `Building::footprint` is `Footprint` (was announced); `Footprint` has `cells()`, `contains(CellRef)`, `area()`,
+  `corners()`, `rect()` (lattice rectangle), `Footprint::new(lattice, &Lattice, min, max, facing)`.
+- `growth::front_cells(&Footprint, Facing) -> Vec<CellRef>` and `growth::has_frontage(&World, &Footprint, Facing)`
+  take a footprint now. New `growth::place_cells(&mut World, BuildingId)` marks a hand-inserted building's cells.
+- New `World::roads_edited()`: call after changing `world.roads` directly (tools, tests); regenerates blocks.
+- `CommandError::TooManyArms { at, arms }` added.
+- `Stats::road_cells` / `avenue_cells` and so road upkeep are counted by the metre (`length / CELL_SIZE`), so a grid
+  pays a little more upkeep than when junction cells were counted once (about +7 % on a block grid).
+- Zone cells under a road are `blocked: Some(Blocked::Road)` and lose their zone; cells beyond a road's end are no
+  longer zoneable (they never fronted a road).

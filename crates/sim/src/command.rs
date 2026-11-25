@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::build::{self, Part, RoadPlan};
 use crate::curve::Curve;
 use crate::geom::{Cell, CellRect};
-use crate::grid::{Occupant, Zone};
+use crate::grid::Zone;
 use crate::junction::{JunctionControl, JunctionSetting};
 use crate::roads::{NodeId, RoadKind, RoadNetwork, SegmentId};
 use crate::zoning::CellRef;
@@ -307,7 +307,7 @@ pub(crate) enum Plan {
         cost: i64,
     },
     Zone {
-        cells: Vec<Cell>,
+        cells: Vec<CellRef>,
         zone: Option<Zone>,
     },
     Tax(f32),
@@ -375,12 +375,21 @@ impl Plan {
                 buildings: buildings.clone(),
                 ..Preview::default()
             },
-            Plan::Zone { cells, .. } => Preview {
-                cost: 0,
-                cells: cells.clone(),
-                zone_cells: cells.iter().map(|&c| CellRef::world(c)).collect(),
-                ..Preview::default()
-            },
+            Plan::Zone { cells, .. } => {
+                let mut world_cells: Vec<Cell> = cells
+                    .iter()
+                    .filter_map(|&c| world.zoning.cell_center(c))
+                    .map(Cell::from_pos)
+                    .collect();
+                world_cells.sort_by_key(|c| (c.y, c.x));
+                world_cells.dedup();
+                Preview {
+                    cost: 0,
+                    cells: world_cells,
+                    zone_cells: cells.clone(),
+                    ..Preview::default()
+                }
+            }
             Plan::Tax(_) => Preview::default(),
             Plan::Junction { cell, change } => Preview {
                 cells: vec![*cell],
@@ -409,20 +418,6 @@ fn quad_of_rect(r: CellRect) -> [[f32; 2]; 4] {
         (r.max.y + 1) as f32 * crate::CELL_SIZE,
     );
     [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
-}
-
-fn quad_cells(quad: &[[f32; 2]; 4]) -> Vec<Cell> {
-    let lo = quad
-        .iter()
-        .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
-    let hi = quad
-        .iter()
-        .fold([f32::NEG_INFINITY; 2], |a, p| [a[0].max(p[0]), a[1].max(p[1])]);
-    let r = CellRect::from_corners(Cell::from_pos(lo), Cell::from_pos(hi));
-    match r.clamp_to_map() {
-        Some(r) => r.cells().filter(|c| crate::zoning::in_quad(quad, c.center())).collect(),
-        None => Vec::new(),
-    }
 }
 
 /// Do two convex quads overlap by more than touching (`a` is shrunk by a
@@ -529,18 +524,18 @@ pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
                 .ok_or(CommandError::OutOfBounds)?;
             plan_area(world, &quad_of_rect(rect), Some(rect))
         }
-        &Command::SetZone { min, max, zone } => plan_zone(world, CellRect::from_corners(min, max), zone),
-        Command::ZoneArea { quad, zone } => Ok(zone_list(world, quad_cells(quad), *zone)),
-        Command::ZoneCells { cells, zone } => Ok(zone_list(
-            world,
-            cells
-                .iter()
-                .filter(|c| c.lattice == crate::zoning::LatticeId::WORLD)
-                .map(|c| Cell::new(c.i, c.j))
-                .filter(|c| c.in_bounds())
-                .collect(),
-            *zone,
-        )),
+        &Command::SetZone { min, max, zone } => {
+            let rect = CellRect::from_corners(min, max)
+                .clamp_to_map()
+                .ok_or(CommandError::OutOfBounds)?;
+            Ok(zone_list(
+                world,
+                crate::zoning::cells_in_quad(world, &quad_of_rect(rect)),
+                zone,
+            ))
+        }
+        Command::ZoneArea { quad, zone } => Ok(zone_list(world, crate::zoning::cells_in_quad(world, quad), *zone)),
+        Command::ZoneCells { cells, zone } => Ok(zone_list(world, cells.clone(), *zone)),
         &Command::SetTaxRate(r) => {
             if r.is_finite() && (0.0..=balance::MAX_TAX_RATE).contains(&r) {
                 Ok(Plan::Tax(r))
@@ -700,58 +695,42 @@ fn plan_junction(world: &World, node: NodeId, cell: Cell, setting: JunctionSetti
     })
 }
 
-fn plan_zone(world: &World, rect: CellRect, zone: Option<Zone>) -> Result<Plan, CommandError> {
-    let rect = rect.clamp_to_map().ok_or(CommandError::OutOfBounds)?;
-    Ok(zone_list(world, rect.cells().collect(), zone))
-}
-
-/// The eligible cells of a list.
-fn zone_list(world: &World, cells: Vec<Cell>, zone: Option<Zone>) -> Plan {
-    let mut cells: Vec<Cell> = cells
+/// The eligible cells of a list: zoning needs a usable cell without a
+/// building, unzoning any cell with a zone and without a building.
+fn zone_list(world: &World, cells: Vec<CellRef>, zone: Option<Zone>) -> Plan {
+    let mut cells: Vec<CellRef> = cells
         .into_iter()
         .filter(|&c| {
-            world.grid.get(c).is_some_and(|cd| {
-                cd.occupant == Occupant::Empty
-                    && cd.zone != zone
-                    && (zone.is_none() || world.grid.near_road(c, balance::ZONE_ROAD_REACH))
-            })
+            world
+                .zoning
+                .cell(c)
+                .is_some_and(|x| x.building.is_none() && x.zone != zone && (zone.is_none() || x.usable()))
         })
         .collect();
-    cells.sort_by_key(|c| (c.y, c.x));
+    cells.sort();
     cells.dedup();
     Plan::Zone { cells, zone }
-}
-
-/// Bounds of a set of curves, metres.
-fn curves_bounds(cs: impl Iterator<Item = Curve>) -> Option<([f32; 2], [f32; 2])> {
-    cs.map(|c| c.bounds())
-        .reduce(|(a, b), (c, d)| ([a[0].min(c[0]), a[1].min(c[1])], [b[0].max(d[0]), b[1].max(d[1])]))
 }
 
 pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
     let preview = plan.preview(world);
     match plan {
         Plan::Road { plan, .. } => {
-            let area = curves_bounds(
-                plan.pieces
-                    .iter()
-                    .enumerate()
-                    .map(|(k, _)| Curve::straight(plan.stops[k].pos, plan.stops[k + 1].pos))
-                    .chain(preview.pieces.iter().map(|p| p.curve)),
-            );
-            build::execute_road(world, &plan);
-            world.economy.money -= plan.cost;
+            // Redrawing a road as it is changes nothing (and splits nothing).
             if !preview.pieces.is_empty() {
+                build::execute_road(world, &plan);
                 world.versions.roads += 1;
             }
-            if let Some((lo, hi)) = area {
-                refresh_road_cells(world, lo, hi);
-            }
+            world.economy.money -= plan.cost;
         }
-        Plan::Kind { part, kind, cost, .. } => {
-            build::execute_kind(world, part, kind);
+        Plan::Kind {
+            part, kind, cost, old, ..
+        } => {
+            if old != kind {
+                build::execute_kind(world, part, kind);
+                world.versions.roads += 1;
+            }
             world.economy.money -= cost;
-            world.versions.roads += 1;
         }
         Plan::Remove {
             parts,
@@ -761,35 +740,30 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             ..
         } => {
             build::execute_remove(world, &parts);
-            for id in &buildings {
-                if let Some(b) = world.buildings.remove(*id) {
-                    for c in b.footprint.rect().cells() {
-                        if let Some(cd) = world.grid.get_mut(c)
-                            && cd.occupant == Occupant::Building(*id)
-                        {
-                            cd.occupant = Occupant::Empty;
-                        }
-                    }
-                }
-                world.growth.meta.remove(*id);
+            let _ = removed;
+            if !buildings.is_empty() {
+                // Residents of removed buildings leave, their workers lose
+                // the job; the zoning stays.
+                crate::growth::remove_buildings(world, &buildings);
             }
-            // Residents of removed buildings leave, their workers lose the job.
-            crate::households::buildings_removed(world, &buildings);
             world.economy.money -= cost;
             if !parts.is_empty() {
                 world.versions.roads += 1;
-                if let Some((lo, hi)) = curves_bounds(removed.into_iter()) {
-                    refresh_road_cells(world, lo, hi);
-                }
-            }
-            if !buildings.is_empty() {
-                world.versions.buildings += 1;
-                world.versions.grid += 1;
             }
         }
         Plan::Zone { cells, zone } => {
             for &c in &cells {
-                world.grid.get_mut(c).expect("in bounds").zone = zone;
+                if let Some(x) = world.zoning.cell_mut(c) {
+                    x.zone = zone;
+                }
+                if zone.is_none()
+                    && let Some(l) = world.zoning.lattice_mut(c.lattice)
+                    && l.cells
+                        .get(&(c.i, c.j))
+                        .is_some_and(|x| !x.covered && x.building.is_none())
+                {
+                    l.cells.remove(&(c.i, c.j));
+                }
             }
             if !cells.is_empty() {
                 world.versions.grid += 1;
@@ -818,43 +792,4 @@ pub(crate) fn road_over(roads: &RoadNetwork, near: &[SegmentId], c: Cell) -> boo
             p[0] >= a[0] - r && p[0] <= b[0] + r && p[1] >= a[1] - r && p[1] <= b[1] + r && seg.nearest(p).1 < r - 0.01
         })
     })
-}
-
-/// Mark the world-grid cells under roads in a box (sim metres) as road
-/// (clearing their zoning), and free cells no road covers any more.
-fn refresh_road_cells(world: &mut World, lo: [f32; 2], hi: [f32; 2]) {
-    let m = crate::CELL_SIZE;
-    let r = CellRect::from_corners(
-        Cell::from_pos([lo[0] - m, lo[1] - m]),
-        Cell::from_pos([hi[0] + m, hi[1] + m]),
-    );
-    let Some(r) = r.clamp_to_map() else { return };
-    let near: Vec<SegmentId> = world
-        .roads
-        .segments
-        .iter()
-        .filter(|(_, s)| {
-            let (a, b) = s.curve.bounds();
-            a[0] <= hi[0] + 2.0 * m && b[0] >= lo[0] - 2.0 * m && a[1] <= hi[1] + 2.0 * m && b[1] >= lo[1] - 2.0 * m
-        })
-        .map(|(id, _)| id)
-        .collect();
-    let mut changed = false;
-    for c in r.cells() {
-        let road = road_over(&world.roads, &near, c);
-        let cd = world.grid.get_mut(c).expect("clamped");
-        if road && (cd.occupant != Occupant::Road || cd.zone.is_some()) {
-            if cd.occupant == Occupant::Empty || cd.occupant == Occupant::Road {
-                cd.occupant = Occupant::Road;
-                cd.zone = None;
-                changed = true;
-            }
-        } else if !road && cd.occupant == Occupant::Road {
-            cd.occupant = Occupant::Empty;
-            changed = true;
-        }
-    }
-    if changed {
-        world.versions.grid += 1;
-    }
 }

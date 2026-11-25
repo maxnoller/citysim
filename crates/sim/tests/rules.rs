@@ -18,9 +18,7 @@ fn road(w: &mut World, a: (i32, i32), b: (i32, i32)) -> Result<Outcome, CommandE
 fn blank() -> World {
     let mut w = World::new(1);
     w.roads = RoadNetwork::new();
-    for cd in &mut w.grid.cells {
-        cd.occupant = Occupant::Empty;
-    }
+    w.roads_edited();
     w
 }
 
@@ -35,13 +33,15 @@ fn degree_at(w: &World, cell: Cell) -> Option<usize> {
 /// Invariants restricted to a window (the full check is O(map * graph)).
 fn check(w: &World) {
     w.roads.validate().unwrap();
+    w.check_invariants().unwrap();
+    let view = w.grid_view();
     for y in 0..40 {
         for x in 0..40 {
             let cell = c(x, y);
             let covered = w.roads.covers(cell.center());
-            assert_eq!(w.grid.is_road(cell), covered, "grid/graph mismatch at {cell:?}");
+            assert_eq!(view.is_road(cell), covered, "grid/graph mismatch at {cell:?}");
             if covered {
-                assert!(w.grid.get(cell).unwrap().zone.is_none());
+                assert!(view.get(cell).unwrap().zone.is_none());
             }
         }
     }
@@ -58,9 +58,13 @@ fn new_world_has_highway_stub() {
     let entry = w.roads.entry.unwrap();
     assert_eq!(w.roads.nodes[entry].pos, World::highway_entry_cell().center());
     assert_eq!(World::highway_entry_cell().x, 0);
-    assert!(w.grid.is_road(c(0, 128)) && w.grid.is_road(c(11, 128)) && !w.grid.is_road(c(12, 128)));
+    assert!(
+        w.grid_view().is_road(c(0, 128)) && w.grid_view().is_road(c(11, 128)) && !w.grid_view().is_road(c(12, 128))
+    );
     assert_eq!(w.economy.money, balance::STARTING_MONEY);
-    assert_eq!(w.stats.road_cells, balance::HIGHWAY_STUB_CELLS as u32);
+    // Road length in cells (by the metre): the stub runs between the
+    // centres of its end cells.
+    assert_eq!(w.stats.road_cells, balance::HIGHWAY_STUB_CELLS as u32 - 1);
 }
 
 #[test]
@@ -85,7 +89,7 @@ fn straight_road_cost_and_cells() {
     assert_eq!(seg.speed_limit, balance::STREET_SPEED_LIMIT);
     assert!(seg.capacity[0] > 0.0 && seg.capacity[0] == seg.capacity[1]);
     for x in 2..=10 {
-        assert!(w.grid.is_road(c(x, 5)));
+        assert!(w.grid_view().is_road(c(x, 5)));
     }
     check(&w);
 }
@@ -95,7 +99,7 @@ fn vertical_and_reversed_roads() {
     let mut w = blank();
     road(&mut w, (5, 10), (5, 2)).unwrap();
     assert_eq!(w.roads.segments.len(), 1);
-    assert!(w.grid.is_road(c(5, 2)) && w.grid.is_road(c(5, 10)));
+    assert!(w.grid_view().is_road(c(5, 2)) && w.grid_view().is_road(c(5, 10)));
     check(&w);
 }
 
@@ -228,7 +232,7 @@ fn diagonal_road() {
     );
     let seg = w.roads.segments.values().next().unwrap();
     assert!((seg.length - 5.0 * CELL_SIZE * 2f32.sqrt()).abs() < 1e-3);
-    assert!(w.grid.is_road(c(3, 3)) && !w.grid.is_road(c(3, 4)));
+    assert!(w.grid_view().is_road(c(3, 3)) && !w.grid_view().is_road(c(3, 4)));
     // Anti-diagonal direction works too.
     road(&mut w, (20, 0), (10, 10)).unwrap();
     check(&w);
@@ -290,7 +294,7 @@ fn road_blocked_by_building() {
         seed: 7,
         created_tick: 0,
     });
-    w.grid.get_mut(c(5, 1)).unwrap().occupant = Occupant::Building(id);
+    citysim_sim::growth::place_cells(&mut w, id);
     assert_eq!(
         road(&mut w, (5, 0), (5, 5)),
         Err(CommandError::BlockedByBuilding(c(5, 1)))
@@ -312,11 +316,11 @@ fn road_clears_zoning() {
         zone: Some(Zone::Residential),
     })
     .unwrap();
-    assert_eq!(w.grid.get(c(4, 2)).unwrap().zone, Some(Zone::Residential));
+    assert_eq!(w.grid_view().get(c(4, 2)).unwrap().zone, Some(Zone::Residential));
     road(&mut w, (4, 0), (4, 6)).unwrap();
-    assert_eq!(w.grid.get(c(4, 2)).unwrap().zone, None);
-    assert_eq!(w.grid.get(c(4, 2)).unwrap().occupant, Occupant::Road);
-    assert_eq!(w.grid.get(c(3, 2)).unwrap().zone, Some(Zone::Residential));
+    assert_eq!(w.grid_view().get(c(4, 2)).unwrap().zone, None);
+    assert_eq!(w.grid_view().get(c(4, 2)).unwrap().occupant, Occupant::Road);
+    assert_eq!(w.grid_view().get(c(3, 2)).unwrap().zone, Some(Zone::Residential));
     check(&w);
 }
 
@@ -376,10 +380,11 @@ fn zoning_needs_nearby_road() {
     assert_eq!(out.cells.len(), 3 * 4);
     assert_eq!(out.cost, 0);
     assert!(w.versions.grid > v);
-    assert_eq!(w.grid.get(c(11, 8)).unwrap().zone, Some(Zone::Commercial));
-    assert_eq!(w.grid.get(c(11, 7)).unwrap().zone, None);
-    assert_eq!(w.grid.get(c(11, 10)).unwrap().zone, None);
-    // Corner reach is Chebyshev: (8, 8) is 2 from (10, 10).
+    assert_eq!(w.grid_view().get(c(11, 8)).unwrap().zone, Some(Zone::Commercial));
+    assert_eq!(w.grid_view().get(c(11, 7)).unwrap().zone, None);
+    assert_eq!(w.grid_view().get(c(11, 10)).unwrap().zone, None);
+    // Zoning follows the road's sides: cells beyond its end (no block
+    // there) cannot be zoned.
     let out = w
         .apply(Command::SetZone {
             min: c(7, 7),
@@ -387,7 +392,7 @@ fn zoning_needs_nearby_road() {
             zone: Some(Zone::Industrial),
         })
         .unwrap();
-    assert_eq!(out.cells, vec![c(8, 8)]);
+    assert!(out.cells.is_empty());
     // Re-zoning the same zone changes nothing.
     let out = w
         .apply(Command::SetZone {
@@ -449,8 +454,8 @@ fn unzoning() {
         })
         .unwrap();
     assert_eq!(out.cells.len(), 9);
-    assert_eq!(w.grid.get(c(1, 0)).unwrap().zone, None);
-    assert_eq!(w.grid.get(c(4, 0)).unwrap().zone, Some(Zone::Industrial));
+    assert_eq!(w.grid_view().get(c(1, 0)).unwrap().zone, None);
+    assert_eq!(w.grid_view().get(c(4, 0)).unwrap().zone, Some(Zone::Industrial));
 }
 
 #[test]
@@ -466,8 +471,8 @@ fn bulldoze_middle_of_road_splits_it() {
     assert_eq!(out.cells, vec![c(5, 5)]);
     assert_eq!(out.cost, balance::BULLDOZE_COST_PER_CELL);
     assert_eq!(w.roads.segments.len(), 2);
-    assert!(!w.grid.is_road(c(5, 5)));
-    assert!(w.grid.is_road(c(4, 5)) && w.grid.is_road(c(6, 5)));
+    assert!(!w.grid_view().is_road(c(5, 5)));
+    assert!(w.grid_view().is_road(c(4, 5)) && w.grid_view().is_road(c(6, 5)));
     check(&w);
 }
 
@@ -505,7 +510,7 @@ fn bulldoze_single_piece_removes_both_nodes() {
     .unwrap();
     assert!(w.roads.segments.is_empty());
     assert!(w.roads.nodes.is_empty());
-    assert!(!w.grid.is_road(c(4, 3)));
+    assert!(!w.grid_view().is_road(c(4, 3)));
     check(&w);
 }
 
@@ -523,7 +528,7 @@ fn bulldoze_t_junction_stem_merges_main_road() {
     // The stem's piece touching (5,5) is gone; the main road is whole again.
     assert_eq!(w.roads.segments.len(), 1);
     assert_eq!(w.roads.nodes.len(), 2);
-    assert!(w.grid.is_road(c(5, 5)));
+    assert!(w.grid_view().is_road(c(5, 5)));
     check(&w);
 }
 
@@ -570,7 +575,7 @@ fn highway_cannot_be_bulldozed_but_streets_attached_can() {
     .unwrap();
     assert_eq!(w.roads.segments.len(), 1);
     assert_eq!(w.roads.segments.values().next().unwrap().kind, RoadKind::Highway);
-    assert!(w.grid.is_road(c(11, 128)) && !w.grid.is_road(c(12, 128)));
+    assert!(w.grid_view().is_road(c(11, 128)) && !w.grid_view().is_road(c(12, 128)));
     w.check_invariants().unwrap();
 }
 
@@ -605,9 +610,7 @@ fn bulldoze_removes_buildings_and_keeps_zone() {
         seed: 7,
         created_tick: 0,
     });
-    for cell in fp.cells() {
-        w.grid.get_mut(cell).unwrap().occupant = Occupant::Building(id);
-    }
+    citysim_sim::growth::place_cells(&mut w, id);
     let vb = w.versions.buildings;
     let out = w
         .apply(Command::Bulldoze {
@@ -618,8 +621,8 @@ fn bulldoze_removes_buildings_and_keeps_zone() {
     assert_eq!(out.cells.len(), 4);
     assert!(w.buildings.is_empty());
     assert!(w.versions.buildings > vb);
-    assert_eq!(w.grid.get(c(2, 1)).unwrap().occupant, Occupant::Empty);
-    assert_eq!(w.grid.get(c(2, 1)).unwrap().zone, Some(Zone::Residential));
+    assert_eq!(w.grid_view().get(c(2, 1)).unwrap().occupant, Occupant::Empty);
+    assert_eq!(w.grid_view().get(c(2, 1)).unwrap().zone, Some(Zone::Residential));
     assert_eq!(w.roads.segments.len(), 1);
     w.check_invariants().unwrap();
 }
@@ -717,7 +720,7 @@ fn save_load_round_trip() {
     assert_eq!(loaded, w);
     assert_eq!(loaded.time, w.time);
     assert_eq!(loaded.versions, w.versions);
-    assert_eq!(loaded.grid, w.grid);
+    assert_eq!(loaded.zoning, w.zoning);
     loaded.check_invariants().unwrap();
     // The loaded world keeps working and stays in lockstep.
     let (mut a, mut b) = (w, loaded);

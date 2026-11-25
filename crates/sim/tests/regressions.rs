@@ -217,11 +217,8 @@ fn bulldoze_handles_a_segment_off_the_cell_centres() {
     let a = w.roads.add_node([20.0 * CELL_SIZE + 1.0, (y as f32 + 0.5) * CELL_SIZE]);
     let b = w.roads.add_node([31.0 * CELL_SIZE - 1.0, (y as f32 + 0.5) * CELL_SIZE]);
     w.roads.add_segment(a, b, RoadKind::Street);
-    for x in 20..=30 {
-        w.grid.get_mut(c(x, y)).unwrap().occupant = Occupant::Road;
-    }
     w.versions.roads += 1;
-    w.versions.grid += 1;
+    w.step();
     w.check_invariants().unwrap();
     let out = w
         .apply(Command::Bulldoze {
@@ -232,7 +229,7 @@ fn bulldoze_handles_a_segment_off_the_cell_centres() {
     assert_eq!(out.cells, vec![c(24, y), c(25, y), c(26, y)]);
     w.check_invariants().unwrap();
     for x in 20..=30 {
-        assert_eq!(w.grid.is_road(c(x, y)), !(24..=26).contains(&x), "{x}");
+        assert_eq!(w.grid_view().is_road(c(x, y)), !(24..=26).contains(&x), "{x}");
     }
     assert_eq!(w.roads.segments.len(), 3, "highway and the two remaining ends");
 }
@@ -301,8 +298,8 @@ fn load_rejects_inconsistent_saves() {
     assert!(corrupt(&|b| b.roads.segments[street].speed_limit = f32::NAN));
     assert!(corrupt(&|b| b.roads.segments[street].capacity = [f32::INFINITY; 2]));
     assert!(corrupt(&|b| b.roads.segments[street].length *= 2.0));
-    assert!(corrupt(&|b| b.grid.cells.truncate(100)));
-    assert!(corrupt(&|b| b.grid.size = 300));
+    assert!(corrupt(&|b| b.zoning.lattices.clear()));
+    assert!(corrupt(&|b| b.zoning.blocks[0].lattice = citysim_sim::LatticeId(999)));
     assert!(corrupt(&|b| {
         let n = b.roads.add_node([3.0, 3.0]);
         b.roads.segments[street].b = n;

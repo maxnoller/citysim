@@ -7,13 +7,12 @@ use crate::citizens::{Citizen, CitizenId, Location};
 use crate::command::{self, Command, CommandError, Outcome, Preview};
 use crate::derived::Derived;
 use crate::geom::Cell;
-use crate::grid::Occupant;
 use crate::growth::GrowthState;
 use crate::people::People;
 use crate::roads::RoadKind;
 use crate::traffic::TrafficState;
 use crate::{
-    Building, BuildingId, Demand, Economy, Grid, Household, HouseholdId, MAP_CELLS, Rng, RoadNetwork, SimTime, Stats,
+    Building, BuildingId, Demand, Economy, Household, HouseholdId, MAP_CELLS, Rng, RoadNetwork, SimTime, Stats,
     Vehicle, VehicleId, Zone, balance, demand, economy, growth, households, save, stats, traffic,
 };
 
@@ -47,7 +46,6 @@ pub struct World {
     pub rng: Rng,
     pub time: SimTime,
     pub roads: RoadNetwork,
-    pub grid: Grid,
     pub buildings: IdMap<BuildingId, Building>,
     pub households: IdMap<HouseholdId, Household>,
     pub vehicles: IdMap<VehicleId, Vehicle>,
@@ -66,7 +64,6 @@ pub struct World {
     /// trip and life-event counts, city statistics (`people.stats`).
     pub people: People,
     /// Zone blocks, lattices and cells (see [`crate::zoning`]).
-    #[serde(skip)]
     pub zoning: crate::Zoning,
     /// Lazily rebuilt indices derived from the state above. Not saved,
     /// ignored by `==`.
@@ -84,7 +81,6 @@ impl World {
             rng: Rng::new(seed),
             time: SimTime::default(),
             roads: RoadNetwork::new(),
-            grid: Grid::new(),
             buildings: IdMap::new(),
             households: IdMap::new(),
             vehicles: IdMap::new(),
@@ -105,14 +101,28 @@ impl World {
         let b = world.roads.add_node(end.center());
         world.roads.add_segment(a, b, RoadKind::Highway);
         world.roads.entry = Some(a);
-        for c in start.straight_line_to(end).expect("horizontal") {
-            world.grid.get_mut(c).expect("in bounds").occupant = Occupant::Road;
-        }
+        crate::blocks::sync(&mut world);
         traffic::sync_junctions(&mut world);
         stats::update(&mut world);
         demand::refresh(&mut world);
-        crate::zoning::mirror_grid(&mut world);
         world
+    }
+
+    /// Call after changing `roads` directly (tools, tests): bumps the road
+    /// version and regenerates the zone blocks (buildings a road now covers
+    /// are removed).
+    pub fn roads_edited(&mut self) {
+        self.versions.roads += 1;
+        let doomed = crate::blocks::sync(self);
+        if !doomed.is_empty() {
+            growth::remove_buildings(self, &doomed);
+        }
+        let mut ended = Vec::new();
+        traffic::sync_network(self, &mut ended);
+        for e in ended {
+            households::trip_ended(self, e);
+        }
+        stats::update(self);
     }
 
     /// Map-edge cell where the highway stub starts.
@@ -130,13 +140,16 @@ impl World {
     pub fn apply(&mut self, cmd: Command) -> Result<Outcome, CommandError> {
         let plan = command::plan(self, &cmd)?;
         let outcome = command::execute(self, plan);
+        let doomed = crate::blocks::sync(self);
+        if !doomed.is_empty() {
+            growth::remove_buildings(self, &doomed);
+        }
         let mut ended = Vec::new();
         traffic::sync_network(self, &mut ended);
         for e in ended {
             households::trip_ended(self, e);
         }
         stats::update(self);
-        crate::zoning::mirror_grid(self);
         if self.time.tick == 0 {
             // The clock never ran (a new game, paused from the start):
             // demand follows every command at once.
@@ -147,6 +160,13 @@ impl World {
 
     /// Advance exactly one fixed tick (1 / TICKS_PER_SECOND of sim time).
     pub fn step(&mut self) {
+        // Roads edited directly (tools, tests): their blocks follow.
+        if self.zoning.roads_version != self.versions.roads {
+            let doomed = crate::blocks::sync(self);
+            if !doomed.is_empty() {
+                growth::remove_buildings(self, &doomed);
+            }
+        }
         let new_day = self.time.advance();
         demand::tick(self);
         growth::tick(self);
@@ -158,7 +178,6 @@ impl World {
         crate::errands::tick(self);
         traffic::tick(self);
         stats::update(self);
-        crate::zoning::mirror_grid(self);
     }
 
     pub fn save(&self) -> Vec<u8> {
@@ -284,42 +303,16 @@ impl World {
         Ok(())
     }
 
-    /// Check cross-structure invariants (road graph valid, grid road cells
-    /// match the graph, building cells match buildings). For tests/debug.
+    /// Check cross-structure invariants (road graph valid, blocks made for
+    /// the current roads, cells consistent with blocks and buildings, every
+    /// building on its own cells with road frontage). For tests / debug.
     pub fn check_invariants(&self) -> Result<(), String> {
         self.roads.validate()?;
-        // Segments by the cells their bounds touch (one cell of margin).
-        let n = MAP_CELLS as usize;
-        let mut buckets: Vec<Vec<crate::SegmentId>> = vec![Vec::new(); n * n];
-        for (s, seg) in self.roads.segments.iter() {
-            let (lo, hi) = seg.curve.bounds();
-            let (a, b) = (Cell::from_pos(lo), Cell::from_pos(hi));
-            for y in (a.y - 1).max(0)..=(b.y + 1).min(MAP_CELLS - 1) {
-                for x in (a.x - 1).max(0)..=(b.x + 1).min(MAP_CELLS - 1) {
-                    buckets[y as usize * n + x as usize].push(s);
-                }
-            }
-        }
-        for y in 0..MAP_CELLS {
-            for x in 0..MAP_CELLS {
-                let c = Cell::new(x, y);
-                let cd = self.grid.get(c).expect("in bounds");
-                let covered = command::road_over(&self.roads, &buckets[y as usize * n + x as usize], c);
-                match cd.occupant {
-                    Occupant::Road if !covered => return Err(format!("{c:?} marked road but no road there")),
-                    Occupant::Road => {}
-                    _ if covered => return Err(format!("{c:?} has road but is not marked road")),
-                    Occupant::Building(id) => match self.buildings.get(id) {
-                        Some(b) if b.footprint.rect().contains(c) => {}
-                        _ => return Err(format!("{c:?} references bad building {id:?}")),
-                    },
-                    Occupant::Empty => {}
-                }
-                if cd.occupant == Occupant::Road && cd.zone.is_some() {
-                    return Err(format!("{c:?} is road and zoned"));
-                }
-            }
-        }
-        Ok(())
+        crate::zoning::check(self)
+    }
+
+    /// The world-grid cell `c` as zoning sees it (for tools and tests).
+    pub fn grid_view(&self) -> crate::grid::GridView<'_> {
+        crate::grid::GridView::new(self)
     }
 }

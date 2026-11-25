@@ -389,6 +389,7 @@ pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, end
 /// nothing changed).
 pub(crate) fn sync_network(world: &mut World, ended: &mut Vec<Ended>) {
     world.cache.ensure_roads(&world.roads, world.versions.roads);
+    world.cache.ensure_zoning(&world.zoning);
     sync_junctions(world);
     if world.traffic.roads_version == world.versions.roads {
         return;

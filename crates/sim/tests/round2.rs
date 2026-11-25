@@ -449,7 +449,7 @@ fn deadlock_breaker_almost_never_fires_in_a_scripted_city() {
 fn assert_frontage(w: &World) {
     for (id, b) in w.buildings.iter() {
         assert!(
-            growth::has_frontage(w, b.footprint.rect(), b.facing),
+            growth::has_frontage(w, &b.footprint, b.facing),
             "{id:?} {:?} facing {:?} has no frontage",
             b.footprint.rect(),
             b.facing
@@ -497,13 +497,11 @@ fn a_large_zoned_block_fills_with_lots_that_all_front_a_road() {
     let deep = w.buildings.values().filter(|b| b.size().0 * b.size().1 == 2).count();
     let wide = w.buildings.values().filter(|b| b.size().0 * b.size().1 == 4).count();
     assert!(deep > 40 && wide > 3, "deep {deep} wide {wide}");
-    // Along the diagonals too: some lots front a diagonal road cell.
+    // Along the diagonals too: some lots stand on a diagonal road's own
+    // lattice, turned to face it.
     let diag = w.buildings.values().any(|b| {
-        let (dx, dy) = b.facing.offset();
-        growth::front_cells(b.footprint.rect(), b.facing).iter().any(|&f| {
-            let r = f.offset(dx, dy);
-            w.grid.is_road(r) && !w.grid.is_road(r.offset(dy, dx)) && !w.grid.is_road(r.offset(-dy, -dx))
-        })
+        let r = b.rotation().to_degrees().rem_euclid(90.0);
+        b.footprint.lattice != LatticeId::WORLD && (r - 45.0).abs() < 1.0
     });
     assert!(diag, "no lot along a diagonal");
     // No building ever stands in a second row: every occupied cell is in a
@@ -657,7 +655,11 @@ fn round1_saves_load_and_second_row_buildings_are_merged() {
     let front = c(25, 127);
     let back = c(25, 126);
     for cell in [front, back] {
-        assert_eq!(w.grid.get(cell).unwrap().occupant, Occupant::Empty, "{cell:?} free");
+        assert_eq!(
+            w.grid_view().get(cell).unwrap().occupant,
+            Occupant::Empty,
+            "{cell:?} free"
+        );
     }
     let mk = |cell: Cell, w: &mut World| {
         let id = w.buildings.insert(Building {
@@ -670,7 +672,7 @@ fn round1_saves_load_and_second_row_buildings_are_merged() {
             seed: 1,
             created_tick: 0,
         });
-        w.grid.get_mut(cell).unwrap().occupant = Occupant::Building(id);
+        citysim_sim::growth::place_cells(w, id);
         w.growth.meta.insert(id, Default::default());
         id
     };
@@ -750,4 +752,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0x41d2e74d7d44c4f9;
+const PINNED_CHECKSUM: u64 = 0xb3754fafc16366b1;

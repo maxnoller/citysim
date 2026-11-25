@@ -116,40 +116,38 @@ pub(crate) struct GridV5 {
 }
 
 impl GridV5 {
-    pub(crate) fn upgrade(self) -> crate::Grid {
-        crate::Grid {
-            size: self.size,
-            cells: self
-                .cells
-                .into_iter()
-                .map(|c| crate::grid::CellData {
-                    zone: c.zone,
-                    occupant: match c.occupant {
-                        OccupantV5::Empty => crate::Occupant::Empty,
-                        OccupantV5::Road => crate::Occupant::Road,
-                        OccupantV5::Building(b) => crate::Occupant::Building(b),
-                    },
-                })
-                .collect(),
-        }
+    /// Zoned cells (zones under roads were never kept).
+    pub(crate) fn zones(&self) -> Vec<(crate::Cell, Zone)> {
+        let n = self.size.max(1);
+        self.cells
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let z = c.zone?;
+                (c.occupant != OccupantV5::Road).then_some((crate::Cell::new(i as i32 % n, i as i32 / n), z))
+            })
+            .collect()
     }
 
-    pub(crate) fn of(g: &crate::Grid) -> GridV5 {
-        GridV5 {
-            size: g.size,
-            cells: g
-                .cells
-                .iter()
-                .map(|c| CellDataV5 {
+    /// The world grid of a live world (lattice 0, as old saves held it).
+    pub(crate) fn of_world(w: &World) -> GridV5 {
+        let view = w.grid_view();
+        let n = crate::MAP_CELLS;
+        let mut cells = Vec::with_capacity((n * n) as usize);
+        for y in 0..n {
+            for x in 0..n {
+                let c = view.get(crate::Cell::new(x, y)).expect("in bounds");
+                cells.push(CellDataV5 {
                     zone: c.zone,
                     occupant: match c.occupant {
                         crate::Occupant::Empty => OccupantV5::Empty,
                         crate::Occupant::Road => OccupantV5::Road,
                         crate::Occupant::Building(b) => OccupantV5::Building(b),
                     },
-                })
-                .collect(),
+                });
+            }
         }
+        GridV5 { size: n, cells }
     }
 }
 
@@ -630,7 +628,6 @@ impl WorldV5 {
         w.rng = self.rng;
         w.time = self.time;
         w.roads = self.roads.upgrade();
-        w.grid = self.grid.upgrade();
         w.buildings = upgrade_buildings(self.buildings);
         w.households = self.households;
         w.vehicles = upgrade_vehicles(self.vehicles);
@@ -643,6 +640,7 @@ impl WorldV5 {
         w.citizens = self.citizens;
         w.people = self.people;
         w.cache = Default::default();
+        crate::zoning::adopt_grid(&mut w, &self.grid.zones());
         w
     }
 }
@@ -656,7 +654,7 @@ pub fn save_as_v5(w: &World) -> Vec<u8> {
         rng: w.rng.clone(),
         time: w.time.clone(),
         roads: RoadNetworkV5::of(&w.roads),
-        grid: GridV5::of(&w.grid),
+        grid: GridV5::of_world(w),
         buildings: buildings_of(&w.buildings),
         households: w.households.clone(),
         vehicles: vehicles_of(&w.vehicles),
