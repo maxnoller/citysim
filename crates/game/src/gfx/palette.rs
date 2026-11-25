@@ -50,6 +50,7 @@ pub const GRAVEL: Color = c(0x9C9584);
 pub const LAMP: Color = c(0x5E656B);
 pub const LAMP_GLASS: Color = c(0xF4EED8);
 pub const SIGN_GREEN: Color = c(0x2E7D4F);
+pub const MEDIAN_GRASS: Color = c(0x6E9A4E);
 
 // ------------------------------------------------------------ houses
 pub const HOUSE_WALLS: [Color; 6] = [

@@ -42,6 +42,10 @@ pub struct Style {
     /// Sidewalk width on each side (0 = none).
     pub walk: f32,
     pub highway: bool,
+    /// Half-width of the raised central median (0 = painted centre line).
+    pub median: f32,
+    /// Lanes per direction.
+    pub lanes: u8,
 }
 
 impl Style {
@@ -54,30 +58,36 @@ pub fn style(kind: RoadKind) -> Style {
     match kind {
         // 8 m in total: 5.5 m carriageway, 1.25 m sidewalks.
         RoadKind::Street => Style {
-            h: 2.75,
+            h: RoadKind::Street.half_width_m(),
             walk: 1.25,
             highway: false,
+            median: 0.0,
+            lanes: 1,
+        },
+        // 13 m carriageway (two 3 m lanes each way either side of a narrow
+        // planted median), wider sidewalks: 16 m overall, so it reaches
+        // into the cells beside its own (buildings there step back).
+        RoadKind::Avenue => Style {
+            h: RoadKind::Avenue.half_width_m(),
+            walk: 1.5,
+            highway: false,
+            median: 0.25,
+            lanes: 2,
         },
         RoadKind::Highway => Style {
-            h: 5.0,
+            h: RoadKind::Highway.half_width_m(),
             walk: 0.0,
             highway: true,
+            median: 0.0,
+            lanes: 2,
         },
     }
 }
 
-/// Lateral offset of the lane a vehicle drives in (to the right of travel).
-pub fn lane_offset(kind: RoadKind, seed: u32) -> f32 {
-    match kind {
-        RoadKind::Street => 1.35,
-        RoadKind::Highway => {
-            if seed.is_multiple_of(3) {
-                3.6
-            } else {
-                1.3
-            }
-        }
-    }
+/// Lateral offset of lane `lane` (0 = kerb side) to the right of travel,
+/// as the sim defines it.
+pub fn lane_offset(kind: RoadKind, lane: u8) -> f32 {
+    kind.lane_offset_m(lane)
 }
 
 fn perp(v: Vec2) -> Vec2 {
@@ -584,6 +594,29 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
             );
             dashes(m, s.a, dir, side * h * 0.5, m0, m1, 4.0, 6.0, 0.15, white);
         }
+    } else if st.median > 0.0 {
+        // Avenue: raised planted median, lane lines, turn arrows.
+        let (q0, q1) = (m0 + 0.4, m1 - 0.4);
+        if q1 - q0 > 1.0 {
+            median_strip(m, s.a, dir, st.median, q0, q1);
+        }
+        let lane_line = (lane_offset(s.kind, 0) + lane_offset(s.kind, 1)) * 0.5;
+        for side in [1.0f32, -1.0] {
+            dashes(m, s.a, dir, side * lane_line, m0, m1, 3.0, 5.0, 0.14, white);
+        }
+        for (at_a, deg) in [(true, s.deg_a), (false, s.deg_b)] {
+            if deg < 3 || m1 - m0 < 16.0 {
+                continue;
+            }
+            // Arriving at this end: travel direction and the right of it.
+            let (e, back, travel) = if at_a { (m0, 1.0, -dir) } else { (m1, -1.0, dir) };
+            let right = Vec2::new(-travel.y, travel.x);
+            let t = e + back * 7.0;
+            for (lane, turn) in [(0u8, 1.0f32), (1, -1.0)] {
+                let p = s.a + dir * t + right * lane_offset(s.kind, lane);
+                turn_arrow(m, p, travel, turn, white);
+            }
+        }
     } else {
         dashes(m, s.a, dir, 0.0, m0, m1, 2.6, 2.4, 0.16, white);
     }
@@ -609,7 +642,7 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
             // when arriving at a (`lane_offset` / vehicles use the same).
             let (ta, tb) = (along(3.0), along(3.35));
             let side = if at_a { -1.0 } else { 1.0 };
-            let (oa, ob) = (side * 0.15, side * (h - 0.25));
+            let (oa, ob) = (side * (st.median + 0.15), side * (h - 0.25));
             rect(
                 m,
                 s.a,
@@ -626,12 +659,56 @@ pub fn mesh_segment(m: &mut MeshBuilder, s: &SegLayout) {
     }
 }
 
+/// Raised median between `t0` and `t1`: kerbs and a grass top with
+/// rounded-off (pointed) ends.
+fn median_strip(m: &mut MeshBuilder, a: Vec2, dir: Vec2, hw: f32, t0: f32, t1: f32) {
+    let n = perp(dir);
+    let y = ROAD_Y + 0.13;
+    let nose = (hw * 2.5).min((t1 - t0) * 0.25);
+    let pts = [
+        a + dir * t0,
+        a + dir * (t0 + nose) + n * hw,
+        a + dir * (t1 - nose) + n * hw,
+        a + dir * t1,
+        a + dir * (t1 - nose) - n * hw,
+        a + dir * (t0 + nose) - n * hw,
+    ];
+    let grass = lin(palette::MEDIAN_GRASS);
+    let c = lift(a + dir * (t0 + t1) * 0.5, y);
+    let ring: Vec<Vec3> = pts.iter().map(|&p| lift(p, y)).collect();
+    m.fan_up(c, &ring, grass);
+    for i in 0..pts.len() {
+        let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+        let mid = (p + q) * 0.5 - (a + dir * (t0 + t1) * 0.5);
+        vface(m, p, q, ROAD_Y - 0.02, y, mid, palette::KERB);
+    }
+}
+
+/// Painted turn arrow at `p` pointing along `travel`; `turn` +1 adds a
+/// right-turn head, -1 a left-turn head (always with straight on).
+fn turn_arrow(m: &mut MeshBuilder, p: Vec2, travel: Vec2, turn: f32, c: [f32; 4]) {
+    let right = Vec2::new(-travel.y, travel.x);
+    let y = MARK_Y;
+    let q = |along: f32, side: f32| lift(p + travel * along + right * side, y);
+    // Shaft.
+    m.quad_up([q(-2.2, -0.09), q(1.0, -0.09), q(1.0, 0.09), q(-2.2, 0.09)], c);
+    // Straight head.
+    m.tri_up(q(1.0, -0.38), q(1.0, 0.38), q(2.0, 0.0), c);
+    // Turn branch from the middle of the shaft, bent to the side.
+    let s = turn;
+    m.quad_up([q(-0.7, 0.0), q(-0.35, 0.0), q(0.1, s * 0.62), q(-0.25, s * 0.62)], c);
+    m.tri_up(q(-0.45, s * 0.52), q(0.35, s * 0.52), q(0.05, s * 1.05), c);
+}
+
 /// Street lamp positions along a segment: (pole base, lamp head) on
 /// alternating sides, clear of the junction ends. Empty for roads without
 /// sidewalks.
 pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
     if s.style.walk <= 0.0 {
         return Vec::new();
+    }
+    if s.style.median > 0.0 {
+        return median_lamp_spots(s);
     }
     let dir = s.dir();
     let n = perp(dir);
@@ -661,15 +738,57 @@ pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
         .collect()
 }
 
+/// Avenue lamps: double-armed poles on the median, one head over each
+/// carriageway.
+fn median_lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
+    let dir = s.dir();
+    let n = perp(dir);
+    let (t0, t1) = (s.s_a + JUNCTION_MARGIN + 3.0, s.len() - s.s_b - JUNCTION_MARGIN - 3.0);
+    if t1 <= t0 {
+        return Vec::new();
+    }
+    let count = ((t1 - t0) / 30.0).floor() as usize + 1;
+    let mut out = Vec::new();
+    for k in 0..count {
+        let t = if count == 1 {
+            (t0 + t1) * 0.5
+        } else {
+            t0 + (t1 - t0) * k as f32 / (count - 1) as f32
+        };
+        let base = s.a + dir * t;
+        out.push((base, base + n * 2.6));
+        out.push((base, base - n * 2.6));
+    }
+    out
+}
+
 /// Street lamps: pole, arm over the road and a glowing head.
 fn street_lamps(m: &mut MeshBuilder, s: &SegLayout) {
     let pole = palette::LAMP;
+    let on_median = s.style.median > 0.0;
+    let ground = if on_median { ROAD_Y + 0.13 } else { WALK_Y };
+    let mut last: Option<Vec2> = None;
     for (base, tip) in lamp_spots(s) {
-        m.box_yaw(lift(base, WALK_Y), Vec3::new(0.14, 4.6, 0.14), 0.0, pole, pole);
+        if last != Some(base) {
+            m.box_yaw(
+                lift(base, ground),
+                Vec3::new(0.14, WALK_Y + 4.6 - ground, 0.14),
+                0.0,
+                pole,
+                pole,
+            );
+        }
+        last = Some(base);
         let mid = (base + tip) * 0.5;
         let d = tip - base;
         let yaw = -d.y.atan2(d.x);
-        m.box_yaw(lift(mid, WALK_Y + 4.5), Vec3::new(1.2, 0.1, 0.1), yaw, pole, pole);
+        m.box_yaw(
+            lift(mid, WALK_Y + 4.5),
+            Vec3::new(d.length() + 0.1, 0.1, 0.1),
+            yaw,
+            pole,
+            pole,
+        );
         m.box_yaw(lift(tip, WALK_Y + 4.38), Vec3::new(0.62, 0.14, 0.32), yaw, pole, pole);
         m.glow(Glow::Lamp, 0.0, |m| {
             m.box_yaw(

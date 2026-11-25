@@ -233,7 +233,7 @@ pub fn lane_geoms(world: &World) -> HashMap<SegmentId, LaneGeom> {
         if a.dir.dot(b.dir) > 0.9995 {
             return None;
         }
-        let off = lane_offset(b.kind, 1);
+        let off = lane_offset(b.kind, 0);
         let right = |d: Vec2| Vec2::new(-d.y, d.x);
         let pa = b.origin - a.dir * a.s1 + right(a.dir) * off;
         let pb = b.origin + b.dir * b.s0 + right(b.dir) * off;
@@ -622,11 +622,27 @@ fn model_size(model: usize) -> (f32, f32) {
 /// travel direction).
 fn lane_sample(lanes: &HashMap<SegmentId, LaneGeom>, v: &Vehicle) -> (Vec2, Vec2) {
     if let Some(g) = v.segment.and_then(|s| lanes.get(&s)) {
-        return g.point(v.forward, v.progress, lane_offset(g.kind, v.seed));
+        return g.point(v.forward, v.progress, vehicle_offset(g.kind, v));
     }
     let dir = Vec2::from_angle(v.heading);
-    let off = lane_offset(RoadKind::Street, v.seed);
+    let off = vehicle_offset(RoadKind::Street, v);
     (Vec2::from(v.pos) + Vec2::new(-dir.y, dir.x) * off, dir)
+}
+
+/// Lateral offset of a vehicle from the centre line (to the right of
+/// travel): its sim lane, plus what is left of a lane change.
+pub fn vehicle_offset(kind: RoadKind, v: &Vehicle) -> f32 {
+    let base = lane_offset(kind, v.lane);
+    if v.lane_shift.abs() < 1e-3 {
+        return base;
+    }
+    // Positive shift: it came from the lane to its left (higher index).
+    let other = if v.lane_shift > 0.0 {
+        lane_offset(kind, v.lane.saturating_add(1))
+    } else {
+        lane_offset(kind, v.lane.saturating_sub(1))
+    };
+    base + (other - base) * v.lane_shift.abs().min(1.0)
 }
 
 fn bezier(p0: Vec2, p1: Vec2, p2: Vec2, t: f32) -> (Vec2, Vec2) {
@@ -663,7 +679,7 @@ fn advance(vis: &mut VehicleVisual, v: &Vehicle, lanes: &HashMap<SegmentId, Lane
             // Sim distance from the last sample to the node just crossed.
             let left = lanes.get(&old).map_or(0.0, |o| o.len - vis.progress).max(0.0);
             let lane = g.lane(v.forward);
-            let off = lane_offset(g.kind, v.seed);
+            let off = vehicle_offset(g.kind, v);
             // Through a junction or bend: curve to the start of the straight
             // lane. Straight on through a plain node: the lane map runs on,
             // but ease over a few metres if the lane offset changes (e.g.
@@ -713,7 +729,7 @@ fn run_pos(lanes: &HashMap<SegmentId, LaneGeom>, v: &Vehicle) -> Option<RunPos> 
         t: lane.t(v.progress.clamp(0.0, g.len)) - lane.t_min,
         seg: v.segment?,
         forward: v.forward,
-        offset: lane_offset(g.kind, v.seed),
+        offset: vehicle_offset(g.kind, v),
     })
 }
 
