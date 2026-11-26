@@ -352,6 +352,7 @@ pub enum FoldKey {
     Household,
     Happiness,
     Journal,
+    Residents,
     Workers,
     Aboard,
 }
@@ -359,7 +360,10 @@ pub enum FoldKey {
 impl FoldKey {
     /// Open until the player folds it.
     pub fn open_by_default(self) -> bool {
-        matches!(self, FoldKey::Life | FoldKey::Workers | FoldKey::Aboard)
+        matches!(
+            self,
+            FoldKey::Life | FoldKey::Residents | FoldKey::Workers | FoldKey::Aboard
+        )
     }
 }
 
@@ -455,14 +459,36 @@ pub struct Sheet {
     pub inside: Option<BuildingId>,
 }
 
-/// Where a person is on the map now: in their car (at its drawn lane
-/// pose), in a building, or on the way off screen.
+/// Where to look for a person on the map now: their car (at its drawn
+/// lane pose), the building they are in, or, on a trip the map does not
+/// draw (on foot, or a car beyond the cars shown), the place they are
+/// going: there is nothing to see on the way.
 pub fn person_position(world: &World, id: CitizenId) -> Option<[f32; 2]> {
     let v = inspect::citizen(world, id)?;
-    if let Some(car) = v.trip.and_then(|t| t.vehicle).and_then(|c| world.vehicles.get(c)) {
-        return Some(citysim_sim::drive::vehicle_pose(world, car).0);
+    if let Some(t) = v.trip {
+        return match t.vehicle.and_then(|c| world.vehicles.get(c)) {
+            Some(car) => Some(citysim_sim::drive::vehicle_pose(world, car).0),
+            None => world.buildings.get(t.to).map(|b| b.center()),
+        };
     }
     inspect::citizen_pos(world, id)
+}
+
+/// A trip the map does not draw: on foot, a lift, or a car beyond the cars
+/// shown.
+pub fn trip_unseen(world: &World, t: &inspect::TripView) -> bool {
+    t.vehicle.is_none_or(|c| !world.vehicles.contains_key(c))
+}
+
+/// Why a trip is not on the map, in words.
+fn unseen_words(t: &inspect::TripView) -> &'static str {
+    match t.mode {
+        TravelMode::Walking => "People on foot are not drawn",
+        TravelMode::NoCar => "Not drawn: without a car they go by lift or bus, off the map",
+        _ => {
+            "Not drawn: the map shows up to 125 cars per 1,000 residents, the rest drive in the same traffic off screen"
+        }
+    }
 }
 
 /// Clock time of an absolute tick (the game's tick 0 is not midnight: a
@@ -674,7 +700,10 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
         sec.line("", next, Tone::Muted);
     }
     if let Some(t) = v.trip {
-        if let Some(car) = t.vehicle {
+        if trip_unseen(world, &t) {
+            sec.line("", unseen_words(&t), Tone::Muted);
+        }
+        if let Some(car) = t.vehicle.filter(|c| world.vehicles.contains_key(*c)) {
             sec.link("In", "their car", Target::Vehicle(car));
         }
         if let Some(from) = t.from {
@@ -732,7 +761,11 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
         ),
     }
     if c.last_commute_s > 0.0 && c.job.is_some() {
-        sec.line("Last commute", format!("{:.0} s by car", c.last_commute_s), Tone::Muted);
+        sec.line(
+            "Last commute",
+            format!("{} by car", super::bar::commute_text(c.last_commute_s)),
+            Tone::Muted,
+        );
     }
     s.sections.push(sec);
     // Household.
@@ -883,14 +916,26 @@ pub fn place_sheet(world: &World, id: BuildingId) -> Option<Sheet> {
     }
     s.sections.push(sec);
     if b.kind == Zone::Residential {
+        // One foldable list: each household's name line, then its people.
+        let mut sec = Section::folding(
+            format!(
+                "Who lives here · {} {}",
+                v.households.len(),
+                if v.households.len() == 1 {
+                    "household"
+                } else {
+                    "households"
+                }
+            ),
+            FoldKey::Residents,
+        );
         for &hid in v.households.iter().take(8) {
             let Some(h) = world.households.get(hid) else { continue };
-            let mut sec = Section::new(format!(
-                "{} · {} · rent {}/day",
-                family_name(h.seed),
-                kind_word(h.kind).to_lowercase(),
-                format::money(h.rent)
-            ));
+            sec.line(
+                format!("{} · {}", family_name(h.seed), kind_word(h.kind).to_lowercase()),
+                format!("rent {}/day", format::money(h.rent)),
+                Tone::Muted,
+            );
             for &m in &h.citizens {
                 let Some(c) = world.citizens.get(m) else { continue };
                 let here = c.location.building() == Some(id);
@@ -900,22 +945,20 @@ pub fn place_sheet(world: &World, id: BuildingId) -> Option<Sheet> {
                     _ => format!("out · {}", activity_word(c.activity).to_lowercase()),
                 };
                 sec.link(
-                    format!("{} {}", given_name(world, m), c.age_years()),
+                    format!("  {} {}", given_name(world, m), c.age_years()),
                     what,
                     Target::Person(m),
                 );
             }
-            s.sections.push(sec);
         }
         if v.households.len() > 8 {
-            let mut sec = Section::new("");
             sec.line(
                 "",
                 format!("and {} more households", v.households.len() - 8),
                 Tone::Muted,
             );
-            s.sections.push(sec);
         }
+        s.sections.push(sec);
     } else {
         let mut sec = Section::folding(format!("Who works here · {}", v.workers.len()), FoldKey::Workers);
         let mut rows: Vec<(bool, CitizenId)> = v
@@ -998,13 +1041,11 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
         }
     }
     sec.line("Why", purpose_title(v.purpose), Tone::Normal);
+    // Game time, like every clock in the panel (a real second at 1x is a
+    // game minute and a half).
     sec.line(
-        "On the road",
-        format!(
-            "{:.0} s · left {} ago",
-            v.on_road_s,
-            span(world.time.tick.saturating_sub(v.requested_tick))
-        ),
+        "On the way",
+        span(world.time.tick.saturating_sub(v.requested_tick)),
         Tone::Normal,
     );
     if truck && v.cargo > 0.0 {

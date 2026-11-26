@@ -181,10 +181,6 @@ impl Band {
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{} {}", format::group(n as u64), if n == 1 { one } else { many })
-}
-
 /// "Eastbound" etc. for travel from `from` to `to` (sim metres; -y is north,
 /// the top of the screen in the default view).
 pub fn heading_name(from: [f32; 2], to: [f32; 2]) -> &'static str {
@@ -534,12 +530,10 @@ fn road_card(world: &World, ids: &[citysim_sim::SegmentId]) -> Option<Card> {
         let d = RoadSegment::dir(forward);
         let c = s.congestion_in(forward);
         let b = Band::of(c);
-        let mut value = format!(
-            "{} / {} · {}",
-            format::group(s.load[d].round() as u64),
-            plural(s.capacity[d].floor().max(1.0) as usize, "car", "cars"),
-            b.word()
-        );
+        // "30 cars, room for 26 · jammed"; on two lanes "(12 + 18)" after
+        // the count, kerb lane first.
+        let n = s.load[d].round() as u64;
+        let mut count = format!("{} {}", format::group(n), if n == 1 { "car" } else { "cars" });
         let lanes = s.lane_count() as usize;
         if lanes > 1 {
             let id = ids.iter().copied().find(|&i| roads.segments.get(i) == Some(s));
@@ -547,8 +541,13 @@ fn road_card(world: &World, ids: &[citysim_sim::SegmentId]) -> Option<Card> {
                 .and_then(|i| lane_cars.get(&(i, forward)).copied())
                 .unwrap_or_default();
             let parts: Vec<String> = (0..lanes.min(4)).map(|l| per[l].to_string()).collect();
-            value = format!("lanes {} · {value}", parts.join("|"));
+            count = format!("{count} ({})", parts.join(" + "));
         }
+        let value = format!(
+            "{count}, room for {} · {}",
+            format::group(s.capacity[d].floor().max(1.0) as u64),
+            b.word()
+        );
         Row::new(name, value, b.color())
     };
     // Both directions of the busiest piece of the stretch.

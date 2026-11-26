@@ -168,13 +168,17 @@ fn fragment(
     } else if kind == 8u {
         pbr_input.material.base_color = vec4<f32>(ground_color(base, wp), 1.0);
     } else if kind == 9u {
-        // Distant building body: at night scattered warm specks (a stand-in
-        // for windows that are under a pixel from far away), only when far.
-        let far = smoothstep(450.0, 1100.0, distance(view.world_position, wp));
+        // Distant building body (the far model, past the LOD switch): at
+        // night the walls carry the average light of windows too small to
+        // draw, plus scattered warm specks, so a big city does not turn into
+        // dark blocks when zoomed out.
+        let far = smoothstep(400.0, 900.0, distance(view.world_position, wp));
         let wall = 1.0 - abs(in.world_normal.y);
+        let warm = vec3<f32>(1.0, 0.62, 0.3);
+        glow = warm * (0.32 * city.windows * city.night * wall * (0.5 + 0.5 * far));
         let h = hash21(floor(wp.xz / 2.6) + vec2<f32>(floor(wp.y / 2.6) * 7.3, 1.7));
-        if far > 0.0 && h < city.windows * (0.08 + 0.3 * wall) {
-            glow = vec3<f32>(1.0, 0.62, 0.3) * (2.0 * city.night * far);
+        if h < city.windows * (0.14 + 0.4 * wall) {
+            glow += warm * (2.4 * city.night * (0.4 + 0.6 * far));
         }
         } else if kind == 7u {
         // Shop fronts: a warm interior glow, kept low so a whole glazed

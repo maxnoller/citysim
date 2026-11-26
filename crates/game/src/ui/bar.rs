@@ -961,18 +961,16 @@ pub fn commute_color(secs: f32) -> Color {
     }
 }
 
-/// Average commute: real driving seconds at 1x ("—" before the first
-/// commute finished).
+/// A commute (the sim measures driving seconds) in game time, like every
+/// clock in the interface: cars drive in real time while the calendar is
+/// compressed, so 40 s on the road is an hour of the day ("—" before the
+/// first commute finished).
 pub fn commute_text(secs: f32) -> String {
     if secs <= 0.0 || !secs.is_finite() {
         return "\u{2014}".to_string();
     }
-    let s = secs.round() as u32;
-    if s < 60 {
-        format!("{s} s")
-    } else {
-        format!("{} min {:02} s", s / 60, s % 60)
-    }
+    let ticks = (secs * citysim_sim::TICKS_PER_SECOND as f32).round() as u64;
+    super::people::span(ticks)
 }
 
 #[cfg(test)]
@@ -993,9 +991,10 @@ mod tests {
     #[test]
     fn commute_formatting() {
         assert_eq!(commute_text(0.0), "\u{2014}");
-        assert_eq!(commute_text(42.4), "42 s");
-        assert_eq!(commute_text(59.6), "1 min 00 s");
-        assert_eq!(commute_text(125.0), "2 min 05 s");
+        // An hour of the day is 40 s of driving.
+        assert_eq!(commute_text(40.0), "1 h");
+        assert_eq!(commute_text(10.0), "15 min");
+        assert_eq!(commute_text(150.0), "3 h 45 min");
     }
 
     #[test]

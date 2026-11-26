@@ -520,9 +520,12 @@ fn follow(
     if let Some(Target::Person(c)) = view.current()
         && let Some(v) = citysim_sim::inspect::citizen(w, c)
     {
-        let sel = match (v.trip.and_then(|t| t.vehicle), v.inside) {
-            (Some(car), _) => Some(WorldTarget::Vehicle(car)),
-            (None, Some(b)) => Some(WorldTarget::Building(b)),
+        let car = v.trip.and_then(|t| t.vehicle).filter(|c| w.vehicles.contains_key(*c));
+        let sel = match (car, v.trip, v.inside) {
+            (Some(car), _, _) => Some(WorldTarget::Vehicle(car)),
+            // On the way where the map draws nothing: mark where they go.
+            (None, Some(t), _) => Some(WorldTarget::Building(t.to)),
+            (None, None, Some(b)) => Some(WorldTarget::Building(b)),
             _ => None,
         };
         if highlight.selected != sel {

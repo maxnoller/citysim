@@ -461,7 +461,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                 Hovered::default(),
                 Tooltip::new(
                     "Tax rate",
-                    "Drag to set the tax on homes, shops and industry (0% to 20%).",
+                    "Drag to set the tax on homes, shops and industry (0% to 30%).",
                 ),
             ))
             .with_children(|tr| {

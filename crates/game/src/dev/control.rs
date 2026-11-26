@@ -59,8 +59,10 @@ pub struct ControlPlugin {
 enum Goal {
     Pop(u32),
     Day(u32),
-    /// Tick of day.
-    Hour(u32),
+    /// The next time of day asked for, as an absolute tick (normal sim
+    /// steps run between the checks, so an exact tick of day could be
+    /// stepped over).
+    Hour(u64),
 }
 
 #[derive(Resource)]
@@ -129,7 +131,7 @@ fn reached(world: &citysim_sim::World, goal: Goal) -> bool {
     match goal {
         Goal::Pop(n) => world.stats.population >= n,
         Goal::Day(d) => world.time.day >= d,
-        Goal::Hour(t) => world.time.tick_of_day == t,
+        Goal::Hour(t) => world.time.tick >= t,
     }
 }
 
@@ -415,8 +417,11 @@ fn run(
                 "until-day" => Goal::Day(num(args, 0)?),
                 _ => {
                     let h: f32 = num(args, 0)?;
-                    let t = (h.rem_euclid(24.0) / 24.0 * citysim_sim::balance::TICKS_PER_DAY as f32) as u32;
-                    Goal::Hour(t)
+                    let day = citysim_sim::balance::TICKS_PER_DAY as u64;
+                    let t = (h.rem_euclid(24.0) / 24.0 * day as f32) as u64;
+                    let w = &cx.sim.world;
+                    let ahead = (t + day - w.time.tick_of_day as u64 % day) % day;
+                    Goal::Hour(w.time.tick + if ahead == 0 { day } else { ahead })
                 }
             };
             if let Some((old, _, _)) = ctl.until.take() {
@@ -504,7 +509,7 @@ fn run(
                     w.citizens.get(c).is_some_and(|ct| {
                         ct.job.is_some()
                             && ct.location.building() == Some(b)
-                            && (20.0..90.0).contains(&ct.last_commute_s)
+                            && (20.0..240.0).contains(&ct.last_commute_s)
                     }) && citysim_sim::inspect::plan(w, c).and_then(|p| p.next).is_some_and(|n| {
                         n.purpose == Some(citysim_sim::TripPurpose::ToWork)
                             && n.at_tick.is_some_and(|t| t >= now && t < now + hours)

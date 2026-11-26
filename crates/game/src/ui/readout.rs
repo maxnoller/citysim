@@ -317,6 +317,20 @@ pub fn upgrade(plan: &ToolPlan, dragging: bool) -> Option<Readout> {
             .sum();
         lines.push(Line::new("Length", metres(len), Tone::Normal));
         lines.push(price_line(plan.eval.cost, len as f64 * kind.upkeep_per_m()));
+        // What the change does to the daily bill (the other kind is what
+        // is there now).
+        let other = if *kind == RoadKind::Avenue {
+            RoadKind::Street
+        } else {
+            RoadKind::Avenue
+        };
+        let delta = (len as f64 * (kind.upkeep_per_m() - other.upkeep_per_m())).round() as i64;
+        if delta != 0 && len > 0.0 {
+            lines.push(Line::text(
+                format!("{}/day upkeep against now", format::signed_money(delta)),
+                Tone::Muted,
+            ));
+        }
         if let Some(e) = error {
             lines.push(Line::text(super::context::error_text(e), Tone::Bad));
         }

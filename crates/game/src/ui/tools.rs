@@ -1203,7 +1203,10 @@ fn use_tool(
                         .zoning
                         .cell_at(live.point)
                         .map_or(LatticeId::WORLD, |c| c.lattice);
-                    let at = live.point;
+                    // Drags are measured from where the pointer went down,
+                    // not from the snapped point (a snap of a few metres is
+                    // not a drag, and must not add a piece on release).
+                    let at = state.cursor.unwrap_or(live.point);
                     place_point(state, &sim, live, &mut out, &mut toasts);
                     state.press = Some(Press {
                         at,
@@ -1345,7 +1348,9 @@ pub fn vehicle_near(world: &World, p: [f32; 2], reach: f32) -> Option<citysim_si
 /// What the inspect tool points at: a car, a building, a junction, a road
 /// stretch (in that order).
 pub fn target_at(world: &World, p: [f32; 2], radius: f32) -> Option<WorldTarget> {
-    if let Some(v) = vehicle_near(world, p, 3.2) {
+    // Cars are small from far away: the reach grows with the zoom (the
+    // cursor radius is a fixed number of pixels in metres).
+    if let Some(v) = vehicle_near(world, p, 3.2f32.max(radius * 0.45)) {
         return Some(WorldTarget::Vehicle(v));
     }
     if let Some(b) = zoning::building_at(world, p) {
