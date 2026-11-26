@@ -22,12 +22,14 @@ unsafe_code = "forbid"
 all = { level = "warn", priority = -1 }
 
 # `dev` is the profile for working on the game: `cargo test`, `cargo run`, demo
-# cities and screenshots. The game crate compiles quickly (opt-level 1,
-# incremental); Bevy and the simulation run at full speed. Line tables only:
-# backtraces keep file and line, and the build is smaller and links faster.
-# `release` is for playing and for performance measurements.
+# cities and screenshots. The game crate compiles quickly (opt-level 0, no
+# LLVM optimisation or local ThinLTO: a one-line edit rebuilds in ~5 s instead
+# of ~13 s at opt-level 1, at the same average frame time since Bevy and the
+# simulation run optimised). Line tables only: backtraces keep file and line,
+# and the build is smaller and links faster. `release` is for playing and for
+# performance measurements.
 [profile.dev]
-opt-level = 1
+opt-level = 0
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
