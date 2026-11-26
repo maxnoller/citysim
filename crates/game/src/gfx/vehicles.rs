@@ -175,6 +175,8 @@ struct SyncState {
     generation: u64,
     /// The sim advanced on the most recent fixed update.
     moving: bool,
+    /// Fixed updates between the kept poses (see `sync_vehicles`).
+    span: u32,
 }
 
 pub struct VehiclesPlugin;
@@ -310,13 +312,20 @@ fn sync_vehicles(
     let stepped = fixed_now != state.last_fixed;
     let tick = world.time.tick;
     let advanced = tick != state.last_tick;
-    state.last_fixed = fixed_now;
-    state.last_tick = tick;
     if stepped {
+        // Fast speeds run several fixed updates a frame: the poses kept
+        // (`prev`, `cur`) are this many fixed updates apart.
+        let period = fixed.timestep().as_secs_f64().max(1e-6);
+        state.span = (((fixed_now - state.last_fixed) / period).round() as u32).clamp(1, 16);
         state.moving = advanced;
     }
+    state.last_fixed = fixed_now;
+    state.last_tick = tick;
+    // Draw one fixed update behind the newest pose: the same lag at every
+    // speed, so cars move evenly whatever the frame rate.
     let alpha = if state.moving {
-        fixed.overstep_fraction().clamp(0.0, 1.0)
+        let span = state.span.max(1) as f32;
+        ((span - 1.0 + fixed.overstep_fraction().clamp(0.0, 1.0)) / span).clamp(0.0, 1.0)
     } else {
         1.0
     };

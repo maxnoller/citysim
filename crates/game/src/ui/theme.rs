@@ -230,6 +230,7 @@ pub mod icon {
     pub const QUIT: char = '\u{e10e}';
     pub const MINUS: char = '\u{e11c}';
     pub const PLUS: char = '\u{e13d}';
+    pub const CHEVRON_DOWN: char = '\u{e06d}';
     pub const CHEVRON_LEFT: char = '\u{e06e}';
     pub const CHEVRON_RIGHT: char = '\u{e06f}';
     pub const SPLINE: char = '\u{e38b}';

@@ -78,6 +78,8 @@ pub struct UiState {
     pub following: bool,
     /// The bar is in its compact form (narrow window).
     pub compact: bool,
+    /// The keyboard works the open drawer (F6; arrows, Enter, Esc).
+    pub tray_focus: bool,
 }
 
 impl UiState {
@@ -99,6 +101,7 @@ impl Default for UiState {
             ui_scale: 1,
             following: false,
             compact: false,
+            tray_focus: false,
         }
     }
 }

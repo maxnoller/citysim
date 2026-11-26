@@ -558,7 +558,10 @@ pub fn snap(world: &World, anchor: Option<Anchor>, cursor: [f32; 2], radius: f32
             {
                 let l = &lines[i];
                 let len = dot(sub(c.point, a.pos), l.dir);
-                let cells = (len / CELL_SIZE).round().max(1.0);
+                // Under half a cell from the previous point is that point
+                // (never a cell behind it: the cursor resting where the
+                // last piece ended must not start a stub).
+                let cells = (len / CELL_SIZE).round().max(0.0);
                 s.point = add(a.pos, mul(l.dir, cells * CELL_SIZE));
                 s.guides = vec![l.guide_to(s.point)];
                 if !s.matched.contains(&SnapTarget::Length) {
@@ -577,7 +580,7 @@ pub fn snap(world: &World, anchor: Option<Anchor>, cursor: [f32; 2], radius: f32
             {
                 let len = dist(cursor, a.pos);
                 if len > 1.0 {
-                    let cells = (len / CELL_SIZE).round().max(1.0);
+                    let cells = (len / CELL_SIZE).round();
                     s.point = add(a.pos, mul(unit(sub(cursor, a.pos)), cells * CELL_SIZE));
                     s.target = SnapTarget::Length;
                     s.matched = vec![SnapTarget::Length];
@@ -658,6 +661,25 @@ mod tests {
         // 61 m rounds to 8 cells.
         assert!((s.point[1] - (1028.0 + 64.0)).abs() < 0.01, "{:?}", s.point);
         assert!(!s.guides.is_empty());
+    }
+
+    #[test]
+    fn a_cursor_resting_on_the_last_point_stays_there() {
+        // The cursor a few metres from where the last piece ended (the
+        // player clicked the end and pressed Enter): never a cell away,
+        // which would start a stub (often backwards, and refused).
+        let w = town();
+        let a = Anchor {
+            pos: [600.0, 700.0],
+            dir: Some([0.0, -1.0]),
+        };
+        for off in [[0.5, 0.3], [-2.0, 1.5], [1.0, 3.0], [0.0, -3.0]] {
+            let s = snap(&w, Some(a), add(a.pos, off), 6.0, &SnapOptions::default());
+            assert!(dist(s.point, a.pos) < 0.01, "{off:?}: {s:?}");
+        }
+        // Past half a cell it does snap a whole cell on.
+        let s = snap(&w, Some(a), [600.5, 694.0], 6.0, &SnapOptions::default());
+        assert!((dist(s.point, a.pos) - 8.0).abs() < 0.01, "{s:?}");
     }
 
     #[test]

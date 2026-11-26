@@ -41,11 +41,11 @@ impl Plugin for ControlsPlugin {
 /// The pause menu owns keyboard and mouse: tell gfx to leave the camera
 /// alone while it is open (after this frame's menu open / close / load).
 fn block_camera_input(ui: Res<UiState>, mut blocked: ResMut<CameraInputBlocked>) {
-    blocked.set_if_neq(CameraInputBlocked(ui.menu_open));
+    blocked.set_if_neq(CameraInputBlocked(ui.menu_open || ui.tray_focus));
 }
 
 #[allow(clippy::too_many_arguments)]
-fn control_keys(
+pub(super) fn control_keys(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     over_ui: Res<PointerOverUi>,
@@ -56,7 +56,8 @@ fn control_keys(
     mut ui: ResMut<UiState>,
     mut out: MessageWriter<UiAction>,
 ) {
-    if keys.just_pressed(KeyCode::Escape) && !tools.busy() {
+    // Esc in a focused drawer only leaves the focus (`tray::tray_keys`).
+    if keys.just_pressed(KeyCode::Escape) && !tools.busy() && !ui.tray_focus {
         if ui.menu_open && ui.settings_open {
             out.write(UiAction::CloseSettings);
         } else if ui.menu_open && ui.keys_open {
@@ -153,7 +154,9 @@ fn handle_actions(
                 modes.road = RoadMode::Straight;
             }
             UiAction::Tool(t) => {
-                let new = if *tool == t && t != ActiveTool::Inspect {
+                // A bar slot clicked again puts the tool away; the zone
+                // pictures in the tray are a choice, not a switch.
+                let new = if *tool == t && !matches!(t, ActiveTool::Inspect | ActiveTool::Zone(_)) {
                     ActiveTool::Inspect
                 } else {
                     t
@@ -260,6 +263,7 @@ fn handle_actions(
             | UiAction::PeopleBack
             | UiAction::ClosePeople
             | UiAction::SetJunction(_)
+            | UiAction::Fold(_)
             | UiAction::None => {}
             // Handled in save_load.rs.
             UiAction::Save | UiAction::Load => {}

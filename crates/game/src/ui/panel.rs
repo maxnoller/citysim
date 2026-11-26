@@ -19,7 +19,7 @@ use bevy::prelude::*;
 use bevy::ui::ComputedNode;
 use citysim_sim::{Command, JunctionSetting, junction};
 
-use super::people::{self, Item, Portrait, Sheet, SheetKind, Target};
+use super::people::{self, FoldKey, Item, Portrait, Sheet, SheetKind, Target};
 use super::plate::{PlateCache, PlateMaterial, PlateStyle};
 use super::readout::Tone;
 use super::theme::{self as t, UiFonts, icon};
@@ -54,6 +54,17 @@ impl PeopleView {
     }
 }
 
+/// Sections of the side panel the player folded or opened (others keep
+/// `FoldKey::open_by_default`).
+#[derive(Resource, Debug, Default, Clone, PartialEq)]
+pub struct Folds(pub std::collections::BTreeMap<FoldKey, bool>);
+
+impl Folds {
+    pub fn open(&self, k: FoldKey) -> bool {
+        self.0.get(&k).copied().unwrap_or(k.open_by_default())
+    }
+}
+
 /// Where the side panel's plate is on screen (logical px), while it shows.
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct PanelArea(pub Option<Rect>);
@@ -76,6 +87,7 @@ impl Plugin for PanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PeopleView>()
             .init_resource::<PanelArea>()
+            .init_resource::<Folds>()
             .add_systems(Startup, (spawn_panel, spawn_leader))
             .add_systems(
                 PostUpdate,
@@ -83,7 +95,15 @@ impl Plugin for PanelPlugin {
             )
             .add_systems(
                 Update,
-                (people_input, follow, draw_sheets, slide_panel, scroll_bodies)
+                (
+                    people_input,
+                    follow,
+                    draw_sheets,
+                    add_ellipsis,
+                    fit_ellipsis,
+                    slide_panel,
+                    scroll_bodies,
+                )
                     .chain()
                     .in_set(GameSet::Render),
             );
@@ -159,13 +179,16 @@ struct SheetShape {
     portrait: Option<Portrait>,
     trip: bool,
     mood: bool,
-    sections: Vec<(bool, Vec<ItemShape>)>,
+    /// Per section: titled, folded, items (none while folded).
+    sections: Vec<(bool, bool, Vec<ItemShape>)>,
     actions: Vec<Target>,
     /// Back, following, can follow, junction setting.
     controls: (bool, bool, bool, Option<JunctionSetting>),
+    /// Laid out for a small window (the city drawer).
+    compact: bool,
 }
 
-fn shape_of(s: &Sheet, controls: (bool, bool, bool, Option<JunctionSetting>)) -> SheetShape {
+fn shape_of(s: &Sheet, controls: (bool, bool, bool, Option<JunctionSetting>), folds: &Folds) -> SheetShape {
     SheetShape {
         kind: s.kind,
         portrait: s.portrait,
@@ -175,21 +198,28 @@ fn shape_of(s: &Sheet, controls: (bool, bool, bool, Option<JunctionSetting>)) ->
             .sections
             .iter()
             .map(|sec| {
+                let folded = sec.fold.is_some_and(|k| !folds.open(k));
                 (
                     !sec.title.is_empty(),
-                    sec.items
-                        .iter()
-                        .map(|it| match it {
-                            Item::Line(l) => ItemShape::Line(l.label.is_empty()),
-                            Item::Link(l) => ItemShape::Link(l.target),
-                            Item::Bar { .. } => ItemShape::Bar,
-                        })
-                        .collect(),
+                    folded,
+                    if folded {
+                        Vec::new()
+                    } else {
+                        sec.items
+                            .iter()
+                            .map(|it| match it {
+                                Item::Line(l) => ItemShape::Line(l.label.is_empty()),
+                                Item::Link(l) => ItemShape::Link(l.target),
+                                Item::Bar { .. } => ItemShape::Bar,
+                            })
+                            .collect()
+                    },
                 )
             })
             .collect(),
         actions: s.actions.iter().map(|l| l.target).collect(),
         controls,
+        compact: false,
     }
 }
 
@@ -220,25 +250,61 @@ fn tone_of(c: Color) -> Tone {
     }
 }
 
-/// `s` cut to `max` characters with an ellipsis (Bevy text cannot end a
-/// clipped line cleanly).
-pub fn ellipsize(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{}\u{2026}", cut.trim_end())
+/// A one-line text cut with "…" to the width its node gets (measured from
+/// the laid-out text, so it does not depend on the font or the letters).
+/// `full` is the whole text; the shown `Text` may be shorter.
+#[derive(Component, Debug, Default)]
+pub struct Ellipsis {
+    pub full: String,
+}
+
+/// Give one-line sheet texts an [`Ellipsis`].
+fn add_ellipsis(mut commands: Commands, added: Query<(Entity, &SheetText, &TextLayout), Added<SheetText>>) {
+    for (e, tag, layout) in &added {
+        let measured = matches!(
+            tag,
+            SheetText::Title | SheetText::Headline | SheetText::Section(_) | SheetText::Value(..)
+        );
+        if measured && layout.linebreak == bevy::text::LineBreak::NoWrap {
+            commands.entity(e).insert(Ellipsis::default());
+        }
+    }
+}
+
+/// Cut texts wider than their node: estimate from the measured widths,
+/// then a letter at a time until it fits (each step is measured on the
+/// next layout).
+pub fn fit_ellipsis(mut texts: Query<(&mut Text, &Ellipsis, &ComputedNode, &bevy::text::TextLayoutInfo)>) {
+    for (mut text, e, node, info) in &mut texts {
+        let avail = node.size.x - node.padding.min_inset.x - node.padding.max_inset.x;
+        if avail <= 1.0 || info.size.x <= avail + 0.5 || e.full.is_empty() {
+            continue;
+        }
+        let shown: Vec<char> = text.0.trim_end_matches('\u{2026}').chars().collect();
+        if shown.len() <= 1 {
+            continue;
+        }
+        let guess = (shown.len() as f32 * avail / info.size.x).floor() as usize;
+        let keep = guess.min(shown.len() - 1).max(1);
+        let cut: String = shown[..keep].iter().collect();
+        text.0 = format!("{}\u{2026}", cut.trim_end());
     }
 }
 
 /// The text and colour a tagged entity shows in a sheet.
 fn text_of(s: &Sheet, tag: SheetText) -> Option<(String, Option<Color>)> {
     Some(match tag {
-        SheetText::Title => (ellipsize(&s.title.to_uppercase(), 26), None),
-        SheetText::Headline => (ellipsize(&s.headline, 38), None),
+        SheetText::Title => (s.title.to_uppercase(), None),
+        SheetText::Headline => (s.headline.clone(), None),
         SheetText::Subtitle => (s.subtitle.clone(), None),
         SheetText::TripTitle => (s.trip.as_ref()?.title.to_uppercase(), None),
-        SheetText::TripLeft => (s.trip.as_ref()?.left.clone(), None),
+        SheetText::TripLeft => {
+            let trip = s.trip.as_ref()?;
+            (
+                trip.left.clone(),
+                Some(if trip.late { t::WARNING } else { t::ACCENT_TEXT }),
+            )
+        }
         SheetText::TripFrom => (s.trip.as_ref()?.from.clone(), None),
         SheetText::TripTo => (s.trip.as_ref()?.to.clone(), None),
         SheetText::MoodValue => (format!("{}", (s.mood? * 100.0).round() as i64), None),
@@ -251,9 +317,9 @@ fn text_of(s: &Sheet, tag: SheetText) -> Option<(String, Option<Color>)> {
         },
         SheetText::Value(i, j) => match s.sections.get(i)?.items.get(j)? {
             Item::Line(l) if l.label.is_empty() => (l.value.clone(), Some(tone_color(l.tone))),
-            Item::Line(l) => (ellipsize(&l.value, 44), Some(tone_color(l.tone))),
-            Item::Link(l) => (ellipsize(&l.value, 40), None),
-            Item::Bar { value, .. } => (ellipsize(&value.clone(), 40), None),
+            Item::Line(l) => (l.value.clone(), Some(tone_color(l.tone))),
+            Item::Link(l) => (l.value.clone(), None),
+            Item::Bar { value, .. } => (value.clone(), None),
         },
     })
 }
@@ -345,6 +411,7 @@ fn people_input(
     sim: Res<SimWorld>,
     mut cmds: MessageWriter<SimCommand>,
     mut toasts: MessageWriter<Toast>,
+    mut folds: ResMut<Folds>,
 ) {
     for a in actions.read() {
         match *a {
@@ -363,6 +430,10 @@ fn people_input(
                 view.stack.clear();
                 ui.following = false;
                 highlight.selected = None;
+            }
+            UiAction::Fold(k) => {
+                let open = folds.open(k);
+                folds.0.insert(k, !open);
             }
             UiAction::SetJunction(s) => {
                 if let Some(WorldTarget::Junction { node, .. }) = highlight.selected {
@@ -521,6 +592,7 @@ type TextQuery<'w, 's> = Query<
         &'static Of,
         &'static mut Text,
         &'static mut TextColor,
+        Option<&'static mut Ellipsis>,
     ),
 >;
 type BarQuery<'w, 's> = Query<'w, 's, (&'static SheetBar, &'static Of, &'static mut Node), Without<TripMark>>;
@@ -534,7 +606,7 @@ fn draw_sheets(
     fonts: Res<UiFonts>,
     sim: Res<SimWorld>,
     ui: Res<UiState>,
-    view: Res<PeopleView>,
+    (view, folds): (Res<PeopleView>, Res<Folds>),
     hl: Res<WorldHighlight>,
     mut roots: Query<&mut PanelRoot>,
     bodies: Query<(Entity, &Body)>,
@@ -546,7 +618,7 @@ fn draw_sheets(
     mut shown: Local<Shown>,
 ) {
     shown.age += time.delta_secs();
-    if shown.age < 0.25 && !view.is_changed() && !ui.is_changed() && !hl.is_changed() {
+    if shown.age < 0.25 && !view.is_changed() && !ui.is_changed() && !hl.is_changed() && !folds.is_changed() {
         return;
     }
     shown.age = 0.0;
@@ -566,7 +638,10 @@ fn draw_sheets(
     let can_follow = matches!(view.current(), Some(Target::Person(_) | Target::Vehicle(_)));
     let controls = (view.stack.len() > 1, ui.following, can_follow, setting);
     for (root, sheet) in [(Root::Panel, &panel), (Root::City, &city)] {
-        let shape = sheet.as_ref().map(|s| shape_of(s, controls));
+        let shape = sheet.as_ref().map(|s| SheetShape {
+            compact: root == Root::City && ui.compact,
+            ..shape_of(s, controls, &folds)
+        });
         let old = match root {
             Root::Panel => &mut shown.panel,
             Root::City => &mut shown.city,
@@ -584,8 +659,8 @@ fn draw_sheets(
                 commands.entity(body).despawn_children();
                 if let Some(s) = sheet {
                     commands.entity(body).with_children(|p| match root {
-                        Root::Panel => spawn_panel_sheet(p, fonts, s, controls),
-                        Root::City => spawn_city_sheet(p, fonts, s),
+                        Root::Panel => spawn_panel_sheet(p, fonts, s, controls, &folds),
+                        Root::City => spawn_city_sheet(p, fonts, s, ui.compact),
                     });
                 }
             }
@@ -595,13 +670,25 @@ fn draw_sheets(
             continue;
         }
         let Some(s) = sheet else { continue };
-        for (tag, of, mut text, mut color) in &mut texts {
+        for (tag, of, mut text, mut color, ellipsis) in &mut texts {
             if of.0 != root {
                 continue;
             }
             if let Some((v, c)) = text_of(s, *tag) {
-                if text.0 != v {
-                    text.0 = v;
+                match ellipsis {
+                    // Measured texts: start again from the whole text when
+                    // it changes (`fit_ellipsis` cuts it to fit).
+                    Some(mut e) => {
+                        if e.full != v {
+                            text.0 = v.clone();
+                            e.full = v;
+                        }
+                    }
+                    None => {
+                        if text.0 != v {
+                            text.0 = v;
+                        }
+                    }
                 }
                 if let Some(c) = c {
                     color.set_if_neq(TextColor(c));
@@ -772,6 +859,7 @@ fn spawn_panel_sheet(
     fonts: &UiFonts,
     s: &Sheet,
     controls: (bool, bool, bool, Option<JunctionSetting>),
+    folds: &Folds,
 ) {
     let of = Of(Root::Panel);
     header(p, fonts, controls.0);
@@ -875,7 +963,7 @@ fn spawn_panel_sheet(
         if let Some(setting) = controls.3 {
             junction_switch(b, fonts, setting);
         }
-        sections(b, fonts, s, of, false);
+        sections(b, fonts, s, of, false, folds);
     });
     // Action bar.
     let follow = controls.2;
@@ -1153,16 +1241,97 @@ fn junction_switch(p: &mut ChildSpawnerCommands, fonts: &UiFonts, current: Junct
 }
 
 /// Sections: caps titles, label / value rows, links, meters.
-fn sections(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet, of: Of, city: bool) {
+fn sections(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet, of: Of, city: bool, folds: &Folds) {
     for (si, sec) in s.sections.iter().enumerate() {
+        section(p, fonts, si, sec, of, city, folds);
+    }
+}
+
+/// One section: its title (a fold button when foldable) and its items.
+fn section(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    si: usize,
+    sec: &people::Section,
+    of: Of,
+    city: bool,
+    folds: &Folds,
+) {
+    {
         p.spawn(layout(Node {
             flex_direction: FlexDirection::Column,
-            width: if city { px(CITY_COL) } else { percent(100) },
-            margin: UiRect::top(px(if si == 0 && sec.title.is_empty() { 4.0 } else { 10.0 })),
+            width: percent(100),
+            margin: UiRect::top(px(if si == 0 && sec.title.is_empty() {
+                4.0
+            } else if city {
+                4.0
+            } else {
+                10.0
+            })),
             ..default()
         }))
         .with_children(|c| {
-            if !sec.title.is_empty() {
+            let folded = sec.fold.is_some_and(|k| !folds.open(k));
+            if let Some(k) = sec.fold {
+                // A foldable title: the whole row is a button with a chevron.
+                let id = spawn_button(
+                    c,
+                    UiButton::new(UiAction::Fold(k), ButtonKind::Row),
+                    Node {
+                        align_items: AlignItems::Center,
+                        column_gap: px(8),
+                        min_height: px(26),
+                        margin: UiRect::bottom(px(if folded { 0.0 } else { 3.0 })),
+                        padding: UiRect::right(px(2)),
+                        border: UiRect::bottom(px(if folded { 1.0 } else { 0.0 })),
+                        ..default()
+                    },
+                    Some(Tooltip::new(
+                        if folded { "Show" } else { "Hide" },
+                        "Fold this part of the panel away; it stays folded for everyone you look at.",
+                    )),
+                    |h, id| {
+                        h.spawn((
+                            layout(Node {
+                                width: px(3),
+                                height: px(11),
+                                flex_shrink: 0.0,
+                                ..default()
+                            }),
+                            BackgroundColor(t::ACCENT),
+                        ));
+                        h.spawn((
+                            caps(fonts, "", t::FONT_CAP, t::TEXT),
+                            Node {
+                                flex_grow: 1.0,
+                                flex_shrink: 1.0,
+                                min_width: px(0),
+                                overflow: Overflow::clip(),
+                                ..default()
+                            },
+                            SheetText::Section(si),
+                            of,
+                        ));
+                        h.spawn((
+                            super::widgets::icon(
+                                fonts,
+                                if folded {
+                                    icon::CHEVRON_RIGHT
+                                } else {
+                                    icon::CHEVRON_DOWN
+                                },
+                                14.0,
+                                t::TEXT_MUTED,
+                            ),
+                            ButtonFg {
+                                owner: id,
+                                base: t::TEXT_MUTED,
+                            },
+                        ));
+                    },
+                );
+                c.commands().entity(id).insert(Name::new("Fold section"));
+            } else if !sec.title.is_empty() {
                 c.spawn(layout(Node {
                     align_items: AlignItems::Center,
                     column_gap: px(8),
@@ -1181,6 +1350,8 @@ fn sections(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet, of: Of, ci
                     h.spawn((
                         caps(fonts, "", t::FONT_CAP, t::TEXT),
                         Node {
+                            flex_shrink: 1.0,
+                            min_width: px(0),
                             overflow: Overflow::clip(),
                             ..default()
                         },
@@ -1191,6 +1362,9 @@ fn sections(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet, of: Of, ci
             }
             let n = sec.items.len();
             for (ii, it) in sec.items.iter().enumerate() {
+                if folded {
+                    break;
+                }
                 let last = ii + 1 == n;
                 let tags = (SheetText::Label(si, ii), SheetText::Value(si, ii), of);
                 match it {
@@ -1359,7 +1533,11 @@ fn link_row(
 
 /// The city's people in the tray: title block, then the sections in
 /// columns.
-fn spawn_city_sheet(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet) {
+/// Which of the city sheet's sections share a column (by index: ages;
+/// households and money; work; right now; trips and the unhappy).
+const CITY_COLUMNS: [&[usize]; 5] = [&[0], &[1, 6], &[2], &[3], &[4, 5]];
+
+fn spawn_city_sheet(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet, compact: bool) {
     let of = Of(Root::City);
     p.spawn(layout(Node {
         flex_direction: FlexDirection::Column,
@@ -1388,21 +1566,40 @@ fn spawn_city_sheet(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet) {
             of,
         ));
     });
+    let (col, gap) = if compact {
+        (CITY_COL - 40.0, 14.0)
+    } else {
+        (CITY_COL, 22.0)
+    };
+    let folds = Folds::default();
     p.spawn((
         Node {
-            flex_wrap: FlexWrap::Wrap,
-            column_gap: px(22),
-            row_gap: px(0),
-            width: px(CITY_COL * 5.0 + 22.0 * 4.0),
-            max_height: Val::Vh(40.0),
+            column_gap: px(gap),
+            max_height: Val::Vh(if compact { 52.0 } else { 40.0 }),
             overflow: Overflow::scroll_y(),
-            align_content: AlignContent::FlexStart,
+            align_items: AlignItems::FlexStart,
             ..default()
         },
         ScrollPosition::default(),
         Hovered::default(),
     ))
-    .with_children(|g| sections(g, fonts, s, of, true));
+    .with_children(|g| {
+        for group in CITY_COLUMNS {
+            g.spawn(layout(Node {
+                flex_direction: FlexDirection::Column,
+                width: px(col),
+                flex_shrink: 0.0,
+                ..default()
+            }))
+            .with_children(|c| {
+                for &si in group {
+                    if let Some(sec) = s.sections.get(si) {
+                        section(c, fonts, si, sec, of, true, &folds);
+                    }
+                }
+            });
+        }
+    });
 }
 
 fn slide_panel(

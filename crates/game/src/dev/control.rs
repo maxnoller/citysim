@@ -139,6 +139,10 @@ fn turbo_steps(mut ctl: ResMut<Control>, mut sim: ResMut<SimWorld>, clock: Res<S
             Some((_, _, n)) => n,
             None => ctl.turbo,
         };
+        // Turbo is per real-time tick; fast speeds split a tick into
+        // several fixed updates.
+        let k = clock.fixed_per_tick();
+        let n = n.div_ceil(k);
         for _ in 0..n {
             if let Some((seq, goal, _)) = ctl.until
                 && reached(&sim.world, goal)

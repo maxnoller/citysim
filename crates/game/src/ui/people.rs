@@ -344,11 +344,32 @@ pub enum Item {
     },
 }
 
+/// A section the player can fold away (its title stays as a one-line
+/// summary). The panel remembers each one's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FoldKey {
+    Life,
+    Household,
+    Happiness,
+    Journal,
+    Workers,
+    Aboard,
+}
+
+impl FoldKey {
+    /// Open until the player folds it.
+    pub fn open_by_default(self) -> bool {
+        matches!(self, FoldKey::Life | FoldKey::Workers | FoldKey::Aboard)
+    }
+}
+
 /// A titled group of items.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Section {
     pub title: String,
     pub items: Vec<Item>,
+    /// Foldable (and remembered under this key).
+    pub fold: Option<FoldKey>,
 }
 
 impl Section {
@@ -356,6 +377,13 @@ impl Section {
         Section {
             title: title.into(),
             items: Vec::new(),
+            fold: None,
+        }
+    }
+    pub fn folding(title: impl Into<String>, key: FoldKey) -> Section {
+        Section {
+            fold: Some(key),
+            ..Section::new(title)
         }
     }
     pub fn line(&mut self, label: impl Into<String>, value: impl Into<String>, tone: Tone) {
@@ -390,8 +418,11 @@ pub enum SheetKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TripBar {
     pub title: String,
-    /// Expected time still to go ("0:40", hours:minutes of game time).
+    /// Expected time still to go ("0:40", hours:minutes of game time), or
+    /// how late they are ("12 min late").
     pub left: String,
+    /// Past the expected arrival and still on the way.
+    pub late: bool,
     pub progress: f32,
     pub from: String,
     pub to: String,
@@ -491,6 +522,7 @@ fn doing(world: &World, id: CitizenId) -> (String, String) {
                 (Activity::Travelling, Some(TripPurpose::ToHome), _) => format!("Heads home{when}"),
                 (Activity::Travelling, Some(pp), _) => format!("Sets off {}{when}", purpose_word(pp)),
                 (Activity::Sleeping, _, _) => format!("Bed{when}"),
+                (Activity::Home, _, _) if p.activity == Activity::Sleeping => format!("Gets up{when}"),
                 (a, _, _) => format!("Then {}{when}{place}", activity_word(a).to_lowercase()),
             }
         }
@@ -540,15 +572,51 @@ fn trip_bar(world: &World, t: &inspect::TripView) -> TripBar {
         TravelMode::NoCar => "Getting a lift",
         TravelMode::Walking => "Walking",
     };
-    let total = t.expected_tick.saturating_sub(t.departed_tick).max(1);
     let done = now.saturating_sub(t.departed_tick);
+    let late = now > t.expected_tick;
+    let (left, progress) = if late {
+        // Past the expected arrival: the bar shows the road still ahead
+        // (at the car's way of going), never a full bar.
+        let ahead = t
+            .vehicle
+            .and_then(|v| world.vehicles.get(v))
+            .map_or(done / 10, |car| road_ahead_ticks(world, car));
+        (
+            format!("{} late", span(now - t.expected_tick)),
+            (done as f32 / (done + ahead).max(1) as f32).clamp(0.0, 0.97),
+        )
+    } else {
+        let total = t.expected_tick.saturating_sub(t.departed_tick).max(1);
+        (
+            hours_minutes(t.expected_tick - now),
+            (done as f32 / total as f32).clamp(0.0, 1.0),
+        )
+    };
     TripBar {
         title: format!("{how} {}", purpose_word(t.purpose)),
-        left: hours_minutes(t.expected_tick.saturating_sub(now)),
-        progress: (done as f32 / total as f32).clamp(0.0, 1.0),
+        left,
+        late,
+        progress,
         from: t.from.map_or("The highway".into(), |b| building_name(world, b)),
         to: building_name(world, t.to),
     }
+}
+
+/// Ticks a car still needs for the rest of its route, at the speed cars
+/// manage in town right now (never below a crawl).
+fn road_ahead_ticks(world: &World, car: &citysim_sim::Vehicle) -> u64 {
+    let len = |s| world.roads.segments.get(s).map_or(0.0, |seg| seg.length);
+    let here = car.segment.map_or(0.0, |s| (len(s) - car.progress).max(0.0));
+    // The last segment is driven part of the way: count half of it.
+    let n = car.route.len();
+    let rest: f32 = car
+        .route
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| if i + 1 == n { len(s) * 0.5 } else { len(s) })
+        .sum();
+    let speed = world.stats.avg_speed.max(3.0);
+    ((here + rest) / speed * citysim_sim::TICKS_PER_SECOND as f32) as u64
 }
 
 /// Everything about one person.
@@ -619,7 +687,7 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
     }
     s.sections.push(sec);
     // Home and work.
-    let mut sec = Section::new("Life");
+    let mut sec = Section::folding("Life", FoldKey::Life);
     sec.link("Home", building_name(world, v.home), Target::Place(v.home));
     match c.job {
         Some(j) => {
@@ -667,7 +735,10 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
     }
     s.sections.push(sec);
     // Household.
-    let mut sec = Section::new(format!("{} household · {}", kind_word(h.kind), family_name(h.seed)));
+    let mut sec = Section::folding(
+        format!("{} household · {}", kind_word(h.kind), family_name(h.seed)),
+        FoldKey::Household,
+    );
     for &m in v.members {
         if m == id {
             continue;
@@ -702,11 +773,17 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
     }
     s.sections.push(sec);
     // Happiness with its reasons.
-    let mut sec = Section::new(format!(
-        "{} · {}",
-        mood_word(c.happiness.total),
-        format::percent((c.happiness.total * 100.0).round() / 100.0)
-    ));
+    let mut sec = Section::folding(
+        match &s.mood_reason {
+            Some(r) => format!("{} · {}", mood_word(c.happiness.total), r.to_lowercase()),
+            None => format!(
+                "{} · {}",
+                mood_word(c.happiness.total),
+                format::percent((c.happiness.total * 100.0).round() / 100.0)
+            ),
+        },
+        FoldKey::Happiness,
+    );
     if let Some(reasons) = inspect::happiness_reasons(world, id) {
         for r in reasons {
             sec.bar(part_title(r.part), r.text, r.value);
@@ -714,7 +791,13 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
     }
     s.sections.push(sec);
     // Journal, newest first.
-    let mut sec = Section::new("Journal");
+    let mut sec = Section::folding(
+        match c.journal.last() {
+            Some(e) => format!("Journal · {}", journal_words(world, e.event).to_lowercase()),
+            None => "Journal".into(),
+        },
+        FoldKey::Journal,
+    );
     for e in c.journal.iter().rev().take(6) {
         sec.line(format!("Day {}", e.day), journal_words(world, e.event), Tone::Muted);
     }
@@ -833,7 +916,7 @@ pub fn place_sheet(world: &World, id: BuildingId) -> Option<Sheet> {
             s.sections.push(sec);
         }
     } else {
-        let mut sec = Section::new(format!("Who works here · {}", v.workers.len()));
+        let mut sec = Section::folding(format!("Who works here · {}", v.workers.len()), FoldKey::Workers);
         let mut rows: Vec<(bool, CitizenId)> = v
             .workers
             .iter()
@@ -927,7 +1010,7 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
         sec.line("Cargo", format!("{:.0} units of goods", v.cargo), Tone::Normal);
     }
     s.sections.push(sec);
-    let mut sec = Section::new(format!("In the car · {}", v.occupants));
+    let mut sec = Section::folding(format!("In the car · {}", v.occupants), FoldKey::Aboard);
     for c in inspect::occupants(world, id) {
         let role = if Some(c) == v.driver { "driving" } else { "passenger" };
         let age = world.citizens.get(c).map_or(0, |c| c.age_years());
@@ -967,16 +1050,23 @@ pub fn city_sheet(world: &World) -> Sheet {
         ..Default::default()
     };
     let total = st.population.max(1) as f32;
-    // Age pyramid, oldest at the top.
+    // Ages in twenty-year bands, oldest at the top (the sim counts
+    // decades; five rows keep the drawer short).
     let mut sec = Section::new("Ages");
-    let most = st.age_pyramid.iter().copied().max().unwrap_or(1).max(1) as f32;
-    for band in (0..AGE_BANDS).rev() {
-        let n = st.age_pyramid[band];
-        let label = if band + 1 == AGE_BANDS {
-            format!("{}+", band * 10)
-        } else {
-            format!("{}–{}", band * 10, band * 10 + 9)
-        };
+    let bands: Vec<(String, u32)> = (0..AGE_BANDS)
+        .step_by(2)
+        .map(|b| {
+            let n: u32 = st.age_pyramid[b..(b + 2).min(AGE_BANDS)].iter().sum();
+            let label = if b + 2 >= AGE_BANDS {
+                format!("{}+", b * 10)
+            } else {
+                format!("{}–{}", b * 10, b * 10 + 19)
+            };
+            (label, n)
+        })
+        .collect();
+    let most = bands.iter().map(|b| b.1).max().unwrap_or(1).max(1) as f32;
+    for (label, n) in bands.into_iter().rev() {
         sec.bar(label, format::group(n as u64), n as f32 / most);
     }
     s.sections.push(sec);

@@ -2,14 +2,17 @@
 //! net over the last two weeks (`economy.history`), income and costs by
 //! line for yesterday (`economy.last_day`) next to today so far
 //! (`economy::budget_now`), the tax rate (steps and a slider), and the
-//! fiscal state with what would fix it.
+//! fiscal state with what would fix it; and where the running costs go
+//! (`economy::running_costs`: each kind of road, traffic lights, services
+//! by what drives them) with the share of shift hours worked, which
+//! business tax follows (`economy.attendance`).
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
-use citysim_sim::economy::budget_now;
+use citysim_sim::economy::{RunningCosts, budget_now, running_costs};
 use citysim_sim::{Budget, Command, DaySummary, Zone, balance};
 
 use super::UiState;
@@ -109,6 +112,33 @@ enum BudgetText {
     FiscalTitle,
     FiscalBody,
     FiscalFix,
+    /// Label / amount of running-cost line `.0` (`COST_LINES`).
+    CostLabel(usize),
+    Cost(usize),
+    Attendance,
+}
+
+/// The running-cost lines: name and amount (a cost, positive).
+const COST_LINES: [&str; 7] = [
+    "Streets",
+    "Avenues",
+    "Highway",
+    "Traffic lights",
+    "Services: residents",
+    "Services: city size",
+    "Services: dense homes",
+];
+
+fn cost_line(c: &RunningCosts, i: usize) -> (String, i64) {
+    match i {
+        0 => ("Streets".into(), c.streets),
+        1 => ("Avenues".into(), c.avenues),
+        2 => ("Highway".into(), c.highway),
+        3 => (format!("Traffic lights · {}", c.signal_count), c.signals),
+        4 => ("Services: residents".into(), c.services_base),
+        5 => ("Services: city size".into(), c.services_city_size),
+        _ => ("Services: dense homes".into(), c.services_density),
+    }
 }
 
 #[derive(Component)]
@@ -151,6 +181,7 @@ struct SliderDrag {
 #[derive(Resource, Default)]
 struct BudgetCache {
     today: Budget,
+    costs: RunningCosts,
     age: f32,
     /// Inputs the texts were last written from.
     key: Option<BudgetKey>,
@@ -165,8 +196,11 @@ type BudgetKey = (
     u32,
     u32,
     (citysim_sim::FiscalState, citysim_sim::FiscalReason, u32),
+    u32,
 );
 
+/// Width of the running-costs column.
+const COSTS_W: f32 = 196.0;
 /// Width of each amount column of the table.
 const AMOUNT_W: f32 = 82.0;
 /// Days in the chart.
@@ -270,7 +304,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                 ..default()
             }))
             .with_children(|h| {
-                for (i, txt) in ["", "Today"].into_iter().enumerate() {
+                for (i, txt) in ["", "Today, est."].into_iter().enumerate() {
                     let mut e = h.spawn((
                         caps(fonts, txt, 10.5, t::TEXT_MUTED),
                         Node {
@@ -333,6 +367,52 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                     }
                 });
             }
+        });
+        rule(pg);
+        // Where the running costs go (today, if the day ended now).
+        column(pg, COSTS_W, |c| {
+            c.spawn((
+                caps(fonts, "Running costs · today", 10.5, t::TEXT_MUTED),
+                Node {
+                    margin: UiRect::bottom(px(4)),
+                    ..default()
+                },
+                Tooltip::new(
+                    "Running costs",
+                    "What the roads and city services cost per day at the city's size now.",
+                ),
+                Hovered::default(),
+            ));
+            for i in 0..COST_LINES.len() {
+                c.spawn(layout(Node {
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    height: px(17),
+                    border: UiRect::top(px(if i == 4 { 1.0 } else { 0.0 })),
+                    ..default()
+                }))
+                .insert(BorderColor::all(t::RULE))
+                .with_children(|r| {
+                    r.spawn((
+                        label(fonts, COST_LINES[i], t::FONT_SMALL, t::W_MEDIUM, t::SLOT_INK),
+                        BudgetText::CostLabel(i),
+                    ));
+                    r.spawn((
+                        figure(fonts, "", 13.0, t::TEXT),
+                        BudgetText::Cost(i),
+                        super::widgets::Justified(Justify::Right),
+                    ));
+                });
+            }
+            c.spawn((
+                paragraph(fonts, "", t::FONT_SMALL - 0.5, t::W_MEDIUM, t::TEXT_MUTED),
+                BudgetText::Attendance,
+                Node {
+                    width: px(COSTS_W),
+                    margin: UiRect::top(px(6)),
+                    ..default()
+                },
+            ));
         });
         rule(pg);
         // Taxes and the fiscal state.
@@ -573,6 +653,7 @@ fn update_budget(
     if cache.age >= PROJECTION_EVERY || cache.key.is_some_and(|k| k.0 != sim.generation) {
         cache.age = 0.0;
         cache.today = budget_now(w);
+        cache.costs = running_costs(w);
     }
     let key = (
         sim.generation,
@@ -583,6 +664,7 @@ fn update_budget(
         w.stats.road_cells,
         w.stats.population,
         (e.fiscal.state, e.fiscal.reason, e.fiscal.left_last_night),
+        e.attendance.share().to_bits(),
     );
     if cache.key == Some(key) {
         return;
@@ -640,6 +722,33 @@ fn update_budget(
                 }
             }
             BudgetText::TaxValue => (format::percent(e.tax_rate), t::ACCENT_TEXT),
+            BudgetText::CostLabel(i) => (cost_line(&cache.costs, i).0, t::SLOT_INK),
+            BudgetText::Cost(i) => {
+                let v = cost_line(&cache.costs, i).1;
+                (
+                    if v == 0 {
+                        "\u{2014}".to_string()
+                    } else {
+                        format::signed_money(-v)
+                    },
+                    if v == 0 { t::TEXT_FAINT } else { t::TEXT },
+                )
+            }
+            BudgetText::Attendance => {
+                let share = e.attendance.share();
+                (
+                    format!(
+                        "Shops and works pay tax on the hours their staff are at work: {} of shift hours lately{}.",
+                        format::percent((share * 100.0).round() / 100.0),
+                        if share < 0.9 {
+                            " (late commutes cost the rest)"
+                        } else {
+                            ""
+                        }
+                    ),
+                    if share < 0.8 { t::WARNING } else { t::TEXT_MUTED },
+                )
+            }
         };
         set_text(&mut text, &mut color, s, c);
     }

@@ -647,6 +647,9 @@ def launch(release, quality, demo, extra_env):
     profile = "release" if release else "debug"
     exe = os.path.join(ROOT, "target", profile, "citysim")
     env = dict(os.environ, DISPLAY=DISPLAY, CITYSIM_CONTROL=CTL, CITYSIM_GFX_QUALITY=quality)
+    # Never let winit pick a Wayland session: the game must open on DISPLAY.
+    for k in ("WAYLAND_DISPLAY", "XDG_SESSION_TYPE"):
+        env.pop(k, None)
     if demo:
         env["CITYSIM_DEMO"] = demo
     for kv in extra_env:

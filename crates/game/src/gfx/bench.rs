@@ -5,7 +5,7 @@
 //! (`CITYSIM_BENCH_SIZE`, default 1920x1080) along a fixed camera path over
 //! the city, frame by frame (`CITYSIM_BENCH_FRAMES`, default 1500, after
 //! `CITYSIM_BENCH_WARMUP` frames, default 240), with the simulation running
-//! at 1x. Use it with a demo city (`CITYSIM_DEMO=town|city|hierarchy`) and
+//! at 1x (`CITYSIM_BENCH_SPEED=i`: speed index, 3 = the top speed). Use it with a demo city (`CITYSIM_DEMO=town|city|hierarchy`) and
 //! `CITYSIM_GFX_QUALITY=low|medium|high`.
 //!
 //! Without a swapchain nothing would hold the CPU back from queueing frames
@@ -92,6 +92,7 @@ impl Plugin for BenchPlugin {
                     _ => GraphicsQuality::High,
                 },
                 paused: env::<u32>("CITYSIM_BENCH_PAUSED") == Some(1),
+                speed: env::<usize>("CITYSIM_BENCH_SPEED").unwrap_or(0),
                 ..default()
             })
             .insert_resource(counts.clone())
@@ -207,6 +208,8 @@ struct Bench {
     /// `CITYSIM_BENCH_PAUSED=1`: the simulation stands still (to separate
     /// its cost from drawing).
     paused: bool,
+    /// `CITYSIM_BENCH_SPEED=i`: index into `SPEEDS` (default 0, 1x).
+    speed: usize,
     phase: Phase,
     frame: u32,
     started: Option<Instant>,
@@ -327,7 +330,7 @@ fn drive(
     bench.last = Some(now);
     quality.set_if_neq(bench.quality);
     clock.paused = bench.paused;
-    clock.speed = 0;
+    clock.speed = bench.speed;
     // Point the world camera at an off-screen image of the benchmark size.
     for (cam, target) in &cams {
         if !matches!(target, Some(RenderTarget::Image(_))) {
@@ -478,7 +481,7 @@ fn report(
     let secs = bench.times.iter().sum::<f64>() / 1000.0;
     let sim_rate = (bench.sim_ticks.1 - bench.sim_ticks.0) as f64 / secs.max(1e-6);
     format!(
-        "{{\n  \"quality\": \"{:?}\",\n  \"sim_paused\": {},\n  \"size\": [{}, {}],\n  \"frames\": {},\n  \
+        "{{\n  \"quality\": \"{:?}\",\n  \"sim_paused\": {},\n  \"sim_speed\": {},\n  \"size\": [{}, {}],\n  \"frames\": {},\n  \
          \"population\": {},\n  \"buildings\": {},\n  \"vehicles\": {},\n  \"sim_ticks_per_s\": {:.1},\n  \"sim_step_ms\": {{ \"avg\": {:.3}, \"p99\": {:.3}, \"max\": {:.3}, \"per_frame\": {:.3} }},\n  \
          \"frame_ms\": {{ \"avg\": {:.3}, \"median\": {:.3}, \"p99\": {:.3}, \"worst_1pct\": {:.3}, \"max\": {:.3} }},\n  \
          \"fps_avg\": {:.1},\n  \
@@ -489,6 +492,7 @@ fn report(
          \"shadow_views\": {:.0} }}\n}}\n",
         bench.quality,
         bench.paused,
+        crate::shared::SPEEDS[bench.speed.min(crate::shared::SPEEDS.len() - 1)],
         bench.size.0,
         bench.size.1,
         bench.times.len(),

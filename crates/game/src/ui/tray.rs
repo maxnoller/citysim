@@ -8,9 +8,14 @@
 //! the budget (`budget.rs`) and the city's people (`panel.rs`) fill their
 //! own pages. One page shows at a time; the drawer rises from behind the
 //! bar when it opens and sinks when it closes.
+//!
+//! Keyboard: F6 moves the focus into the open drawer (and out again); the
+//! arrow keys move it to the nearest control in that direction, Enter
+//! presses it, Esc leaves. The camera ignores the arrows meanwhile.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
+use bevy::ui::ComputedNode;
 use citysim_sim::Zone;
 
 use super::context::{Band, JAM_CRAWL_MPS, junction_card, pct, road_price};
@@ -20,9 +25,9 @@ use super::readout::{self, Figure, Tone};
 use super::theme::{self as t, UiFonts, icon};
 use super::tools::{SnapRule, ToolOptions, ToolState};
 use super::widgets::{
-    ActiveFill, ButtonFg, ButtonKind, Disabled, Tooltip, UiAction, UiButton, approach, caps, figure, label, layout,
-    paragraph, plate_node, plate_shadow, spawn_brackets, spawn_button, spawn_segments, spawn_stepper, spawn_toggle,
-    title_tick,
+    ActiveFill, ButtonFg, ButtonKind, Disabled, Focused, Tooltip, UiAction, UiButton, approach, caps, figure, label,
+    layout, paragraph, plate_node, plate_shadow, spawn_brackets, spawn_button, spawn_segments, spawn_stepper,
+    spawn_toggle, title_tick,
 };
 use super::{InfoTray, UiState};
 use crate::shared::{
@@ -34,20 +39,124 @@ pub struct TrayPlugin;
 
 impl Plugin for TrayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_tray).add_systems(
-            Update,
-            (
-                show_page,
-                slide_tray,
-                tray_shape,
-                update_figures,
-                update_conditions,
-                update_junction,
-                update_maps,
-                update_stats,
+        app.add_systems(Startup, spawn_tray)
+            .add_systems(
+                Update,
+                (
+                    show_page,
+                    slide_tray,
+                    tray_shape,
+                    update_figures,
+                    update_conditions,
+                    update_junction,
+                    update_maps,
+                    update_stats,
+                )
+                    .in_set(GameSet::Render),
             )
-                .in_set(GameSet::Render),
-        );
+            // After Esc was seen by the other keys (it only leaves the focus).
+            .add_systems(
+                Update,
+                tray_keys.in_set(GameSet::Input).after(super::controls::control_keys),
+            );
+    }
+}
+
+/// The control of the drawer that has the keyboard focus.
+#[derive(Default)]
+struct TrayFocus(Option<Entity>);
+
+/// Keyboard focus inside the open drawer (see the module notes).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn tray_keys(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut ui: ResMut<UiState>,
+    root: Query<&TrayRoot>,
+    plate: Query<(&ComputedNode, &bevy::ui::UiGlobalTransform), With<TrayPlate>>,
+    buttons: Query<(
+        Entity,
+        &UiButton,
+        &ComputedNode,
+        &bevy::ui::UiGlobalTransform,
+        &InheritedVisibility,
+        Has<Disabled>,
+        Has<Focused>,
+    )>,
+    mut focus: Local<TrayFocus>,
+    mut out: MessageWriter<UiAction>,
+) {
+    let up = root.single().is_ok_and(|r| r.t > 0.9 && r.shown.is_some());
+    if keys.just_pressed(KeyCode::F6) && !ui.menu_open {
+        let want = !ui.tray_focus && up;
+        ui.tray_focus = want;
+    }
+    if ui.tray_focus && (!up || ui.menu_open || keys.just_pressed(KeyCode::Escape)) {
+        ui.tray_focus = false;
+    }
+    // The drawer's controls: visible buttons inside the plate.
+    let area = plate
+        .single()
+        .ok()
+        .map(|(n, tf)| Rect::from_center_size(tf.translation, n.size));
+    let controls: Vec<(Entity, Vec2, UiAction)> = match area {
+        Some(area) if ui.tray_focus => buttons
+            .iter()
+            .filter(|b| b.4.get() && !b.5 && b.1.kind != ButtonKind::Slot)
+            .filter(|b| area.contains(b.3.translation) && b.2.size.x > 1.0)
+            .map(|b| (b.0, b.3.translation, b.1.action))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if controls.is_empty() {
+        focus.0 = None;
+    } else {
+        let cur = focus.0.and_then(|e| controls.iter().find(|c| c.0 == e));
+        let dir = [
+            (KeyCode::ArrowRight, Vec2::X),
+            (KeyCode::ArrowLeft, -Vec2::X),
+            (KeyCode::ArrowDown, Vec2::Y),
+            (KeyCode::ArrowUp, -Vec2::Y),
+        ]
+        .into_iter()
+        .find(|(k, _)| keys.just_pressed(*k))
+        .map(|(_, d)| d);
+        match (cur, dir) {
+            // First focus: the top-left control.
+            (None, _) => {
+                focus.0 = controls
+                    .iter()
+                    .min_by(|a, b| (a.1.x + a.1.y * 4.0).total_cmp(&(b.1.x + b.1.y * 4.0)))
+                    .map(|c| c.0);
+            }
+            (Some(&(_, at, _)), Some(d)) => {
+                // Nearest control ahead, preferring ones straight ahead.
+                let next = controls
+                    .iter()
+                    .filter_map(|c| {
+                        let off = c.1 - at;
+                        let along = off.dot(d);
+                        (along > 2.0).then(|| (along + (off - d * along).length() * 3.0, c.0))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                if let Some((_, e)) = next {
+                    focus.0 = Some(e);
+                }
+            }
+            (Some(&(_, _, action)), None) => {
+                if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
+                    out.write(action);
+                }
+            }
+        }
+    }
+    for (e, .., focused) in &buttons {
+        let want = ui.tray_focus && focus.0 == Some(e);
+        if want && !focused {
+            commands.entity(e).insert(Focused);
+        } else if !want && focused && !ui.menu_open {
+            commands.entity(e).remove::<Focused>();
+        }
     }
 }
 
@@ -138,7 +247,7 @@ enum TrayLabel {
 struct JunctionRow(usize);
 
 const JUNCTION_ROWS: usize = 8;
-const STATS: usize = 10;
+const STATS: usize = 12;
 
 fn spawn_tray(
     mut commands: Commands,
@@ -360,7 +469,7 @@ fn figures(p: &mut ChildSpawnerCommands, fonts: &UiFonts, which: Page) {
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::End,
                 row_gap: px(5),
-                min_width: px(if i == 2 { 96.0 } else { 58.0 }),
+                min_width: px(if i == 2 { 110.0 } else { 84.0 }),
                 ..default()
             }))
             .with_children(|c| {
@@ -1256,12 +1365,12 @@ fn maps_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
             ..default()
         }))
         .with_children(|r| {
-            for i in 0..2 {
+            for i in 0..MAP_FIGS {
                 r.spawn(layout(Node {
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::End,
                     row_gap: px(5),
-                    min_width: px(70),
+                    min_width: px(76),
                     ..default()
                 }))
                 .with_children(|c| {
@@ -1384,7 +1493,7 @@ fn stats_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
             flex_wrap: FlexWrap::Wrap,
             column_gap: px(26),
             row_gap: px(12),
-            width: px(760),
+            width: px(6.0 * 126.0 + 5.0 * 26.0),
             ..default()
         }))
         .with_children(|g| {
@@ -1668,44 +1777,57 @@ fn update_junction(
     }
 }
 
-type MapsKey = (OverlayMode, u32, u32, [u32; 3]);
+type MapsKey = (OverlayMode, u32, u32, [u32; 3], u32, u32);
+
+/// Figures beside the maps legend.
+const MAP_FIGS: usize = 4;
 
 fn update_maps(
+    time: Res<Time<Real>>,
     ui: Res<UiState>,
     overlay: Res<OverlayMode>,
     sim: Res<SimWorld>,
     mut labels: Query<(&TrayLabel, &mut Text)>,
     mut last: Local<Option<MapsKey>>,
+    mut smooth: Local<Smoothed>,
 ) {
     if ui.tray != Some(InfoTray::Maps) {
         return;
     }
+    smooth.add(sim.world.traffic.stopped_share, time.delta_secs());
     let s = &sim.world.stats;
+    let delay = delay_stat(&sim.world);
     let key = (
         *overlay,
         (s.avg_speed * 10.0) as u32,
         (s.congestion_share * 1000.0) as u32,
         s.buildings_by_kind,
+        (smooth.0 * 100.0) as u32,
+        (citysim_sim::traffic::delay_factor(&sim.world) * 100.0) as u32,
     );
     if *last == Some(key) {
         return;
     }
     *last = Some(key);
-    let figs: [(&str, String); 2] = match *overlay {
+    let figs: [(&str, String); MAP_FIGS] = match *overlay {
         OverlayMode::Traffic | OverlayMode::None => [
             (
-                "Avg speed",
+                "Moving at",
                 if s.avg_speed > 0.0 {
                     super::context::kmh(s.avg_speed)
                 } else {
                     "\u{2014}".into()
                 },
             ),
+            ("Standing", pct(smooth.0)),
+            (delay.0, delay.1),
             ("Busy roads", pct(s.congestion_share)),
         ],
         OverlayMode::Zones => [
             ("Buildings", format::group(s.buildings as u64)),
+            ("Residents", format::group(s.population as u64)),
             ("Jobs", format::group(s.jobs as u64)),
+            ("Vacant jobs", format::group(s.vacant_jobs as u64)),
         ],
     };
     for (l, mut text) in &mut labels {
@@ -1723,16 +1845,53 @@ fn update_maps(
     }
 }
 
+/// A per-tick share eased over a few seconds (it jumps with every light).
+#[derive(Default)]
+struct Smoothed(f32, bool);
+
+impl Smoothed {
+    fn add(&mut self, v: f32, dt: f32) {
+        if !self.1 {
+            *self = Smoothed(v, true);
+        } else {
+            self.0 += (v - self.0) * (dt / 3.0).min(1.0);
+        }
+    }
+}
+
+/// "+40%": how much longer car trips take than on empty roads.
+fn delay_stat(w: &citysim_sim::World) -> (&'static str, String, Color) {
+    let f = citysim_sim::traffic::delay_factor(w);
+    let extra = f - 1.0;
+    (
+        "Trip delay",
+        if w.stats.vehicles_on_road == 0 && extra < 0.005 {
+            "\u{2014}".into()
+        } else {
+            format!("+{}", pct(extra))
+        },
+        if extra > 1.0 {
+            t::NEGATIVE
+        } else if extra > 0.5 {
+            t::WARNING
+        } else {
+            t::TEXT
+        },
+    )
+}
+
 fn update_stats(
     time: Res<Time<Real>>,
     ui: Res<UiState>,
     sim: Res<SimWorld>,
     mut labels: Query<(&TrayLabel, &mut Text, &mut TextColor)>,
     mut age: Local<f32>,
+    mut smooth: Local<Smoothed>,
 ) {
     if ui.tray != Some(InfoTray::Stats) {
         return;
     }
+    smooth.add(sim.world.traffic.stopped_share, time.delta_secs());
     *age += time.delta_secs();
     if *age < 0.3 && !ui.is_changed() {
         return;
@@ -1758,6 +1917,12 @@ fn update_stats(
             super::bar::commute_color(s.avg_commute_s),
         ),
         ("Cars on roads", g(s.vehicles_on_road), t::TEXT),
+        (
+            "Cars standing",
+            pct(smooth.0),
+            if smooth.0 > 0.5 { t::WARNING } else { t::TEXT },
+        ),
+        delay_stat(&sim.world),
         (
             "Homes · shops · industry",
             format!(

@@ -85,6 +85,8 @@ pub enum UiAction {
     UiScale(usize),
     EdgeScroll(bool),
     LotMarkers(bool),
+    /// Fold / unfold a section of the side panel.
+    Fold(super::people::FoldKey),
     /// Does nothing (a locked item).
     None,
 }

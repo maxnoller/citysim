@@ -650,7 +650,7 @@ pub fn pending(
                 }
                 let live = state.live.as_ref().map(|s| s.point).filter(|_| cursor.is_some());
                 let k = road_kind(kind);
-                let curves = state.draft.curves(live);
+                let (curves, grid) = draft_roads(&state.draft, live, world);
                 let ops = curves
                     .iter()
                     .map(|&curve| Op::Cmd(Command::BuildCurve { curve, kind: k }))
@@ -659,7 +659,7 @@ pub fn pending(
                     ops,
                     curves,
                     kind: k,
-                    grid: state.draft.grid(live),
+                    grid,
                 }
             }
             RoadMode::Upgrade => {
@@ -1013,6 +1013,48 @@ fn place_point(
     placed
 }
 
+/// The roads a draft would build (and its grid), the grid moved onto an
+/// existing node it nearly touches.
+fn draft_roads(draft: &Draft, live: Option<[f32; 2]>, world: &World) -> (Vec<Curve>, Option<GridFrame>) {
+    if draft.shape != Shape::Grid {
+        return (draft.curves(live), None);
+    }
+    let grid = draft.grid(live).map(|g| align_grid(world, g));
+    let mut curves = draft.pieces.clone();
+    curves.extend(grid.iter().flat_map(|g| g.streets()));
+    (curves, grid)
+}
+
+/// A grid whose crossings or ends come within a few centimetres of an
+/// existing junction or road end (a corner snapped onto a road a hair off
+/// the cell centre) is moved onto it, so every street meets that node
+/// exactly; a near miss would be a crossing too close to a road's end.
+pub fn align_grid(world: &World, g: GridFrame) -> GridFrame {
+    const REACH: f32 = 1.0;
+    let mut best: Option<(f32, [f32; 2])> = None;
+    for i in 0..=g.nu {
+        for j in 0..=g.nv {
+            let p = [
+                g.a[0] + g.u[0] * i as f32 * g.block_m + g.v[0] * j as f32 * g.block_m,
+                g.a[1] + g.u[1] * i as f32 * g.block_m + g.v[1] * j as f32 * g.block_m,
+            ];
+            for (_, n) in world.roads.nodes.iter() {
+                let d = dist(n.pos, p);
+                if d < REACH && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, [n.pos[0] - p[0], n.pos[1] - p[1]]));
+                }
+            }
+        }
+    }
+    match best {
+        Some((d, shift)) if d > 1e-4 => GridFrame {
+            a: [g.a[0] + shift[0], g.a[1] + shift[1]],
+            ..g
+        },
+        _ => g,
+    }
+}
+
 /// Build the draft (with the live piece when `with_live`).
 fn finish(
     state: &mut ToolState,
@@ -1021,31 +1063,55 @@ fn finish(
     toasts: &mut MessageWriter<Toast>,
     with_live: bool,
 ) {
-    let live = if with_live && state.on_map {
+    let mut live = if with_live && state.on_map {
         state.live.as_ref().map(|s| s.point)
     } else {
         None
     };
-    let curves = state.draft.curves(live);
-    if curves.is_empty() {
-        state.reset();
-        return;
+    // Enter right where the last piece ended: the cursor (snapped a cell
+    // on, or a few metres off) must not add a stub to the road.
+    let placed = !state.draft.pieces.is_empty();
+    if placed
+        && let (Some(l), Some(end)) = (live, state.draft.last())
+        && dist(l, end) < citysim_sim::CELL_SIZE
+    {
+        live = None;
     }
     let kind = match &state.plan.pending {
         Pending::Road { kind, .. } => *kind,
         _ => RoadKind::Street,
     };
-    let ops: Vec<Op> = curves
-        .iter()
-        .map(|&curve| Op::Cmd(Command::BuildCurve { curve, kind }))
-        .collect();
-    let grid = state.draft.grid(live);
-    let p = Pending::Road {
-        ops,
-        curves,
-        kind,
-        grid,
+    let draft = state.draft.clone();
+    let draft_plan = |live: Option<[f32; 2]>| -> Option<Pending> {
+        let (curves, grid) = draft_roads(&draft, live, &sim.world);
+        if curves.is_empty() {
+            return None;
+        }
+        let ops: Vec<Op> = curves
+            .iter()
+            .map(|&curve| Op::Cmd(Command::BuildCurve { curve, kind }))
+            .collect();
+        Some(Pending::Road {
+            ops,
+            curves,
+            kind,
+            grid,
+        })
     };
+    let Some(mut p) = draft_plan(live) else {
+        state.reset();
+        return;
+    };
+    // The piece under the cursor is refused but the pieces already placed
+    // are fine: build those (the cursor piece was never clicked).
+    if placed && live.is_some() && state.draft.shape != Shape::Grid {
+        let (eval, _) = plan::evaluate(state.scratch_for(sim), p.ops());
+        if eval.first_error().is_some()
+            && let Some(q) = draft_plan(None)
+        {
+            p = q;
+        }
+    }
     refresh_plan(state, sim, p);
     let (toast, sent) = commit(state, sim, out);
     if let Some(t) = toast {
@@ -1104,7 +1170,7 @@ fn use_tool(
     let right = mouse.just_pressed(MouseButton::Right) && !over_ui.0;
     let p = pending(*tool, *modes, *kind, &opts, state, &sim.world);
     refresh_plan(state, &sim, p);
-    if (keys.just_pressed(KeyCode::Escape) || right) && state.busy() {
+    if (keys.just_pressed(KeyCode::Escape) && !ui.tray_focus || right) && state.busy() {
         step_back(state);
         return;
     }
@@ -1121,7 +1187,8 @@ fn use_tool(
             if keys.just_pressed(KeyCode::Backspace) {
                 state.draft.pop();
             }
-            let enter = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
+            let enter =
+                (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter)) && !ui.tray_focus;
             if pressed && let Some(live) = state.live.clone() {
                 let double = state
                     .last_click

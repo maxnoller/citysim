@@ -75,8 +75,15 @@ impl SimWorld {
 /// 1x, 80 seconds at 12x).
 pub const SPEEDS: [u32; 4] = [1, 3, 6, 12];
 
-/// Pause and speed. The fixed timestep runs at `TICKS_PER_SECOND`; each
-/// fixed update performs `steps_per_tick()` sim steps.
+/// Most fixed updates a second: the steps of a fast speed are spread over
+/// several smaller fixed updates (so no single frame carries all of a
+/// tick's steps), up to this rate.
+pub const MAX_FIXED_HZ: u32 = 120;
+
+/// Pause and speed. The fixed timestep runs at `TICKS_PER_SECOND` times
+/// `fixed_per_tick()`; each fixed update performs `steps_per_tick()` sim
+/// steps, so a second of real time is always `TICKS_PER_SECOND` times the
+/// speed in steps.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SimClock {
     pub paused: bool,
@@ -85,11 +92,37 @@ pub struct SimClock {
 }
 
 impl SimClock {
+    /// Sim steps per real-time tick (`1/TICKS_PER_SECOND` s) at this speed.
+    pub fn speed_steps(&self) -> u32 {
+        SPEEDS[self.speed.min(SPEEDS.len() - 1)]
+    }
+
+    /// Fixed updates per real-time tick: the largest divisor of the speed
+    /// that keeps the fixed rate at most [`MAX_FIXED_HZ`].
+    pub fn fixed_per_tick(&self) -> u32 {
+        let s = self.speed_steps();
+        (1..=s)
+            .rev()
+            .find(|k| s % k == 0 && k * TICKS_PER_SECOND <= MAX_FIXED_HZ)
+            .unwrap_or(1)
+    }
+
+    /// Sim steps per fixed update (0 while paused).
     pub fn steps_per_tick(&self) -> u32 {
         if self.paused {
             0
         } else {
-            SPEEDS[self.speed.min(SPEEDS.len() - 1)]
+            self.speed_steps() / self.fixed_per_tick()
+        }
+    }
+}
+
+/// Keep the fixed timestep at the rate the speed asks for.
+fn fixed_rate(clock: Res<SimClock>, mut fixed: ResMut<Time<Fixed>>) {
+    if clock.is_changed() {
+        let hz = (TICKS_PER_SECOND * clock.fixed_per_tick()) as f64;
+        if (fixed.timestep().as_secs_f64() - 1.0 / hz).abs() > 1e-9 {
+            fixed.set_timestep_hz(hz);
         }
     }
 }
@@ -655,6 +688,7 @@ impl Plugin for SharedPlugin {
                 .chain(),
         )
         .add_systems(FixedUpdate, step_sim.in_set(SimStep))
+        .add_systems(First, fixed_rate)
         .add_systems(Update, compute_hover.in_set(GameSet::Hover))
         .add_systems(Update, apply_commands.in_set(GameSet::Sim));
     }

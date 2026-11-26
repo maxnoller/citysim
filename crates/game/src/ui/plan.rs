@@ -392,6 +392,50 @@ mod tests {
     }
 
     #[test]
+    fn a_grid_a_hair_off_a_junction_still_builds() {
+        // A grid whose corner was snapped onto the road 5 cm off the cell
+        // centre: its last street started 5 cm from the junction where a
+        // curve leaves, and ran 3.5 cm past the ends of its own rows, which
+        // the sim refuses as crossings too close to a road's end. The tool
+        // moves the grid onto the junction.
+        let mut w = rich();
+        let Op::Cmd(c) = road([92.0, 1028.0], [292.0, 1028.0]) else {
+            unreachable!()
+        };
+        w.apply(c).unwrap();
+        w.apply(Command::BuildCurve {
+            curve: Curve::through_corner([292.0, 1028.0], [468.0, 1028.0], [532.0, 868.0]),
+            kind: RoadKind::Street,
+        })
+        .unwrap();
+        let g = crate::ui::shapes::GridFrame {
+            a: [132.04666, 1028.0],
+            u: [1.0, 0.0],
+            v: [0.0, 1.0],
+            nu: 4,
+            nv: 4,
+            block_m: 40.0,
+        };
+        let ops = |g: &crate::ui::shapes::GridFrame| -> Vec<Op> {
+            g.streets()
+                .into_iter()
+                .map(|curve| {
+                    Op::Cmd(Command::BuildCurve {
+                        curve,
+                        kind: RoadKind::Street,
+                    })
+                })
+                .collect()
+        };
+        let (raw, _) = evaluate(&scratch(&w), &ops(&g));
+        assert!(!raw.ok(), "the near miss itself is refused by the sim");
+        let fixed = crate::ui::tools::align_grid(&w, g);
+        assert!(dist(fixed.a, [132.0, 1028.0]) < 1e-3, "{:?}", fixed.a);
+        let (e, _) = evaluate(&scratch(&w), &ops(&fixed));
+        assert!(e.ok(), "{:?}", e.first_error());
+    }
+
+    #[test]
     fn a_chain_checks_each_piece_after_the_ones_before() {
         let w = rich();
         let ops = [

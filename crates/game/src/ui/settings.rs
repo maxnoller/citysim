@@ -224,6 +224,7 @@ const KEYS: [(&str, &[(&str, &str)]); 3] = [
             ("O", "Maps · cycle"),
             ("T", "Traffic map"),
             ("G", "Graphics quality"),
+            ("F6", "Keyboard into the drawer · arrows, Enter"),
             ("F5  F9", "Save · load"),
         ],
     ),
