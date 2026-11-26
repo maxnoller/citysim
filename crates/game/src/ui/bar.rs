@@ -679,12 +679,15 @@ fn spawn_time(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                         if arrows == 0 {
                             b.spawn((super::widgets::icon(fonts, icon::PAUSE, 17.0, t::SLOT_INK), fg));
                         }
+                        // One chevron per speed step, close together so
+                        // they read as one mark and their strokes never
+                        // cross.
                         for k in 0..arrows {
-                            b.spawn((super::widgets::icon(fonts, icon::PLAY, 15.0, t::SLOT_INK), fg))
+                            b.spawn((super::widgets::icon(fonts, icon::CHEVRON_RIGHT, 17.0, t::SLOT_INK), fg))
                                 .insert(Node {
-                                    width: px(15),
-                                    height: px(15),
-                                    margin: UiRect::left(px(if k == 0 { 0.0 } else { -8.0 })),
+                                    width: px(17),
+                                    height: px(17),
+                                    margin: UiRect::left(px(if k == 0 { 0.0 } else { -11.0 })),
                                     ..default()
                                 });
                         }
