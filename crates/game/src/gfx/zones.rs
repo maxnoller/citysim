@@ -43,10 +43,13 @@ pub fn full_overlay(mode: OverlayMode, tool: ActiveTool) -> bool {
 #[derive(Resource)]
 struct ZoneMaterial(Handle<StandardMaterial>);
 
+/// Grid and roads keys, and whether empty land shows.
+type ChunkKey = ((u64, u64), (u64, u64), bool);
+
 #[derive(Default)]
 struct ZoneChunks {
     /// Grid and roads keys the chunks were last built for.
-    key: Option<((u64, u64), (u64, u64), bool)>,
+    key: Option<ChunkKey>,
     fits: land::FitCache,
     shown: bool,
     chunks: HashMap<IVec2, (u64, Entity, bool)>,

@@ -1744,10 +1744,14 @@ mod tests {
                 .all(|&c| w.zoning.cell_center(c).is_some_and(|q| q[1] < 1028.0)),
             "all on the north side"
         );
-        let one = ToolOptions { zone_depth: 1, ..opts };
-        let p1 = pending(zone, modes, RoadChoice::Street, &one, &s, &w);
-        let (e1, _) = plan::evaluate(&plan::scratch(&w), p1.ops());
-        assert_eq!(e1.zone_cells().len() * 2, cells.len());
+        // One row is half of two rows; the full block is deeper still.
+        let count = |d: u8| {
+            let o = ToolOptions { zone_depth: d, ..opts };
+            let p = pending(zone, modes, RoadChoice::Street, &o, &s, &w);
+            plan::evaluate(&plan::scratch(&w), p.ops()).0.zone_cells().len()
+        };
+        assert_eq!(count(1) * 2, count(2));
+        assert!(cells.len() > count(2), "{} full vs {} two rows", cells.len(), count(2));
     }
 
     #[test]

@@ -495,13 +495,16 @@ impl Tiles {
     }
 }
 
+/// A road's centre line, reserve half width and bounds.
+type RoadPoly = (Vec<[f32; 2]>, f32, [f32; 2], [f32; 2]);
+
 /// Spatial context for resolving cells.
 struct Ctx {
     blocks: Tiles,
     bbounds: Vec<([f32; 2], [f32; 2])>,
     roads: Tiles,
     /// Road polylines (centre line) and reserve, by index.
-    polys: Vec<(Vec<[f32; 2]>, f32, [f32; 2], [f32; 2])>,
+    polys: Vec<RoadPoly>,
     buildings: Tiles,
     bpolys: Vec<(BuildingId, LatticeId, [[f32; 2]; 4])>,
 }
