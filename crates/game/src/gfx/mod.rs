@@ -17,6 +17,7 @@ mod mesh_util;
 mod noise;
 mod overlay;
 mod palette;
+mod perf;
 mod props;
 mod record;
 mod road_geom;
@@ -68,6 +69,7 @@ impl Plugin for GfxPlugin {
             land::LandPlugin,
             road_tool::RoadToolPlugin,
             bench::BenchPlugin,
+            perf::PerfPlugin,
             record::RecordPlugin,
         ));
     }
