@@ -57,9 +57,16 @@
 //   the city (services cost more per resident in a bigger and denser city,
 //   avenues and traffic lights cost upkeep), so money stays a constraint
 //   for the whole game: the block-by-block player holds $20-40k before
-//   5,000 residents, the avenue city holds tens of thousands at 10,000
-//   (enough for the next district or an avenue upgrade, not hundreds of
-//   thousands), and the longest wait for money is a few real minutes.
+//   5,000 residents, every sensible layout holds tens of thousands at
+//   10,000 (enough for the next district or an avenue upgrade, not
+//   hundreds of thousands), and the longest wait for money is a few real
+//   minutes.
+// * Traffic decides who comes out ahead (round 5): commuting time lost in
+//   jams costs business tax (`TRAFFIC_OUTPUT_PER_S`, shown as
+//   `economy::TrafficLoss`), jammed residents are unhappy, move nearer work
+//   or leave, and newcomers stay away. A road hierarchy earns back its
+//   extra construction and upkeep; the same blocks on streets only run
+//   into a deficit as they grow past 12,000 residents.
 // * A network far bigger than its town needs (the pre-built `overbuilt`
 //   mesh, ~9,000 cells) loses money every day.
 
@@ -68,9 +75,10 @@ pub const STARTING_MONEY: i64 = 30_000;
 /// Cost of one cell of newly built road (per cell-to-cell piece of length).
 /// The main money sink: an expanding city spends most of its surplus here.
 pub const ROAD_COST_PER_CELL: i64 = 65;
-/// Cost of one cell of avenue. Upgrading a street to an avenue costs the
-/// difference; downgrading is free (no refund).
-pub const AVENUE_COST_PER_CELL: i64 = 100;
+/// Cost of one cell of avenue (round 5: 140 -> 90, a hierarchy must be
+/// affordable to the player who builds it). Upgrading a street to an
+/// avenue costs the difference; downgrading is free (no refund).
+pub const AVENUE_COST_PER_CELL: i64 = 90;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
@@ -79,24 +87,26 @@ pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// or two; a mesh many times bigger than its town still sinks it.
 /// ($1 per 4 real minutes, as in round 2.)
 pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 4;
-/// Daily upkeep per avenue cell (four lanes, more to maintain).
+/// Daily upkeep per avenue cell (four lanes, more to maintain; round 5:
+/// 10 -> 8).
 pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 8;
 /// Daily upkeep of a junction with traffic lights (power, maintenance),
 /// part of road upkeep. Busy junctions get lights automatically, so a city
 /// whose traffic needs many lights pays for them.
-pub const SIGNAL_UPKEEP_PER_DAY: i64 = 100;
+pub const SIGNAL_UPKEEP_PER_DAY: i64 = 80;
 /// Daily cost of city services per resident (police, fire, schools...,
 /// abstracted), charged at midnight with road upkeep. Keeps the margin per
 /// resident moderate (residents and their jobs pay ~$9 a day in taxes at
-/// the default rate), so a bigger city is not a money machine.
+/// the default rate), so a bigger city is not a money machine (round 5:
+/// 3.0 -> 3.6, with a gentler size term below).
 pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 3.6;
 /// A bigger city needs more complex services (hospitals, a fire brigade
 /// with ladders, transit, courts): each resident costs up to this much more
 /// per day, `* pop² / (pop² + SERVICES_CITY_SIZE_POP²)`: little in a town
-/// ($0.6 at 3,000 residents), $2.2 at 10,000, $2.75 at 20,000. Total
-/// services therefore grow faster than the population, and the surplus of
-/// a big city stays modest (enough for the next district) without turning
-/// into a wall.
+/// ($0.2 at 3,000 residents), $1.2 at 10,000, $1.8 at 20,000. Total
+/// services therefore grow faster than the population, but a well-run
+/// bigger city still nets more per day than a smaller one (round 5: the
+/// size term was steep enough to cancel a hierarchy's extra residents).
 pub const SERVICES_CITY_SIZE_PER_RESIDENT: f32 = 2.2;
 /// Population at which half of [`SERVICES_CITY_SIZE_PER_RESIDENT`] applies.
 pub const SERVICES_CITY_SIZE_POP: f32 = 9_000.0;
@@ -113,8 +123,8 @@ pub const SERVICES_DENSITY_PER_RESIDENT: [f32; 3] = [0.0, 0.4, 1.0];
 /// (`economy::TrafficLoss`, taken off the commercial and industrial tax
 /// lines).
 pub const TRAFFIC_FREE_FACTOR: f32 = 1.6;
-pub const TRAFFIC_OUTPUT_PER_S: f32 = 0.6;
-pub const TRAFFIC_LOSS_MAX_SHARE: f32 = 0.6;
+pub const TRAFFIC_OUTPUT_PER_S: f32 = 0.9;
+pub const TRAFFIC_LOSS_MAX_SHARE: f32 = 0.7;
 
 /// Debt: every midnight with money below zero cuts city services by this
 /// share (services cost less, but all demand falls), down to
@@ -554,10 +564,11 @@ pub const SHOP_JOBS_PER_WORKER: f32 = 0.44;
 pub const INDUSTRY_PER_SHOP: f32 = 1.5;
 /// Weight of the relative job shortfall on C / I demand.
 pub const JOB_SHORTFALL_WEIGHT: f32 = 1.4;
-/// Extra C / I demand per unit of unemployment rate (split between the two
-/// by their shortfall of jobs, `demand::target`: 9 % out of work with
-/// industry short adds about 0.6 to industrial demand).
-pub const UNEMPLOYMENT_JOB_BOOST: f32 = 3.5;
+/// Extra C / I demand per unit of unemployment rate (a quarter to each kind
+/// of work, the other half by their shortfall of jobs, `demand::target`: 9 %
+/// out of work with only industry short adds about 0.6 to industrial
+/// demand).
+pub const UNEMPLOYMENT_JOB_BOOST: f32 = 4.5;
 /// `demand::jobs_view`: below this share of the workforce out of work
 /// nothing is wrong; fewer free zoned cells of the short kind of work than
 /// this counts as no land zoned.

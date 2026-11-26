@@ -234,6 +234,14 @@ struct Block {
 impl Block {
     fn build(&self, w: &mut World, z: Zone, layout: Layout) -> bool {
         let (x0, y0, x1, y1) = (self.x0, self.y0, self.x0 + 10, self.y0 + 5);
+        // A block away from the trunk is reached along the first column's
+        // spine (x = 20) even before the blocks in between are built.
+        if x0 == 20 && (y0 > 128 || y1 < 128) {
+            let (a, b) = if y0 > 128 { (128, y0) } else { (y1, 128) };
+            if let Some(k) = layout.vertical(20) {
+                road_of(w, (20, a), (20, b), k);
+            }
+        }
         let mut ok = road_of(w, (x0, y0), (x1, y0), layout.horizontal(y0))
             && road_of(w, (x0, y1), (x1, y1), layout.horizontal(y1));
         for x in [x0, x1] {

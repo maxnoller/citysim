@@ -84,13 +84,13 @@ pub fn target(world: &World) -> (Demand, f32) {
     // Jobs follow the workforce (every adult wants their own job).
     let want_c = households * balance::SHOP_JOBS_PER_WORKER;
     let want_i = want_c * balance::INDUSTRY_PER_SHOP;
-    // People out of work call for the kind of jobs that is short: the
-    // unemployment boost goes to commerce and industry by their shortfall
-    // (alike when neither is short).
+    // People out of work call for jobs, mostly of the kind that is short:
+    // the unemployment boost goes to commerce and industry a quarter each,
+    // the other half by their shortfall (alike when neither is short).
     let short = |want: f32, have: f32| ((want - have) / (want + small)).max(0.0);
     let (sc, si) = (short(want_c, c_jobs), short(want_i, i_jobs));
     let (share_c, share_i) = if sc + si > 0.0 {
-        (sc / (sc + si), si / (sc + si))
+        (0.25 + 0.5 * sc / (sc + si), 0.25 + 0.5 * si / (sc + si))
     } else {
         (0.5, 0.5)
     };

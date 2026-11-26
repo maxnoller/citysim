@@ -994,7 +994,12 @@ fn draw_cars_by_purpose(c: &mut Canvas, w: &World, v: &View) {
 /// the citizens are doing.
 fn day(out: &str, seconds: u32) {
     let mut w = World::new(7);
-    let mut p = GridPlayer::new(&Zone::ALL);
+    // `CITYSIM_TOPDOWN_LAYOUT=hierarchy`: the avenue city.
+    let mut p = if std::env::var("CITYSIM_TOPDOWN_LAYOUT").as_deref() == Ok("hierarchy") {
+        GridPlayer::hierarchy()
+    } else {
+        GridPlayer::new(&Zone::ALL)
+    };
     let pop = std::env::var("CITYSIM_TOPDOWN_POP")
         .ok()
         .and_then(|s| s.parse().ok())
