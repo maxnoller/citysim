@@ -121,8 +121,8 @@ CITYSIM_DEMO=town CITYSIM_STILLS=/tmp/s CITYSIM_STILLS_LIST="a=wide;b=street" ca
 cargo run -p citysim_sim --release --example headless   # balance runs of scripted cities, no window
 ```
 
-CI (`.github/workflows/ci.yml`) checks formatting, clippy and the simulation tests (with `cargo-nextest`, including the
-pinned determinism checksum), and builds and tests the game crate in all three feature sets.
+CI (`.github/workflows/ci.yml`) checks formatting, clippy and the simulation tests (including the pinned determinism
+checksum), and builds and tests the game crate in all three feature sets.
 
 Performance (GTX 1080, 1920x1080, windowless benchmark `CITYSIM_BENCH`, a ~10,000-resident city with about 850 cars on
 the road): about 110 fps on High (99th-percentile frame 11 ms) and 220 fps on Low at 1x, and still above 100 fps on

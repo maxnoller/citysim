@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Run on this machine what CI (.github/workflows/ci.yml) checks, in the same
-# order, stopping at the first failure. Keep the two in step.
+# order, stopping at the first failure. Keep the two in step. The sim tests run
+# through cargo-nextest when it is installed (the same tests and assertions,
+# all at once: about a minute here instead of five; CI's two-core runners gain
+# nothing from it), `cargo test` otherwise or with CI_LOCAL_CARGO_TEST=1.
 #
 #   scripts/ci-local.sh          # both CI jobs: sim, then game
 #   scripts/ci-local.sh sim      # only the sim job (format, clippy, sim tests)
@@ -22,7 +25,11 @@ start=$(date +%s)
 if [[ $jobs == all || $jobs == sim || $jobs == --full ]]; then
     run cargo fmt --all --check
     run cargo clippy -p citysim_sim --all-targets -- -D warnings
-    run cargo nextest run -p citysim_sim
+    if command -v cargo-nextest >/dev/null && [[ "${CI_LOCAL_CARGO_TEST:-0}" != 1 ]]; then
+        run cargo nextest run -p citysim_sim
+    else
+        run cargo test -p citysim_sim
+    fi
 fi
 if [[ $jobs == all || $jobs == game || $jobs == --full ]]; then
     run cargo check -p citysim --all-targets
