@@ -39,6 +39,7 @@ impl Plugin for TrayPlugin {
             (
                 show_page,
                 slide_tray,
+                tray_shape,
                 update_figures,
                 update_conditions,
                 update_junction,
@@ -149,7 +150,7 @@ fn spawn_tray(
 ) {
     let fonts = fonts.into_inner();
     // The drawer: a trapezoid, top corners pulled in.
-    let mat = cache.get(&mut mats, PlateStyle::PANEL.slanted([0.16, 0.0, 0.16, 0.0]));
+    let _ = (&mut cache, &mut mats);
     let hatch = cache.get(
         &mut mats,
         PlateStyle::fill(t::alpha(Color::BLACK, 0.4), t::alpha(Color::BLACK, 0.4), Color::NONE).hatched(1.0),
@@ -185,7 +186,7 @@ fn spawn_tray(
                     UiRect::new(px(t::LW), px(t::LW), px(t::LW), px(0)),
                     [0.0; 4],
                 ),
-                mat,
+                super::plate::PlateAnim::new(tray_style(t::TRAY_H)),
                 plate_shadow(),
             ))
             .with_children(|tray| {
@@ -199,6 +200,27 @@ fn spawn_tray(
                 page(tray, Page::People, |_| {});
             });
         });
+}
+
+/// The drawer's look for a height: its top corners pulled in by a fixed
+/// 20 px whatever the height (slants are fractions of the height).
+fn tray_style(h: f32) -> PlateStyle {
+    let s = 20.0 / h.max(40.0);
+    PlateStyle::PANEL.slanted([s, 0.0, s, 0.0])
+}
+
+/// Keep the drawer's slanted sides at the same angle when a page is tall.
+fn tray_shape(mut q: Query<(&ComputedNode, &mut super::plate::PlateAnim), With<TrayPlate>>) {
+    for (n, mut a) in &mut q {
+        let h = n.size.y * n.inverse_scale_factor;
+        if h <= 0.0 {
+            continue;
+        }
+        let want = tray_style(h);
+        if (a.style.slant[0] - want.slant[0]).abs() > 1e-4 {
+            a.style = want;
+        }
+    }
 }
 
 fn page(p: &mut ChildSpawnerCommands, which: Page, f: impl FnOnce(&mut ChildSpawnerCommands)) {

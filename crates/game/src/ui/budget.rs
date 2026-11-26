@@ -254,7 +254,8 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                 BudgetText::BalanceNote,
                 Node {
                     width: px(CHART_W),
-                    min_height: px(18),
+                    height: px(34),
+                    overflow: Overflow::clip(),
                     ..default()
                 },
             ));

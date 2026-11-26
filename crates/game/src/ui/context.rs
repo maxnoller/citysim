@@ -289,7 +289,9 @@ pub fn tool_card(
                 card.hint = "Lights or priority signs are chosen automatically".into();
                 return Some(card);
             };
+            // The tray shows the phases and queues; the tag stays short.
             let mut card = junction_card(world, *node)?;
+            card.rows.truncate(1);
             let setting = junction::junction(world, *node).map(|j| j.setting).unwrap_or_default();
             card.hint = format!(
                 "Click: switch to {}",
@@ -930,7 +932,7 @@ fn update_tag(
     plate: Query<&ComputedNode, With<TagPlate>>,
     mut plate_anim: Query<&mut PlateAnim, With<TagPlate>>,
     mut parts: Query<(&TagPart, &mut Text, &mut TextColor, &mut Node), Without<TagRoot>>,
-    highlight: Res<WorldHighlight>,
+    (highlight, panel): (Res<WorldHighlight>, Res<super::panel::PanelArea>),
     mut slide: Local<f32>,
     mut cache: Local<TagCache>,
 ) {
@@ -1026,6 +1028,14 @@ fn update_tag(
     let tray = if *tool == ActiveTool::Inspect { 0.0 } else { t::TRAY_H };
     if pos.y + size.y > screen.y - t::BAR_H - tray - 8.0 {
         pos.y = cursor.y - off.y * 0.6 - size.y;
+    }
+    // Clear of the side panel.
+    if let Some(r) = panel.0
+        && pos.x + size.x > r.min.x - 8.0
+        && pos.y < r.max.y
+        && pos.y + size.y > r.min.y
+    {
+        pos.x = (cursor.x - off.x - size.x).min(r.min.x - 8.0 - size.x);
     }
     pos = pos.max(Vec2::new(8.0, 64.0));
     let (left, top) = (px(pos.x.round()), px(pos.y.round()));

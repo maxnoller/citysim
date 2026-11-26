@@ -7,6 +7,9 @@
 //!   follows `GraphicsQuality`.
 //! * Around the map: cheaper trees in the countryside out to the fog, kept
 //!   clear of the highway corridor.
+//! * While a road is being drawn (`CurveToolView`), the trees its ghost
+//!   would clear are left out of the chunks under it (re-meshed a few times
+//!   a second at most), so the preview shows the land it takes.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -23,7 +26,7 @@ use super::palette::{self, mix, shade};
 use super::props;
 use super::road_geom::chunk_of;
 use super::scene::{WorldMaterials, quality_settings};
-use crate::shared::{GameSet, GraphicsQuality, SimWorld};
+use crate::shared::{CurveToolView, GameSet, GraphicsQuality, SimWorld};
 
 const CHUNK: i32 = 32;
 /// How far the countryside trees reach beyond the map edge, metres.
@@ -40,7 +43,9 @@ type Keys = ((u64, u64), (u64, u64));
 
 #[derive(Default)]
 struct TreeChunks {
-    key: Option<(Keys, GraphicsQuality)>,
+    key: Option<(Keys, GraphicsQuality, u64)>,
+    /// Seconds since the last re-mesh for a changed road ghost.
+    since_ghost: f32,
     /// Chunk -> (cells hash, [near, far] entities, trees placed).
     chunks: HashMap<IVec2, (u64, [Entity; 2], usize)>,
     outside: Vec<Entity>,
@@ -200,15 +205,57 @@ impl Taken {
     }
 }
 
-/// Whether a tree may stand at `p`: away from the drawn roads, and not on
-/// zoned or built land.
-fn open(taken: &Taken, edges: &RoadEdges, p: Vec2) -> bool {
-    !taken.contains(p) && edges.clearance(p) > 2.5
+/// The road being drawn, as line pieces with the half width it clears.
+#[derive(Default)]
+struct Ghost {
+    segs: Vec<(Vec2, Vec2, f32)>,
+}
+
+impl Ghost {
+    fn of(view: &CurveToolView) -> Ghost {
+        let mut segs = Vec::new();
+        if view.active {
+            let hw = view.kind.map_or(4.0, |k| k.half_width_m()) + 2.5;
+            let curves = view.pieces.iter().map(|(c, _)| c).chain(view.refused.iter());
+            for c in curves {
+                let pts = c.flatten(0.5);
+                for w in pts.windows(2) {
+                    segs.push((Vec2::from(w[0]), Vec2::from(w[1]), hw));
+                }
+            }
+        }
+        Ghost { segs }
+    }
+
+    /// Hash of the geometry (quantised to half a metre).
+    fn key(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        for (a, b, w) in &self.segs {
+            for v in [a.x, a.y, b.x, b.y, *w] {
+                ((v * 2.0).round() as i32).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    fn covers(&self, p: Vec2) -> bool {
+        self.segs.iter().any(|(a, b, w)| {
+            let ab = *b - *a;
+            let t = ((p - *a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            (*a + ab * t).distance(p) < *w
+        })
+    }
+}
+
+/// Whether a tree may stand at `p`: away from the drawn roads and the road
+/// being drawn, and not on zoned or built land.
+fn open(taken: &Taken, edges: &RoadEdges, ghost: &Ghost, p: Vec2) -> bool {
+    !taken.contains(p) && edges.clearance(p) > 2.5 && !ghost.covers(p)
 }
 
 /// What a tree chunk depends on: zoning cells with a zone or building whose
 /// centre is in it (or near), and the roads near it (by their geometry).
-fn chunk_hashes(world: &World) -> HashMap<IVec2, u64> {
+fn chunk_hashes(world: &World, ghost: &Ghost) -> HashMap<IVec2, u64> {
     let size = CHUNK as f32 * CELL_SIZE;
     let mut hashers: HashMap<IVec2, DefaultHasher> = HashMap::new();
     let mut add = |lo: Vec2, hi: Vec2, f: &dyn Fn(&mut DefaultHasher)| {
@@ -228,6 +275,14 @@ fn chunk_hashes(world: &World) -> HashMap<IVec2, u64> {
         // Only whether the cell is taken matters (a building on an
         // already zoned cell changes nothing for the trees).
         add(p - 6.0, p + 6.0, &|h| c.hash(h));
+    }
+    for (a, b, w) in &ghost.segs {
+        let (lo, hi) = (a.min(*b) - *w, a.max(*b) + *w);
+        add(lo, hi, &|h| {
+            for v in [a.x, a.y, b.x, b.y] {
+                ((v * 2.0).round() as i32).hash(h);
+            }
+        });
     }
     for (_, seg) in world.roads.segments.iter() {
         let (lo, hi) = seg.curve.bounds();
@@ -253,18 +308,24 @@ fn rebuild_trees(
     mut meshes: ResMut<Assets<Mesh>>,
     mut count: ResMut<TreeCount>,
     edges: Res<RoadEdges>,
+    (view, time): (Res<CurveToolView>, Res<Time<Real>>),
 ) {
-    let key = (
-        (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads)),
-        *quality,
-    );
+    state.since_ghost += time.delta_secs();
+    let ghost = Ghost::of(&view);
+    let keys = (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads));
+    let key = (keys, *quality, ghost.key());
     if state.key == Some(key) {
         return;
     }
-    let quality_changed = state.key.is_some_and(|(_, q)| q != *quality);
+    // Only the ghost moved: re-mesh at most a few times a second.
+    if state.key.is_some_and(|(k, q, _)| k == keys && q == *quality) && state.since_ghost < 0.2 {
+        return;
+    }
+    state.since_ghost = 0.0;
+    let quality_changed = state.key.is_some_and(|(_, q, _)| q != *quality);
     state.key = Some(key);
     let world = &sim.world;
-    let hashes = chunk_hashes(world);
+    let hashes = chunk_hashes(world, &ghost);
     let taken = Taken::new(world);
     let dens = quality_settings(*quality).tree_density;
     let n = MAP_CELLS / CHUNK;
@@ -285,7 +346,7 @@ fn rebuild_trees(
                     cell_trees(x, y, &mut trees);
                     for t in trees
                         .iter()
-                        .filter(|t| keep(t, dens) && open(&taken, &edges, Vec2::new(t.pos.x, t.pos.z)))
+                        .filter(|t| keep(t, dens) && open(&taken, &edges, &ghost, Vec2::new(t.pos.x, t.pos.z)))
                     {
                         draw_tree(&mut m, t, false);
                         draw_tree(&mut far, t, true);

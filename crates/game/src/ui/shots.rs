@@ -181,8 +181,9 @@ fn reset(world: &mut World) {
     ui.settings_open = false;
     ui.keys_open = false;
     ui.following = false;
-    world.write_message(UiAction::ClosePeople);
-    world.write_message(UiAction::StopFollow);
+    // Directly (a ClosePeople message would also drop a selection the
+    // step makes this frame).
+    world.resource_mut::<super::panel::PeopleView>().stack.clear();
     world.resource_mut::<SimClock>().paused = false;
     world.resource_mut::<super::top::PinnedAlert>().0 = None;
     *world.resource_mut::<Pointer>() = Pointer::default();

@@ -37,6 +37,12 @@ struct HighlightGround;
 #[derive(Component)]
 struct VehicleRing;
 
+/// Diamond floating above the selected / followed vehicle: it grows with
+/// the camera distance so the car stays unmistakable far away and at night
+/// (unlit).
+#[derive(Component)]
+struct VehicleMarker;
+
 /// Tinted copies of highlighted buildings.
 #[derive(Component)]
 struct HighlightCopy;
@@ -55,7 +61,7 @@ impl Plugin for GuidesPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup).add_systems(
             Update,
-            (draw_snap, pulse_marker, draw_highlight, vehicle_ring).in_set(GameSet::Render),
+            (draw_snap, pulse_marker, draw_highlight, vehicle_ring, vehicle_marker).in_set(GameSet::Render),
         );
     }
 }
@@ -92,16 +98,44 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
             ec.insert(GuideLines);
         }
     }
+    // White inner ring and an accent outer ring, as the interface draws a
+    // selection.
     let mut ring_mesh = MeshBuilder::new();
-    let gold = lin(Color::srgb(1.0, 0.86, 0.35).with_alpha(0.95));
-    ring(&mut ring_mesh, Vec2::ZERO, 3.6, 0.45, 0.0, gold, 32);
+    let white = lin(Color::srgb(1.0, 1.0, 1.0).with_alpha(0.95));
+    let accent = lin(ACCENT.with_alpha(0.95));
+    ring(&mut ring_mesh, Vec2::ZERO, 3.6, 0.45, 0.0, white, 32);
+    ring(&mut ring_mesh, Vec2::ZERO, 4.5, 0.5, 0.0, accent, 32);
     disc(
         &mut ring_mesh,
         Vec2::ZERO,
         3.5,
         -0.01,
-        [gold[0], gold[1], gold[2], 0.18],
+        [accent[0], accent[1], accent[2], 0.22],
     );
+    let mut diamond = MeshBuilder::new();
+    let (top, mid, bot) = (Vec3::new(0.0, 1.4, 0.0), 0.0, Vec3::new(0.0, -1.6, 0.0));
+    let rim: Vec<Vec3> = (0..4)
+        .map(|i| {
+            let a = i as f32 * std::f32::consts::FRAC_PI_2;
+            Vec3::new(a.cos() * 1.0, mid, a.sin() * 1.0)
+        })
+        .collect();
+    let light = lin(Color::srgb(0.78, 0.72, 1.0));
+    for i in 0..4 {
+        let (p, q) = (rim[i], rim[(i + 1) % 4]);
+        let shade = if i % 2 == 0 { accent } else { light };
+        diamond.tri_c(top, q, p, [shade; 3]);
+        diamond.tri_c(bot, p, q, [accent; 3]);
+    }
+    commands.spawn((
+        Name::new("Vehicle marker"),
+        VehicleMarker,
+        Mesh3d(meshes.add(diamond.build())),
+        MeshMaterial3d(overlay.clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
     commands.spawn((
         Name::new("Vehicle ring"),
         VehicleRing,
@@ -129,8 +163,8 @@ fn guide_color(_: GuideKind) -> Color {
     Color::srgba(1.0, 0.78, 0.3, 0.95)
 }
 
-/// The interface accent blue (ui theme `ACCENT`).
-const ACCENT: Color = Color::srgb(0.302, 0.639, 0.941);
+/// The interface accent (ui theme `ACCENT_SET.base`, amethyst 8f7bd8).
+const ACCENT: Color = Color::srgb(0.561, 0.482, 0.847);
 
 fn snap_color(_: SnapTarget) -> Color {
     ACCENT
@@ -380,6 +414,55 @@ fn vehicle_ring(
     }
 }
 
+/// Hang a highlight copy under its building, unless the building's entity
+/// was despawned meanwhile (rebuilt this frame): then drop the copy.
+fn attach_copy(commands: &mut Commands, copy: Entity, parent: Entity) {
+    commands.queue(move |world: &mut World| {
+        if world.get_entity(parent).is_ok() {
+            if let Ok(mut e) = world.get_entity_mut(copy) {
+                e.insert(ChildOf(parent));
+            }
+        } else if let Ok(e) = world.get_entity_mut(copy) {
+            e.despawn();
+        }
+    });
+}
+
+/// The diamond above the selected (not merely hovered) vehicle: bobbing a
+/// little, spinning slowly, its height and size growing with the camera
+/// distance.
+fn vehicle_marker(
+    time: Res<Time<Real>>,
+    hl: Res<WorldHighlight>,
+    sim: Res<SimWorld>,
+    camera: Query<&GlobalTransform, With<WorldCamera>>,
+    mut q: Query<(&mut Transform, &mut Visibility), With<VehicleMarker>>,
+) {
+    let Ok((mut t, mut vis)) = q.single_mut() else { return };
+    let pose = match &hl.selected {
+        Some(WorldTarget::Vehicle(v)) => sim
+            .world
+            .vehicles
+            .get(*v)
+            .map(|veh| citysim_sim::drive::vehicle_pose(&sim.world, veh)),
+        _ => None,
+    };
+    let Some((pos, _)) = pose else {
+        vis.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    let base = Vec3::new(pos[0], 0.0, pos[1]);
+    let k = camera
+        .single()
+        .map(|c| (c.translation().distance(base) / 120.0).clamp(1.0, 8.0))
+        .unwrap_or(1.0);
+    let e = time.elapsed_secs();
+    t.translation = base + Vec3::Y * (5.5 + 2.2 * k + 0.35 * k * (e * 2.6).sin());
+    t.rotation = Quat::from_rotation_y(e * 0.9);
+    t.scale = Vec3::splat(k);
+    vis.set_if_neq(Visibility::Inherited);
+}
+
 #[allow(clippy::type_complexity)]
 #[derive(Default)]
 struct HighlightState {
@@ -463,9 +546,9 @@ fn draw_highlight(
                             MeshMaterial3d(mats.glow.clone()),
                             tf,
                             NotShadowCaster,
-                            ChildOf(parent),
                         ))
                         .id();
+                    attach_copy(&mut commands, copy, parent);
                     state.copies.push(copy);
                 }
             }
@@ -532,9 +615,9 @@ fn draw_highlight(
                     MeshMaterial3d(mats.doom.clone()),
                     tf,
                     NotShadowCaster,
-                    ChildOf(parent),
                 ))
                 .id();
+            attach_copy(&mut commands, copy, parent);
             state.copies.push(copy);
         }
     }

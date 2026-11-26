@@ -16,6 +16,7 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui::ComputedNode;
 use citysim_sim::{Command, JunctionSetting, junction};
 
 use super::people::{self, Item, Portrait, Sheet, SheetKind, Target};
@@ -53,12 +54,33 @@ impl PeopleView {
     }
 }
 
+/// Where the side panel's plate is on screen (logical px), while it shows.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct PanelArea(pub Option<Rect>);
+
+/// The plate of the side panel.
+#[derive(Component)]
+struct PanelPlate;
+
+/// The line from what is selected to the panel, and its two ends.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum Leader {
+    Line,
+    Dot,
+    Tip,
+}
+
 pub struct PanelPlugin;
 
 impl Plugin for PanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PeopleView>()
-            .add_systems(Startup, spawn_panel)
+            .init_resource::<PanelArea>()
+            .add_systems(Startup, (spawn_panel, spawn_leader))
+            .add_systems(
+                PostUpdate,
+                (panel_area, leader).chain().after(bevy::ui::UiSystems::Layout),
+            )
             .add_systems(
                 Update,
                 (people_input, follow, draw_sheets, slide_panel, scroll_bodies)
@@ -234,6 +256,9 @@ fn bar_of(s: &Sheet, b: SheetBar) -> Option<f32> {
     }
 }
 
+/// Width of a column of the city's people.
+const CITY_COL: f32 = 200.0;
+
 /// Room above and below the panel (logical px).
 const PANEL_MARGIN_TOP: f32 = 62.0;
 const PANEL_MARGIN_BOTTOM: f32 = t::BAR_H + 14.0;
@@ -260,6 +285,7 @@ fn spawn_panel(mut commands: Commands, mut cache: ResMut<PlateCache>, mut mats: 
         ))
         .with_children(|r| {
             r.spawn((
+                PanelPlate,
                 plate_node(
                     Node {
                         width: px(t::PANEL_W),
@@ -1118,7 +1144,7 @@ fn sections(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet, of: Of, ci
     for (si, sec) in s.sections.iter().enumerate() {
         p.spawn(layout(Node {
             flex_direction: FlexDirection::Column,
-            width: if city { px(236) } else { percent(100) },
+            width: if city { px(CITY_COL) } else { percent(100) },
             margin: UiRect::top(px(if si == 0 && sec.title.is_empty() { 4.0 } else { 10.0 })),
             ..default()
         }))
@@ -1207,7 +1233,7 @@ fn row(
         justify_content: JustifyContent::SpaceBetween,
         align_items: AlignItems::Center,
         column_gap: px(10),
-        min_height: px(if city { 24.0 } else { 29.0 }),
+        min_height: px(if city { 21.0 } else { 29.0 }),
         border: UiRect::bottom(px(if last { 0.0 } else { 1.0 })),
         ..default()
     }))
@@ -1352,10 +1378,10 @@ fn spawn_city_sheet(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet) {
     p.spawn((
         Node {
             flex_wrap: FlexWrap::Wrap,
-            column_gap: px(24),
+            column_gap: px(22),
             row_gap: px(0),
-            width: px(236.0 * 4.0 + 24.0 * 3.0),
-            max_height: Val::Vh(42.0),
+            width: px(CITY_COL * 5.0 + 22.0 * 4.0),
+            max_height: Val::Vh(40.0),
             overflow: Overflow::scroll_y(),
             align_content: AlignContent::FlexStart,
             ..default()
@@ -1506,4 +1532,124 @@ fn spawn_portrait(p: &mut ChildSpawnerCommands, f: &Portrait) {
                 ));
             }
         });
+}
+
+fn spawn_leader(mut commands: Commands) {
+    commands.spawn((
+        Name::new("Leader line"),
+        layout(Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            top: px(0),
+            width: px(0),
+            height: px(2),
+            ..default()
+        }),
+        BackgroundColor(t::TEXT),
+        Outline {
+            width: px(1),
+            offset: px(0),
+            color: t::alpha(Color::BLACK, 0.35),
+        },
+        UiTransform::default(),
+        Leader::Line,
+        GlobalZIndex(21),
+        Visibility::Hidden,
+    ));
+    for (which, size) in [(Leader::Dot, 7.0), (Leader::Tip, 10.0)] {
+        commands.spawn((
+            layout(Node {
+                position_type: PositionType::Absolute,
+                width: px(size),
+                height: px(size),
+                ..default()
+            }),
+            BackgroundColor(if which == Leader::Tip { t::ACCENT } else { t::TEXT }),
+            UiTransform {
+                rotation: Rot2::degrees(45.0),
+                ..default()
+            },
+            which,
+            GlobalZIndex(23),
+            Visibility::Hidden,
+        ));
+    }
+}
+
+/// Record where the panel's plate is (the cursor readout keeps clear).
+fn panel_area(
+    roots: Query<(&PanelRoot, &InheritedVisibility)>,
+    plate: Query<(&ComputedNode, &bevy::ui::UiGlobalTransform), With<PanelPlate>>,
+    mut area: ResMut<PanelArea>,
+) {
+    let open = roots.iter().any(|(r, v)| v.get() && r.t > 0.5);
+    let rect = plate.single().ok().filter(|_| open).map(|(n, tf)| {
+        let inv = n.inverse_scale_factor;
+        Rect::from_center_size(tf.translation * inv, n.size * inv)
+    });
+    if area.0 != rect {
+        area.0 = rect;
+    }
+}
+
+/// A line from the selected car, person, building or road to the panel,
+/// with a dot at the thing and an accent diamond at the panel.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn leader(
+    area: Res<PanelArea>,
+    view: Res<PeopleView>,
+    hl: Res<WorldHighlight>,
+    sim: Res<SimWorld>,
+    ui_scale: Res<UiScale>,
+    cameras: Query<(&Camera, &GlobalTransform), With<crate::shared::WorldCamera>>,
+    mut parts: Query<(&Leader, &mut Node, &mut UiTransform, &mut Visibility)>,
+) {
+    let w = &sim.world;
+    let at = match view.current() {
+        Some(Target::Person(c)) => people::person_position(w, c),
+        Some(Target::Place(b)) => w.buildings.get(b).map(|b| b.center()),
+        Some(Target::Vehicle(v)) => w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0),
+        None => match &hl.selected {
+            Some(WorldTarget::Junction { pos, .. }) => Some(*pos),
+            Some(WorldTarget::Road(s)) => s.points.get(s.points.len() / 2).copied(),
+            _ => None,
+        },
+    };
+    let scale = ui_scale.0.max(0.01);
+    let ends = (|| {
+        let rect = area.0?;
+        let (cam, tf) = cameras.single().ok()?;
+        let p = cam.world_to_viewport(tf, crate::shared::sim_to_world(at?, 1.5)).ok()? / scale;
+        if p.x > rect.min.x - 30.0 || p.x < 0.0 || p.y < 0.0 {
+            return None;
+        }
+        let q = Vec2::new(rect.min.x - 2.0, p.y.clamp(rect.min.y + 40.0, rect.max.y - 40.0));
+        Some((p, q))
+    })();
+    for (which, mut node, mut tf, mut vis) in &mut parts {
+        let Some((p, q)) = ends else {
+            vis.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        vis.set_if_neq(Visibility::Inherited);
+        match which {
+            Leader::Line => {
+                let d = q - p;
+                let len = d.length();
+                let mid = (p + q) * 0.5;
+                node.left = px(mid.x - len * 0.5);
+                node.top = px(mid.y - 1.0);
+                node.width = px(len);
+                tf.rotation = Rot2::radians(d.y.atan2(d.x));
+            }
+            Leader::Dot => {
+                node.left = px(p.x - 3.5);
+                node.top = px(p.y - 3.5);
+            }
+            Leader::Tip => {
+                node.left = px(q.x - 5.0);
+                node.top = px(q.y - 5.0);
+            }
+        }
+    }
 }
