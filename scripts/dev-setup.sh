@@ -74,6 +74,12 @@ say "wrote .cargo/config.toml (jobs $jobs, rustflags [$toml_flags])"
 if [[ -n "${RUSTFLAGS:-}" && "$RUSTFLAGS" != "$flags" ]]; then
     say "note: RUSTFLAGS=\"$RUSTFLAGS\" is set and replaces the file's flags; unset it" >&2
 fi
+# One target directory per checkout. A shared one makes checkouts wait on each
+# other's build lock and lets one link another's build of the workspace crates.
+if [[ -n "${CARGO_TARGET_DIR:-}${CARGO_BUILD_TARGET_DIR:-}" ]]; then
+    say "error: CARGO_TARGET_DIR is set; unset it (each checkout builds in its own target/)" >&2
+    exit 1
+fi
 
 # --- 2. seed ---------------------------------------------------------------
 # The key: what decides the compiled dependencies. Same key = same artifacts.
