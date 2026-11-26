@@ -30,7 +30,7 @@ fn main() {
                 j.signal.stage,
                 j.signal.ticks,
                 q,
-                j.plan.as_ref().map_or(false, |p| p.coordinated)
+                j.plan.as_ref().is_some_and(|p| p.coordinated)
             );
         }
     }
