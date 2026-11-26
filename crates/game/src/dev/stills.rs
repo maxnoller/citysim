@@ -177,12 +177,10 @@ fn run_stills(
         }
     }
     let Some(still) = st.list.get(st.index).cloned() else {
-        // All shots handed over: exit once the last one is on disk (without
-        // the renderer's teardown, which once crashed after the files were
-        // written: scripts rely on the exit code).
+        // All shots handed over: exit once the last one is on disk.
         if in_flight.is_empty() {
             info!("stills: {} shots in {}", st.list.len(), st.dir.display());
-            std::process::exit(0);
+            exit.write(AppExit::Success);
         }
         return;
     };
