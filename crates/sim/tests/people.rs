@@ -165,13 +165,21 @@ fn commuters_on_time(seed: u64) -> (u32, u32) {
     (arrived, on_time)
 }
 
-/// Rush hours come from people: more commuters set off between 06:00 and
-/// 09:00 than in any other three hours, and come home in the afternoon or
-/// evening; shopping and leisure fill the day and the evening.
+/// Rush hours come from people: more commuters set off in the early
+/// morning than in any other four hours, and come home in the afternoon or
+/// evening; shopping and leisure fill the day and the evening. Trips by
+/// hour of three towns' second day, added up.
 #[test]
 fn rush_hours_and_daytime_errands_emerge() {
-    let (w, _) = grid_city(12, 2);
-    let by_hour = &w.people.trips_by_hour_yesterday;
+    let mut by_hour = vec![[0u32; TripPurpose::COUNT]; 24];
+    for seed in [12, 13, 14] {
+        let (w, _) = grid_city(seed, 2);
+        for (h, row) in w.people.trips_by_hour_yesterday.iter().enumerate() {
+            for (k, n) in row.iter().enumerate() {
+                by_hour[h][k] += *n;
+            }
+        }
+    }
     eprintln!("{by_hour:?}");
     let sum =
         |purpose: TripPurpose, h0: usize, h1: usize| -> u32 { (h0..h1).map(|h| by_hour[h][purpose.index()]).sum() };
