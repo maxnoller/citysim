@@ -37,9 +37,10 @@ fn main() {
         file_path: asset_root(),
         ..default()
     });
-    // `CITYSIM_BENCH` / `CITYSIM_RECORD`: no window at all (gfx renders
-    // off-screen); the app loop runs as fast as frames are drawn.
-    let windowless = ["CITYSIM_BENCH", "CITYSIM_RECORD"]
+    // `CITYSIM_BENCH` / `CITYSIM_RECORD` / `CITYSIM_STILLS`: no window at all
+    // (the world camera renders off-screen); the app loop runs as fast as
+    // frames are drawn.
+    let windowless = ["CITYSIM_BENCH", "CITYSIM_RECORD", "CITYSIM_STILLS"]
         .iter()
         .any(|v| std::env::var_os(v).is_some_and(|v| !v.is_empty()));
     if windowless {

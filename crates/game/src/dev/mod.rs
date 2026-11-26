@@ -7,6 +7,8 @@
 //! * `CITYSIM_AUTOSHOT=out.png` (or `--autoshot out.png`) — screenshot and
 //!   exit; `CITYSIM_SHOT_VIEW=wide|street|close`, `CITYSIM_SHOT_DELAY=secs`,
 //!   `CITYSIM_SHOT_OVERLAY=none|zones|traffic`, `CITYSIM_SHOT_SIZE=1920x1080`.
+//! * `CITYSIM_STILLS=dir` — windowless screenshots, several from one start
+//!   (`CITYSIM_STILLS_LIST`, see `stills`).
 //! * `CITYSIM_LOG_FPS=1` — log frame time / FPS every second.
 //! * `CITYSIM_CONTROL=dir` — file control channel for scripted play-throughs
 //!   (`scripts/play.py`, see `control`).
@@ -15,6 +17,7 @@ mod autoshot;
 mod control;
 mod scenario;
 mod shapes;
+mod stills;
 
 use bevy::prelude::*;
 
@@ -139,6 +142,9 @@ impl Plugin for DevPlugin {
         }
         if let Some(dir) = &c.control {
             app.add_plugins(control::ControlPlugin { dir: dir.clone() });
+        }
+        if stills::enabled() {
+            app.add_plugins(stills::StillsPlugin { demo: c.demo });
         }
         if let Some(shot) = &c.shot {
             app.add_plugins(autoshot::AutoshotPlugin {
