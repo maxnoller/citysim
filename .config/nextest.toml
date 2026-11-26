@@ -8,13 +8,22 @@
 # Report a test as slow after a minute, but never kill it.
 slow-timeout = { period = "60s" }
 
+# Tests with a wall-clock limit run alone, so a busy machine (every other test
+# at once) does not make them fail.
+[[profile.default.overrides]]
+filter = "test(=bulldoze_preview_and_apply_scale_on_a_dense_map)"
+threads-required = "num-test-threads"
+
 [profile.quick]
 # The tests that take 10 s or more on this machine's debug build (grown cities,
 # long fuzz runs). Add a new slow test here. The pinned checksum stays in.
 default-filter = """
 not (
-    test(=a_large_zoned_block_fills_with_lots_that_all_front_a_road)
+    test(=a_jammed_town_is_unhappy_about_its_commutes_and_says_so)
+  | test(=a_large_zoned_block_fills_with_lots_that_all_front_a_road)
   | test(=a_sensible_layout_built_all_at_once_stays_solvent)
+  | test(=a_town_short_of_work_land_says_what_is_missing_and_recovers_once_zoned)
+  | test(=a_town_with_enough_work_has_no_jobless_problem)
   | test(=an_avenue_carries_more_than_twice_a_street_through_a_junction)
   | test(=bad_layout_jams_and_a_second_connection_fixes_it)
   | test(=building_a_district_up_front_is_viable)
@@ -26,6 +35,7 @@ not (
   | test(=disconnected_islands)
   | test(=economy_books_taxes_and_upkeep_daily)
   | test(=enormous_dead_end_tree)
+  | test(=fuzz_a_busy_city_through_rush_hour)
   | test(=fuzz_commands_and_steps_keep_the_world_consistent)
   | test(=fuzz_is_deterministic_and_save_load_keeps_lockstep)
   | test(=growth_is_gradual)
@@ -34,6 +44,8 @@ not (
   | test(=junction_boxes_never_hold_conflicting_cars_and_lanes_never_overlap)
   | test(=map_spanning_diagonal_mesh)
   | test(=money_stays_a_constraint_for_a_player_who_keeps_expanding)
+  | test(=nobody_spends_most_of_a_day_on_a_trip)
+  | test(=overbuilding_goes_broke)
   | test(=overbuilding_goes_broke_but_a_sensible_layout_stays_solvent)
   | test(=people_stay_with_their_car_and_nights_are_quiet)
   | test(=random_edits_keep_graph_valid)
@@ -42,6 +54,7 @@ not (
   | test(=rush_hours_and_daytime_errands_emerge)
   | test(=same_seed_and_commands_give_identical_worlds)
   | test(=save_load_mid_rush_hour_stays_in_lockstep)
+  | test(=traffic_costs_business_tax_and_the_budget_shows_it)
   | test(=turning_traffic_costs_capacity_but_never_blocks_a_junction)
   | test(=zero_tax_is_no_growth_button_and_high_tax_slows_growth)
 )
