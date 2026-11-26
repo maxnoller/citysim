@@ -10,7 +10,8 @@
 //! interface into the image as well (it is not drawn otherwise: there is no
 //! window); with `CITYSIM_PERF=off|small|full` that measures the
 //! performance panel's own cost. `CITYSIM_BENCH_GPU=0` leaves GPU pass
-//! timing to the panel (`perf.rs`: on only while it is full), as in a game.
+//! timing (and draw counts) to the panel (`perf.rs`: on only while it is
+//! full), as in a game.
 //!
 //! Without a swapchain nothing would hold the CPU back from queueing frames
 //! faster than the GPU draws them, so the render world waits (after each
