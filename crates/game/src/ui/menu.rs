@@ -537,7 +537,7 @@ fn update_hint(
             state.hint_visible = false;
         }
     }
-    let show = state.hint_visible && state.tray.is_none() && !state.menu_open;
+    let show = state.hint_visible && state.tray.is_none() && state.window.is_none() && !state.menu_open;
     let d = if show { Display::Flex } else { Display::None };
     if node.display != d {
         node.display = d;

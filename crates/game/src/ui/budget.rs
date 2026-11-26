@@ -1,4 +1,4 @@
-//! The budget drawer of the tray: the balance with a chart of the daily
+//! The budget page of the city window (`city.rs`): the balance with a chart of the daily
 //! net over the last two weeks (`economy.history`), income and costs by
 //! line for yesterday (`economy.last_day`) next to today so far
 //! (`economy::budget_now`), the tax rate (steps and a slider), and the
@@ -18,8 +18,7 @@ use citysim_sim::{Budget, Command, DaySummary, Zone, balance};
 use super::UiState;
 use super::format;
 use super::theme::{self as t, UiFonts, icon};
-use super::tray::Page;
-use super::widgets::{Tooltip, UiAction, caps, figure, label, layout, paragraph, spawn_stepper, title_tick};
+use super::widgets::{Tooltip, UiAction, caps, figure, label, layout, paragraph, spawn_stepper};
 use crate::shared::{GameSet, SimCommand, SimWorld};
 
 pub struct BudgetPlugin;
@@ -40,6 +39,9 @@ enum Line {
     Residential,
     Commercial,
     Industrial,
+    /// Business tax lost to traffic (not collected; the commercial and
+    /// industrial lines are already net of it).
+    TrafficLost,
     Income,
     Upkeep,
     Services,
@@ -48,10 +50,11 @@ enum Line {
 }
 
 impl Line {
-    const ALL: [Line; 8] = [
+    const ALL: [Line; 9] = [
         Line::Residential,
         Line::Commercial,
         Line::Industrial,
+        Line::TrafficLost,
         Line::Income,
         Line::Upkeep,
         Line::Services,
@@ -64,6 +67,7 @@ impl Line {
             Line::Residential => "Residential tax",
             Line::Commercial => "Commercial tax",
             Line::Industrial => "Industrial tax",
+            Line::TrafficLost => "Business tax lost to traffic",
             Line::Income => "Income",
             Line::Upkeep => "Road upkeep",
             Line::Services => "City services",
@@ -78,6 +82,8 @@ impl Line {
             Line::Residential => b.residential_tax,
             Line::Commercial => b.commercial_tax,
             Line::Industrial => b.industrial_tax,
+            // Shown from `TrafficLoss`, never part of the totals.
+            Line::TrafficLost => 0,
             Line::Income => b.income(),
             Line::Upkeep => -b.road_upkeep,
             Line::Services => -b.services,
@@ -181,6 +187,8 @@ struct SliderDrag {
 #[derive(Resource, Default)]
 struct BudgetCache {
     today: Budget,
+    /// Business tax lost to traffic today so far.
+    lost_today: i64,
     costs: RunningCosts,
     age: f32,
     /// Inputs the texts were last written from.
@@ -192,7 +200,7 @@ type BudgetKey = (
     i64,
     u32,
     usize,
-    Budget,
+    (Budget, i64),
     u32,
     u32,
     (citysim_sim::FiscalState, citysim_sim::FiscalReason, u32),
@@ -203,160 +211,78 @@ type BudgetKey = (
 const COSTS_W: f32 = 196.0;
 /// Width of each amount column of the table.
 const AMOUNT_W: f32 = 82.0;
+/// Width of the table's labels.
+const LABEL_W: f32 = 184.0;
 /// Days in the chart.
 pub const CHART_DAYS: usize = 14;
-const CHART_H: f32 = 54.0;
-const CHART_W: f32 = 236.0;
+const CHART_H: f32 = 96.0;
+const CHART_W: f32 = 290.0;
 /// Seconds between refreshes of today's projection.
 const PROJECTION_EVERY: f32 = 0.25;
 /// Tax slider step (fraction).
 pub const TAX_STEP: f32 = 0.005;
 const TRACK_W: f32 = 220.0;
 
+/// A cell of the budget's grid, `width` wide.
 fn column(p: &mut ChildSpawnerCommands, width: f32, f: impl FnOnce(&mut ChildSpawnerCommands)) {
     p.spawn(layout(Node {
         flex_direction: FlexDirection::Column,
         width: px(width),
-        align_self: AlignSelf::Stretch,
-        justify_content: JustifyContent::Center,
+        flex_shrink: 0.0,
         ..default()
     }))
     .with_children(f);
 }
 
-fn rule(p: &mut ChildSpawnerCommands) {
-    p.spawn((
-        Node {
-            width: px(t::LW),
-            height: px(150),
-            flex_shrink: 0.0,
-            ..default()
-        },
-        BackgroundColor(t::LINE),
-        UiTransform {
-            rotation: Rot2::degrees(6.0),
-            ..default()
-        },
-        Pickable::IGNORE,
-    ));
-}
-
-fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entity, &Page)>) {
+fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, bodies: Query<Entity, With<super::city::BudgetBody>>) {
     let fonts = fonts.into_inner();
-    let Some((page, _)) = pages.iter().find(|p| *p.1 == Page::Budget) else {
+    let Ok(body) = bodies.single() else {
         return;
     };
-    commands.entity(page).insert(Name::new("Budget")).with_children(|pg| {
-        // Title.
+    commands.entity(body).with_children(|pg| {
         pg.spawn(layout(Node {
-            flex_direction: FlexDirection::Column,
-            min_width: px(98),
-            align_self: AlignSelf::Center,
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: px(24),
+            row_gap: px(26),
+            width: percent(100),
+            align_items: AlignItems::FlexStart,
             ..default()
         }))
-        .with_children(|c| {
-            c.spawn(title_tick());
-            c.spawn((
-                Text::new("BUDGET"),
-                fonts.figures(t::FONT_TITLE, t::W_BOLD),
-                t::caps_spacing(t::FONT_TITLE, 0.12),
-                TextColor(t::TEXT),
-                Pickable::IGNORE,
-            ));
-            c.spawn((
-                caps(fonts, "Booked at midnight", t::FONT_CAP, t::TEXT_MUTED),
-                Node {
-                    margin: UiRect::top(px(6)),
-                    ..default()
-                },
-            ));
-        });
-        rule(pg);
-        // Balance and chart.
-        column(pg, CHART_W, |c| {
-            c.spawn(caps(fonts, "Balance", t::FONT_CAP, t::TEXT_MUTED));
-            c.spawn((
-                figure(fonts, "", t::FONT_BIG, t::TEXT),
-                BudgetText::Balance,
-                Node {
-                    margin: UiRect::vertical(px(4)),
-                    ..default()
-                },
-            ));
-            c.spawn((
-                paragraph(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
-                BudgetText::BalanceNote,
-                Node {
-                    width: px(CHART_W),
-                    height: px(34),
-                    overflow: Overflow::clip(),
-                    ..default()
-                },
-            ));
-            chart(c, fonts);
-        });
-        rule(pg);
-        // Table.
-        column(pg, 150.0 + 2.0 * AMOUNT_W, |c| {
-            c.spawn(layout(Node {
-                justify_content: JustifyContent::End,
-                margin: UiRect::bottom(px(4)),
-                ..default()
-            }))
-            .with_children(|h| {
-                for (i, txt) in ["", "Today, est."].into_iter().enumerate() {
-                    let mut e = h.spawn((
-                        caps(fonts, txt, 10.5, t::TEXT_MUTED),
-                        Node {
-                            width: px(AMOUNT_W),
-                            justify_content: JustifyContent::End,
-                            ..default()
-                        },
-                        super::widgets::Justified(Justify::Right),
-                    ));
-                    if i == 0 {
-                        e.insert(BudgetText::YesterdayHeader);
-                    }
-                }
+        .with_children(|pg| {
+            // Balance and chart.
+            column(pg, CHART_W, |c| {
+                c.spawn(caps(fonts, "Balance", t::FONT_CAP, t::TEXT_MUTED));
+                c.spawn((
+                    figure(fonts, "", t::FONT_BIG, t::TEXT),
+                    BudgetText::Balance,
+                    Node {
+                        margin: UiRect::vertical(px(4)),
+                        ..default()
+                    },
+                ));
+                c.spawn((
+                    paragraph(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
+                    BudgetText::BalanceNote,
+                    Node {
+                        width: px(CHART_W),
+                        height: px(34),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                ));
+                chart(c, fonts);
             });
-            for (li, line) in Line::ALL.iter().enumerate() {
-                let total = line.is_total();
+            // Table.
+            column(pg, LABEL_W + 2.0 * AMOUNT_W, |c| {
                 c.spawn(layout(Node {
-                    align_items: AlignItems::Center,
-                    height: px(if total { 21.0 } else { 18.0 }),
-                    border: UiRect::top(px(if total { 1.0 } else { 0.0 })),
-                    margin: UiRect::bottom(px(if total && *line != Line::Net { 4.0 } else { 0.0 })),
+                    justify_content: JustifyContent::End,
+                    margin: UiRect::bottom(px(4)),
                     ..default()
                 }))
-                .insert(BorderColor::all(t::RULE))
-                .with_children(|r| {
-                    r.spawn(layout(Node {
-                        width: px(150),
-                        align_items: AlignItems::Center,
-                        column_gap: px(7),
-                        ..default()
-                    }))
-                    .with_children(|n| {
-                        if let Some(z) = line.zone() {
-                            n.spawn((
-                                layout(Node {
-                                    width: px(7),
-                                    height: px(7),
-                                    ..default()
-                                }),
-                                BackgroundColor(t::zone_color(Some(z))),
-                            ));
-                        }
-                        if total {
-                            n.spawn(caps(fonts, line.name(), 11.0, t::TEXT));
-                        } else {
-                            n.spawn(label(fonts, line.name(), t::FONT_BODY, t::W_MEDIUM, t::SLOT_INK));
-                        }
-                    });
-                    for col in 0..2 {
-                        r.spawn((
-                            figure(fonts, "", if total { 16.0 } else { 14.0 }, t::TEXT),
-                            BudgetText::Amount(li, col),
+                .with_children(|h| {
+                    for (i, txt) in ["", "Today, est."].into_iter().enumerate() {
+                        let mut e = h.spawn((
+                            caps(fonts, txt, 10.5, t::TEXT_MUTED),
                             Node {
                                 width: px(AMOUNT_W),
                                 justify_content: JustifyContent::End,
@@ -364,189 +290,248 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                             },
                             super::widgets::Justified(Justify::Right),
                         ));
+                        if i == 0 {
+                            e.insert(BudgetText::YesterdayHeader);
+                        }
                     }
                 });
-            }
-        });
-        rule(pg);
-        // Where the running costs go (today, if the day ended now).
-        column(pg, COSTS_W, |c| {
-            c.spawn((
-                caps(fonts, "Running costs · today", 10.5, t::TEXT_MUTED),
-                Node {
-                    margin: UiRect::bottom(px(4)),
-                    ..default()
-                },
-                Tooltip::new(
-                    "Running costs",
-                    "What the roads and city services cost per day at the city's size now.",
-                ),
-                Hovered::default(),
-            ));
-            for (i, name) in COST_LINES.iter().enumerate() {
-                c.spawn(layout(Node {
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::SpaceBetween,
-                    height: px(17),
-                    border: UiRect::top(px(if i == 4 { 1.0 } else { 0.0 })),
-                    ..default()
-                }))
-                .insert(BorderColor::all(t::RULE))
-                .with_children(|r| {
-                    r.spawn((
-                        label(fonts, *name, t::FONT_SMALL, t::W_MEDIUM, t::SLOT_INK),
-                        BudgetText::CostLabel(i),
-                    ));
-                    r.spawn((
-                        figure(fonts, "", 13.0, t::TEXT),
-                        BudgetText::Cost(i),
-                        super::widgets::Justified(Justify::Right),
-                    ));
-                });
-            }
-            c.spawn((
-                paragraph(fonts, "", t::FONT_SMALL - 0.5, t::W_MEDIUM, t::TEXT_MUTED),
-                BudgetText::Attendance,
-                Node {
-                    width: px(COSTS_W),
-                    margin: UiRect::top(px(6)),
-                    ..default()
-                },
-            ));
-        });
-        rule(pg);
-        // Taxes and the fiscal state.
-        column(pg, 262.0, |c| {
-            c.spawn(caps(fonts, "Tax rate", t::FONT_CAP, t::TEXT_MUTED));
-            c.spawn(layout(Node {
-                align_items: AlignItems::Center,
-                column_gap: px(8),
-                margin: UiRect::vertical(px(5)),
-                ..default()
-            }))
-            .with_children(|r| {
-                r.spawn((
-                    figure(fonts, "", 30.0, t::ACCENT_TEXT),
-                    BudgetText::TaxValue,
+                for (li, line) in Line::ALL.iter().enumerate() {
+                    let total = line.is_total();
+                    c.spawn(layout(Node {
+                        align_items: AlignItems::Center,
+                        height: px(if total { 21.0 } else { 18.0 }),
+                        border: UiRect::top(px(if total { 1.0 } else { 0.0 })),
+                        margin: UiRect::bottom(px(if total && *line != Line::Net { 4.0 } else { 0.0 })),
+                        ..default()
+                    }))
+                    .insert(BorderColor::all(t::RULE))
+                    .with_children(|r| {
+                        r.spawn(layout(Node {
+                            width: px(LABEL_W),
+                            align_items: AlignItems::Center,
+                            column_gap: px(7),
+                            ..default()
+                        }))
+                        .with_children(|n| {
+                            if let Some(z) = line.zone() {
+                                n.spawn((
+                                    layout(Node {
+                                        width: px(7),
+                                        height: px(7),
+                                        ..default()
+                                    }),
+                                    BackgroundColor(t::zone_color(Some(z))),
+                                ));
+                            }
+                            if *line == Line::TrafficLost {
+                                n.spawn((
+                                    layout(Node {
+                                        width: px(7),
+                                        height: px(2),
+                                        ..default()
+                                    }),
+                                    BackgroundColor(t::WARNING),
+                                ));
+                                n.spawn(label(fonts, line.name(), t::FONT_SMALL, t::W_MEDIUM, t::WARNING));
+                            } else if total {
+                                n.spawn(caps(fonts, line.name(), 11.0, t::TEXT));
+                            } else {
+                                n.spawn(label(fonts, line.name(), t::FONT_BODY, t::W_MEDIUM, t::SLOT_INK));
+                            }
+                        });
+                        for col in 0..2 {
+                            r.spawn((
+                                figure(fonts, "", if total { 16.0 } else { 14.0 }, t::TEXT),
+                                BudgetText::Amount(li, col),
+                                Node {
+                                    width: px(AMOUNT_W),
+                                    justify_content: JustifyContent::End,
+                                    ..default()
+                                },
+                                super::widgets::Justified(Justify::Right),
+                            ));
+                        }
+                    });
+                }
+            });
+            // Where the running costs go (today, if the day ended now).
+            column(pg, COSTS_W, |c| {
+                c.spawn((
+                    caps(fonts, "Running costs · today", 10.5, t::TEXT_MUTED),
                     Node {
-                        min_width: px(70),
+                        margin: UiRect::bottom(px(4)),
+                        ..default()
+                    },
+                    Tooltip::new(
+                        "Running costs",
+                        "What the roads and city services cost per day at the city's size now.",
+                    ),
+                    Hovered::default(),
+                ));
+                for (i, name) in COST_LINES.iter().enumerate() {
+                    c.spawn(layout(Node {
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::SpaceBetween,
+                        height: px(17),
+                        border: UiRect::top(px(if i == 4 { 1.0 } else { 0.0 })),
+                        ..default()
+                    }))
+                    .insert(BorderColor::all(t::RULE))
+                    .with_children(|r| {
+                        r.spawn((
+                            label(fonts, *name, t::FONT_SMALL, t::W_MEDIUM, t::SLOT_INK),
+                            BudgetText::CostLabel(i),
+                        ));
+                        r.spawn((
+                            figure(fonts, "", 13.0, t::TEXT),
+                            BudgetText::Cost(i),
+                            super::widgets::Justified(Justify::Right),
+                        ));
+                    });
+                }
+                c.spawn((
+                    paragraph(fonts, "", t::FONT_SMALL - 0.5, t::W_MEDIUM, t::TEXT_MUTED),
+                    BudgetText::Attendance,
+                    Node {
+                        width: px(COSTS_W),
+                        margin: UiRect::top(px(6)),
                         ..default()
                     },
                 ));
-                spawn_stepper(
-                    r,
-                    fonts,
-                    UiAction::TaxStep(-5),
-                    icon::MINUS,
-                    Tooltip::new("Lower taxes", "Half a percent less. Lower taxes make people happier."),
-                );
-                spawn_stepper(
-                    r,
-                    fonts,
-                    UiAction::TaxStep(5),
-                    icon::PLUS,
-                    Tooltip::new("Raise taxes", "Half a percent more. Higher taxes cost happiness."),
-                );
             });
-            // Slider.
-            c.spawn((
-                Node {
-                    width: px(TRACK_W),
-                    height: px(18),
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    ..default()
-                },
-                TaxTrack,
-                Hovered::default(),
-                Tooltip::new(
-                    "Tax rate",
-                    "Drag to set the tax on homes, shops and industry (0% to 30%).",
-                ),
-            ))
-            .with_children(|tr| {
-                tr.spawn((
-                    layout(Node {
-                        height: px(6),
-                        width: percent(100),
-                        border: UiRect::all(px(1)),
-                        ..default()
-                    }),
-                    BackgroundColor(t::WELL),
-                    BorderColor::all(t::LINE),
-                ))
-                .with_child((
-                    layout(Node {
-                        height: percent(100),
-                        width: percent(0),
-                        ..default()
-                    }),
-                    BackgroundColor(t::ACCENT),
-                    TaxFill,
-                ));
-                tr.spawn((
-                    layout(Node {
-                        position_type: PositionType::Absolute,
-                        top: px(0),
-                        width: px(6),
-                        height: px(18),
-                        margin: UiRect::left(px(-3)),
-                        left: percent(0),
-                        ..default()
-                    }),
-                    BackgroundColor(t::TEXT),
-                    TaxKnob,
-                ));
-            });
-            c.spawn(layout(Node {
-                width: px(TRACK_W),
-                justify_content: JustifyContent::SpaceBetween,
-                margin: UiRect::bottom(px(10)),
-                ..default()
-            }))
-            .with_children(|r| {
-                r.spawn(caps(fonts, "0%", 10.0, t::TEXT_FAINT));
-                r.spawn(caps(fonts, format::percent(balance::MAX_TAX_RATE), 10.0, t::TEXT_FAINT));
-            });
-            // Fiscal state.
-            c.spawn(layout(Node {
-                column_gap: px(9),
-                ..default()
-            }))
-            .with_children(|f| {
-                f.spawn((
-                    layout(Node {
-                        width: px(4),
-                        align_self: AlignSelf::Stretch,
-                        ..default()
-                    }),
-                    BackgroundColor(t::POSITIVE),
-                    FiscalBar,
-                ));
-                f.spawn(layout(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(2),
-                    width: px(248),
+            // Taxes and the fiscal state.
+            column(pg, 262.0, |c| {
+                c.spawn(caps(fonts, "Tax rate", t::FONT_CAP, t::TEXT_MUTED));
+                c.spawn(layout(Node {
+                    align_items: AlignItems::Center,
+                    column_gap: px(8),
+                    margin: UiRect::vertical(px(5)),
                     ..default()
                 }))
-                .with_children(|col| {
-                    col.spawn((caps(fonts, "", t::FONT_CAP, t::POSITIVE), BudgetText::FiscalTitle));
-                    col.spawn((
-                        paragraph(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT),
-                        BudgetText::FiscalBody,
+                .with_children(|r| {
+                    r.spawn((
+                        figure(fonts, "", 30.0, t::ACCENT_TEXT),
+                        BudgetText::TaxValue,
                         Node {
-                            width: px(248),
+                            min_width: px(70),
                             ..default()
                         },
                     ));
-                    col.spawn((
-                        paragraph(fonts, "", t::FONT_SMALL, t::W_SEMIBOLD, t::ACCENT_TEXT),
-                        BudgetText::FiscalFix,
-                        Node {
-                            width: px(248),
+                    spawn_stepper(
+                        r,
+                        fonts,
+                        UiAction::TaxStep(-5),
+                        icon::MINUS,
+                        Tooltip::new("Lower taxes", "Half a percent less. Lower taxes make people happier."),
+                    );
+                    spawn_stepper(
+                        r,
+                        fonts,
+                        UiAction::TaxStep(5),
+                        icon::PLUS,
+                        Tooltip::new("Raise taxes", "Half a percent more. Higher taxes cost happiness."),
+                    );
+                });
+                // Slider.
+                c.spawn((
+                    Node {
+                        width: px(TRACK_W),
+                        height: px(18),
+                        justify_content: JustifyContent::Center,
+                        flex_direction: FlexDirection::Column,
+                        ..default()
+                    },
+                    TaxTrack,
+                    Hovered::default(),
+                    Tooltip::new(
+                        "Tax rate",
+                        "Drag to set the tax on homes, shops and industry (0% to 30%).",
+                    ),
+                ))
+                .with_children(|tr| {
+                    tr.spawn((
+                        layout(Node {
+                            height: px(6),
+                            width: percent(100),
+                            border: UiRect::all(px(1)),
                             ..default()
-                        },
+                        }),
+                        BackgroundColor(t::WELL),
+                        BorderColor::all(t::LINE),
+                    ))
+                    .with_child((
+                        layout(Node {
+                            height: percent(100),
+                            width: percent(0),
+                            ..default()
+                        }),
+                        BackgroundColor(t::ACCENT),
+                        TaxFill,
                     ));
+                    tr.spawn((
+                        layout(Node {
+                            position_type: PositionType::Absolute,
+                            top: px(0),
+                            width: px(6),
+                            height: px(18),
+                            margin: UiRect::left(px(-3)),
+                            left: percent(0),
+                            ..default()
+                        }),
+                        BackgroundColor(t::TEXT),
+                        TaxKnob,
+                    ));
+                });
+                c.spawn(layout(Node {
+                    width: px(TRACK_W),
+                    justify_content: JustifyContent::SpaceBetween,
+                    margin: UiRect::bottom(px(10)),
+                    ..default()
+                }))
+                .with_children(|r| {
+                    r.spawn(caps(fonts, "0%", 10.0, t::TEXT_FAINT));
+                    r.spawn(caps(fonts, format::percent(balance::MAX_TAX_RATE), 10.0, t::TEXT_FAINT));
+                });
+                // Fiscal state.
+                c.spawn(layout(Node {
+                    column_gap: px(9),
+                    ..default()
+                }))
+                .with_children(|f| {
+                    f.spawn((
+                        layout(Node {
+                            width: px(4),
+                            align_self: AlignSelf::Stretch,
+                            ..default()
+                        }),
+                        BackgroundColor(t::POSITIVE),
+                        FiscalBar,
+                    ));
+                    f.spawn(layout(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(2),
+                        width: px(248),
+                        ..default()
+                    }))
+                    .with_children(|col| {
+                        col.spawn((caps(fonts, "", t::FONT_CAP, t::POSITIVE), BudgetText::FiscalTitle));
+                        col.spawn((
+                            paragraph(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT),
+                            BudgetText::FiscalBody,
+                            Node {
+                                width: px(248),
+                                ..default()
+                            },
+                        ));
+                        col.spawn((
+                            paragraph(fonts, "", t::FONT_SMALL, t::W_SEMIBOLD, t::ACCENT_TEXT),
+                            BudgetText::FiscalFix,
+                            Node {
+                                width: px(248),
+                                ..default()
+                            },
+                        ));
+                    });
                 });
             });
         });
@@ -653,6 +638,7 @@ fn update_budget(
     if cache.age >= PROJECTION_EVERY || cache.key.is_some_and(|k| k.0 != sim.generation) {
         cache.age = 0.0;
         cache.today = budget_now(w);
+        cache.lost_today = citysim_sim::economy::traffic_loss_now(w).business_tax;
         cache.costs = running_costs(w);
     }
     let key = (
@@ -660,7 +646,7 @@ fn update_budget(
         e.money,
         e.tax_rate.to_bits(),
         e.history.len(),
-        cache.today,
+        (cache.today, cache.lost_today),
         w.stats.road_cells,
         w.stats.population,
         (e.fiscal.state, e.fiscal.reason, e.fiscal.left_last_night),
@@ -704,6 +690,20 @@ fn update_budget(
                 },
                 t::TEXT_MUTED,
             ),
+            BudgetText::Amount(li, col) if Line::ALL[li] == Line::TrafficLost => {
+                let lost = if col == 0 {
+                    e.last_day_traffic.business_tax
+                } else {
+                    cache.lost_today
+                };
+                if col == 0 && !booked {
+                    ("\u{2014}".to_string(), t::TEXT_FAINT)
+                } else if lost == 0 {
+                    (format::money(0), t::TEXT_MUTED)
+                } else {
+                    (format::signed_money(-lost), t::WARNING)
+                }
+            }
             BudgetText::Amount(li, col) => {
                 let line = Line::ALL[li];
                 if col == 0 && !booked {

@@ -106,6 +106,21 @@ pub const ZONE_INDUSTRIAL: Color = rgb(0xf0a73c);
 /// De-zone has no zone colour; a neutral grey.
 pub const ZONE_NONE: Color = rgb(0x8e97a5);
 
+/// Series of the city window's charts, in stacking order (the accent
+/// first; distinct in hue and lightness, readable on the dark well).
+pub const CHART_SERIES: [Color; 5] = [
+    ACCENT_SET.base,
+    rgb(0x56c2c9),
+    rgb(0xe6b450),
+    rgb(0xd77a9b),
+    rgb(0x7d8aa0),
+];
+
+/// The bulldozer's switch while it is on, and its mode plate's edge: a
+/// warning red, never the accent (it destroys).
+pub const DEMOLISH_TOP: Color = rgb(0xb9453a);
+pub const DEMOLISH_BOTTOM: Color = rgb(0x8a2e27);
+
 /// Grass and asphalt of the tray's picture slots.
 pub const PIC_GRASS: Color = rgb(0x6fae58);
 pub const PIC_ASPHALT: Color = rgb(0x474d59);
@@ -253,6 +268,8 @@ pub mod icon {
     pub const KEYBOARD: char = '\u{e284}';
     pub const SLASH: char = '\u{e51d}';
     pub const ROTATE: char = '\u{e148}'; // rotate-ccw
+    pub const DEMOLISH: char = '\u{e18e}'; // trash-2
+    pub const MAP_PIN: char = '\u{e111}';
     pub const GAUGE: char = '\u{e1bf}';
 }
 

@@ -67,14 +67,14 @@ const PROC_S: f32 = 1.0;
 const RATE_S: f64 = 2.0;
 
 /// Where the panels hang (logical px): under the city plate.
-const TOP: f32 = 68.0;
-const SMALL_H: f32 = 40.0;
+pub(super) const TOP: f32 = 68.0;
+pub(super) const SMALL_H: f32 = 40.0;
 const COL_A: f32 = 292.0;
 const COL_B: f32 = 262.0;
 const PAD: f32 = 20.0;
 const GAP: f32 = 16.0;
 /// Columns, the rule between them, padding and the edge line.
-const FULL_W: f32 = PAD + COL_A + GAP + 1.0 + GAP + COL_B + PAD + t::LW;
+pub(super) const FULL_W: f32 = PAD + COL_A + GAP + 1.0 + GAP + COL_B + PAD + t::LW;
 const GRAPH_H: f32 = 76.0;
 const PASSES: usize = 4;
 
@@ -418,9 +418,9 @@ impl GraphMaterial {
 struct SmallRoot;
 
 #[derive(Component)]
-struct FullRoot {
+pub(super) struct FullRoot {
     /// Eased fit scale.
-    fit: f32,
+    pub(super) fit: f32,
 }
 
 /// A graph and its material.
