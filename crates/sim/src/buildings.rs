@@ -92,8 +92,9 @@ impl Footprint {
     /// The footprint of cells `min..=max` of `lattice` (whose geometry is
     /// `l`) with its front towards `facing`.
     pub fn new(lattice: LatticeId, l: &Lattice, min: [i32; 2], max: [i32; 2], facing: Facing) -> Footprint {
-        let center = l.world_at((min[0] + max[0] + 1) as f32 * 0.5, (min[1] + max[1] + 1) as f32 * 0.5);
-        let d = l.dir(facing);
+        let cx = (min[0] + max[0] + 1) as f32 * 0.5;
+        let center = l.world_at(cx, (min[1] + max[1] + 1) as f32 * 0.5);
+        let d = l.dir_at(cx, facing);
         let (w, h) = ((max[0] - min[0] + 1) as u8, (max[1] - min[1] + 1) as u8);
         let size = match facing {
             Facing::PlusX | Facing::MinusX => [h, w],
@@ -144,6 +145,17 @@ impl Footprint {
     /// Number of cells.
     pub fn area(&self) -> u32 {
         self.size[0] as u32 * self.size[1] as u32
+    }
+
+    /// Cells the building itself stands on: its front
+    /// `balance::BUILT_DEPTH` rows (deeper rows are its yard).
+    pub fn built_area(&self) -> u32 {
+        self.size[0] as u32 * self.size[1].min(crate::balance::BUILT_DEPTH) as u32
+    }
+
+    /// Rows of yard behind the building.
+    pub fn yard_depth(&self) -> u8 {
+        self.size[1].saturating_sub(crate::balance::BUILT_DEPTH)
     }
 
     /// Corners in sim metres: front-left, front-right, back-right,

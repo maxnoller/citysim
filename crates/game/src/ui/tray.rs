@@ -1031,12 +1031,20 @@ fn zone_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts, hatch: &MaterialNode
             });
             opt_row(o, fonts, "Depth", |r| {
                 r.spawn(layout(Node::default())).with_children(|g| {
-                    for d in 1..=citysim_sim::balance::BLOCK_DEPTH {
-                        let (text, desc) = if d == 1 {
-                            ("1 row", "Only the row of lots along the road (along-road mode).")
-                        } else {
-                            ("2 rows", "The whole depth of the block (along-road mode).")
-                        };
+                    for (d, text, desc) in [
+                        (1, "1 row", "Only the row of lots along the road (along-road mode)."),
+                        (
+                            2,
+                            "2 rows",
+                            "Two rows: lots as deep as their buildings (along-road mode).",
+                        ),
+                        (4, "4 rows", "Four rows: lots with gardens and yards (along-road mode)."),
+                        (
+                            citysim_sim::balance::BLOCK_DEPTH,
+                            "Full",
+                            "As deep as the land goes, up to where the lots of the next road begin (along-road mode).",
+                        ),
+                    ] {
                         let id = spawn_button(
                             g,
                             UiButton::new(UiAction::ZoneDepth(d), ButtonKind::Segment),

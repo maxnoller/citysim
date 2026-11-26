@@ -1031,14 +1031,20 @@ pub const MIN_ROAD_SPACING_M: f32 = 8.0;
 /// Lateral acceleration drivers accept in curves, m/s² (speed limit on a
 /// curve of radius `r` is `sqrt(CORNER_ACCEL * r)`).
 pub const CORNER_ACCEL: f32 = 2.5;
-/// Zone blocks: cells per block side, from the road (the lot reach). The
-/// data structures allow up to [`MAX_BLOCK_DEPTH`].
-pub const BLOCK_DEPTH: u8 = 2;
+/// Zone blocks: cells per block side, from the road (48 m: land between
+/// streets up to about 100 m apart can be zoned all the way in; where the
+/// rows of two roads meet, the cell nearer its own road keeps the land).
+/// The data structures allow up to [`MAX_BLOCK_DEPTH`].
+pub const BLOCK_DEPTH: u8 = 6;
 pub const MAX_BLOCK_DEPTH: u8 = 6;
+/// Rows of a lot that hold the building (its capacity); the rest of a
+/// deeper lot is its yard.
+pub const BUILT_DEPTH: u8 = 2;
 /// Lattices of two blocks coincide (share cells) when their directions are
 /// parallel or perpendicular within this many degrees and their offset is a
-/// whole number of cells within this fraction of a cell.
-pub const LATTICE_ANGLE_TOL_DEG: f32 = 1.0;
+/// whole number of cells within this fraction of a cell, at both ends of
+/// the newer block.
+pub const LATTICE_ANGLE_TOL_DEG: f32 = 0.2;
 pub const LATTICE_OFFSET_TOL: f32 = 0.02;
 /// Car and truck body sizes the traffic rules keep apart (length, width),
 /// metres; renderers should draw vehicles within them. Queues keep

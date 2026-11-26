@@ -14,9 +14,13 @@
 //! * Road, upgrade: click a road for the stretch between junctions, or
 //!   drag along it for a part; it becomes the chosen kind.
 //! * Road, junctions: click a junction to switch its control.
-//! * Zone: paint (drag over cells), frontage (click a road side; drag along
-//!   it for a part), fill (click), marquee (drag a rectangle that follows
-//!   the lattice it starts on). De-zoning is the same with no zone.
+//! * Zone: paint (drag over cells of any lattice), frontage (click a road
+//!   side for the stretch between junctions; drag along the roads to follow
+//!   them through bends, pieces and junctions, keeping to that side; depth
+//!   1, 2, 4 rows or the full block), fill (click land enclosed by roads,
+//!   even its bare middle), marquee (drag a rectangle turned to the cell it
+//!   starts on; it takes the cells of every lattice inside). De-zoning is
+//!   the same with no zone.
 //! * Bulldoze: road (click a stretch or a building; drag along a road for a
 //!   part), area (marquee).
 //! * Tab cycles the current tool's modes, Ctrl+Z undoes (`plan::UndoRecord`).
@@ -536,11 +540,16 @@ fn track_pointer(
 /// The lattice rectangle from `p0` to `p1` (whole cells of lattice `l`,
 /// both corner cells included), as a quad in sim metres.
 pub fn lattice_quad(world: &World, l: LatticeId, p0: [f32; 2], p1: [f32; 2]) -> [[f32; 2]; 4] {
-    let lat = world
-        .zoning
-        .lattice(l)
-        .cloned()
-        .unwrap_or_else(citysim_sim::Lattice::world);
+    let lat = match world.zoning.lattice(l) {
+        // A strip bends: the rectangle follows the cell the drag started on.
+        Some(st) if st.is_strip() => {
+            let (i, j) = st.cell_of(p0);
+            let (u, _) = st.axes_at(i as f32 + 0.5);
+            citysim_sim::Lattice::new(st.world_at(i as f32, j as f32), u)
+        }
+        Some(x) => x.clone(),
+        None => citysim_sim::Lattice::world(),
+    };
     let (a, b) = (lat.cell_of(p0), lat.cell_of(p1));
     let (i0, i1) = (a.0.min(b.0), a.0.max(b.0) + 1);
     let (j0, j1) = (a.1.min(b.1), a.1.max(b.1) + 1);
@@ -550,6 +559,29 @@ pub fn lattice_quad(world: &World, l: LatticeId, p0: [f32; 2], p1: [f32; 2]) -> 
         lat.world_at(i1 as f32, j1 as f32),
         lat.world_at(i0 as f32, j1 as f32),
     ]
+}
+
+/// A walk along the roads as one polyline (for the tool's preview).
+fn walk_polyline(world: &World, walk: &[zoning::RoadPiece]) -> Vec<[f32; 2]> {
+    let mut out: Vec<[f32; 2]> = Vec::new();
+    for p in walk {
+        let Some(seg) = world.roads.segments.get(p.segment) else {
+            continue;
+        };
+        let (a, b) = (p.from_m.min(p.to_m), p.from_m.max(p.to_m));
+        if b - a < 0.05 {
+            continue;
+        }
+        let mut pts = seg.curve.sub(a, b).flatten(0.2);
+        if !p.forward {
+            pts.reverse();
+        }
+        if out.last().zip(pts.first()).is_some_and(|(x, y)| dist(*x, *y) < 0.01) {
+            pts.remove(0);
+        }
+        out.extend(pts);
+    }
+    out
 }
 
 /// A quad shrunk towards its centre by `m` metres along each diagonal.
@@ -727,7 +759,8 @@ pub fn pending(
                 ZoneMode::Frontage => {
                     let depth = opts.zone_depth.clamp(1, balance::BLOCK_DEPTH);
                     let anchor = state.press.map_or(c, |p| p.at);
-                    let reach = 4.0 + depth as f32 * citysim_sim::CELL_SIZE + 2.0;
+                    // Pointing anywhere on the land beside a road picks it.
+                    let reach = 4.0 + depth.min(4) as f32 * citysim_sim::CELL_SIZE + 2.0;
                     let Some((s, d, _)) = world.roads.nearest_segment(anchor, reach) else {
                         return no_zone(zone, "Point at the land beside a road");
                     };
@@ -740,29 +773,42 @@ pub fn pending(
                     } else {
                         zoning::Side::Left
                     };
-                    let mut cells = zoning::frontage(world, s, side, depth);
-                    let st = Stretch::of(world, s);
-                    if let Some(p) = state.press.filter(|p| p.moved)
-                        && let (Some(s0), Some(s1)) = (st.locate(world, p.at), st.locate(world, c))
-                        && (s1 - s0).abs() >= citysim_sim::CELL_SIZE
-                    {
-                        let (lo, hi) = (s0.min(s1), s0.max(s1));
-                        cells.retain(|&cell| {
-                            world
-                                .zoning
-                                .cell_center(cell)
-                                .and_then(|q| st.locate(world, q))
-                                .is_some_and(|x| (lo - 4.0..=hi + 4.0).contains(&x))
-                        });
-                    }
+                    // A click: the road between its junctions. A drag: along
+                    // the roads from the press to the pointer, through bends,
+                    // pieces and junctions, keeping to the same side.
+                    let dragged = state
+                        .press
+                        .filter(|p| p.moved && dist(p.at, c) >= citysim_sim::CELL_SIZE)
+                        .and_then(|_| world.roads.nearest_segment(c, reach.max(24.0)))
+                        .and_then(|(s1, d1, _)| zoning::road_walk(world, (s, d), (s1, d1), 4000.0));
+                    let walk = dragged.unwrap_or_else(|| zoning::stretch_walk(world, s));
+                    let side = match walk.iter().find(|p| p.segment == s) {
+                        Some(p) if !p.forward => match side {
+                            zoning::Side::Left => zoning::Side::Right,
+                            zoning::Side::Right => zoning::Side::Left,
+                        },
+                        _ => side,
+                    };
+                    let cells = zoning::frontage_walk(world, &walk, side, depth);
+                    let stretch = walk_polyline(world, &walk);
                     if cells.is_empty() {
-                        return no_zone(zone, "No free lots along this side of the road");
+                        return Pending::Zone {
+                            ops: Vec::new(),
+                            zone,
+                            area: None,
+                            stretch,
+                            hint: Some(if zone.is_some() {
+                                "No free land along this side of the road"
+                            } else {
+                                "Nothing zoned along this side of the road"
+                            }),
+                        };
                     }
                     Pending::Zone {
                         ops: vec![cells_op(cells)],
                         zone,
                         area: None,
-                        stretch: st.polyline(world),
+                        stretch,
                         hint: None,
                     }
                 }
@@ -780,9 +826,19 @@ pub fn pending(
                     }
                 }
                 ZoneMode::Marquee => {
+                    let usable = |p: [f32; 2]| {
+                        world
+                            .zoning
+                            .cell_at(p)
+                            .filter(|&r| world.zoning.cell(r).is_some_and(|x| x.usable()))
+                    };
                     let (l, p0) = match state.press {
                         Some(p) => (p.lattice, p.at),
-                        None => (world.zoning.cell_at(c).map_or(LatticeId::WORLD, |r| r.lattice), c),
+                        None => match usable(c) {
+                            Some(r) => (r.lattice, c),
+                            // Not over zoning land: nothing to outline yet.
+                            None => return no_zone(zone, "Drag over the land beside the roads"),
+                        },
                     };
                     let quad = lattice_quad(world, l, p0, c);
                     Pending::Zone {
@@ -1688,10 +1744,14 @@ mod tests {
                 .all(|&c| w.zoning.cell_center(c).is_some_and(|q| q[1] < 1028.0)),
             "all on the north side"
         );
-        let one = ToolOptions { zone_depth: 1, ..opts };
-        let p1 = pending(zone, modes, RoadChoice::Street, &one, &s, &w);
-        let (e1, _) = plan::evaluate(&plan::scratch(&w), p1.ops());
-        assert_eq!(e1.zone_cells().len() * 2, cells.len());
+        // One row is half of two rows; the full block is deeper still.
+        let count = |d: u8| {
+            let o = ToolOptions { zone_depth: d, ..opts };
+            let p = pending(zone, modes, RoadChoice::Street, &o, &s, &w);
+            plan::evaluate(&plan::scratch(&w), p.ops()).0.zone_cells().len()
+        };
+        assert_eq!(count(1) * 2, count(2));
+        assert!(cells.len() > count(2), "{} full vs {} two rows", cells.len(), count(2));
     }
 
     #[test]

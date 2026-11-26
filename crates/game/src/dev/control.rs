@@ -34,6 +34,10 @@
 //! * `node PREFIX` — window position (logical px) of the first visible UI
 //!   node whose `Name` starts with PREFIX: `X Y` (people-panel links are
 //!   named "Person link", "Place link", "Vehicle link", "Follow").
+//! * `screenm X Y` — like `screen`, for a point in sim metres.
+//! * `money N` — set the city's money (test beds only).
+//! * `zonestats` — zoning numbers: lattices, blocks, usable / zoned /
+//!   blocked cells, empty zoned cells, buildings and building cells.
 //! * `quit` — exit.
 
 use std::collections::VecDeque;
@@ -251,7 +255,7 @@ fn tool_name(t: ActiveTool) -> &'static str {
 
 #[derive(bevy::ecs::system::SystemParam)]
 struct Ctx<'w, 's> {
-    sim: Res<'w, SimWorld>,
+    sim: ResMut<'w, SimWorld>,
     clock: Res<'w, SimClock>,
     tool: Res<'w, ActiveTool>,
     overlay: Res<'w, OverlayMode>,
@@ -316,6 +320,42 @@ fn poll_commands(mut commands: Commands, time: Res<Time<Real>>, mut ctl: ResMut<
     }
 }
 
+/// Zoning numbers for `zonestats`.
+fn zone_stats(w: &citysim_sim::World) -> String {
+    use citysim_sim::zoning::Blocked;
+    let z = &w.zoning;
+    let (mut usable, mut zoned, mut empty_zoned, mut road, mut contested, mut under_bld, mut uncovered) =
+        (0, 0, 0, 0, 0, 0, 0);
+    for (_, c) in z.cells() {
+        if !c.covered {
+            uncovered += 1;
+            continue;
+        }
+        match c.blocked {
+            None => usable += 1,
+            Some(Blocked::Road) => road += 1,
+            Some(Blocked::Contested) => contested += 1,
+            Some(Blocked::Building) => under_bld += 1,
+        }
+        if c.usable() && c.zone.is_some() {
+            zoned += 1;
+            if c.building.is_none() {
+                empty_zoned += 1;
+            }
+        }
+    }
+    let bcells: u32 = w.buildings.values().map(|b| b.footprint.area()).sum();
+    format!(
+        "lattices={} blocks={} usable={usable} zoned={zoned} empty_zoned={empty_zoned} blocked_road={road} \
+         contested={contested} under_building={under_bld} uncovered={uncovered} buildings={} building_cells={bcells} \
+         pop={}",
+        z.lattices().count(),
+        z.blocks.len(),
+        w.buildings.len(),
+        w.stats.population
+    )
+}
+
 fn num<T: std::str::FromStr>(args: &[&str], i: usize) -> Result<T, String> {
     args.get(i)
         .and_then(|s| s.parse().ok())
@@ -344,6 +384,28 @@ fn run(
                 true,
                 &format!("{:.0} {:.0} {}", p.x, p.y, if inside { "inside" } else { "outside" }),
             );
+        }
+        "screenm" => {
+            let (x, y): (f32, f32) = (num(args, 0)?, num(args, 1)?);
+            let (cam, tf) = cx.cams.single().map_err(|_| "no world camera".to_string())?;
+            let win = cx.window.single().map_err(|_| "no window".to_string())?;
+            let p = cam
+                .world_to_viewport(tf, Vec3::new(x, 0.0, y))
+                .map_err(|e| format!("not visible: {e:?}"))?;
+            let inside = p.x >= 0.0 && p.y >= 0.0 && p.x < win.width() && p.y < win.height();
+            ctl.reply(
+                seq,
+                true,
+                &format!("{:.0} {:.0} {}", p.x, p.y, if inside { "inside" } else { "outside" }),
+            );
+        }
+        "money" => {
+            cx.sim.world.economy.money = num(args, 0)?;
+            ctl.reply(seq, true, "money set");
+        }
+        "zonestats" => {
+            let line = zone_stats(&cx.sim.world);
+            ctl.reply(seq, true, &line);
         }
         "preview-road" => {
             // What the sim says about a road (no change): `ok COST` or the

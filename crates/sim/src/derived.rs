@@ -256,6 +256,13 @@ impl Derived {
 
     /// Rebuild the connected-cell sets if the blocks or the road
     /// connectivity changed. Requires `ensure_roads`.
+    /// Forget the zoning lists (the blocks were made again without a road
+    /// edit: an older save's zoning renewed on load).
+    pub(crate) fn forget_zoning(&mut self) {
+        self.zoning_key = None;
+        self.cand_key = None;
+    }
+
     pub fn ensure_zoning(&mut self, zoning: &Zoning) {
         let key = (zoning.roads_version, self.roads_key.unwrap_or_default());
         if self.zoning_key == Some(key) {

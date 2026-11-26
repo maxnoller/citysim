@@ -2,7 +2,8 @@
 //!
 //! Zones are drawn only while they matter: in `OverlayMode::Zones` or while
 //! a zoning tool is active (a 40 % fill and a bright outline on every zoned
-//! cell). The rest of the time the ground carries no zone colour at all.
+//! cell; with the tool, faint outlines on the empty land that can be
+//! zoned). The rest of the time the ground carries no zone colour at all.
 //!
 //! Drawn per zoning cell on whatever lattice it belongs to (rotated quads
 //! along curved and rotated roads), each cell fitted clear of the drawn
@@ -42,10 +43,13 @@ pub fn full_overlay(mode: OverlayMode, tool: ActiveTool) -> bool {
 #[derive(Resource)]
 struct ZoneMaterial(Handle<StandardMaterial>);
 
+/// Grid and roads keys, and whether empty land shows.
+type ChunkKey = ((u64, u64), (u64, u64), bool);
+
 #[derive(Default)]
 struct ZoneChunks {
     /// Grid and roads keys the chunks were last built for.
-    key: Option<((u64, u64), (u64, u64))>,
+    key: Option<ChunkKey>,
     fits: land::FitCache,
     shown: bool,
     chunks: HashMap<IVec2, (u64, Entity, bool)>,
@@ -100,7 +104,22 @@ fn chunk_mesh(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> Option<Mesh
     let (fill_a, line_a) = (0.4, 1.0);
     let line_w = 0.6;
     for c in cells {
-        let Some(z) = c.zone else { continue };
+        let Some(z) = c.zone else {
+            // Empty zoneable land (shown while zoning): a faint cell.
+            let centre = c.center();
+            let shrink = |p: Vec2| p + (centre - p).normalize_or_zero() * 0.45;
+            let q = c.quad.map(shrink);
+            m.quad_up(q.map(|p| Vec3::new(p.x, y, p.y)), lin(Color::WHITE.with_alpha(0.07)));
+            for k in 0..4 {
+                let (a, b) = (q[k], q[(k + 1) % 4]);
+                let inward = ((a + b) * 0.5 - centre).normalize_or_zero() * -0.22;
+                m.quad_up(
+                    [a, b, b + inward, a + inward].map(|p| Vec3::new(p.x, y + 0.005, p.y)),
+                    lin(Color::WHITE.with_alpha(0.32)),
+                );
+            }
+            continue;
+        };
         let base = zone_color(z);
         let fill = lin(base.with_alpha(fill_a));
         let line = lin(palette::mix(base, Color::WHITE, 0.45).with_alpha(line_a));
@@ -149,13 +168,21 @@ fn rebuild_zones(
         }
     }
     // Re-mesh only while showing; a hidden overlay catches up when shown.
-    let key = (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads));
+    // While a zone tool is active the empty zoneable land shows too.
+    let land = matches!(*tool, ActiveTool::Zone(_));
+    let key = (
+        sim.key(sim.world.versions.grid),
+        sim.key(sim.world.versions.roads),
+        land,
+    );
     if !show || state.key == Some(key) {
         return;
     }
     state.key = Some(key);
     let world = &sim.world;
-    let by_chunk = land::cells_by_chunk(world, &edges, &mut state.fits, CHUNK_M, |z| z.zone.is_some());
+    let by_chunk = land::cells_by_chunk(world, &edges, &mut state.fits, CHUNK_M, |z| {
+        z.zone.is_some() || (land && z.building.is_none())
+    });
     let zones: HashMap<CellRef, Zone> = by_chunk
         .values()
         .flatten()

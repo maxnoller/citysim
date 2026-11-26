@@ -20,9 +20,12 @@ working hours and empty out the city's purse.
   distance, extensions and the points where two guides meet; each rule can be switched off (Alt holds them all off).
   A card at the cursor shows length, bend, price and upkeep, and a refusal is drawn in red where it happens, with the
   reason. Streets and avenues (two lanes each way); the upgrade tool turns a stretch into the other kind. Undo.
-- **Zoning** in blocks along each side of each road, on lattices that follow the road's angle: paint, along a road
-  (one or two rows), fill a block, or a rectangle. Buildings grow by demand on 1x1, deep 1x2 and 2x2 lots, always
-  facing their road, and level up from houses, small shops and sheds to apartment blocks, offices and works.
+- **Zoning** in blocks up to six rows deep along each side of each road: straight roads on grids that follow their
+  angle, curved roads on rows of lots bent along the kerb, so the inside and outside of every bend are continuous
+  building land. Paint, along a road (drag to follow it through bends and junctions; 1, 2, 4 rows or the full block),
+  fill the land enclosed by roads, or a rectangle; the land that can be zoned shows while zoning. Buildings grow by
+  demand on lots one or two wide, with a yard behind on deep lots, always facing their road, and level up from
+  houses, small shops and sheds to apartment blocks, offices and works.
 - **Traffic** in real time: cars drive on the right in lanes, choose lanes before turns and wait at junctions with
   real rules — actuated traffic lights with protected left turns, priority junctions where side streets give way, and
   all-way stops. Junctions pick their control by road type and traffic; the junction tool shows each approach's

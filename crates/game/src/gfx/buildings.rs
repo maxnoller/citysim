@@ -153,13 +153,44 @@ struct Spawned {
     rebuilt: HashMap<BuildingId, u64>,
 }
 
-/// A building's lot in its own frame (see `land::Lot`).
+/// Rows of a lot the building itself stands on (the rest is its yard).
+fn built_rows(b: &Building) -> i32 {
+    b.size().1.min(citysim_sim::balance::BUILT_DEPTH as i32)
+}
+
+/// The part of a building's lot it stands on, in its own frame (see
+/// `land::Lot`): the front rows; a deeper lot's yard lies behind it.
 pub fn lot_of(b: &Building) -> Lot {
     let (w, d) = b.size();
+    let built = built_rows(b);
+    let f = Vec2::from(b.front_dir());
     Lot {
-        c: Vec2::from(b.center()),
-        f: Vec2::from(b.front_dir()),
-        half: Vec2::new(w as f32, d as f32) * CELL_SIZE * 0.5,
+        c: Vec2::from(b.center()) + f * (d - built) as f32 * CELL_SIZE * 0.5,
+        f,
+        half: Vec2::new(w as f32, built as f32) * CELL_SIZE * 0.5,
+    }
+}
+
+/// How a building is fitted on its lot: clear of the roads and, on a
+/// curve, inside the narrowing or widening lot with a little room to its
+/// neighbours.
+fn fit_building(world: &citysim_sim::World, b: &Building, edges: &RoadEdges) -> Inset {
+    let lot = lot_of(b);
+    match world.zoning.lattice(b.footprint.lattice) {
+        Some(l) if l.is_strip() => {
+            let Some(q) = world.zoning.lot_quad(&b.footprint) else {
+                return land::fit(lot, edges);
+            };
+            // The built part of the quad: from the front edge back by the
+            // built rows' share of the lot.
+            let (_, d) = b.size();
+            let t = built_rows(b) as f32 / d.max(1) as f32;
+            let q = q.map(Vec2::from);
+            let back_l = q[0] + (q[3] - q[0]) * t;
+            let back_r = q[1] + (q[2] - q[1]) * t;
+            land::fit_in_quad(lot, [q[0], q[1], back_r, back_l], 0.4, edges)
+        }
+        _ => land::fit(lot, edges),
     }
 }
 
@@ -186,7 +217,8 @@ impl Plugin for BuildingsPlugin {
 
 /// Model key and placement for a building.
 pub fn model_key(b: &Building) -> ModelKey {
-    let (w, d) = b.size();
+    let (w, _) = b.size();
+    let d = built_rows(b);
     ModelKey {
         kind: b.kind,
         cells: (w.clamp(1, 255) as u8, d.clamp(1, 255) as u8),
@@ -209,8 +241,8 @@ fn pose_key(b: &Building) -> [u32; 3] {
 
 /// Placement of a building: (parent transform, model child transform).
 pub fn placement(b: &Building, inset: Inset) -> (Transform, Transform) {
-    let c = b.center();
-    let tf = Transform::from_xyz(c[0], 0.0, c[1]).with_rotation(front_rotation(b.rotation()));
+    let c = lot_of(b).c;
+    let tf = Transform::from_xyz(c.x, 0.0, c.y).with_rotation(front_rotation(b.rotation()));
     let model_tf = Transform::from_xyz(inset.shift.x, 0.0, inset.shift.y).with_scale(inset.scale);
     (tf, model_tf)
 }
@@ -252,7 +284,7 @@ fn sync_buildings(
         {
             return *i;
         }
-        let i = land::fit(lot_of(b), &edges);
+        let i = fit_building(world, b, &edges);
         insets.insert(id, (pose, i));
         i
     };

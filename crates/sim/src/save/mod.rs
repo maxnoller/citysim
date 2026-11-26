@@ -4,9 +4,13 @@
 //! [`World`], then optionally an extension block (postcard, starts with its
 //! own version number).
 //!
-//! Version 6 (citizens, household money and goods, the population
-//! bookkeeping; the 16-minute day, people bound to their cars, trips that
-//! name their buildings, party and cargo) is written now. Version 5 was the
+//! Version 7 (zoning on strips bent along curved roads, blocks six rows
+//! deep: the body is laid out as version 6, the bent lattices travel in
+//! extension block 4) is written now. Version 6 (citizens, household money
+//! and goods, the population bookkeeping; the 16-minute day, people bound
+//! to their cars, trips that name their buildings, party and cargo) loads
+//! with the same body; its zoning blocks are made again the current way
+//! (`blocks::renew_all`). Version 5 was the
 //! unreleased first citizens layout and does not load. Older saves still
 //! load (their clock keeps its time of day on the longer day):
 //!
@@ -39,14 +43,14 @@ pub mod v5;
 
 pub const MAGIC: &[u8; 4] = b"CSIM";
 /// Bump when the World layout changes incompatibly.
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 /// Versions between the oldest loadable and this one that do not load
 /// (5: the unreleased first citizens layout).
 const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
-pub const EXTENSION_VERSION: u32 = 3;
+pub const EXTENSION_VERSION: u32 = 4;
 
 /// Every field of a [`Budget`], including those its own serde skips.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -186,6 +190,36 @@ impl ExtensionV3 {
     }
 }
 
+/// Extension block, version 4: version 3 plus the bent lattices of
+/// curved roads (`Lattice::strip`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ExtensionV4 {
+    v3: ExtensionV3,
+    strips: Vec<(u16, crate::zoning::Strip)>,
+}
+
+impl ExtensionV4 {
+    pub(crate) fn of(w: &World) -> ExtensionV4 {
+        ExtensionV4 {
+            v3: ExtensionV3::of(w),
+            strips: w
+                .zoning
+                .lattices()
+                .filter_map(|(id, l)| Some((id.0, l.strip.clone()?)))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn restore(self, w: &mut World) {
+        self.v3.restore(w);
+        for (id, st) in self.strips {
+            if let Some(Some(l)) = w.zoning.lattices.get_mut(id as usize) {
+                l.strip = Some(st);
+            }
+        }
+    }
+}
+
 /// Derived fields that are not stored at all, recomputed exactly as
 /// `stats::update` computes them.
 fn restore_derived(w: &mut World) {
@@ -221,7 +255,7 @@ pub(crate) fn save(world: &World) -> Vec<u8> {
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     let body = postcard::to_stdvec(world).expect("World is always serialisable");
     out.extend_from_slice(&body);
-    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV3::of(world))).expect("serialisable");
+    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV4::of(world))).expect("serialisable");
     out.extend_from_slice(&ext);
     out
 }
@@ -265,6 +299,9 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
             3 => postcard::from_bytes::<ExtensionV3>(rest)
                 .map_err(bad)?
                 .restore(&mut world),
+            4 => postcard::from_bytes::<ExtensionV4>(rest)
+                .map_err(bad)?
+                .restore(&mut world),
             _ => {}
         }
     }
@@ -274,6 +311,13 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     crate::traffic::upgrade_junction_geometry(&mut world);
     world.cache.ensure_roads(&world.roads, world.versions.roads);
     world.cache.ensure_zoning(&world.zoning);
+    if version == 6 {
+        // Zoning blocks of the version-6 kind (two rows, straight blocks
+        // along curves): made again the current way; zones move onto the
+        // new cells and buildings onto the new lots where they fit.
+        crate::blocks::renew_all(&mut world);
+        world.cache.ensure_zoning(&world.zoning);
+    }
     if version == 3 {
         crate::growth::convert_legacy_lots(&mut world);
         crate::traffic::sync_junctions(&mut world);
