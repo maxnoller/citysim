@@ -50,6 +50,11 @@ const SCENARIOS: &[Scenario] = &[
         days: 15,
     },
     Scenario {
+        name: "rescue",
+        about: "the streets-only city, its main streets upgraded to avenues at the start of day 8",
+        days: 15,
+    },
+    Scenario {
         name: "single_artery",
         about: "round 2: the same blocks hanging off one spine, grows to 10,000",
         days: 15,
@@ -96,6 +101,25 @@ const SCENARIOS: &[Scenario] = &[
     },
 ];
 
+/// Day the `rescue` city's main streets become avenues.
+const RESCUE_DAY: u32 = 8;
+
+/// The `rescue` scenario's upgrade, at the start of `RESCUE_DAY`; the player
+/// builds avenues from then on.
+fn rescue(sc: &Scenario, w: &mut World, player: &mut Option<GridPlayer>) {
+    if sc.name != "rescue" || w.time.day != RESCUE_DAY || w.time.tick_of_day != 0 {
+        return;
+    }
+    let (ok, refused, cost) = scenarios::upgrade_to_hierarchy(w);
+    if let Some(p) = player.as_mut() {
+        p.layout = scenarios::Layout::Hierarchy;
+    }
+    eprintln!(
+        "rescue: day {} pop {}: {ok} pieces upgraded to avenues, {refused} refused, ${cost}",
+        w.time.day, w.stats.population
+    );
+}
+
 fn minutes(tick: u64) -> f64 {
     tick as f64 / TICKS_PER_SECOND as f64 / ASSUMED_SPEED / 60.0
 }
@@ -108,6 +132,8 @@ struct DayExtra {
     happiness: f32,
     avg_commute_s: f32,
     step_mean_us: f64,
+    delay_factor: f32,
+    worked_share: f32,
 }
 
 /// Per-hour vehicle measurements.
@@ -158,7 +184,7 @@ fn sample(w: &World, a: &mut HourAcc) {
 
 fn start(sc: &Scenario, w: &mut World) -> Option<GridPlayer> {
     match sc.name {
-        "grid" | "streets" => Some(GridPlayer::new(&Zone::ALL)),
+        "grid" | "streets" | "rescue" => Some(GridPlayer::new(&Zone::ALL)),
         "hierarchy" => Some(GridPlayer::hierarchy()),
         "single_artery" => Some(GridPlayer::single_artery()),
         "upfront" => {
@@ -211,6 +237,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         if sc.name == "artery_fixed" && w.time.day == 2 && w.time.tick_of_day == 0 {
             scenarios::add_connections(&mut w);
         }
+        rescue(sc, &mut w, &mut player);
         let t0 = Instant::now();
         w.step();
         let dt = t0.elapsed().as_nanos();
@@ -229,6 +256,8 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
                 happiness: w.people.stats.avg_happiness,
                 avg_commute_s: w.traffic.avg_commute_s,
                 step_mean_us: (sum_ns - day_ns_before) as f64 / balance::TICKS_PER_DAY as f64 / 1e3,
+                delay_factor: w.traffic.delay_factor,
+                worked_share: w.economy.attendance.share(),
             });
             given_up_before = w.traffic.stuck_removed;
             day_ns_before = sum_ns;
@@ -246,7 +275,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
     let mut daily = String::from(
         "day,minutes,population,peak_vehicles,money,income,expenses,residential_tax,commercial_tax,industrial_tax,road_upkeep,services,road_cells,\
          streets,avenues,highway,signals,signal_count,services_base,services_city_size,services_density,\
-         given_up,trips,happiness,avg_commute_s,step_mean_us\n",
+         given_up,trips,happiness,avg_commute_s,step_mean_us,delay_factor,worked_share\n",
     );
     for (i, h) in w.economy.history.iter().enumerate() {
         let b = h.budget;
@@ -280,8 +309,8 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         let e = extra.get(i).copied().unwrap_or_default();
         let _ = writeln!(
             daily,
-            ",{},{},{:.4},{:.1},{:.1}",
-            e.given_up, e.trips, e.happiness, e.avg_commute_s, e.step_mean_us
+            ",{},{},{:.4},{:.1},{:.1},{:.3},{:.3}",
+            e.given_up, e.trips, e.happiness, e.avg_commute_s, e.step_mean_us, e.delay_factor, e.worked_share
         );
     }
     std::fs::write(format!("{out_dir}/{}_seed{seed}_days.csv", sc.name), daily).expect("write csv");
@@ -364,6 +393,7 @@ fn run(sc: &Scenario, out_dir: &str) {
         if sc.name == "artery_fixed" && w.time.day == 2 && w.time.tick_of_day == 0 {
             scenarios::add_connections(&mut w);
         }
+        rescue(sc, &mut w, &mut player);
         let t0 = Instant::now();
         w.step();
         let dt = t0.elapsed().as_nanos();

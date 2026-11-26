@@ -209,25 +209,37 @@ impl Derived {
     pub fn access_near(&self, roads: &RoadNetwork, pos: [f32; 2]) -> Option<Access> {
         let c = Cell::from_pos(pos);
         let r = balance::ACCESS_SEARCH_CELLS;
-        let mut best: Option<(u8, f32, usize, Access)> = None;
+        // A segment is listed in every cell it passes: each one once (the
+        // nearest point on a curve is the costly part).
+        let mut segs: Vec<SegmentId> = Vec::new();
         for y in c.y - r..=c.y + r {
             for x in c.x - r..=c.x + r {
-                for &s in self.segments_in(Cell::new(x, y)) {
-                    let Some(seg) = roads.segments.get(s) else { continue };
-                    let (from_a, d, _) = seg.nearest(pos);
-                    if d > (r as f32 + 0.5) * CELL_SIZE {
-                        continue;
-                    }
-                    // Rank: connected first, then nearer, then lower slot.
-                    let rank = (u8::from(!self.node_connected(seg.a)), d, key_index(s));
-                    let better = match &best {
-                        None => true,
-                        Some((bc, bd, bi, _)) => (rank.0, rank.1, rank.2) < (*bc, *bd, *bi),
-                    };
-                    if better {
-                        best = Some((rank.0, d, rank.2, Access { segment: s, from_a }));
-                    }
-                }
+                segs.extend_from_slice(self.segments_in(Cell::new(x, y)));
+            }
+        }
+        segs.sort_unstable();
+        segs.dedup();
+        let mut best: Option<(u8, f32, usize, Access)> = None;
+        for s in segs {
+            let Some(seg) = roads.segments.get(s) else { continue };
+            // Too far by its bounding box: skip the exact search.
+            let (lo, hi) = seg.curve.bounds();
+            let reach = (r as f32 + 0.5) * CELL_SIZE;
+            if pos[0] < lo[0] - reach || pos[0] > hi[0] + reach || pos[1] < lo[1] - reach || pos[1] > hi[1] + reach {
+                continue;
+            }
+            let (from_a, d, _) = seg.nearest(pos);
+            if d > reach {
+                continue;
+            }
+            // Rank: connected first, then nearer, then lower slot.
+            let rank = (u8::from(!self.node_connected(seg.a)), d, key_index(s));
+            let better = match &best {
+                None => true,
+                Some((bc, bd, bi, _)) => (rank.0, rank.1, rank.2) < (*bc, *bd, *bi),
+            };
+            if better {
+                best = Some((rank.0, d, rank.2, Access { segment: s, from_a }));
             }
         }
         best.map(|b| b.3)

@@ -274,7 +274,8 @@ pub struct TrafficState {
     pub replan: VecDeque<VehicleId>,
     /// `versions.roads` the vehicles were last checked against.
     pub roads_version: u64,
-    /// Moving average of completed car commutes, vehicle seconds.
+    /// Moving average of completed car commutes (to and from work, on the
+    /// road), door to door, vehicle seconds.
     pub avg_commute_s: f32,
     /// Mean speed of the cars on the road that are moving this tick
     /// (faster than `balance::WAIT_SPEED`), m/s. Cars standing at a red
@@ -301,6 +302,10 @@ pub struct TrafficState {
     /// Share of the cars on the road standing (at a red light, in a queue,
     /// giving way) this tick.
     pub stopped_share: f32,
+    /// Moving average of car trips' door-to-door time over their free-flow
+    /// estimate (`day::estimate_s`), at least 1: what the roads do to every
+    /// trip, on screen or off.
+    pub delay_factor: f32,
 }
 
 pub(crate) const DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
@@ -379,6 +384,18 @@ pub fn has_room(world: &World) -> bool {
     world.vehicles.len() + world.traffic.pending.len() < vehicle_budget(world)
 }
 
+/// [`TrafficState::delay_factor`], at least 1.
+pub fn delay_factor(world: &World) -> f32 {
+    world.traffic.delay_factor.max(1.0)
+}
+
+fn place_pos(world: &World, p: Place) -> Option<[f32; 2]> {
+    match p {
+        Place::At(p) => Some(p),
+        Place::Entry => world.roads.entry.and_then(|e| world.roads.nodes.get(e)).map(|n| n.pos),
+    }
+}
+
 fn resolve(world: &World, place: Place) -> Option<Access> {
     match place {
         Place::Entry => {
@@ -450,6 +467,23 @@ pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, end
                     s
                 } else {
                     t.avg_commute_s + (s - t.avg_commute_s) * 0.02
+                };
+            }
+            // Commutes only (errands are short and may turn back), each
+            // weighted by its length so a minute's drive counts more than
+            // a hop round the corner.
+            if let TripEnd::Arrived(s) = end
+                && matches!(trip.purpose, TripPurpose::ToWork | TripPurpose::ToHome)
+                && let (Some(a), Some(b)) = (place_pos(world, trip.from), place_pos(world, trip.to))
+            {
+                let est = crate::day::estimate_s(a, b);
+                let r = (s / est).clamp(0.5, balance::DELAY_FACTOR_MAX);
+                let k = 0.01 * (est / 60.0).min(3.0);
+                let t = &mut world.traffic;
+                t.delay_factor = if t.delay_factor == 0.0 {
+                    r.max(1.0)
+                } else {
+                    (t.delay_factor + (r - t.delay_factor) * k).max(1.0)
                 };
             }
         }
@@ -686,7 +720,7 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
 
 fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
     let mut tries = world.traffic.pending.len().min(balance::DEPARTURES_PER_TICK);
-    let mut lanes: Option<Vec<(usize, f32)>> = None;
+    let mut lanes: Option<Vec<(usize, f32, bool)>> = None;
     let mut marks = std::mem::take(&mut world.cache.depart_marks);
     let mut marked: Vec<usize> = Vec::new();
     while tries > 0 && *budget > 0 {
@@ -733,7 +767,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             for &i in &marked {
                 marks[i] = true;
             }
-            let mut l: Vec<(usize, f32)> = world
+            let mut l: Vec<(usize, f32, bool)> = world
                 .vehicles
                 .values()
                 .filter_map(|v| {
@@ -742,7 +776,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                         .get(key_index(s))
                         .copied()
                         .unwrap_or(false)
-                        .then(|| (lane_of(s, v.forward), v.progress))
+                        .then(|| (lane_of(s, v.forward), v.progress, v.stopped()))
                 })
                 .collect();
             l.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -760,6 +794,12 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             };
             if setbacks_ok {
                 let (lo, hi) = crate::drive::lane_range(setbacks, from.segment, fwd, from_seg.length);
+                // Not with its nose over the stop line either.
+                let hi = if hi < from_seg.length - 0.01 {
+                    (hi - crate::drive::stop_back_m(dep.purpose == TripPurpose::Goods)).max(lo.min(hi))
+                } else {
+                    hi
+                };
                 let lo = if lo > 0.0 {
                     (lo + balance::NO_LANE_CHANGE_AFTER_BOX_M).min(hi)
                 } else {
@@ -771,14 +811,20 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             }
         };
         let (start_fwd, start_back) = (start_at(true), start_at(false));
+        // Blocked: a car right at the driveway, or a standing queue just
+        // ahead of it (nobody pulls out into a jam: the trip waits, and in
+        // the end goes without the car).
         let blocked = |fwd: bool| {
             let lane = lane_of(from.segment, fwd);
             let progress = if fwd { start_fwd } else { start_back };
-            let start = lanes.partition_point(|&(l, _)| l < lane);
+            let start = lanes.partition_point(|&(l, _, _)| l < lane);
             lanes[start..]
                 .iter()
-                .take_while(|&&(l, _)| l == lane)
-                .any(|&(_, p)| (p - progress).abs() < balance::SPAWN_CLEARANCE_M)
+                .take_while(|&&(l, _, _)| l == lane)
+                .any(|&(_, p, stopped)| {
+                    (p - progress).abs() < balance::SPAWN_CLEARANCE_M
+                        || (stopped && p > progress && p - progress < balance::SPAWN_QUEUE_M)
+                })
         };
         if blocked(true) && blocked(false) {
             world.traffic.pending.push_back(dep);
@@ -831,8 +877,8 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             continue;
         }
         let lane = lane_of(from.segment, forward);
-        let pos = lanes.partition_point(|&(l, p)| l < lane || (l == lane && p < progress));
-        lanes.insert(pos, (lane, progress));
+        let pos = lanes.partition_point(|&(l, p, _)| l < lane || (l == lane && p < progress));
+        lanes.insert(pos, (lane, progress, true));
         let seed = world.rng.next_u64() as u32;
         let mut v = Vehicle {
             pos: [0.0; 2],
@@ -946,7 +992,11 @@ fn update_loads(world: &mut World) {
     let minute = 60 * TICKS_PER_SECOND as u64;
     if world.time.tick.is_multiple_of(minute) {
         for j in world.traffic.junction_states.values_mut() {
-            j.peak_minute_today = j.peak_minute_today.max(j.entered_minute);
+            // Demand, not just what got through: those let in plus those
+            // still queued (a jammed all-way stop lets in fewer cars than
+            // the signal threshold however long its queues).
+            let waiting: u16 = j.queue.iter().fold(0u16, |a, &q| a.saturating_add(q));
+            j.peak_minute_today = j.peak_minute_today.max(j.entered_minute.saturating_add(waiting));
             j.entered_minute = 0;
         }
     }

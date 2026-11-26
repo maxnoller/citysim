@@ -119,6 +119,24 @@ pub(crate) fn estimate_s(from: [f32; 2], to: [f32; 2]) -> f32 {
     geom::dist(from, to) * balance::OFFSCREEN_ROUTE_FACTOR / balance::OFFSCREEN_SPEED + balance::OFFSCREEN_BASE_S
 }
 
+/// Expected time of a trip by road between two points right now: the
+/// free-flow estimate times what the roads are doing to car trips
+/// (`traffic::delay_factor`), vehicle seconds.
+pub(crate) fn road_s(world: &World, from: [f32; 2], to: [f32; 2]) -> f32 {
+    estimate_s(from, to) * traffic::delay_factor(world)
+}
+
+/// Off-screen time of a trip: commutes in today's traffic ([`road_s`],
+/// what the delay factor is measured on), other trips at the free-flow
+/// estimate.
+fn trip_s(world: &World, purpose: TripPurpose, from: [f32; 2], to: [f32; 2]) -> f32 {
+    if matches!(purpose, TripPurpose::ToWork | TripPurpose::ToHome) {
+        road_s(world, from, to)
+    } else {
+        estimate_s(from, to)
+    }
+}
+
 /// Ticks a trip of `s` estimated vehicle seconds takes, on the road or off
 /// screen alike (vehicle time is real time, see the `balance` time scales).
 fn secs_to_ticks(s: f32) -> u64 {
@@ -412,6 +430,7 @@ fn commute(world: &mut World, id: CitizenId, d: u32) {
         return;
     }
     world.citizens[id].worked_day = d;
+    world.economy.attendance.scheduled_ticks += job.shift.length as u64;
     let hid = world.citizens[id].household;
     world.households[hid].last_work_day = world.time.day;
     let driver_takes_last_car =
@@ -579,7 +598,12 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
     } else {
         TravelMode::NoCar
     };
-    let est = estimate_s(fp, tp);
+    // On foot the roads do not matter; by car or otherwise they do.
+    let est = if mode == TravelMode::Walking {
+        estimate_s(fp, tp)
+    } else {
+        trip_s(world, purpose, fp, tp)
+    };
     // Every car trip is a car on the road while the budget allows.
     let visible = mode == TravelMode::Driving && traffic::has_room(world);
     if mode == TravelMode::Driving {
@@ -721,7 +745,7 @@ pub(crate) fn continue_off_screen(world: &mut World, id: CitizenId) {
     let now = world.time.tick;
     let Some(c) = world.citizens.get(id) else { return };
     let Location::Travelling(j) = c.location else { return };
-    let est = estimate_s(pos_of(world, j.from), pos_of(world, Some(j.to)));
+    let est = trip_s(world, j.purpose, pos_of(world, j.from), pos_of(world, Some(j.to)));
     let t = now + secs_to_ticks(est * 0.5);
     let j = Journey {
         vehicle: None,
@@ -800,7 +824,7 @@ pub(crate) fn trip_ended(world: &mut World, e: Ended) {
                 record_commute(world, id, j.purpose, s, true);
             }
             let from = e.at.unwrap_or_else(|| pos_of(world, j.from));
-            let t = now + secs_to_ticks(estimate_s(from, pos_of(world, Some(j.to))));
+            let t = now + secs_to_ticks(trip_s(world, j.purpose, from, pos_of(world, Some(j.to))));
             for m in std::iter::once(id).chain(riders) {
                 if let Location::Travelling(mj) = world.citizens[m].location {
                     let nj = Journey {
@@ -817,7 +841,7 @@ pub(crate) fn trip_ended(world: &mut World, e: Ended) {
             // Could not start in time: off screen, counted as a hopeless
             // commute (the driveway or the network was jammed).
             record_commute(world, id, j.purpose, balance::MAX_DEPARTURE_WAIT_S, true);
-            let est = estimate_s(pos_of(world, j.from), pos_of(world, Some(j.to)));
+            let est = trip_s(world, j.purpose, pos_of(world, j.from), pos_of(world, Some(j.to)));
             let t = now + secs_to_ticks(est);
             for m in std::iter::once(id).chain(riders) {
                 if let Location::Travelling(mj) = world.citizens[m].location {
@@ -886,13 +910,14 @@ fn arrive(world: &mut World, id: CitizenId) {
     }
     let c = &world.citizens[id];
     if j.arrive_tick.is_some() && matches!(j.purpose, TripPurpose::ToWork | TripPurpose::ToHome) && c.job.is_some() {
-        // Off screen: the estimated drive (the commute a car would have).
-        let f = if j.mode == TravelMode::NoCar {
-            balance::CARLESS_TIME_FACTOR
-        } else {
-            1.0
+        // Off screen: the estimated drive (the commute a car would have,
+        // in today's traffic; on foot without it).
+        let (a, b) = (pos_of(world, j.from), pos_of(world, Some(j.to)));
+        let s = match j.mode {
+            TravelMode::Walking => estimate_s(a, b),
+            TravelMode::NoCar => road_s(world, a, b) * balance::CARLESS_TIME_FACTOR,
+            _ => road_s(world, a, b),
         };
-        let s = estimate_s(pos_of(world, j.from), pos_of(world, Some(j.to))) * f;
         world.citizens[id].last_commute_s = s;
     }
     if to == home {
@@ -909,6 +934,8 @@ fn arrive(world: &mut World, id: CitizenId) {
         TripPurpose::ToWork if c.workplace() == Some(to) => {
             let job = c.job.expect("checked");
             let (_, _, end) = shift_times(world, id, job.shift, c.worked_day);
+            let left = (end - now as i64).clamp(0, job.shift.length as i64) as u64;
+            world.economy.attendance.worked_ticks += left;
             if end > now as i64 + HOUR as i64 / 4 {
                 people::set_place(world, id, Activity::Working, Location::In(to), at(end));
             } else {

@@ -160,6 +160,7 @@ impl EconomyV4 {
             history: self.history,
             fiscal: self.fiscal,
             last_day_costs: Default::default(),
+            attendance: Default::default(),
         }
     }
 
@@ -259,6 +260,7 @@ impl WorldV4 {
             deadlocks_resolved: t.deadlocks_resolved,
             control_version: t.control_version,
             stopped_share: 0.0,
+            delay_factor: 1.0,
         };
         let mut w = World::new(self.seed);
         w.rng = self.rng;

@@ -1652,6 +1652,196 @@ fn organic(out: &str, days: u32) {
     );
 }
 
+/// A saved world run on to an hour of its next day, top-down:
+/// `save out.png <save> <hour> <x m> <y m> <px per m> [title]`.
+fn save_view(out: &str, args: &[String]) {
+    let bytes = std::fs::read(&args[0]).expect("save file");
+    let hour: f32 = args[1].parse().unwrap();
+    let cx: f32 = args[2].parse().unwrap();
+    let cy: f32 = args[3].parse().unwrap();
+    let k: f32 = args[4].parse().unwrap();
+    let title = args.get(5).cloned().unwrap_or_default();
+    let mut w = World::load(&bytes).expect("loads");
+    let target = (hour * balance::TICKS_PER_HOUR as f32) as u32;
+    let day = w.time.day;
+    while w.time.day == day && w.time.tick_of_day < target {
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([cx, cy], wpx, hpx - 64, k);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, false, true);
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    let stopped = w.vehicles.values().filter(|v| v.stopped()).count();
+    header(
+        &mut cv,
+        &title,
+        &format!(
+            "DAY {} {:05.2}H  POP {}  CARS {} ({} STANDING)  GIVEN UP {}",
+            w.time.day,
+            w.time.hour(),
+            w.stats.population,
+            w.vehicles.len(),
+            stopped,
+            w.traffic.stuck_removed
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// Twelve frames of a saved world from an hour of its next day:
+/// `savewatch out.png <save> <hour> <x m> <y m> <ticks between frames>`.
+fn save_watch(out: &str, args: &[String]) {
+    let bytes = std::fs::read(&args[0]).expect("save file");
+    let hour: f32 = args[1].parse().unwrap();
+    let cx: f32 = args[2].parse().unwrap();
+    let cy: f32 = args[3].parse().unwrap();
+    let every: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(40);
+    let mut w = World::load(&bytes).expect("loads");
+    w.traffic.junctions_version = u64::MAX;
+    let target = (hour * balance::TICKS_PER_HOUR as f32) as u32;
+    let day = w.time.day;
+    while w.time.day == day && w.time.tick_of_day < target {
+        w.step();
+    }
+    let (fw, fh, cols, rows) = (420usize, 420usize, 4usize, 3usize);
+    let mut sheet = Canvas::new(cols * fw + (cols + 1) * 6, rows * fh + (rows + 1) * 6, [22, 24, 28]);
+    for i in 0..cols * rows {
+        let mut f = Canvas::new(fw, fh, GRASS);
+        let view = View::centred(
+            [cx, cy],
+            fw,
+            fh,
+            std::env::var("TD_ZOOM")
+                .ok()
+                .and_then(|z| z.parse().ok())
+                .unwrap_or(5.0),
+        );
+        draw_world(&mut f, &w, &view, false);
+        f.text(
+            6,
+            6,
+            &format!(
+                "{:05.2}H T+{:.0}S",
+                w.time.hour(),
+                (i as u32 * every) as f32 / TICKS_PER_SECOND as f32
+            ),
+            2,
+            [255, 255, 255],
+        );
+        sheet.blit(&f, 6 + (i % cols) * (fw + 6), 6 + (i / cols) * (fh + 6));
+        for _ in 0..every {
+            w.step();
+        }
+    }
+    ffmpeg_png(&sheet, out);
+}
+
+/// The avenue city (`GridPlayer::hierarchy`, seed 7) at
+/// `CITYSIM_TOPDOWN_POP` residents (default 10,000) through its evening rush,
+/// 16:00 to 19:30, cars coloured by trip purpose.
+fn rush(out: &str, seconds: u32) {
+    let mut w = World::new(7);
+    let mut p = GridPlayer::hierarchy();
+    let pop = std::env::var("CITYSIM_TOPDOWN_POP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_000u32);
+    while w.stats.population < pop && w.time.day < 60 {
+        p.act(&mut w);
+        w.step();
+    }
+    let (start, end) = (
+        16 * balance::TICKS_PER_HOUR,
+        19 * balance::TICKS_PER_HOUR + balance::TICKS_PER_HOUR / 2,
+    );
+    while w.time.tick_of_day != start {
+        p.act(&mut w);
+        w.step();
+    }
+    // Frame the built-up area.
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for b in w.buildings.values() {
+        let q = derived::rect_center(b.footprint);
+        for k in 0..2 {
+            lo[k] = lo[k].min(q[k]);
+            hi[k] = hi[k].max(q[k]);
+        }
+    }
+    let (wpx, hpx) = (1280usize, 720usize);
+    let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0 + 10.0];
+    let k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
+    let fps = 30;
+    let mut child = Proc::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s"])
+        .arg(format!("{wpx}x{hpx}"))
+        .args([
+            "-r",
+            &fps.to_string(),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "20",
+        ])
+        .arg(out)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("ffmpeg");
+    let mut pipe = child.stdin.take().unwrap();
+    let frames = seconds * fps;
+    let per_frame = (end - start) as f32 / frames as f32;
+    let mut done = start as f32;
+    let view = View::centred(centre, wpx, hpx, k);
+    for f in 0..frames {
+        done += per_frame;
+        while (w.time.tick_of_day as f32) < done && f + 1 < frames {
+            p.act(&mut w);
+            w.step();
+        }
+        let mut cv = Canvas::new(wpx, hpx, GRASS);
+        draw_world_opts(&mut cv, &w, &view, false, false);
+        draw_cars_by_purpose(&mut cv, &w, &view);
+        cv.rect(0.0, 0.0, wpx as f32, 34.0, [22, 24, 28]);
+        let a = inspect::activity_shares(&w);
+        cv.text(
+            10,
+            10,
+            &format!(
+                "AVENUE CITY EVENING RUSH  DAY {}  {:02}:{:02}   POP {}   CARS {} ({:.0}% STANDING)   GIVEN UP {}   TRAVELLING {:.0}%",
+                w.time.day,
+                w.time.hour() as u32,
+                (w.time.hour().fract() * 60.0) as u32,
+                w.stats.population,
+                w.stats.vehicles_on_road,
+                w.traffic.stopped_share * 100.0,
+                w.traffic.stuck_removed,
+                a[5] * 100.0,
+            ),
+            2,
+            [235, 235, 235],
+        );
+        // Legend.
+        cv.rect(0.0, hpx as f32 - 30.0, wpx as f32, 30.0, [22, 24, 28]);
+        let mut x = 12.0;
+        for (i, label) in PURPOSE_LABEL.iter().enumerate() {
+            if i == 3 {
+                continue;
+            }
+            cv.rect(x, hpx as f32 - 21.0, 14.0, 12.0, PURPOSE_RGB[i]);
+            cv.text(x as i32 + 20, hpx as i32 - 22, label, 2, [235, 235, 235]);
+            x += 30.0 + label.len() as f32 * 12.0;
+        }
+        pipe.write_all(&cv.px).unwrap();
+    }
+    drop(pipe);
+    assert!(child.wait().unwrap().success());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first().map(String::as_str).unwrap_or("signal");
@@ -1673,6 +1863,9 @@ fn main() {
         "queue" => queue_sheet(&out),
         "organic-zoom" => organic_zoom(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(12)),
         "organic-video" => organic_video(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(25)),
+        "save" => save_view(&out, &args[2..]),
+        "savewatch" => save_watch(&out, &args[2..]),
+        "rush" => rush(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
         _ => panic!("modes: signal, lots, video, day, watch, organic, curve, junctions, blocks, lattices, queue"),
     }
 }

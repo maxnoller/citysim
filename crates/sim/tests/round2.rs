@@ -155,15 +155,27 @@ fn default_controls_by_road_class() {
     let j = junction::junction(&w, junction::junction_at(&w, c(40, 128)).unwrap()).unwrap();
     assert_eq!(j.control, JunctionControl::Priority);
     assert_eq!(j.arms.iter().filter(|a| a.major).count(), 2);
-    // A street crossing an avenue, and two avenues: signals.
-    assert_eq!(ctl(50, 128), Some(JunctionControl::Signal));
+    // A street crossing an avenue gives way to it until it gets busy.
+    assert_eq!(ctl(50, 128), Some(JunctionControl::Priority));
+    let j = junction::junction(&w, junction::junction_at(&w, c(50, 128)).unwrap()).unwrap();
+    assert!(j.arms.iter().all(|a| a.major == (a.kind == RoadKind::Avenue)));
+    // Two avenues: signals.
     assert_eq!(ctl(60, 128), Some(JunctionControl::Signal));
-    // Opposite approaches share a phase; avenues get a protected left phase.
+    // Opposite approaches share a phase; avenues get a protected left
+    // phase; two avenues crossing are served alike and not coordinated.
     let j = junction::junction(&w, junction::junction_at(&w, c(60, 128)).unwrap()).unwrap();
     let plan = j.plan.as_ref().unwrap();
     assert_eq!(plan.phases.len(), 4, "{plan:?}");
     assert!(plan.phases.iter().filter(|p| p.left_only).count() == 2);
     assert!(plan.phases.iter().all(|p| p.arms.len() == 2));
+    assert!(!plan.coordinated);
+    let through: Vec<f32> = plan
+        .phases
+        .iter()
+        .filter(|p| !p.left_only)
+        .map(|p| p.max_green_s)
+        .collect();
+    assert_eq!(through, vec![balance::SIGNAL_MAIN_MAX_GREEN_S; 2]);
     // Nodes with fewer than three arms are no junction.
     assert!(junction::junction_at(&w, c(20, 128)).is_none());
 }
@@ -207,17 +219,17 @@ fn player_override_with_preview() {
     build(&mut w, (30, 118), (40, 118), RoadKind::Street).unwrap();
     let w2 = World::load(&w.save()).unwrap();
     assert_eq!(junction::junction_control(&w2, n), Some(JunctionControl::Signal));
-    // Priority on an avenue crossing, then back to Auto.
-    let m = junction::junction_at(&w, c(50, 128)).unwrap();
+    // Priority on the avenues' crossing, then back to Auto (signals).
+    let m = junction::junction_at(&w, c(60, 128)).unwrap();
     w.apply(Command::SetJunctionControl {
-        cell: c(50, 128),
+        cell: c(60, 128),
         control: JunctionSetting::Priority,
     })
     .unwrap();
     assert_eq!(junction::junction_control(&w, m), Some(JunctionControl::Priority));
     let p = w
         .preview(&Command::SetJunctionControl {
-            cell: c(50, 128),
+            cell: c(60, 128),
             control: JunctionSetting::Auto,
         })
         .unwrap();
@@ -397,7 +409,7 @@ fn coordinated_avenue_signals_are_offset_along_the_avenue() {
     scenarios::prebuilt(&mut w, |w| {
         build(w, (11, 128), (90, 128), RoadKind::Avenue).unwrap();
         for x in [30, 45, 60, 75] {
-            build(w, (x, 118), (x, 138), RoadKind::Avenue).unwrap();
+            build(w, (x, 118), (x, 138), RoadKind::Street).unwrap();
         }
     });
     let offsets: Vec<f32> = [30, 45, 60, 75]
@@ -757,4 +769,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0x7f1879a055a06988;
+const PINNED_CHECKSUM: u64 = 0x4b2cced8f7d48eaa;

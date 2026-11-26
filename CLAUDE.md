@@ -65,23 +65,33 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `Vehicle { pos (m, centre line), heading (rad, atan2 in sim xy), segment, forward (a→b), progress (m), seed }`.
 - `RoadSegment { load: [f32; 2], capacity: [f32; 2] }` indexed `[a→b, b→a]`; `congestion_in(forward)`.
 - Segment ids can vanish on road edits (split keeps the id for the `a` half): always re-check.
-- Time: vehicles move in real time (1 tick = 1/20 s), the calendar is compressed: a day = 4 min at 1x (`balance`).
+- Time: vehicles move in real time (1 tick = 1/20 s), the calendar is compressed: a day = 16 min at 1x
+  (`balance::DAY_MINUTES`, `TICKS_PER_DAY` 19,200, an hour 40 real s); speeds to offer 1x, 3x, 6x, 16x.
 - Trip kind per car: `world.traffic.trips.get(vehicle_id).map(|t| t.purpose)` (`TripPurpose::Goods` = draw a truck).
 - HUD data: `stats` (population, households, `workforce`, employed, unemployed, `unemployment` = unemployed / workforce,
   `vacant_jobs`, jobs, avg_commute_s, avg_speed m/s, congestion_share, buildings_by_kind); `employed + unemployed ==
   workforce` (use these for the jobless figure). `demand` (-1..=1 per zone).
 - Budget: `economy.last_day` = yesterday's `Budget { residential_tax, commercial_tax, industrial_tax, road_upkeep,
   services }` with `income()`, `expenses()` (upkeep + services), `net()`; `economy::budget_now(world)` = today so far;
-  `economy.history[i].budget` per finished day (`DaySummary`). City services cost 0.75 per resident per day.
-- Money: start 30,000, road 65 per cell (`balance::ROAD_COST_PER_CELL`; ui prices follow it), upkeep 1 per road cell per
-  day. Bulldozing is never refused for lack of money. Money may go negative.
+  `economy.history[i].budget` per finished day (`DaySummary`); cost breakdown `economy::running_costs(world)` /
+  `economy.last_day_costs`. Shops and works pay tax on the shift time actually worked (`economy.attendance`).
+- Money: start 30,000, street 65 / avenue 140 per cell to build (`balance::ROAD_COST_PER_CELL`,
+  `AVENUE_COST_PER_CELL`; roads are priced by the metre), upkeep 4 / 10 per cell per day, $100 per signalled junction
+  per day, services per resident growing with size and density. Bulldozing is never refused for lack of money. Money
+  may go negative.
+- People: individual citizens in households (`world.citizens`, `inspect::*`); every car trip is a car on the road up
+  to `traffic::vehicle_budget` (125 per 1,000 residents), the rest happen off screen; commutes off screen take
+  `traffic::delay_factor` times their free-flow time (what the roads do to real cars).
+- Zoning is on lattices of blocks along each road side (`world.zoning`; `world.grid_view()` answers world-cell
+  questions); buildings by centre and rotation (`Footprint`). Contract: `docs/r4-sim-contract.md`.
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
-- Saves: format version 4 (round 2); version-3 (round-1) saves load (`save::v3`, fixture
-  `crates/sim/tests/data/round1_town.citysave`); `World::load` rejects structurally damaged saves. Round-1 saves keep
-  their old second-row buildings until they are rebuilt.
-- Scenarios: `scenarios::{GridPlayer, two_districts, add_connections, overbuilt}`; `scenarios::prebuilt(w, f)` pays
-  for a static layout (they cost more than a new game's money).
+- Saves: format version 6 (free-form roads and citizens); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
+  `crates/sim/tests/data/round1_town.citysave`), version 5 is refused; `World::load` rejects structurally damaged
+  saves. Round-1 saves keep their old second-row buildings until they are rebuilt.
+- Scenarios: `scenarios::{GridPlayer, two_districts, add_connections, overbuilt, organic, upgrade_to_hierarchy}`;
+  `scenarios::prebuilt(w, f)` pays for a static layout (they cost more than a new game's money).
+- Traffic diagnostics: `--example simint` (save a grown city, replay a day: where trip time goes, worst junctions).
 - Sim balance runs: `cargo run -p citysim_sim --release --example headless` (scripted cities in `citysim_sim::scenarios`).
 - `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep).
 - Round 2 (sim): `RoadKind::{Street, Highway, Avenue}` (`lane_count`, `lane_offset_m(lane)` right of travel, lane 0 =
@@ -99,8 +109,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   carriageways (a bend: `BEND_MARGIN_M`), which leaves room for the zebra crossings gfx draws there; two movements
   conflict when their paths cross *or* come within `MOVEMENT_CLEARANCE_M` (car width plus room), so cars never
   touch in a box; a degree-2 node where the lane count changes (highway end, avenue -> street) gets a short merge box
-  (`LANE_MERGE_TAPER_M`). Auto control turns a junction into signals from `AUTO_SIGNAL_PER_MINUTE` (16) vehicles in
-  its busiest minute. New games start at 09:00 (`START_TICK_OF_DAY`). The pinned checksum in `tests/round2.rs` moves
+  (`LANE_MERGE_TAPER_M`). Waiting cars stand with the front bumper `STOP_LINE_M` behind the line
+  (`drive::stop_back_m`). Auto control: avenues meeting get signals, streets joining or crossing an avenue give way
+  until busy; a junction becomes signals from `AUTO_SIGNAL_PER_MINUTE` (16) vehicles let in plus still queued in its
+  busiest minute. New games start at 09:00 (`START_TICK_OF_DAY`). The pinned checksum in `tests/round2.rs` moves
   with any rule change: update it deliberately.
 
 ## Dev / headless flags (need a display, see below, except the windowless modes)

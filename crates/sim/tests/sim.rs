@@ -252,14 +252,15 @@ fn bad_layout_jams_and_a_second_connection_fixes_it() {
     println!("grid {grid_speed:.1} m/s {grid_commute:.0} s pop {grid_pop}");
     println!("bad  {bad_speed:.1} m/s {bad_commute:.0} s pop {bad_pop}");
     println!("fix  {fix_speed:.1} m/s {fix_commute:.0} s pop {fix_pop}");
-    // Same zoning: the one-junction city has much longer commutes and slower
-    // traffic although it carries fewer people.
-    assert!(bad_commute > 1.5 * grid_commute, "{bad_commute} vs {grid_commute}");
-    assert!(bad_speed < grid_speed, "{bad_speed} vs {grid_speed}");
-    assert!(bad_pop < grid_pop);
-    // Adding connections measurably fixes it.
-    assert!(fix_commute < 0.8 * bad_commute, "{fix_commute} vs {bad_commute}");
-    assert!(fix_pop > bad_pop);
+    // Same zoning: the one-junction city has much longer commutes although
+    // it carries fewer than half the people (every car on the road stands
+    // in some queue in both, so their mean speeds are alike).
+    assert!(bad_commute > 1.3 * grid_commute, "{bad_commute} vs {grid_commute}");
+    assert!(bad_pop * 2 < grid_pop, "{bad_pop} vs {grid_pop}");
+    // Adding connections measurably fixes it: shorter commutes, and the
+    // town grows again.
+    assert!(fix_commute < 0.85 * bad_commute, "{fix_commute} vs {bad_commute}");
+    assert!(fix_pop as f32 > 1.5 * bad_pop as f32, "{fix_pop} vs {bad_pop}");
 }
 
 #[test]

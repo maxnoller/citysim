@@ -205,8 +205,10 @@ pub const BRAKING: f32 = 4.0;
 /// Speed at which cars turn at junctions (degree >= 3), m/s. Straight-on
 /// traffic keeps its speed.
 pub const JUNCTION_SPEED: f32 = 9.0;
-/// Cars stop this far before a node they may not enter yet, metres.
-pub const STOP_LINE_M: f32 = 0.6;
+/// A car waiting at a stop line stands with its front bumper this far
+/// behind the line, metres (its centre half a body length further back:
+/// `drive::stop_back_m`), so turning cars pass clear of its nose.
+pub const STOP_LINE_M: f32 = 0.5;
 /// Per-driver speed variation: each car drives at `1 ± this` of the
 /// allowed speed (from its seed).
 pub const DRIVER_SPEED_VARIATION: f32 = 0.08;
@@ -339,6 +341,9 @@ pub const MAX_VEHICLES: usize = 2_500;
 /// smaller city; never fewer than [`MIN_VEHICLE_BUDGET`]).
 pub const VEHICLES_PER_1000: usize = 125;
 pub const MIN_VEHICLE_BUDGET: usize = 150;
+/// Cap of a car trip's time over its free-flow estimate in the delay
+/// factor (`TrafficState::delay_factor`).
+pub const DELAY_FACTOR_MAX: f32 = 8.0;
 /// A trip whose car could not start within this many seconds (blocked
 /// driveway, saturated network) happens off screen instead and counts as a
 /// hopeless commute.
@@ -346,6 +351,9 @@ pub const MAX_DEPARTURE_WAIT_S: f32 = 40.0;
 /// A car only pulls out of a driveway if no car on that lane is within this
 /// distance of the spot, metres.
 pub const SPAWN_CLEARANCE_M: f32 = 6.0;
+/// A car does not pull out when a standing car is less than this far ahead
+/// of its driveway in its lane (a queue): it waits for the queue to move.
+pub const SPAWN_QUEUE_M: f32 = 25.0;
 /// How far from a building (centre) its road access point may be, cells.
 pub const ACCESS_SEARCH_CELLS: i32 = 4;
 
@@ -383,6 +391,10 @@ pub const JOB_MATCH_SAMPLES: usize = 10;
 pub const MOVE_IN_FILL_PER_HOUR: f32 = 2.4;
 /// ... at most this many per hour ...
 pub const MOVE_IN_MAX_PER_HOUR: f32 = 480.0;
+/// Newcomers arrive between these hours; at night at this share of the
+/// mean rate (the day's total is unchanged).
+pub const MOVE_IN_DAY_H: [f32; 2] = [6.0, 22.0];
+pub const MOVE_IN_NIGHT_SHARE: f32 = 0.2;
 /// ... and only while the city's attractiveness (residential demand
 /// ignoring empty housing) is above this.
 pub const MOVE_IN_MIN_DEMAND: f32 = -0.25;

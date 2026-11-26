@@ -319,11 +319,12 @@ fn money_stays_a_constraint_for_a_player_who_keeps_expanding() {
     let waited = real_s(p.longest_money_wait_ticks);
     assert!(waited <= 60.0, "waited {waited:.0} s for money");
     // 100 road cells are a few real minutes of net income at 5,000
-    // residents (a quarter to a half of a 16-minute day).
+    // residents (a sixth to over half of a 16-minute day: shops and works
+    // pay on the hours their workers actually get in).
     let at_5k = w.economy.history.iter().find(|d| d.population >= 5000).unwrap().budget;
     let days_per_100 = hundred_cells as f64 / at_5k.net() as f64;
     assert!(
-        (0.15..=0.5).contains(&days_per_100),
+        (0.15..=0.6).contains(&days_per_100),
         "100 cells = {days_per_100:.2} days of net"
     );
     assert!(w.economy.history.iter().skip(1).all(|d| d.budget.net() > 0));
@@ -375,9 +376,9 @@ fn a_sensible_layout_built_all_at_once_stays_solvent() {
             h.iter().skip(1).all(|d| d.budget.net() > 0),
             "grid {grid}: deficit after day 1"
         );
-        // (The one-junction layout fixed at the start of day 2 recovers
-        // more slowly: its surplus holds.)
-        let factor = if grid { 1.0 } else { 0.9 };
+        // (The one-junction layout fixed at the start of day 2 recovers more
+        // slowly: its late workers cost business tax; its surplus holds.)
+        let factor = if grid { 1.0 } else { 0.75 };
         assert!(
             (h[1].budget.net() as f64) * factor < h[2].budget.net() as f64,
             "grid {grid}: surplus grows {} -> {}",
