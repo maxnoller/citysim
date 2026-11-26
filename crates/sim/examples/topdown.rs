@@ -996,7 +996,7 @@ fn day(out: &str, seconds: u32) {
     let mut k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
     // `CITYSIM_TOPDOWN_VIEW="width,x,y,scale"`: a fixed frame (the same for
     // two cities side by side).
-    if let Some(v) = std::env::var("CITYSIM_TOPDOWN_VIEW").ok() {
+    if let Ok(v) = std::env::var("CITYSIM_TOPDOWN_VIEW") {
         let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
         if n.len() == 4 {
             wpx = n[0] as usize;
@@ -1792,7 +1792,7 @@ fn rush(out: &str, seconds: u32) {
     let mut k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
     // `CITYSIM_TOPDOWN_VIEW="width,x,y,scale"`: a fixed frame (the same for
     // two cities side by side).
-    if let Some(v) = std::env::var("CITYSIM_TOPDOWN_VIEW").ok() {
+    if let Ok(v) = std::env::var("CITYSIM_TOPDOWN_VIEW") {
         let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
         if n.len() == 4 {
             wpx = n[0] as usize;

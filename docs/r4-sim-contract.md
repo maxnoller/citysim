@@ -388,3 +388,32 @@ approach, lane and turn at one junction of a save; `LANES_USE`, `LANES_TRACE`), 
 save: time and standing per segment, detour factor), `simint` gains `controls <save>`, `bypass <save> <out>` and a
 breakdown by junction type of standing time and refusals; `topdown rush` takes `CITYSIM_TOPDOWN_LAYOUT=streets`,
 `CITYSIM_TOPDOWN_RED`, `CITYSIM_TOPDOWN_VIEW`; `overlap` takes `streets`.
+
+### Measured (release, this machine; 10 seeds per city unless noted)
+
+Commute over free-flow time (`delay_factor`) · car trips given up · residents · taxes per day:
+
+| | ~9,000–10,000 residents | ~12,000 | day 15 |
+|---|---|---|---|
+| Avenue hierarchy, before | 4.6x · 4.3 % · 9,700 (day 10) | 4.8x · 5.2 % · 10,800 (day 12) | 5.0x · 6.5 % · 12,200 · $95k |
+| Avenue hierarchy, after | 2.2x · 0.5 % · 9,600 (day 8) | 2.6x · 1.2 % · 12,000 (day 10) | 3.4x · 2.2 % · 16,800 · $144k |
+| Streets only, before | 4.7x · 7.4 % · 9,200 (day 10) | 4.9x · 8.4 % · 10,100 (day 12) | 4.9x · 8.3 % · 11,300 · $91k |
+| Streets only, after | 2.4x · 0.8 % · 8,700 (day 8) | 3.1x · 1.7 % · 10,700 (day 10) | 3.6x · 4.0 % · 14,700 · $123k |
+| Streets, main streets upgraded on day 8 | 1.5x · 0.06 % · 8,900 (day 8) | 2.0x · 0.4 % · 11,500 (day 10) | 3.1x · 1.6 % · 17,500 · $148k |
+| Streets, relief roads at the gateway on day 8 | 2.2x · 0.2 % · 8,700 (day 8) | 3.2x · 0.9 % · 10,800 (day 10) | 3.7x · 2.5 % · 15,200 · $128k |
+| Single artery | stalls at 2,200 residents, 4.2x, 7 % given up | | |
+
+- The avenue city now beats the streets city on every traffic measure at every size, grows 14 % larger by day 15,
+  and earns 16 % more tax a day; the rescue (upgrade) drops commutes from 2.0x to 1.5x the same day and keeps
+  give-ups down; relief roads halve give-ups but barely move commutes. Money at day 15: avenue city $85k, streets
+  city $165k, upgraded $75k (after paying ~$35k), relief roads $163k: a bigger city costs more in services, so net
+  income per day is about equal and the streets city still banks more (see the report).
+- Junction bench, step time and overlaps: see above; step time (20,000+ citizens, car budget topped up to 2,500)
+  mean 0.78 ms (before 0.87 on the same machine), p99 1.30 ms, max 3.1 ms; 16 steps 12.5 ms (13.9). Overlapping car
+  bodies over the 07:00–09:00 rush: 0 in the 10,000-resident avenue and streets cities, 2 pair-ticks (one pair at most,
+  0.24 m) in the organic town (8 before).
+- Other scenarios (3 seeds): grid player 5,000 residents on day 5 (the balance test's player: 28.6 real minutes at
+  2.5x), $30–36k in hand;
+  two-district grid town 2,200 / 3,400 residents on days 2 / 3 with 1.4 % / 3.3 % of trips given up (before 0.7 % /
+  2.6 %); one-junction town 1,600–2,000 residents, 20–24 % given up; fixed on day 2 2,800; organic town 8,700–9,300
+  residents on day 7 with 2–5 % given up (before 4,700, 4 %); overbuilt mesh broke (-$74k).
