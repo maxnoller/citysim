@@ -1607,14 +1607,15 @@ fn slide_panel(
     tool: Res<ActiveTool>,
     modes: Res<crate::shared::ToolModes>,
     ui: Res<UiState>,
+    extent: Res<super::tray::TrayExtent>,
     mut q: Query<(&mut PanelRoot, &mut UiTransform, &mut Visibility, &mut Node)>,
 ) {
     let Ok((mut r, mut tf, mut vis, mut node)) = q.single_mut() else {
         return;
     };
-    // Keep above the tray while one is up.
+    // Keep above the tray (as tall as its page) while one is up.
     let tray = super::tray::current_page(*tool, *modes, &ui).is_some();
-    let bottom = px(PANEL_MARGIN_BOTTOM + if tray { t::TRAY_H + 8.0 } else { 0.0 });
+    let bottom = px(PANEL_MARGIN_BOTTOM + if tray { extent.0.max(t::TRAY_H) + 8.0 } else { 0.0 });
     if node.bottom != bottom {
         node.bottom = bottom;
     }

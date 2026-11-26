@@ -522,7 +522,8 @@ fn doing(world: &World, id: CitizenId) -> (String, String) {
                 (Activity::Travelling, Some(TripPurpose::ToHome), _) => format!("Heads home{when}"),
                 (Activity::Travelling, Some(pp), _) => format!("Sets off {}{when}", purpose_word(pp)),
                 (Activity::Sleeping, _, _) => format!("Bed{when}"),
-                (Activity::Home, _, _) if p.activity == Activity::Sleeping => format!("Gets up{when}"),
+                // "Sleeping until 07:06" already says when they get up.
+                (Activity::Home, _, _) if p.activity == Activity::Sleeping => String::new(),
                 (a, _, _) => format!("Then {}{when}{place}", activity_word(a).to_lowercase()),
             }
         }

@@ -231,7 +231,10 @@ fn move_frame(
     let Ok((mut frame, mut t, mut vis)) = q.single_mut() else {
         return;
     };
-    let Some((corner, rot)) = cell_frame(&sim, &hovered, &point) else {
+    // Inspect highlights what it points at (buildings, roads, cars); a
+    // cell frame on bare ground would only look like a stray tile.
+    let frame_at = cell_frame(&sim, &hovered, &point).filter(|_| *tool != ActiveTool::Inspect);
+    let Some((corner, rot)) = frame_at else {
         vis.set_if_neq(Visibility::Hidden);
         return;
     };

@@ -39,7 +39,8 @@ pub struct TrayPlugin;
 
 impl Plugin for TrayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_tray)
+        app.init_resource::<TrayExtent>()
+            .add_systems(Startup, spawn_tray)
             .add_systems(
                 Update,
                 (
@@ -61,6 +62,11 @@ impl Plugin for TrayPlugin {
             );
     }
 }
+
+/// Height of the drawer standing on the bar (logical px), 0 while none
+/// is up: the side panel keeps above it.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct TrayExtent(pub f32);
 
 /// The control of the drawer that has the keyboard focus.
 #[derive(Default)]
@@ -1544,11 +1550,18 @@ fn slide_tray(
     modes: Res<ToolModes>,
     ui: Res<UiState>,
     mut root: Query<(&mut TrayRoot, &mut UiTransform, &mut Visibility, &ComputedNode)>,
+    mut extent: ResMut<TrayExtent>,
 ) {
     let Ok((mut r, mut tf, mut vis, computed)) = root.single_mut() else {
         return;
     };
     let want = current_page(*tool, *modes, &ui);
+    let up = if want.is_some() {
+        (computed.size.y * computed.inverse_scale_factor).max(t::TRAY_H)
+    } else {
+        0.0
+    };
+    extent.set_if_neq(TrayExtent(up));
     let target = if want.is_some() && want == r.shown { 1.0 } else { 0.0 };
     // Rise calmly, sink quickly (a switch between pages stays short).
     let tau = if target > r.t { 0.07 } else { 0.035 };
