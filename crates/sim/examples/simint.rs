@@ -80,6 +80,7 @@ struct Where {
     boxed: u64,
     pending: u64,
     highway: u64,
+    purpose: [u64; 7],
 }
 
 fn classify(w: &World, acc: &mut Where, by_node: &mut BTreeMap<NodeId, [u64; 3]>) {
@@ -97,6 +98,7 @@ fn classify(w: &World, acc: &mut Where, by_node: &mut BTreeMap<NodeId, [u64; 3]>
         if t.to == traffic::Place::Entry || t.from == traffic::Place::Entry {
             acc.highway += 1;
         }
+        acc.purpose[t.purpose.index()] += 1;
     }
     for v in w.vehicles.values() {
         if v.junction.is_some() {
@@ -133,6 +135,29 @@ fn day(args: &[String]) {
     let mut w = World::load(&bytes).unwrap();
     // Junction plans under the current rules.
     w.traffic.junctions_version = u64::MAX;
+    if std::env::var("SIMINT_RESET_BUSY").is_ok() {
+        // Auto control decided afresh: nothing counts as busy yet.
+        let nodes: Vec<NodeId> = w.traffic.junction_states.iter().map(|(n, _)| n).collect();
+        for n in nodes {
+            let j = w.traffic.junction_states.get_mut(n).unwrap();
+            j.busy = false;
+            j.peak_minute_yesterday = 0;
+            let setting = j.setting;
+            if j.arms.len() >= 3 {
+                let _ = w.apply(citysim_sim::Command::SetNodeControl {
+                    node: n,
+                    control: setting,
+                });
+            }
+        }
+        let sig = w
+            .traffic
+            .junction_states
+            .values()
+            .filter(|j| j.control == citysim_sim::JunctionControl::Signal)
+            .count();
+        println!("after reset: {sig} signals");
+    }
     println!(
         "loaded day {} {:.1}h pop {} cars {}",
         w.time.day,
@@ -164,6 +189,8 @@ fn day(args: &[String]) {
     let (mut trips_all, mut gave_all) = (0u32, 0u32);
     let mut step_ns = Vec::new();
     let mut by_node: BTreeMap<NodeId, [u64; 3]> = BTreeMap::new();
+    let mut entries: BTreeMap<NodeId, u64> = BTreeMap::new();
+    let mut in_box: Vec<(VehicleId, NodeId)> = Vec::new();
     println!(
         "hour  trips gaveup  commute | car-seconds per ended trip: moving red held queued box pending | cars stopped%"
     );
@@ -185,6 +212,16 @@ fn day(args: &[String]) {
             trips += w.traffic.trips_today - last_today;
             last_today = w.traffic.trips_today;
             classify(&w, &mut acc, &mut by_node);
+            let mut now_in: Vec<(VehicleId, NodeId)> = Vec::new();
+            for (id, v) in w.vehicles.iter() {
+                if let Some(jm) = v.junction {
+                    now_in.push((id, jm.node));
+                    if !in_box.contains(&(id, jm.node)) {
+                        *entries.entry(jm.node).or_default() += 1;
+                    }
+                }
+            }
+            in_box = now_in;
         }
         let gave = w.traffic.stuck_removed - gave_before;
         trips_all += trips;
@@ -192,7 +229,7 @@ fn day(args: &[String]) {
         let n = trips.max(1) as f64 * TICKS_PER_SECOND as f64;
         let cars = (acc.moving + acc.red + acc.held + acc.queued + acc.boxed).max(1) as f64;
         println!(
-            "{:5.1} {:6} {:6} {:7.1} | {:6.1} {:5.1} {:5.1} {:6.1} {:5.1} {:6.1} | {:4.0}% hw {:4.1}%",
+            "{:5.1} {:6} {:6} {:7.1} | {:6.1} {:5.1} {:5.1} {:6.1} {:5.1} {:6.1} | {:4.0}% hw {:4.1}% by purpose {:?}",
             h,
             trips,
             gave,
@@ -204,7 +241,8 @@ fn day(args: &[String]) {
             acc.boxed as f64 / n,
             acc.pending as f64 / n,
             100.0 * (acc.red + acc.held + acc.queued) as f64 / cars,
-            100.0 * acc.highway as f64 / cars
+            100.0 * acc.highway as f64 / cars,
+            acc.purpose.map(|p| (100.0 * p as f64 / cars).round() as u32)
         );
         total.moving += acc.moving;
         total.red += acc.red;
@@ -237,6 +275,76 @@ fn day(args: &[String]) {
         "gave-up cars' last refusal [conflict in box, no room beyond, signal, yielding, none]: {:?}",
         traffic::debug_gave_up_reasons(&w)
     );
+    let mut by_type: BTreeMap<String, ([u64; 3], u32)> = BTreeMap::new();
+    let mut thru: BTreeMap<String, (u64, u64, u32)> = BTreeMap::new();
+    let minutes = hours as f64 * balance::TICKS_PER_HOUR as f64 / TICKS_PER_SECOND as f64 / 60.0;
+    for (n, e) in &entries {
+        let Some(j) = junction::junction(&w, *n) else { continue };
+        let mut kinds: Vec<String> = j.arms.iter().map(|a| format!("{:?}", a.kind)).collect();
+        kinds.sort();
+        let key = format!("{} {:?}", kinds.join("+"), j.control);
+        let st = by_node.get(n).map_or(0, |c| c.iter().sum::<u64>());
+        let t = thru.entry(key).or_default();
+        t.0 += e;
+        t.1 += st;
+        t.2 += 1;
+    }
+    let mut why: BTreeMap<String, [u64; 4]> = BTreeMap::new();
+    for n in junction::junction_nodes(&w).collect::<Vec<_>>() {
+        let Some(j) = junction::junction(&w, n) else { continue };
+        let mut kinds: Vec<String> = j.arms.iter().map(|a| format!("{:?}", a.kind)).collect();
+        kinds.sort();
+        let key = format!("{} {:?}", kinds.join("+"), j.control);
+        let d = traffic::debug_node_denials(&w, n);
+        let e = why.entry(key).or_default();
+        for k in 0..4 {
+            e[k] += d[k] as u64;
+        }
+    }
+    println!("front cars held at the line, car-seconds per trip [conflict in box, no room beyond, red, yielding]:");
+    for (k, d) in &why {
+        let f = |x: u64| x as f64 / TICKS_PER_SECOND as f64 / trips_all.max(1) as f64;
+        println!(
+            "  {k:44} {:5.1} {:5.1} {:5.1} {:5.1}",
+            f(d[0]),
+            f(d[1]),
+            f(d[2]),
+            f(d[3])
+        );
+    }
+    println!(
+        "turns at junctions so far [straight, right, left, u-turn]: {:?}",
+        traffic::debug_turns(&w)
+    );
+    println!("junctions by type: cars through per minute (mean per junction), standing s per car through:");
+    for (k, (e, st, n)) in &thru {
+        println!(
+            "  {k:44} {:6.1}/min  {:5.1} s/car  ({n})",
+            *e as f64 / *n as f64 / minutes,
+            *st as f64 / TICKS_PER_SECOND as f64 / (*e).max(1) as f64
+        );
+    }
+    for (n, c) in &by_node {
+        let Some(j) = junction::junction(&w, *n) else { continue };
+        let mut kinds: Vec<String> = j.arms.iter().map(|a| format!("{:?}", a.kind)).collect();
+        kinds.sort();
+        let key = format!("{} {:?}", kinds.join("+"), j.control);
+        let e = by_type.entry(key).or_default();
+        for k in 0..3 {
+            e.0[k] += c[k];
+        }
+        e.1 += 1;
+    }
+    println!("standing car-seconds per trip by junction type [red, held, queued] (junctions):");
+    let per_trip = trips_all.max(1) as u64 * TICKS_PER_SECOND as u64;
+    for (k, (c, n)) in &by_type {
+        println!(
+            "  {k:44} {:5.1} {:5.1} {:5.1}  ({n})",
+            c[0] as f64 / per_trip as f64,
+            c[1] as f64 / per_trip as f64,
+            c[2] as f64 / per_trip as f64
+        );
+    }
     let mut nodes: Vec<(NodeId, [u64; 3])> = by_node.into_iter().collect();
     nodes.sort_by_key(|x| std::cmp::Reverse(x.1.iter().sum::<u64>()));
     println!("most standing car-seconds by the junction ahead [red, held at the line, queued behind]:");
@@ -542,6 +650,30 @@ fn cross(args: &[String]) {
     }
 }
 
+/// `controls <save>`: junctions by the road kinds meeting and their control.
+fn controls(args: &[String]) {
+    let mut w = World::load(&std::fs::read(&args[0]).unwrap()).unwrap();
+    w.traffic.junctions_version = u64::MAX;
+    w.step();
+    let mut by: BTreeMap<String, [u32; 3]> = BTreeMap::new();
+    for n in junction::junction_nodes(&w).collect::<Vec<_>>() {
+        let j = junction::junction(&w, n).unwrap();
+        let mut kinds: Vec<String> = j.arms.iter().map(|a| format!("{:?}", a.kind)).collect();
+        kinds.sort();
+        let all_way = !j.arms.iter().any(|a| a.major);
+        let k = match (j.control, all_way) {
+            (JunctionControl::Signal, _) => 0,
+            (JunctionControl::Priority, false) => 1,
+            (JunctionControl::Priority, true) => 2,
+        };
+        by.entry(kinds.join("+")).or_default()[k] += 1;
+    }
+    println!("pop {}: [signal, priority, all-way]", w.stats.population);
+    for (k, v) in by {
+        println!("  {k}: {v:?}");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -550,6 +682,7 @@ fn main() {
         Some("node") => node(&args[1..]),
         Some("flow") => flow(&args[1..]),
         Some("cross") => cross(&args[1..]),
+        Some("controls") => controls(&args[1..]),
         _ => eprintln!("usage: simint build <scenario> <seed> <pop> <out> | simint day <save> [hours]"),
     }
 }

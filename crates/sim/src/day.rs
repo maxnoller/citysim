@@ -605,7 +605,7 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
         trip_s(world, purpose, fp, tp)
     };
     // Every car trip is a car on the road while the budget allows.
-    let visible = mode == TravelMode::Driving && traffic::has_room(world);
+    let visible = mode == TravelMode::Driving && traffic::has_room(world) && traffic::drawn_driver(world, id);
     if mode == TravelMode::Driving {
         world.citizens[id].has_car = true;
     }
@@ -679,16 +679,15 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
 /// Newcomers drive in from the highway together (`driver` drives).
 pub(crate) fn move_in(world: &mut World, hid: crate::HouseholdId, driver: CitizenId, members: &[CitizenId], now: u64) {
     let home = world.households[hid].home;
-    let has_car = world.households[hid].cars > 0 && world.citizens[driver].drives() && traffic::has_room(world);
+    let drives = world.households[hid].cars > 0 && world.citizens[driver].drives();
+    // Drawn on the road (the car share and the budget allow), or driving in
+    // off screen.
+    let has_car = drives && traffic::has_room(world) && traffic::drawn_driver(world, driver);
     let journey = Journey {
         purpose: TripPurpose::MoveIn,
         from: None,
         to: home,
-        mode: if has_car {
-            TravelMode::Driving
-        } else {
-            TravelMode::NoCar
-        },
+        mode: if drives { TravelMode::Driving } else { TravelMode::NoCar },
         driver: None,
         vehicle: None,
         departed_tick: now,
@@ -705,8 +704,12 @@ pub(crate) fn move_in(world: &mut World, hid: crate::HouseholdId, driver: Citize
         traffic::request_trip(world, d);
         journey
     } else {
-        let est = estimate_s(pos_of(world, None), pos_of(world, Some(home)));
-        let t = now + secs_to_ticks(est * balance::CARLESS_TIME_FACTOR);
+        let (from, to) = (pos_of(world, None), pos_of(world, Some(home)));
+        let t = if drives {
+            now + secs_to_ticks(road_s(world, from, to))
+        } else {
+            now + secs_to_ticks(estimate_s(from, to) * balance::CARLESS_TIME_FACTOR)
+        };
         Journey {
             arrive_tick: Some(t),
             due_tick: journey.due_tick.max(t),

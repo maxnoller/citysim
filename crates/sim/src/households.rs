@@ -437,6 +437,7 @@ pub(crate) fn leave(world: &mut World, id: HouseholdId, drive_out: bool) {
         && cars.is_empty()
         && n > 0
         && traffic::has_room(world)
+        && world.rng.next_f32() < traffic::car_share(world)
         && let Some(from) = place_of(world, home)
     {
         let mut d = traffic::Departure::new(world, TripPurpose::MoveOut, from, Place::Entry);

@@ -46,7 +46,7 @@ const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
-pub const EXTENSION_VERSION: u32 = 1;
+pub const EXTENSION_VERSION: u32 = 2;
 
 /// Every field of a [`Budget`], including those its own serde skips.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -119,6 +119,40 @@ impl ExtensionV1 {
     }
 }
 
+/// Extension block, version 2: version 1 plus the junctions' minor-road
+/// counters (`JunctionState::minor_*`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ExtensionV2 {
+    v1: ExtensionV1,
+    junction_minor: Vec<(crate::NodeId, [u16; 3])>,
+}
+
+impl ExtensionV2 {
+    pub(crate) fn of(w: &World) -> ExtensionV2 {
+        ExtensionV2 {
+            v1: ExtensionV1::of(w),
+            junction_minor: w
+                .traffic
+                .junction_states
+                .iter()
+                .filter(|(_, j)| j.minor_minute > 0 || j.minor_peak_today > 0 || j.minor_peak_yesterday > 0)
+                .map(|(n, j)| (n, [j.minor_minute, j.minor_peak_today, j.minor_peak_yesterday]))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn restore(self, w: &mut World) {
+        self.v1.restore(w);
+        for (n, [m, t, y]) in self.junction_minor {
+            if let Some(j) = w.traffic.junction_states.get_mut(n) {
+                j.minor_minute = m;
+                j.minor_peak_today = t;
+                j.minor_peak_yesterday = y;
+            }
+        }
+    }
+}
+
 /// Derived fields that are not stored at all, recomputed exactly as
 /// `stats::update` computes them.
 fn restore_derived(w: &mut World) {
@@ -154,7 +188,7 @@ pub(crate) fn save(world: &World) -> Vec<u8> {
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     let body = postcard::to_stdvec(world).expect("World is always serialisable");
     out.extend_from_slice(&body);
-    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV1::of(world))).expect("serialisable");
+    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV2::of(world))).expect("serialisable");
     out.extend_from_slice(&ext);
     out
 }
@@ -187,10 +221,15 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
         let (ext_version, rest): (u32, &[u8]) =
             postcard::take_from_bytes(rest).map_err(|e| LoadError::Corrupt(format!("extension: {e}")))?;
         // A newer block than this build knows: keep the defaults.
-        if ext_version == 1 {
-            let ext: ExtensionV1 =
-                postcard::from_bytes(rest).map_err(|e| LoadError::Corrupt(format!("extension: {e}")))?;
-            ext.restore(&mut world);
+        let bad = |e: postcard::Error| LoadError::Corrupt(format!("extension: {e}"));
+        match ext_version {
+            1 => postcard::from_bytes::<ExtensionV1>(rest)
+                .map_err(bad)?
+                .restore(&mut world),
+            2 => postcard::from_bytes::<ExtensionV2>(rest)
+                .map_err(bad)?
+                .restore(&mut world),
+            _ => {}
         }
     }
     restore_derived(&mut world);

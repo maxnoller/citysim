@@ -101,6 +101,58 @@ pub(crate) fn build_route_delays(
     out
 }
 
+/// Extra routing cost of every turn at every junction (see
+/// `Derived::route_turns`): drivers avoid turning left across a busy road
+/// (the more oncoming lanes, the more so) and crossing a major road from a
+/// minor one; at an all-way stop every way costs the same.
+pub(crate) fn build_route_turns(
+    roads: &RoadNetwork,
+    states: &crate::side::SideTable<NodeId, JunctionState>,
+) -> Vec<Vec<f32>> {
+    let mut out = vec![Vec::new(); roads.nodes.slot_count()];
+    for (n, node) in roads.nodes.iter() {
+        let deg = node.segments.len();
+        let Some(j) = states.get(n).filter(|j| j.arms.len() >= 3 && j.arms.len() == deg) else {
+            continue;
+        };
+        let any_major = j.arms.iter().any(|a| a.major);
+        let mut t = vec![0.0f32; deg * deg];
+        for (pi, &si) in node.segments.iter().enumerate() {
+            let Some(a) = j.arm_of(si) else { continue };
+            let arm = &j.arms[a];
+            let oncoming = arm.opposite.map_or(1.0, |o| j.arms[o as usize].lanes_in as f32);
+            let major_lanes: f32 = j
+                .arms
+                .iter()
+                .filter(|x| x.major)
+                .map(|x| x.lanes_in as f32)
+                .sum::<f32>()
+                * 0.5;
+            for (po, &so) in node.segments.iter().enumerate() {
+                let Some(b) = j.arm_of(so) else { continue };
+                let turn = j.movements_between(a, b).next().map(|(_, m)| m.turn);
+                let c = match (j.control, turn) {
+                    (_, None) => 0.0,
+                    (JunctionControl::Signal, Some(Turn::Left)) => balance::ROUTE_LEFT_PER_LANE_S * oncoming,
+                    (JunctionControl::Signal, Some(Turn::Right)) => balance::ROUTE_RIGHT_S,
+                    (JunctionControl::Signal, _) => 0.0,
+                    (JunctionControl::Priority, _) if !any_major => 0.0,
+                    (JunctionControl::Priority, Some(turn)) => match (arm.major, turn) {
+                        (true, Turn::Left) => balance::ROUTE_LEFT_PER_LANE_S * 0.5 * oncoming,
+                        (true, _) => 0.0,
+                        (false, Turn::Right) => balance::ROUTE_RIGHT_S,
+                        (false, Turn::Left) => balance::ROUTE_LEFT_PER_LANE_S * major_lanes,
+                        (false, _) => balance::ROUTE_LEFT_PER_LANE_S * 0.5 * major_lanes,
+                    },
+                };
+                t[pi * deg + po] = c;
+            }
+        }
+        out[key_index(n)] = t;
+    }
+    out
+}
+
 /// Make sure the stop lines and routing delays match the junctions.
 pub(crate) fn ensure_tables(world: &mut World) {
     if world.cache.setbacks_key != Some(world.traffic.junctions_version) {
@@ -110,6 +162,7 @@ pub(crate) fn ensure_tables(world: &mut World) {
     let key = (world.traffic.junctions_version, world.traffic.control_version);
     if world.cache.route_delay_key != Some(key) {
         world.cache.route_delay = build_route_delays(&world.roads, &world.traffic.junction_states);
+        world.cache.route_turns = build_route_turns(&world.roads, &world.traffic.junction_states);
         world.cache.route_delay_key = Some(key);
     }
 }
@@ -162,8 +215,18 @@ fn ordered_bits(x: f32) -> u32 {
     if b >> 31 == 1 { !b } else { b | 0x8000_0000 }
 }
 
-fn follow_speed(gap: f32) -> f32 {
-    ((gap - balance::MIN_GAP_M) / balance::FOLLOW_HEADWAY_S).max(0.0)
+fn follow_speed(gap: f32, headway: f32) -> f32 {
+    ((gap - balance::MIN_GAP_M) / headway).max(0.0)
+}
+
+/// Time headway drivers keep on a road of this kind
+/// (`balance::FOLLOW_HEADWAY_S`): narrow streets lined with driveways are
+/// driven with more distance than avenues.
+fn headway_of(kind: crate::RoadKind) -> f32 {
+    match kind {
+        crate::RoadKind::Street => balance::STREET_FOLLOW_HEADWAY_S,
+        _ => balance::FOLLOW_HEADWAY_S,
+    }
 }
 
 fn stop_speed(d: f32) -> f32 {
@@ -251,6 +314,9 @@ struct Front {
     exit_stop: f32,
     /// Allowed to enter (decided this tick).
     permit: bool,
+    /// Refused only because a conflicting car is still in the box (it goes
+    /// as soon as that one is past): cars of lower precedence wait for it.
+    held_by_box: bool,
     /// Reaches the stop line this tick.
     reaches: bool,
 }
@@ -450,6 +516,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             exit_start,
             exit_stop,
             permit: false,
+            held_by_box: false,
             reaches: d_line <= reach,
         });
     }
@@ -496,20 +563,22 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         }
         let denials = &mut cache.denials;
         let j = traffic.junction_states.get_mut(node).expect("front has a junction");
-        // (movement, lane the car really came from)
-        let mut occupied: Vec<(usize, usize)> = boxed[b0..b1]
+        j.ensure_clear();
+        // (movement, lane the car really came from, distance along)
+        let mut occupied: Vec<(usize, usize, f32)> = boxed[b0..b1]
             .iter()
             .map(|b| {
                 let v = &vehicles[b.3];
                 let jm = v.junction.expect("boxed");
-                (b.1 as usize, lane_key(jm.from, v.forward, jm.from_lane))
+                (b.1 as usize, lane_key(jm.from, v.forward, jm.from_lane), jm.distance)
             })
             .collect();
-        // Conflict with a car in the box: crossing / merging paths, or the
-        // same lane's paths taken by a car from another lane (a car that
-        // could not reach its turning lane borrows that lane's path).
-        let clash = |j: &JunctionState, m: usize, lane: usize, o: (usize, usize)| {
-            j.conflict(m, o.0) || {
+        // Conflict with a car in the box: crossing / merging paths it has
+        // not yet passed, or the same lane's paths taken by a car from
+        // another lane (a car that could not reach its turning lane borrows
+        // that lane's path).
+        let clash = |j: &JunctionState, m: usize, lane: usize, o: (usize, usize, f32)| {
+            j.blocks(o.0, o.2, m) || {
                 let (a, b) = (&j.movements[m], &j.movements[o.0]);
                 (a.from_arm, a.from_lane) == (b.from_arm, b.from_lane) && lane != o.1
             }
@@ -547,9 +616,18 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             // Committed first: a car let go last tick is pulling up to its
             // line and keeps its turn (it stops behind the line, so it needs
             // a moment to get there; taking the turn back would stall it).
+            // Two cars both let go (side by side, merging): the one nearer
+            // its line keeps going first (a key that does not flip while
+            // they creep, unlike the arrival time).
+            let both_go = fx.go_before && fy.go_before;
             fy.go_before
                 .cmp(&fx.go_before)
                 .then(class(j, fy).cmp(&class(j, fx)))
+                .then(if both_go {
+                    (fx.d_line - fx.back).total_cmp(&(fy.d_line - fy.back))
+                } else {
+                    std::cmp::Ordering::Equal
+                })
                 .then(in_batch(fy).cmp(&in_batch(fx)))
                 .then(fx.eta.total_cmp(&fy.eta))
                 .then(fy.wait.cmp(&fx.wait))
@@ -559,6 +637,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             let f = fronts[fi];
             let my_lane = cars[f.idx].0 as usize;
             let mut ok = !occupied.iter().any(|&o| clash(j, f.movement, my_lane, o));
+            let box_blocked = !ok;
             // A car that could not reach its turning lane takes that lane's
             // path: only while no car waits at that lane's stop line.
             let mv_lane = j.movements[f.movement].from_lane;
@@ -615,20 +694,25 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         ok = false;
                         break;
                     }
-                    if !(o.go_before || o.permit) {
-                        continue;
-                    }
                     if j.control == JunctionControl::Signal && j.movement_aspect(o.movement) != Some(Aspect::Green) {
                         continue;
                     }
                     let theirs = class(j, o);
+                    // A car with precedence waiting at its line only for the
+                    // box to clear goes next: nobody of lower precedence
+                    // slips in ahead of it (a chain of permissive left turns
+                    // would otherwise starve the oncoming stream).
+                    if o.held_by_box && theirs > mine && o.d_line < o.back + 1.5 {
+                        ok = false;
+                        break;
+                    }
+                    if !(o.go_before || o.permit) {
+                        continue;
+                    }
                     let gap = gap_s(j, mine, theirs);
-                    let blocks = if theirs == mine {
-                        // Earlier in the order: arrives first.
-                        o.eta < f.eta + gap
-                    } else {
-                        o.eta < f.eta + gap
-                    };
+                    // Earlier in the order and arriving before this one
+                    // could clear; a car already let go ahead of it always.
+                    let blocks = (o.go_before && f.go_before) || o.eta < f.eta + gap;
                     if blocks {
                         ok = false;
                         break;
@@ -636,6 +720,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 }
             }
             fronts[fi].permit = ok;
+            fronts[fi].held_by_box = box_blocked && !ok;
             if !ok && j.control == JunctionControl::Signal && j.movement_aspect(f.movement) != Some(Aspect::Green) {
                 held_by_red[my_lane] = true;
             }
@@ -646,10 +731,12 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 }
             }
             if !ok && f.d_line < f.back + 1.0 {
-                let reason = if occupied.iter().any(|&o| clash(j, f.movement, my_lane, o)) {
-                    0
-                } else if j.control == JunctionControl::Signal && j.movement_aspect(f.movement) != Some(Aspect::Green) {
+                let reason = if j.control == JunctionControl::Signal
+                    && !matches!(j.movement_aspect(f.movement), Some(Aspect::Green | Aspect::Yellow))
+                {
                     2
+                } else if occupied.iter().any(|&o| clash(j, f.movement, my_lane, o)) {
+                    0
                 } else {
                     let room = rear[f.exit_key] - f.exit_start;
                     if rear[f.exit_key].is_finite()
@@ -673,7 +760,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 cache.last_denial[vs] = reason as u8;
             }
             if ok && f.reaches {
-                occupied.push((f.movement, my_lane));
+                occupied.push((f.movement, my_lane, 0.0));
                 inbox[f.exit_key] = inbox[f.exit_key].saturating_add(1);
             }
         }
@@ -704,11 +791,12 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             let (exit_start, _) = lane_range(setbacks, jm.to, jm.to_forward, exit_seg.length);
             let mut target = turn_speed(m.turn, exit_seg.speed_limit) * driver(v.seed);
             let ek = lane_key(jm.to, jm.to_forward, jm.to_lane);
+            let hw = headway_of(exit_seg.kind);
             match lead {
-                Some(d) => target = target.min(follow_speed(d - jm.distance)),
+                Some(d) => target = target.min(follow_speed(d - jm.distance, hw)),
                 None => {
                     if rear[ek].is_finite() {
-                        target = target.min(follow_speed(m.length - jm.distance + rear[ek] - exit_start));
+                        target = target.min(follow_speed(m.length - jm.distance + rear[ek] - exit_start, hw));
                     }
                 }
             }
@@ -813,6 +901,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             // here too it slowed every car on a segment with a queue at its
             // far end).
             let mut target = seg.speed_limit * driver(v.seed);
+            let hw = headway_of(seg.kind);
             let trip = traffic.trips.get(id);
             let mut arrive_at: Option<f32> = None;
             if v.route.is_empty() {
@@ -847,7 +936,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     }
                 }
                 if let Some(p) = ahead {
-                    target = target.min(follow_speed(p - v.progress));
+                    target = target.min(follow_speed(p - v.progress, hw));
                 }
             }
             {
@@ -855,16 +944,16 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 if let Some(&(gk, gp)) = ghosts.get(lo)
                     && gk == key
                 {
-                    target = target.min(follow_speed(gp - v.progress));
+                    target = target.min(follow_speed(gp - v.progress, hw));
                 }
             }
             if let Some(lp) = leader {
-                target = target.min(follow_speed(lp - v.progress));
+                target = target.min(follow_speed(lp - v.progress, hw));
                 if let Some(a) = arrive_at {
-                    target = target.min(stop_speed(a - v.progress + 3.0));
+                    target = target.min(stop_speed(a - v.progress + 0.3));
                 }
             } else if let Some(a) = arrive_at {
-                target = target.min(stop_speed(a - v.progress + 3.0));
+                target = target.min(stop_speed(a - v.progress + 0.3));
             } else if let Some(f) = front {
                 let j = traffic.junction_states.get(f.node).expect("front junction");
                 let m = &j.movements[f.movement];
@@ -886,7 +975,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         gap = f.d_line + m.length + rear[f.exit_key] - f.exit_start;
                     }
                     if gap.is_finite() {
-                        target = target.min(follow_speed(gap));
+                        target = target.min(follow_speed(gap, hw));
                     }
                     if f.reaches {
                         enter = Some(f);
@@ -896,7 +985,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     // A car standing just beyond a short box (a bend, a join
                     // of curves) is closer than the stop line: keep the gap.
                     if rear[f.exit_key].is_finite() {
-                        target = target.min(follow_speed(f.d_line + m.length + rear[f.exit_key] - f.exit_start));
+                        target = target.min(follow_speed(f.d_line + m.length + rear[f.exit_key] - f.exit_start, hw));
                     }
                 }
             } else {
@@ -912,8 +1001,18 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             if let Some(a) = arrive_at
                 && v.progress + adv >= a - 0.05
             {
-                let secs = trip.map_or(0.0, |t| (now - t.requested_tick.min(now)) as f32 * DT);
-                finished = Some(TripEnd::Arrived(secs));
+                // Parking: the car stands at the kerb for a moment before it
+                // is gone (on a one-lane street everyone behind waits; on
+                // an avenue they pass in the other lane).
+                let dwell = secs_to_ticks(balance::PARK_DWELL_S) as u32;
+                if trip.is_none_or(|t| t.wait_ticks >= dwell) {
+                    let secs = trip.map_or(0.0, |t| (now - t.requested_tick.min(now)) as f32 * DT);
+                    finished = Some(TripEnd::Arrived(secs));
+                } else {
+                    v.progress = a.max(v.progress);
+                    v.speed = 0.0;
+                    adv = 0.0;
+                }
             }
             if finished.is_none() {
                 match enter {
@@ -941,6 +1040,9 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         v.lane_shift = 0.0;
                         entered.push(id);
                         j.entered_minute = j.entered_minute.saturating_add(1);
+                        if j.arm_of(s).is_some_and(|a| !j.arms[a].major) && j.arms.iter().any(|a| a.major) {
+                            j.minor_minute = j.minor_minute.saturating_add(1);
+                        }
                         j.clear_at = now;
                         cache.turns[match f.turn {
                             Turn::Straight => 0,
@@ -1077,8 +1179,13 @@ fn exit_room(
         return true;
     }
     let v = rear_speed[f.exit_key];
+    // Storage left on the out-lane once everyone on it and in the box
+    // heading there stands in a queue, and this car too, with a margin: a
+    // short block that could fill up needs the room now (a car stuck in the
+    // box blocks every crossing movement).
     let long = f.exit_stop - f.exit_start
-        > (on_lane[f.exit_key] as f32 + inbox[f.exit_key] as f32 + 2.0) * balance::VEHICLE_SPACING_M;
+        > (on_lane[f.exit_key] as f32 + inbox[f.exit_key] as f32 + 1.0 + balance::EXIT_STORAGE_MARGIN_CARS)
+            * balance::VEHICLE_SPACING_M;
     if v <= balance::WAIT_SPEED || !long {
         return false;
     }
@@ -1122,10 +1229,21 @@ fn tick_signals(
                 && can_go[kk]
                 && let Some(d) = per_arm.get_mut(f.arm as usize)
             {
+                // Within the passage time of the line (or standing at it):
+                // holds a green that serves it.
+                let near = f.eta <= balance::SIGNAL_PASSAGE_S || f.d_line < f.back + balance::STOP_SIGN_DISTANCE_M;
                 if matches!(f.turn, Turn::Left | Turn::UTurn) {
-                    d.left = true;
+                    // The protected left phase is called by a left turner
+                    // stuck at the line (it found no gap); the others go
+                    // permissively through the green.
+                    if f.speed < balance::STOP_SIGN_SPEED && f.d_line < f.back + balance::STOP_SIGN_DISTANCE_M {
+                        d.left = true;
+                    }
+                    d.through_left = true;
+                    d.hold_left |= near;
                 } else {
                     d.through = true;
+                    d.hold_through |= near;
                 }
             }
             kk += 1;
