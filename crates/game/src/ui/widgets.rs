@@ -33,7 +33,6 @@ pub enum UiAction {
     TogglePause,
     Speed(usize),
     ToggleBudget,
-    CloseBudget,
     /// Open / close the maps tray.
     Maps,
     /// Open / close the statistics tray.
@@ -321,18 +320,6 @@ pub fn figure(fonts: &UiFonts, s: impl Into<String>, size: f32, color: Color) ->
         fonts.figures(size, t::W_BOLD),
         TextColor(color),
         LineHeight::RelativeToFont(1.0),
-        TextLayout::no_wrap(),
-        Pickable::IGNORE,
-    )
-}
-
-/// Single-line live number in body type (tabular figures).
-pub fn number(fonts: &UiFonts, s: impl Into<String>, size: f32, weight: u16, color: Color) -> impl Bundle {
-    (
-        Text::new(s),
-        fonts.numbers(size, weight),
-        TextColor(color),
-        LineHeight::RelativeToFont(1.2),
         TextLayout::no_wrap(),
         Pickable::IGNORE,
     )

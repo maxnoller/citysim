@@ -714,7 +714,7 @@ pub fn junction_card(world: &World, n: citysim_sim::NodeId) -> Option<Card> {
             format!("{now} {stage}"),
             t::TEXT,
         ));
-        card.rows.push(Row::new("Cycle", names.join(" → "), t::TEXT_MUTED));
+        card.rows.push(Row::new("Cycle", names.join(" › "), t::TEXT_MUTED));
     }
     for (i, a) in view.approaches.iter().enumerate() {
         let from = state.arms.get(i).map(|arm| compass(arm.dir)).unwrap_or("?");
@@ -984,7 +984,7 @@ fn update_tag(
         }
         for (part, mut text, mut color, mut n) in &mut parts {
             let (v, c, show) = match *part {
-                TagPart::Title => (tag.title.clone(), if tag.refused { t::TEXT } else { t::TEXT }, true),
+                TagPart::Title => (tag.title.clone(), t::TEXT, true),
                 TagPart::Price => (
                     tag.price.clone(),
                     if tag.refused { t::NEGATIVE } else { t::ACCENT_TEXT },

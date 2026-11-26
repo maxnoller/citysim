@@ -220,11 +220,22 @@ fn tone_of(c: Color) -> Tone {
     }
 }
 
+/// `s` cut to `max` characters with an ellipsis (Bevy text cannot end a
+/// clipped line cleanly).
+pub fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}\u{2026}", cut.trim_end())
+    }
+}
+
 /// The text and colour a tagged entity shows in a sheet.
 fn text_of(s: &Sheet, tag: SheetText) -> Option<(String, Option<Color>)> {
     Some(match tag {
-        SheetText::Title => (s.title.to_uppercase(), None),
-        SheetText::Headline => (s.headline.clone(), None),
+        SheetText::Title => (ellipsize(&s.title.to_uppercase(), 26), None),
+        SheetText::Headline => (ellipsize(&s.headline, 38), None),
         SheetText::Subtitle => (s.subtitle.clone(), None),
         SheetText::TripTitle => (s.trip.as_ref()?.title.to_uppercase(), None),
         SheetText::TripLeft => (s.trip.as_ref()?.left.clone(), None),
@@ -239,9 +250,10 @@ fn text_of(s: &Sheet, tag: SheetText) -> Option<(String, Option<Color>)> {
             Item::Bar { label, .. } => (label.to_uppercase(), None),
         },
         SheetText::Value(i, j) => match s.sections.get(i)?.items.get(j)? {
-            Item::Line(l) => (l.value.clone(), Some(tone_color(l.tone))),
-            Item::Link(l) => (l.value.clone(), None),
-            Item::Bar { value, .. } => (value.clone(), None),
+            Item::Line(l) if l.label.is_empty() => (l.value.clone(), Some(tone_color(l.tone))),
+            Item::Line(l) => (ellipsize(&l.value, 44), Some(tone_color(l.tone))),
+            Item::Link(l) => (ellipsize(&l.value, 40), None),
+            Item::Bar { value, .. } => (ellipsize(&value.clone(), 40), None),
         },
     })
 }
@@ -578,6 +590,8 @@ fn draw_sheets(
                 }
             }
             *old = shape;
+            // Fill the new widgets' texts on the next frame (they exist then).
+            shown.age = f32::INFINITY;
             continue;
         }
         let Some(s) = sheet else { continue };
@@ -947,7 +961,7 @@ fn spawn_panel_sheet(
     }
 }
 
-fn action_node(primary: bool) -> Node {
+fn action_node(_primary: bool) -> Node {
     Node {
         flex_grow: 1.0,
         flex_basis: px(0),
@@ -955,7 +969,6 @@ fn action_node(primary: bool) -> Node {
         justify_content: JustifyContent::Center,
         align_items: AlignItems::Center,
         column_gap: px(7),
-        border: UiRect::all(px(if primary { 0.0 } else { 0.0 })),
         ..default()
     }
 }

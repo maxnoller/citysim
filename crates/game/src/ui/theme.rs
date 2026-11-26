@@ -149,8 +149,6 @@ pub const SLOT_ACTIVE_H: f32 = 84.0;
 pub const TRAY_H: f32 = 128.0;
 /// Width of the right-edge selection panel.
 pub const PANEL_W: f32 = 376.0;
-/// Top of the right-edge panel (under the system buttons).
-pub const PANEL_TOP: f32 = 84.0;
 /// Chamfer of plate corners.
 pub const CUT: f32 = 18.0;
 /// Slope of slanted rules and the speed switch (tan 14°).
@@ -165,10 +163,8 @@ pub const MIN_LAYOUT: Vec2 = Vec2::new(1250.0, 700.0);
 pub const COMPACT_W: f32 = 1660.0;
 
 // Spacing steps.
-pub const S1: f32 = 2.0;
 pub const S2: f32 = 4.0;
 pub const S3: f32 = 8.0;
-pub const S4: f32 = 12.0;
 pub const S5: f32 = 16.0;
 pub const S6: f32 = 22.0;
 
@@ -209,9 +205,6 @@ pub mod icon {
     pub const ZONE: char = '\u{e528}'; // land-plot
     pub const GRID_ZONE: char = '\u{e0ff}'; // layout-grid
     pub const BULLDOZE: char = '\u{e28f}'; // eraser
-    pub const SHOVEL: char = '\u{e15d}';
-    pub const CONE: char = '\u{e505}'; // traffic-cone
-    pub const TRAFFIC: char = '\u{e1d5}'; // car
     pub const LAYERS: char = '\u{e529}'; // layers
     pub const HOUSE: char = '\u{e0f5}';
     pub const STORE: char = '\u{e3e4}';
@@ -219,17 +212,12 @@ pub mod icon {
     pub const ERASER: char = '\u{e28f}';
     pub const PAUSE: char = '\u{e12e}';
     pub const PLAY: char = '\u{e13c}';
-    pub const FAST: char = '\u{e0bd}'; // fast-forward
     pub const WALLET: char = '\u{e204}';
     pub const USERS: char = '\u{e1a4}';
     pub const USER: char = '\u{e19f}';
     pub const BRIEFCASE: char = '\u{e062}';
     pub const SUN: char = '\u{e178}';
     pub const MOON: char = '\u{e11e}';
-    pub const SUNRISE: char = '\u{e179}';
-    pub const SUNSET: char = '\u{e17a}';
-    pub const TRENDING_UP: char = '\u{e191}';
-    pub const TRENDING_DOWN: char = '\u{e190}';
     pub const CLOSE: char = '\u{e1b2}';
     pub const CHECK: char = '\u{e06c}';
     pub const CHECK_CIRCLE: char = '\u{e226}';
@@ -240,15 +228,10 @@ pub mod icon {
     pub const LOAD: char = '\u{e247}';
     pub const MONITOR: char = '\u{e11d}';
     pub const QUIT: char = '\u{e10e}';
-    pub const LIGHTBULB: char = '\u{e1c2}';
-    pub const PERCENT: char = '\u{e132}';
     pub const MINUS: char = '\u{e11c}';
     pub const PLUS: char = '\u{e13d}';
-    pub const LANDMARK: char = '\u{e23a}';
-    pub const CHEVRON_DOWN: char = '\u{e06d}';
     pub const CHEVRON_LEFT: char = '\u{e06e}';
     pub const CHEVRON_RIGHT: char = '\u{e06f}';
-    pub const CIRCLE: char = '\u{e076}';
     pub const SPLINE: char = '\u{e38b}';
     pub const GRID: char = '\u{e4ff}'; // grid-2x2
     pub const WAYPOINTS: char = '\u{e542}';
@@ -260,31 +243,14 @@ pub mod icon {
     pub const SCALING: char = '\u{e2ec}';
     pub const MOVE: char = '\u{e121}';
     pub const BRUSH: char = '\u{e1d3}';
-    pub const MAGNET: char = '\u{e2b5}';
     pub const UPGRADE: char = '\u{e420}'; // arrow-big-up-dash
     pub const CAR: char = '\u{e1d5}';
     pub const TRUCK: char = '\u{e194}';
-    pub const FOLLOW: char = '\u{e1db}'; // locate-fixed
     pub const EYE: char = '\u{e0ba}';
-    pub const ARROW_RIGHT: char = '\u{e049}';
-    pub const RULER: char = '\u{e14b}';
-    pub const LASSO: char = '\u{e1ce}';
     pub const CHART: char = '\u{e2a3}'; // bar-chart-3
-    pub const LOCK: char = '\u{e10b}';
     pub const KEYBOARD: char = '\u{e284}';
     pub const SLASH: char = '\u{e51d}';
     pub const ROTATE: char = '\u{e148}'; // rotate-ccw
-    pub const SIGNPOST: char = '\u{e540}';
-    pub const SIREN: char = '\u{e2ef}';
-    pub const GAUGE: char = '\u{e1bf}';
-    pub const COINS: char = '\u{e097}';
-    pub const ACTIVITY: char = '\u{e038}';
-    pub const CHART_LINE: char = '\u{e2a5}';
-    pub const MILESTONE: char = '\u{e298}';
-    pub const SLIDERS: char = '\u{e29a}';
-    pub const HAMMER: char = '\u{e0ec}';
-    pub const CONSTRUCTION: char = '\u{e3b4}';
-    pub const ENTER: char = '\u{e0a1}';
 }
 
 // ---------------------------------------------------------------- fonts
@@ -336,14 +302,6 @@ impl UiFonts {
             font: self.face(weight).into(),
             font_size: FontSize::Px(size),
             ..default()
-        }
-    }
-
-    /// Text with tabular figures (live numbers inside sentences).
-    pub fn numbers(&self, size: f32, weight: u16) -> TextFont {
-        TextFont {
-            font_features: FontFeatures::from([FontFeatureTag::TABULAR_FIGURES]),
-            ..self.text(size, weight)
         }
     }
 

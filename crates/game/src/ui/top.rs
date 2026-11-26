@@ -177,7 +177,7 @@ fn spawn_top(
                 ..default()
             }))
             .with_children(|m| {
-                m.spawn((caps(&fonts, "", t::FONT_CAP, t::TEXT_MUTED), TopText::Milestone));
+                m.spawn((caps(fonts, "", t::FONT_CAP, t::TEXT_MUTED), TopText::Milestone));
                 m.spawn((
                     layout(Node {
                         width: px(150),
@@ -234,7 +234,7 @@ fn spawn_top(
             ))
             .with_children(|p| {
                 p.spawn((
-                    super::widgets::icon(&fonts, icon::ALERT, 18.0, t::WARNING_INK),
+                    super::widgets::icon(fonts, icon::ALERT, 18.0, t::WARNING_INK),
                     RibbonIcon,
                 ));
                 p.spawn((
@@ -311,7 +311,7 @@ fn spawn_top(
                     Some(tip),
                     |b, id| {
                         b.spawn((
-                            super::widgets::icon(&fonts, glyph, 20.0, t::SLOT_INK),
+                            super::widgets::icon(fonts, glyph, 20.0, t::SLOT_INK),
                             ButtonFg {
                                 owner: id,
                                 base: t::SLOT_INK,

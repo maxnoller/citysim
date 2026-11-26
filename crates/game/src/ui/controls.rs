@@ -190,11 +190,6 @@ fn handle_actions(
                 clock.paused = false;
             }
             UiAction::ToggleBudget => toggle_tray(&mut ui, &mut tool, InfoTray::Budget),
-            UiAction::CloseBudget => {
-                if ui.tray == Some(InfoTray::Budget) {
-                    ui.tray = None;
-                }
-            }
             UiAction::TaxStep(n) => {
                 let r = sim.world.economy.tax_rate + n as f32 * TAX_STEP / 5.0;
                 let r = ((r / TAX_STEP).round() * TAX_STEP).clamp(0.0, balance::MAX_TAX_RATE);

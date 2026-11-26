@@ -101,7 +101,6 @@ struct FigText(Page, usize, bool);
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum ShowWhen {
     GridMode,
-    NotGridMode,
     ParallelOn,
     TrafficMap,
     ZonesMap,
@@ -115,7 +114,6 @@ enum ShowWhen {
 enum EnableWhen {
     Frontage,
     CanUndo,
-    DrawsRoads,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -1282,9 +1280,8 @@ fn map_pic(p: &mut ChildSpawnerCommands, mode: OverlayMode) {
     let road = |p: &mut ChildSpawnerCommands, n: Node, c: Color| {
         p.spawn((layout(n), BackgroundColor(c)));
     };
-    let base = |c| c;
-    match mode {
-        OverlayMode::Zones => {
+    if mode == OverlayMode::Zones {
+        {
             for (i, z) in [Zone::Residential, Zone::Commercial, Zone::Industrial, Zone::Residential]
                 .into_iter()
                 .enumerate()
@@ -1304,11 +1301,10 @@ fn map_pic(p: &mut ChildSpawnerCommands, mode: OverlayMode) {
                 );
             }
         }
-        _ => {}
     }
     let (h, v) = match mode {
         OverlayMode::Traffic => (t::POSITIVE, t::NEGATIVE),
-        _ => (base(t::PIC_ASPHALT), t::PIC_ASPHALT),
+        _ => (t::PIC_ASPHALT, t::PIC_ASPHALT),
     };
     road(
         p,
@@ -1576,7 +1572,6 @@ fn update_conditions(
     overlay: Res<OverlayMode>,
     highlight: Res<WorldHighlight>,
     state: Res<ToolState>,
-    tool: Res<ActiveTool>,
     mut shows: Query<(&ShowWhen, &mut Node)>,
     enables: Query<(Entity, &EnableWhen, Has<Disabled>)>,
 ) {
@@ -1584,7 +1579,6 @@ fn update_conditions(
     for (w, mut n) in &mut shows {
         let show = match w {
             ShowWhen::GridMode => modes.road == RoadMode::Grid,
-            ShowWhen::NotGridMode => modes.road != RoadMode::Grid,
             ShowWhen::ParallelOn => opts.rule(SnapRule::Parallel),
             ShowWhen::TrafficMap => *overlay == OverlayMode::Traffic,
             ShowWhen::ZonesMap => *overlay == OverlayMode::Zones,
@@ -1601,7 +1595,6 @@ fn update_conditions(
         let on = match w {
             EnableWhen::Frontage => modes.zone == ZoneMode::Frontage,
             EnableWhen::CanUndo => state.can_undo(),
-            EnableWhen::DrawsRoads => *tool == ActiveTool::Road && modes.road.draws(),
         };
         if on && disabled {
             commands.entity(e).remove::<Disabled>();
@@ -1611,7 +1604,7 @@ fn update_conditions(
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_junction(
     time: Res<Time<Real>>,
     tool: Res<ActiveTool>,
@@ -1670,12 +1663,14 @@ fn update_junction(
     }
 }
 
+type MapsKey = (OverlayMode, u32, u32, [u32; 3]);
+
 fn update_maps(
     ui: Res<UiState>,
     overlay: Res<OverlayMode>,
     sim: Res<SimWorld>,
     mut labels: Query<(&TrayLabel, &mut Text)>,
-    mut last: Local<Option<(OverlayMode, u32, u32, [u32; 3])>>,
+    mut last: Local<Option<MapsKey>>,
 ) {
     if ui.tray != Some(InfoTray::Maps) {
         return;

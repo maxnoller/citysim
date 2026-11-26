@@ -16,8 +16,7 @@ use super::menu::{MenuIndex, menu_row, modal_header};
 use super::plate::{PlateCache, PlateMaterial, PlateStyle};
 use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
-    ButtonFg, ButtonKind, UiAction, UiButton, approach, caps, label, layout, plate_node, plate_shadow, spawn_button,
-    spawn_key,
+    ButtonKind, UiAction, UiButton, approach, caps, label, layout, plate_node, plate_shadow, spawn_button, spawn_key,
 };
 use crate::shared::{DisplaySettings, GameSet, GraphicsQuality};
 

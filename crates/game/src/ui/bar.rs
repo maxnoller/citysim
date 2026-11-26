@@ -18,7 +18,7 @@ use super::widgets::{
     ActiveMark, ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, approach, caps, figure, info_tip, label, layout,
     plate_node, slant_rule, spawn_button,
 };
-use crate::shared::{ActiveTool, GameSet, OverlayMode, RoadMode, SimClock, SimWorld};
+use crate::shared::{ActiveTool, GameSet, RoadMode, SimWorld};
 
 pub struct BarPlugin;
 
@@ -973,11 +973,6 @@ pub fn commute_text(secs: f32) -> String {
     } else {
         format!("{} min {:02} s", s / 60, s % 60)
     }
-}
-
-/// Is any overlay map on (for the maps slot's look)?
-pub fn overlay_on(o: OverlayMode) -> bool {
-    o != OverlayMode::None
 }
 
 #[cfg(test)]

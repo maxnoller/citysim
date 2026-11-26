@@ -65,24 +65,6 @@ impl PlateStyle {
         sheen: 0.008,
     };
 
-    pub const SLOT: PlateStyle = PlateStyle {
-        fill_top: t::SLOT_TOP,
-        fill_bottom: t::SLOT_BOTTOM,
-        line: t::LINE,
-        slant: [0.0; 4],
-        hatch: 0.0,
-        sheen: 0.0,
-    };
-
-    pub const ACCENT: PlateStyle = PlateStyle {
-        fill_top: t::ACCENT_SET.fill_top,
-        fill_bottom: t::ACCENT_SET.fill_bottom,
-        line: t::ACCENT,
-        slant: [0.0; 4],
-        hatch: 0.0,
-        sheen: 0.0,
-    };
-
     pub const fn fill(top: Color, bottom: Color, line: Color) -> PlateStyle {
         PlateStyle {
             fill_top: top,

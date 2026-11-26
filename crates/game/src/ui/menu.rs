@@ -20,7 +20,8 @@ pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_menu, spawn_hint))
+        app.init_resource::<MenuFocus>()
+            .add_systems(Startup, (spawn_menu, spawn_hint))
             .add_systems(PostStartup, start_fresh_game)
             .add_systems(Update, (update_menu, menu_keys, update_hint).in_set(GameSet::Render));
     }
@@ -34,6 +35,10 @@ struct MenuCard;
 
 #[derive(Component)]
 struct MenuSubtitle;
+
+/// The keyboard-focused row of the open menu (`MenuIndex`), if any.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub struct MenuFocus(pub Option<usize>);
 
 /// Position of a menu row for arrow-key focus.
 #[derive(Component, Clone, Copy)]
@@ -217,7 +222,7 @@ fn spawn_menu(
                     menu_row(c, fonts, action, glyph, text, key, kind, i);
                 }
                 c.spawn((
-                    caps(fonts, "\u{2191} \u{2193} choose · Enter", 10.0, t::TEXT_FAINT),
+                    caps(fonts, "Arrow keys choose · Enter", 10.0, t::TEXT_FAINT),
                     Node {
                         margin: UiRect::new(px(26), px(14), px(10), px(0)),
                         ..default()
@@ -304,7 +309,7 @@ fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<UiState>,
     rows: Query<(Entity, &MenuIndex, &UiButton, &InheritedVisibility, Has<Focused>)>,
-    mut focus: Local<Option<usize>>,
+    mut focus: ResMut<MenuFocus>,
     mut out: MessageWriter<UiAction>,
 ) {
     let visible: Vec<(Entity, usize, UiAction, bool)> = {
@@ -317,7 +322,9 @@ fn menu_keys(
         v
     };
     if !state.menu_open || visible.is_empty() {
-        *focus = None;
+        if state.is_changed() {
+            focus.0 = None;
+        }
         for (e, .., f) in &visible {
             if *f {
                 commands.entity(*e).remove::<Focused>();
@@ -326,14 +333,17 @@ fn menu_keys(
         return;
     }
     let n = visible.len();
-    let mut cur = focus.and_then(|i| visible.iter().position(|r| r.1 == i));
+    let mut cur = focus.0.and_then(|i| visible.iter().position(|r| r.1 == i));
     if keys.just_pressed(KeyCode::ArrowDown) {
         cur = Some(cur.map_or(0, |c| (c + 1) % n));
     }
     if keys.just_pressed(KeyCode::ArrowUp) {
         cur = Some(cur.map_or(n - 1, |c| (c + n - 1) % n));
     }
-    *focus = cur.map(|c| visible[c].1);
+    let f = cur.map(|c| visible[c].1);
+    if focus.0 != f {
+        focus.0 = f;
+    }
     if (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
         && let Some(c) = cur
     {

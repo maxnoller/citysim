@@ -308,10 +308,10 @@ fn rebuild_trees(
     mut meshes: ResMut<Assets<Mesh>>,
     mut count: ResMut<TreeCount>,
     edges: Res<RoadEdges>,
-    (view, time): (Res<CurveToolView>, Res<Time<Real>>),
+    (view, time): (Option<Res<CurveToolView>>, Res<Time<Real>>),
 ) {
     state.since_ghost += time.delta_secs();
-    let ghost = Ghost::of(&view);
+    let ghost = view.map(|v| Ghost::of(&v)).unwrap_or_default();
     let keys = (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads));
     let key = (keys, *quality, ghost.key());
     if state.key == Some(key) {

@@ -84,15 +84,6 @@ impl UiState {
     pub fn budget_open(&self) -> bool {
         self.tray == Some(InfoTray::Budget)
     }
-
-    pub fn city_people_open(&self) -> bool {
-        self.tray == Some(InfoTray::People)
-    }
-
-    /// Open `tray`, or close it when it is already open.
-    pub fn toggle_tray(&mut self, tray: InfoTray) {
-        self.tray = if self.tray == Some(tray) { None } else { Some(tray) };
-    }
 }
 
 impl Default for UiState {

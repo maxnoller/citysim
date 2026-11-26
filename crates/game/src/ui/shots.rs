@@ -952,6 +952,8 @@ fn steps() -> Vec<Step> {
             setup: |w| {
                 reset(w);
                 w.write_message(UiAction::OpenMenu);
+                // Keyboard focus on "Load game", the pointer over "Save game".
+                w.resource_mut::<super::menu::MenuFocus>().0 = Some(2);
                 w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::Save);
             },
         },

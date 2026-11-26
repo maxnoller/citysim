@@ -488,8 +488,9 @@ pub struct WorldHighlight {
 }
 
 /// Player display settings that gfx honours (written by ui from the
-/// settings panel).
-#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+/// settings panel). Both off by default: in a window the cursor crosses
+/// the border whenever it leaves the game.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct DisplaySettings {
     /// Move the camera when the cursor touches a window edge.
     pub edge_scroll: bool,
@@ -497,17 +498,6 @@ pub struct DisplaySettings {
     /// them only while a zoning tool is active (the zones overlay shows them
     /// anyway).
     pub lot_markers: bool,
-}
-
-impl Default for DisplaySettings {
-    fn default() -> Self {
-        DisplaySettings {
-            // Off by default: in a window the cursor crosses the border
-            // whenever it leaves the game.
-            edge_scroll: false,
-            lot_markers: false,
-        }
-    }
 }
 
 // ---------------------------------------------------------------- camera contract
