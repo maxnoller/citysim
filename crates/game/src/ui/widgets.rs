@@ -30,6 +30,10 @@ pub enum UiAction {
     ZoneTool,
     /// Pick an overlay (the maps tray).
     Overlay(OverlayMode),
+    /// An overlay key: `Some(map)` toggles that map (T), `None` steps
+    /// through them (O). Works in every state; the maps drawer comes up
+    /// only where nothing else is open.
+    MapKey(Option<OverlayMode>),
     TogglePause,
     Speed(usize),
     ToggleBudget,

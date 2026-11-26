@@ -102,7 +102,10 @@ pub(super) fn control_keys(
         }
     }
     if keys.just_pressed(KeyCode::KeyT) {
-        out.write(UiAction::Overlay(OverlayMode::Traffic));
+        out.write(UiAction::MapKey(Some(OverlayMode::Traffic)));
+    }
+    if keys.just_pressed(KeyCode::KeyO) {
+        out.write(UiAction::MapKey(None));
     }
     if keys.just_pressed(KeyCode::KeyU) && !super::tools::ctrl(&keys) {
         out.write(UiAction::ToggleBudget);
@@ -125,7 +128,6 @@ fn next_quality(q: GraphicsQuality) -> GraphicsQuality {
 
 #[allow(clippy::too_many_arguments)]
 fn handle_actions(
-    keys: Res<ButtonInput<KeyCode>>,
     mut actions: MessageReader<UiAction>,
     mut tool: ResMut<ActiveTool>,
     mut overlay: ResMut<OverlayMode>,
@@ -140,21 +142,6 @@ fn handle_actions(
     mut cmds: MessageWriter<SimCommand>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    // O cycles overlays; the maps tray shows while one is on.
-    if keys.just_pressed(KeyCode::KeyO) && !ui.menu_open {
-        *overlay = match *overlay {
-            OverlayMode::None => OverlayMode::Zones,
-            OverlayMode::Zones => OverlayMode::Traffic,
-            OverlayMode::Traffic => OverlayMode::None,
-        };
-        if *overlay == OverlayMode::None {
-            if ui.tray == Some(InfoTray::Maps) {
-                ui.tray = None;
-            }
-        } else {
-            open_tray(&mut ui, &mut tool, InfoTray::Maps);
-        }
-    }
     for action in actions.read() {
         match *action {
             UiAction::Tool(ActiveTool::Road) if *tool == ActiveTool::Road && modes.road == RoadMode::Junction => {
@@ -184,18 +171,32 @@ fn handle_actions(
                 ui.tray = None;
                 ui.window = None;
             }
-            UiAction::Overlay(o) => {
-                // The maps tray picks one; T toggles traffic.
-                *overlay = if *overlay == o && ui.tray != Some(InfoTray::Maps) {
-                    OverlayMode::None
-                } else {
-                    o
+            UiAction::MapKey(which) => {
+                let next = match which {
+                    Some(o) if *overlay == o => OverlayMode::None,
+                    Some(o) => o,
+                    None => match *overlay {
+                        OverlayMode::None => OverlayMode::Zones,
+                        OverlayMode::Zones => OverlayMode::Traffic,
+                        OverlayMode::Traffic => OverlayMode::None,
+                    },
                 };
-                if *overlay != OverlayMode::None
-                    && ui.tray.is_none()
-                    && ui.window.is_none()
-                    && *tool == ActiveTool::Inspect
-                {
+                overlay.set_if_neq(next);
+                if next == OverlayMode::None {
+                    // A drawer the key brought up goes again; one the player
+                    // opened stays, showing "Off".
+                    if ui.tray == Some(InfoTray::Maps) && ui.maps_by_key {
+                        ui.tray = None;
+                    }
+                } else if ui.tray.is_none() && ui.window.is_none() && *tool == ActiveTool::Inspect {
+                    ui.tray = Some(InfoTray::Maps);
+                    ui.maps_by_key = true;
+                }
+            }
+            UiAction::Overlay(o) => {
+                // The maps tray picks one.
+                overlay.set_if_neq(o);
+                if o != OverlayMode::None && ui.tray.is_none() && ui.window.is_none() && *tool == ActiveTool::Inspect {
                     ui.tray = Some(InfoTray::Maps);
                 }
             }
@@ -296,6 +297,7 @@ fn handle_actions(
 /// (and the city window closes: one or the other).
 fn open_tray(ui: &mut UiState, tool: &mut ResMut<ActiveTool>, tray: InfoTray) {
     ui.tray = Some(tray);
+    ui.maps_by_key = false;
     ui.window = None;
     tool.set_if_neq(ActiveTool::Inspect);
 }

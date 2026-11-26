@@ -93,6 +93,9 @@ impl CityPage {
 pub struct UiState {
     /// The open info drawer (the maps).
     pub tray: Option<InfoTray>,
+    /// The maps drawer was brought up by an overlay key (T / O), so the
+    /// key that turns the map off puts it away again.
+    pub maps_by_key: bool,
     /// The city window and its page (people, budget, statistics). The game
     /// keeps running behind it; a build tool closes it.
     pub window: Option<CityPage>,
@@ -132,6 +135,7 @@ impl Default for UiState {
     fn default() -> Self {
         UiState {
             tray: None,
+            maps_by_key: false,
             window: None,
             menu_open: false,
             paused_before_menu: false,
