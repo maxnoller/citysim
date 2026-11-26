@@ -6,24 +6,31 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - **New checkout, first thing:** `scripts/dev-setup.sh --build`. It writes a git-ignored `.cargo/config.toml` for
   this checkout (linker flags that work here: mold, and lld off where the toolchain's wrapper is broken; `jobs` = half
   the cores), copies the machine's compiled dependencies (the "seed", `~/.cache/citysim/seed`) into `target/`, builds
-  the game and every test, and saves a seed if there was none. Seeded: ≈1.5 min; cold: 18–27 min. Then plain
-  `cargo ...`: no `RUSTFLAGS`, no `-j` (an exported `RUSTFLAGS` replaces the file's flags and rebuilds everything).
+  the game and every test, and saves a seed if there was none. Seeded: ≈1.5 min; without a seed 11–27 min (by load).
+  Each checkout builds in its own `target/` (the script refuses a shared `CARGO_TARGET_DIR`: no waiting on another
+  checkout's build lock, never another checkout's build of the workspace crates; seeds hold dependencies only).
+  Then plain `cargo ...`: no `RUSTFLAGS`, no `-j` (an exported `RUSTFLAGS` replaces the file's flags and rebuilds
+  everything).
   `--build-release` also builds the release game. Never commit a `.cargo/config.toml`: CI and other machines build
   without one.
-- **Profiles:** `dev` for everything — tests, demo cities, screenshots, play-testing (game crate opt-level 1 and
-  incremental; Bevy and the simulation at opt-level 3). `--release` only to play at full speed or to measure
-  performance (`CITYSIM_BENCH`); a release rebuild of the game crate takes about a minute (≈3 min under load).
+- **Profiles:** `dev` for everything — tests, demo cities, screenshots, play-testing (game crate opt-level 0 and
+  incremental; Bevy and the simulation at opt-level 3; same average frame time as opt-level 1, higher spikes).
+  `--release` only to play at full speed or to measure performance (`CITYSIM_BENCH`); a release rebuild of the game
+  crate takes about a minute (≈3 min under load).
 - **Sim edit → tests:** `cargo nextest run -p citysim_sim -P quick` after each edit (≈9 s: every test except the
   ones that grow cities for 10 s or more, list in `.config/nextest.toml`); one test: `cargo nextest run -p citysim_sim
-  NAME` (≈9 s); everything before pushing: `cargo nextest run -p citysim_sim` (≈FULL s, all tests at once; `cargo test`
-  runs the test files one after another, ≈3× longer). Simulation-only agents never build the game: `-p citysim_sim`.
+  NAME` (≈8 s); everything before pushing: `cargo nextest run -p citysim_sim` (≈90 s, all tests at once, the timing
+  test alone; `cargo test` runs the test files one after another, ≈2× longer). A test that grows several independent
+  cities grows them side by side (`common::par_map`). Simulation-only agents never build the game: `-p citysim_sim`.
 - **Game edit → picture:** `cargo build -p citysim` (≈5 s for a one-line change in `ui/` or `gfx/`), then a
   windowless still: `CITYSIM_DEMO=organic CITYSIM_STILLS=/tmp/s CITYSIM_STILLS_LIST="a=wide;b=street"
-  target/debug/citysim` (≈8 s with the demo cached; no display, see Dev flags).
+  target/debug/citysim` (≈7 s with the demo cached, +8 s once after a sim change; no display, see Dev flags).
 - **Balance edit → scenario numbers:** `cargo run -p citysim_sim --release --example headless -- --seeds 10 hierarchy`
-  (one seed per core; ≈40 s to rebuild the sim in release, then ≈80 s for ten 10,000-resident cities).
-- **Before pushing:** `scripts/ci-local.sh` runs exactly what CI runs (`sim` / `game` for one job); `--full` adds
-  clippy on the game in all three feature sets. `cargo fmt --all --check` (width 120) and clippy warning-free.
+  (one seed per core, `CITYSIM_HEADLESS_THREADS=n` for fewer; ≈12 s to rebuild the sim in release, then ≈85 s for ten
+  10,000-resident cities).
+- **Before pushing:** `scripts/ci-local.sh` runs what CI runs (≈3 min; sim tests through nextest, `sim` / `game` for
+  one job); `--full` adds clippy on the game in all three feature sets. `cargo fmt --all --check` (width 120) and
+  clippy warning-free.
 - CI: `.github/workflows/ci.yml` (fmt, clippy `-D warnings` + `cargo test` for the sim; `cargo check` of all three
   feature sets + tests for the game, with `Swatinem/rust-cache`; about 6 minutes, the sim tests on a two-core runner).
   CI's clippy is the latest stable: keep the sim lint-clean on it.
@@ -161,13 +168,14 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   shows that overlay. Time of day: the demo's (`CITYSIM_DEMO_HOUR`) or `CITYSIM_GFX_HOUR=h`. `CITYSIM_STILLS_SETTLE`
   (s between camera move and capture, 0.75), `CITYSIM_SHOT_DELAY` (s after the scene is ready, 1). Example:
   `CITYSIM_DEMO=organic CITYSIM_GFX_HOUR=21 CITYSIM_STILLS=/tmp/s CITYSIM_STILLS_LIST="w=wide;s=street;t=close+traffic"
-  target/debug/citysim` (≈8 s with the demo cached). Nothing is hovered (no cursor): interface states with hover
-  or tools still need `CITYSIM_UI_SHOTS` under Xvfb.
+  target/debug/citysim` (≈7 s for one shot, ≈10 s for four, demo cached; 4-5 s of it is building the render
+  pipelines). Nothing is hovered (no cursor): interface states with hover or tools still need `CITYSIM_UI_SHOTS` under
+  Xvfb (the demo cache makes those ≈10 s too).
 - `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000, streets only) · `hierarchy` (`GridPlayer::hierarchy`,
   ~10,000 with avenues, ~50 s to build) · `jam` (bad layout, one overloaded junction): real towns built by
   `citysim_sim::scenarios` through commands and fast-forwarded before the first frame. `CITYSIM_DEMO_POP=n` target,
   `CITYSIM_DEMO_HOUR=h` stop time (default 8 = morning rush). `organic` = the sim's free-form town
-  (`scenarios::organic`, ~4,300 residents, ~13 s to build); `shapes` = gfx's road-shape test town (`dev/shapes.rs`:
+  (`scenarios::organic`, ~4,300 residents, 8-13 s to build); `shapes` = gfx's road-shape test town (`dev/shapes.rs`:
   5-arm junction, a street meeting the avenue at 30°, a T on the outside of a bend, 25° grid, ring).
   Built demo worlds are cached as saves in `~/.cache/citysim/demos` (shared by all checkouts; `CITYSIM_DEMO_CACHE=dir`
   elsewhere, `=0` off) and load in well under a second. The key includes `CITYSIM_SIM_FINGERPRINT` (`crates/game/
