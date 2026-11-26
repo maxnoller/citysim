@@ -146,7 +146,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `CITYSIM_CONTROL=dir` + `scripts/play.py` (see its docstring): `launch`, `start`, `grow --until-pop N`, `road`, `zone`,
   `bulldoze`, `curve`, `follow`, `checks`, `look`, `shot`, `stats`, `counts`, `cmd 'until-day N'` (`launch` waits for
   the `ready` reply: shaders built). `launch --env K=V` passes extra variables. The channel only reads numbers, frames
-  the camera, fast-forwards (`turbo`, `until-*`; they fail while paused), finds things (`find-home`, `node NAME` = a
+  the camera, fast-forwards (`turbo`, `until-*`; they fail while paused), finds things (`find-home`, `find-car [MIN]` = a slow car on screen with MIN m to go, `node NAME` = a
   named UI node's position) and takes screenshots; all play goes through real input. `stats` includes the tool modes
   (`road_mode=...`); `play.py` switches modes with Tab. `play.py checks` (right after `launch`, new game) runs eight
   awkward real-input cases (fast clicks, drag off the window, UI to map, two snaps, a self-crossing loop, zoom and
