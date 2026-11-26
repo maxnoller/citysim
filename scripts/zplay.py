@@ -385,6 +385,60 @@ def neighbourhood():
     play.log(play.cmd("zonestats"))
 
 
+def video_play(days):
+    """Real play for the video on a new map: two curved streets and a loop
+    drawn with the road tool, zoned in a few drags, then the town grows.
+    The camera stays put while drawing (clicks land where they are aimed)."""
+    play.focus()
+    play.cmd("money 2000000")
+    look(38, 128, 600, 0.0, 1.25)
+    play.wait_frames(8)
+    for p in [(11, 128), (60, 128), (22, 112), (30, 137), (41, 139), (57, 116), (50, 109), (40, 140.3)]:
+        sx, sy = px(*p)
+        assert sy < 840, f"{p} under the drawer ({sx}, {sy})"
+
+    def draw(mode, pts):
+        play.road_mode(mode)
+        for p in pts:
+            click_at(*p)
+        play.key("Return")
+        play.wait_frames(3)
+
+    draw("Straight", [(11, 128), (60, 128)])
+    draw("Curve", [(22, 128), (22, 114), (36, 108)])
+    draw("Curve", [(30, 128), (30, 137), (41, 139)])
+    draw("Straight", [(50, 128), (50, 123)])
+    draw("Curve", [(50, 123), (43, 123), (43, 116)])
+    draw("Curve", [(43, 116), (43, 109), (50, 109)])
+    draw("Curve", [(50, 109), (57, 109), (57, 116)])
+    draw("Curve", [(57, 116), (57, 123), (50, 123)])
+    esc()
+    play.wait_frames(4)
+    # Homes along both sides of each curved street, dragged along them.
+    zone_tool("r")
+    zmode("Frontage")
+    drag([(23.2, 126), (23.4, 118), (26, 112.2), (33, 109.3)])
+    drag([(20.8, 126), (21, 116), (25, 110.5), (34, 106.6)])
+    drag([(31.2, 129.5), (31.4, 134), (34, 137.2), (40, 137.8)])
+    drag([(28.8, 129.5), (29, 136), (32, 139.5), (40, 140.3)])
+    # The loop: its whole inside with one click, its outside along it.
+    zmode("Fill")
+    click_at(50, 116)
+    zmode("Frontage")
+    click_at(59, 116)
+    # Shops and industry along the trunk for jobs.
+    zone_tool("c")
+    drag([(12, 126.8), (21, 126.8)])
+    zone_tool("i")
+    drag([(33, 129.4), (48, 129.4)])
+    play.select_tool("inspect")
+    play.wait_frames(4)
+    play.key("space")
+    play.key("4")
+    play.log(play.cmd(f"until-day {days} 20", timeout=5000))
+    play.key("space")
+
+
 def shots(prefix, out, n0, suffix):
     """Top-down (zone overlay on) and street-level pictures of every site."""
     k = n0
@@ -414,6 +468,7 @@ def launch(exe, size="1920x1080"):
     import subprocess
     env = dict(os.environ, DISPLAY=play.DISPLAY, CITYSIM_CONTROL=play.CTL, CITYSIM_GFX_QUALITY="high",
                CITYSIM_GFX_HOUR=os.environ.get("ZPLAY_HOUR", "11"),
+               **({"CITYSIM_DEMO": os.environ["ZPLAY_DEMO"]} if os.environ.get("ZPLAY_DEMO") else {}),
                CITYSIM_CONFIG_DIR=os.path.join(play.CTL, "cfg"), CITYSIM_SAVE_DIR=os.path.join(play.CTL, "save"))
     for k in ("WAYLAND_DISPLAY", "XDG_SESSION_TYPE"):
         env.pop(k, None)
@@ -462,6 +517,8 @@ def main():
         print(modes(a.args[0], int(a.args[1])))
     elif a.phase == "hood":
         neighbourhood()
+    elif a.phase == "video":
+        video_play(int(a.args[0]))
     elif a.phase == "grow":
         play.cmd("speed") if False else None
         print(play.cmd(f"until-day {a.args[0]} 60", timeout=3600))
