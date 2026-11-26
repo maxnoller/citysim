@@ -180,7 +180,8 @@ fn footprint_of(world: &World, cells: &[CellRef], f: Facing) -> Footprint {
 
 /// Lot for a new building of zone `z` on front-row cell `c`: facing, then
 /// the cells (deep when the cell behind is free second row; 2x2 when
-/// `wide` and the neighbours allow).
+/// `wide` and the neighbours allow; then as many whole rows of free yard
+/// behind as the block has).
 fn plan_lot(world: &mut World, c: CellRef, z: Zone, wide: bool) -> Option<(Facing, Vec<CellRef>)> {
     // Facings with a connected road in front; prefer one with a deep lot
     // behind, then the first in a per-cell rotation (corner lots vary).
@@ -198,23 +199,55 @@ fn plan_lot(world: &mut World, c: CellRef, z: Zone, wide: bool) -> Option<(Facin
     }
     let (deep, f) = best?;
     let deep = deep == 1;
-    let mut cells = vec![c];
-    if deep {
-        cells.push(behind(c, f));
-    }
+    let mut front = vec![c];
     if wide && deep {
         let side = sideways(f);
         let pick = world.rng.below(2) as usize;
         for k in 0..2 {
             let s = c.step(side[(pick + k) % 2]);
             if free_for(world, s, z) && fronts(world, s, f) && second_row(world, behind(s, f), z) {
-                cells.push(s);
-                cells.push(behind(s, f));
+                front.push(s);
                 break;
             }
         }
     }
+    let mut cells = front.clone();
+    if deep {
+        cells.extend(rows_behind(world, &front, f, z, 1));
+    }
     Some((f, cells))
+}
+
+/// Whole rows of free second-row cells of zone `z` behind a lot whose
+/// front row is `front` (facing `f`), starting `have` rows back, while the
+/// lot stays within `balance::BLOCK_DEPTH` rows.
+fn rows_behind(world: &World, front: &[CellRef], f: Facing, z: Zone, have: usize) -> Vec<CellRef> {
+    let mut out = Vec::new();
+    let back = |c: CellRef, n: usize| (0..n).fold(c, |c, _| behind(c, f));
+    for depth in have..balance::BLOCK_DEPTH as usize {
+        let row: Vec<CellRef> = front.iter().map(|&c| back(c, depth)).collect();
+        if !row
+            .iter()
+            .all(|&c| second_row(world, c, z) && !nearer_other_road(world, c, f, depth))
+        {
+            break;
+        }
+        out.extend(row);
+    }
+    out
+}
+
+/// Is cell `c`, `depth` rows behind a lot's front (facing `f`), nearer to
+/// another road of its lattice (a road behind it or beside it) than to the
+/// lot's own? Such land is left to the lots of that road.
+fn nearer_other_road(world: &World, c: CellRef, f: Facing, depth: usize) -> bool {
+    Facing::ALL.into_iter().filter(|&g| g != f).any(|g| {
+        let mut x = c;
+        (1..depth).any(|_| {
+            x = x.step(g);
+            world.zoning.cell(x).is_some_and(|y| y.fronts_on(g))
+        })
+    })
 }
 
 /// Mark cells as held by a building (or freed, with `None`).
@@ -301,7 +334,7 @@ fn spawn(world: &mut World, z: Zone) -> bool {
         kind: z,
         footprint,
         level: 1,
-        capacity: capacity(z, 1, footprint.area()),
+        capacity: capacity(z, 1, footprint.built_area()),
         occupied: 0,
         facing,
         seed: world.rng.next_u64() as u32,
@@ -320,28 +353,32 @@ fn spawn(world: &mut World, z: Zone) -> bool {
     true
 }
 
-/// Grow a building's lot on upgrade: a shallow lot absorbs the free second
-/// row behind it; a deep lot at level 2+ widens to 2x2 where free cells
-/// beside it allow. Returns the new footprint, if it changed.
+/// Grow a building's lot on upgrade: a shallow lot absorbs the free rows
+/// behind it; a one-wide lot at level 2+ widens to two where the free
+/// cells beside it allow (as deep as it is). Returns the new footprint, if
+/// it changed.
 fn grow_lot(world: &mut World, id: BuildingId) -> Option<Footprint> {
     let b = &world.buildings[id];
     let (fp, f, z) = (b.footprint, b.facing, b.kind);
-    let (breadth, depth) = (fp.size[0], fp.size[1]);
+    let (breadth, depth) = (fp.size[0] as usize, fp.size[1] as usize);
+    let front = front_cells(&fp, f);
     let mut add: Vec<CellRef> = Vec::new();
-    if depth == 1 && breadth == 1 {
-        let c = fp.cells().next().expect("one cell");
-        if second_row(world, behind(c, f), z) {
-            add.push(behind(c, f));
-        }
-    } else if depth == 2 && breadth == 1 && b.level >= 2 {
-        let front = front_cells(&fp, f)[0];
+    if depth == 1 {
+        add = rows_behind(world, &front, f, z, 1);
+    } else if breadth == 1 && b.level >= 2 {
         let side = sideways(f);
         let pick = world.rng.below(2) as usize;
         for k in 0..2 {
-            let s = front.step(side[(pick + k) % 2]);
-            if free_for(world, s, z) && fronts(world, s, f) && second_row(world, behind(s, f), z) {
-                add.push(s);
-                add.push(behind(s, f));
+            let s = front[0].step(side[(pick + k) % 2]);
+            let col: Vec<CellRef> = (0..depth)
+                .scan(s, |c, _| {
+                    let here = *c;
+                    *c = behind(here, f);
+                    Some(here)
+                })
+                .collect();
+            if free_for(world, s, z) && fronts(world, s, f) && col[1..].iter().all(|&c| second_row(world, c, z)) {
+                add = col;
                 break;
             }
         }
@@ -356,6 +393,113 @@ fn grow_lot(world: &mut World, id: BuildingId) -> Option<Footprint> {
     world.buildings[id].footprint = nf;
     refresh_around(world, &[nf]);
     Some(nf)
+}
+
+/// After zoning blocks were made again (an older save): buildings standing
+/// on cells no block covers any more move onto the free lot of the new
+/// cells under their front, as wide and up to as deep as they were (at
+/// least the built rows), keeping their people. Those that do not fit stay
+/// where they are. Returns how many moved.
+pub(crate) fn reseat(world: &mut World) -> u32 {
+    let ids: Vec<BuildingId> = world.buildings.keys().collect();
+    let mut moved = 0;
+    for id in ids {
+        let b = &world.buildings[id];
+        let (fp, kind) = (b.footprint, b.kind);
+        if fp.cells().all(|c| world.zoning.cell(c).is_some_and(|x| x.covered)) {
+            continue;
+        }
+        let Some(q) = world.zoning.lot_quad(&fp) else { continue };
+        let fd = b.front_dir();
+        let probe = [
+            (q[0][0] + q[1][0]) * 0.5 - fd[0] * 2.0,
+            (q[0][1] + q[1][1]) * 0.5 - fd[1] * 2.0,
+        ];
+        let Some(c) = world.zoning.cell_at(probe).filter(|c| c.lattice != fp.lattice) else {
+            continue;
+        };
+        let Some(cell) = world.zoning.cell(c).copied() else {
+            continue;
+        };
+        if !cell.free() || cell.fronts == 0 {
+            continue;
+        }
+        let Some(l) = world.zoning.lattice(c.lattice) else {
+            continue;
+        };
+        let x = c.i as f32 + 0.5;
+        let Some(f) = Facing::ALL
+            .into_iter()
+            .filter(|&f| cell.fronts_on(f))
+            .max_by(|a, b| geom_dot(l.dir_at(x, *a), fd).total_cmp(&geom_dot(l.dir_at(x, *b), fd)))
+        else {
+            continue;
+        };
+        let usable_free = |w: &World, c: CellRef| w.zoning.cell(c).is_some_and(|x| x.free());
+        let mut front = vec![c];
+        if fp.size[0] >= 2 {
+            let ctr = b.center();
+            let side = sideways(f)
+                .into_iter()
+                .map(|s| c.step(s))
+                .filter(|&s| usable_free(world, s) && world.zoning.cell(s).is_some_and(|x| x.fronts_on(f)))
+                .min_by(|a, b| {
+                    let da = world
+                        .zoning
+                        .cell_center(*a)
+                        .map_or(f32::MAX, |p| crate::geom::dist(p, ctr));
+                    let db = world
+                        .zoning
+                        .cell_center(*b)
+                        .map_or(f32::MAX, |p| crate::geom::dist(p, ctr));
+                    da.total_cmp(&db)
+                });
+            match side {
+                Some(s) => front.push(s),
+                None => continue,
+            }
+        }
+        let mut cells = front.clone();
+        let want = fp.size[1] as usize;
+        for depth in 1..want {
+            let row: Vec<CellRef> = front.iter().map(|&c| (0..depth).fold(c, |c, _| behind(c, f))).collect();
+            if !row
+                .iter()
+                .all(|&c| usable_free(world, c) && world.zoning.cell(c).is_some_and(|x| x.fronts == 0))
+            {
+                break;
+            }
+            cells.extend(row);
+        }
+        let rows = cells.len() / front.len();
+        if rows < want.min(balance::BUILT_DEPTH as usize) {
+            continue;
+        }
+        // Move: free the old cells, zone and take the new ones.
+        let old: Vec<CellRef> = fp.cells().collect();
+        claim(world, old.into_iter(), None);
+        for &n in &cells {
+            if let Some(x) = world.zoning.cell_mut(n) {
+                x.zone = Some(kind);
+            }
+        }
+        let nf = footprint_of(world, &cells, f);
+        claim(world, cells.into_iter(), Some(id));
+        let b = &mut world.buildings[id];
+        b.footprint = nf;
+        b.facing = f;
+        refresh_around(world, &[fp, nf]);
+        moved += 1;
+    }
+    if moved > 0 {
+        world.versions.buildings += 1;
+        world.zoning.zones_version += 1;
+    }
+    moved
+}
+
+fn geom_dot(a: [f32; 2], b: [f32; 2]) -> f32 {
+    a[0] * b[0] + a[1] * b[1]
 }
 
 /// Round-1 saves may hold buildings in a second row (no road in front).
@@ -442,7 +586,7 @@ fn upgrade(world: &mut World, z: Zone) -> bool {
     world.buildings[id].level += 1;
     grow_lot(world, id);
     let b = &mut world.buildings[id];
-    b.capacity = capacity(z, b.level, b.footprint.area()).max(b.capacity);
+    b.capacity = capacity(z, b.level, b.footprint.built_area()).max(b.capacity);
     world.versions.buildings += 1;
     // Better jobs pay better.
     crate::people::retier(world, id);

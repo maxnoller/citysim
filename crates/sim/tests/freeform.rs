@@ -443,7 +443,10 @@ fn zoning_survives_splits_and_rebuilding() {
     })
     .unwrap();
     let after_split = count(&w);
-    assert!(after_split + 12 >= zoned, "{zoned} -> {after_split}");
+    // The new street runs across all 100 m of zoning (six-row blocks on
+    // both sides): its two rows of reserve, 13 cells long, and the cells
+    // its junction corners take.
+    assert!(after_split + 40 >= zoned, "{zoned} -> {after_split}");
     assert!(after_split < zoned);
     w.check_invariants().unwrap();
     // Remove the whole first road and build it again: the zoning returns.

@@ -376,12 +376,14 @@ fn zoning_needs_nearby_road() {
             zone: Some(Zone::Commercial),
         })
         .unwrap();
-    // Rows 8, 9, 11, 12 are within 2 cells; row 10 is road; others too far.
-    assert_eq!(out.cells.len(), 3 * 4);
+    // Rows 4..=9 and 11..=16 are within 6 cells (of them 5..=15 are in
+    // the rectangle); row 10 is road.
+    assert_eq!(out.cells.len(), 3 * 10);
     assert_eq!(out.cost, 0);
     assert!(w.versions.grid > v);
     assert_eq!(w.grid_view().get(c(11, 8)).unwrap().zone, Some(Zone::Commercial));
-    assert_eq!(w.grid_view().get(c(11, 7)).unwrap().zone, None);
+    assert_eq!(w.grid_view().get(c(11, 5)).unwrap().zone, Some(Zone::Commercial));
+    assert_eq!(w.grid_view().get(c(11, 4)).unwrap().zone, None);
     assert_eq!(w.grid_view().get(c(11, 10)).unwrap().zone, None);
     // Zoning follows the road's sides: cells beyond its end (no block
     // there) cannot be zoned.

@@ -479,17 +479,21 @@ fn assert_frontage(w: &World) {
             b.footprint.rect(),
             b.facing
         );
+        // One or two lots wide, up to a block deep (the rows behind the
+        // building are its yard).
         let (wd, h) = b.size();
-        let ok = matches!((wd, h), (1, 1) | (1, 2) | (2, 1) | (2, 2));
+        let ok = (1..=2).contains(&wd) && (1..=balance::BLOCK_DEPTH as i32).contains(&h);
         assert!(ok, "{id:?} footprint {wd}x{h}");
-        // A deep lot is deep along its facing (`size` is width along the
-        // front, depth).
-        if wd * h == 2 {
-            assert_eq!(h, 2, "{id:?} {:?} {:?}", b.footprint.rect(), b.facing);
-            let r = b.footprint.rect();
-            let along_x = matches!(b.facing, Facing::PlusX | Facing::MinusX);
-            assert_eq!(r.width() == 2, along_x, "{id:?} {r:?} {:?}", b.facing);
-        }
+        assert!(wd == 1 || h >= 2, "{id:?} a wide lot is deep too");
+        // `size` is width along the front, depth along the facing.
+        let r = b.footprint.rect();
+        let along_x = matches!(b.facing, Facing::PlusX | Facing::MinusX);
+        let (across, deep) = if along_x {
+            (r.height(), r.width())
+        } else {
+            (r.width(), r.height())
+        };
+        assert_eq!((across, deep), (wd, h), "{id:?} {r:?} {:?}", b.facing);
     }
 }
 
