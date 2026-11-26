@@ -6,22 +6,22 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - **New checkout, first thing:** `scripts/dev-setup.sh --build`. It writes a git-ignored `.cargo/config.toml` for
   this checkout (linker flags that work here: mold, and lld off where the toolchain's wrapper is broken; `jobs` = half
   the cores), copies the machine's compiled dependencies (the "seed", `~/.cache/citysim/seed`) into `target/`, builds
-  the game and every test, and saves a seed if there was none. Seeded: ≈SEEDED_MIN min; cold: 18–27 min. Then plain
+  the game and every test, and saves a seed if there was none. Seeded: ≈1.5 min; cold: 18–27 min. Then plain
   `cargo ...`: no `RUSTFLAGS`, no `-j` (an exported `RUSTFLAGS` replaces the file's flags and rebuilds everything).
   `--build-release` also builds the release game. Never commit a `.cargo/config.toml`: CI and other machines build
   without one.
 - **Profiles:** `dev` for everything — tests, demo cities, screenshots, play-testing (game crate opt-level 1 and
   incremental; Bevy and the simulation at opt-level 3). `--release` only to play at full speed or to measure
   performance (`CITYSIM_BENCH`); a release rebuild of the game crate takes about a minute (≈3 min under load).
-- **Sim edit → tests:** `cargo nextest run -p citysim_sim -P quick` after each edit (≈QUICK s: every test except the
+- **Sim edit → tests:** `cargo nextest run -p citysim_sim -P quick` after each edit (≈9 s: every test except the
   ones that grow cities for 10 s or more, list in `.config/nextest.toml`); one test: `cargo nextest run -p citysim_sim
   NAME` (≈9 s); everything before pushing: `cargo nextest run -p citysim_sim` (≈FULL s, all tests at once; `cargo test`
   runs the test files one after another, ≈3× longer). Simulation-only agents never build the game: `-p citysim_sim`.
-- **Game edit → picture:** `cargo build -p citysim` (≈GAME_EDIT s for a one-line change in `ui/` or `gfx/`), then a
+- **Game edit → picture:** `cargo build -p citysim` (≈5 s for a one-line change in `ui/` or `gfx/`), then a
   windowless still: `CITYSIM_DEMO=organic CITYSIM_STILLS=/tmp/s CITYSIM_STILLS_LIST="a=wide;b=street"
-  target/debug/citysim` (≈STILL s with the demo cached; no display, see Dev flags).
+  target/debug/citysim` (≈8 s with the demo cached; no display, see Dev flags).
 - **Balance edit → scenario numbers:** `cargo run -p citysim_sim --release --example headless -- --seeds 10 hierarchy`
-  (one seed per core; ≈40 s to rebuild the sim in release, then HEADLESS for ten 10,000-resident cities).
+  (one seed per core; ≈40 s to rebuild the sim in release, then ≈80 s for ten 10,000-resident cities).
 - **Before pushing:** `scripts/ci-local.sh` runs exactly what CI runs (`sim` / `game` for one job); `--full` adds
   clippy on the game in all three feature sets. `cargo fmt --all --check` (width 120) and clippy warning-free.
 - CI: `.github/workflows/ci.yml` (fmt, clippy `-D warnings` + nextest for the sim; `cargo check` of all three feature
@@ -41,9 +41,11 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `crates/game/src/shared.rs` — the ONLY contract between gfx and ui; change it only by agreement. gfx and ui
   never import each other. `main.rs` just builds the App (features `gfx`, `ui`, both default).
 - `.github/workflows/ci.yml` — CI. `docs/` — README images (`screenshot.png`, `night.png`, `road-tool.png`, `people.png`, `traffic-overlay.png`), all from the real game.
-- `crates/game/src/dev/` — development tooling, not owned by gfx/ui: `scenario` (real scripted towns), `autoshot`
-  (screenshot and exit), `control` (file control channel for scripted play). `scripts/play.py` plays the real game with
-  OS input (xdotool) through that channel.
+- `crates/game/src/dev/` — development tooling, not owned by gfx/ui: `scenario` (real scripted towns, cached),
+  `stills` (windowless screenshots), `autoshot` (screenshot and exit, in a window), `control` (file control channel for
+  scripted play); `crates/game/build.rs` (the sim fingerprint for the demo cache). `scripts/play.py` plays the real game
+  with OS input (xdotool) through that channel. `scripts/dev-setup.sh` (checkout setup, seeds), `scripts/ci-local.sh`
+  (CI's checks), `.config/nextest.toml` (test tiers).
 - `docs/screenshot.png` (README), `THIRD_PARTY_NOTICES.md` (bundled font licences; licence files stay next to the fonts).
 - Asset root resolves to `crates/game/assets` for `cargo run -p citysim` and for the binary run directly.
 
@@ -153,7 +155,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   shows that overlay. Time of day: the demo's (`CITYSIM_DEMO_HOUR`) or `CITYSIM_GFX_HOUR=h`. `CITYSIM_STILLS_SETTLE`
   (s between camera move and capture, 0.75), `CITYSIM_SHOT_DELAY` (s after the scene is ready, 1). Example:
   `CITYSIM_DEMO=organic CITYSIM_GFX_HOUR=21 CITYSIM_STILLS=/tmp/s CITYSIM_STILLS_LIST="w=wide;s=street;t=close+traffic"
-  target/debug/citysim` (≈STILL s with the demo cached). Nothing is hovered (no cursor): interface states with hover
+  target/debug/citysim` (≈8 s with the demo cached). Nothing is hovered (no cursor): interface states with hover
   or tools still need `CITYSIM_UI_SHOTS` under Xvfb.
 - `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000, streets only) · `hierarchy` (`GridPlayer::hierarchy`,
   ~10,000 with avenues, ~50 s to build) · `jam` (bad layout, one overloaded junction): real towns built by
