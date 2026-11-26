@@ -29,11 +29,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: sim
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - run: cargo fmt --all --check
       - run: cargo clippy -p citysim_sim --all-targets -- -D warnings
-      # Includes the pinned determinism checksum: a different machine must
-      # reproduce the state bit for bit.
-      - run: cargo test -p citysim_sim
+      # Every test in parallel (the slowest test, not the sum of the test
+      # files, sets the time). Includes the pinned determinism checksum: a
+      # different machine must reproduce the state bit for bit.
+      - run: cargo nextest run -p citysim_sim
 
   game:
     name: Check and tests (game)
