@@ -30,6 +30,8 @@ const GRID_R: i32 = 14;
 #[derive(Component)]
 struct HoverFrame {
     pos: Vec3,
+    /// Corners (around the centre) the mesh was built for.
+    shape: [Vec2; 4],
 }
 
 #[derive(Component)]
@@ -73,27 +75,38 @@ fn overlay_material(materials: &mut Assets<StandardMaterial>, color: Color, bias
     })
 }
 
-fn frame_mesh() -> Mesh {
-    // A cell outline with a soft fill, slightly larger than the cell.
+/// A cell outline with a soft fill, a little larger than the cell, around
+/// its centre (`q`: corners relative to the centre, in order).
+fn frame_mesh(q: [Vec2; 4]) -> Mesh {
     let mut m = MeshBuilder::new();
-    let (a, b) = (-0.25, CELL_SIZE + 0.25);
     let w = 0.45;
     let line = [1.0, 1.0, 1.0, 1.0];
     let fill = [1.0, 1.0, 1.0, 0.22];
-    let q = |x0: f32, z0: f32, x1: f32, z1: f32| {
-        [
-            Vec3::new(x0, 0.0, z0),
-            Vec3::new(x1, 0.0, z0),
-            Vec3::new(x1, 0.0, z1),
-            Vec3::new(x0, 0.0, z1),
-        ]
+    let grow = |p: Vec2, d: f32| p + p.normalize_or_zero() * d;
+    let outer = q.map(|p| grow(p, 0.35));
+    let inner = q.map(|p| grow(p, 0.35 - w * std::f32::consts::SQRT_2));
+    let v = |p: Vec2| Vec3::new(p.x, 0.0, p.y);
+    let ccw = (q[1] - q[0]).perp_dot(q[2] - q[0]) > 0.0;
+    let mut quad = |a: [Vec2; 4], c: [f32; 4]| {
+        let pts = a.map(v);
+        if ccw {
+            m.quad_up(pts, c);
+        } else {
+            m.quad_up([pts[0], pts[3], pts[2], pts[1]], c);
+        }
     };
-    m.quad_up(q(a, a, b, a + w), line);
-    m.quad_up(q(a, b - w, b, b), line);
-    m.quad_up(q(a, a + w, a + w, b - w), line);
-    m.quad_up(q(b - w, a + w, b, b - w), line);
-    m.quad_up(q(a + w, a + w, b - w, b - w), fill);
+    for k in 0..4 {
+        let n = (k + 1) % 4;
+        quad([outer[k], outer[n], inner[n], inner[k]], line);
+    }
+    quad(inner, fill);
     m.build()
+}
+
+/// The square map cell, corners around its centre.
+fn square() -> [Vec2; 4] {
+    let h = CELL_SIZE * 0.5;
+    [Vec2::new(-h, -h), Vec2::new(h, -h), Vec2::new(h, h), Vec2::new(-h, h)]
 }
 
 fn grid_mesh() -> Mesh {
@@ -164,8 +177,11 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
     }
     commands.spawn((
         Name::new("Hovered cell"),
-        HoverFrame { pos: Vec3::ZERO },
-        Mesh3d(meshes.add(frame_mesh())),
+        HoverFrame {
+            pos: Vec3::ZERO,
+            shape: square(),
+        },
+        Mesh3d(meshes.add(frame_mesh(square()))),
         MeshMaterial3d(mats.frame.clone()),
         Transform::default(),
         Visibility::Hidden,
@@ -201,13 +217,41 @@ fn tool_color(tool: ActiveTool) -> Color {
     }
 }
 
-/// Placement of a cell's local frame (corner `(i, j)` at the origin, `+x`
-/// along the lattice's `+i`, `+z` along `+j`): the hovered zoning cell on
-/// its own lattice, else the map cell.
-fn cell_frame(sim: &SimWorld, hovered: &HoveredCell, point: &HoveredPoint) -> Option<(Vec3, Quat)> {
+/// The hovered cell as drawn: its centre and corners around it. With a
+/// zone tool only zoneable land (the zoning cell under the cursor, whatever
+/// lattice: a strip cell along a curve is a trapezoid); with other tools
+/// the map cell when there is no zoning cell.
+fn hovered_quad(
+    sim: &SimWorld,
+    hovered: &HoveredCell,
+    point: &HoveredPoint,
+    tool: ActiveTool,
+) -> Option<(Vec2, [Vec2; 4])> {
+    if let Some(c) = point.zone_cell
+        && let Some(q) = sim.world.zoning.cell_corners(c)
+    {
+        let q = q.map(Vec2::from);
+        let ctr = (q[0] + q[1] + q[2] + q[3]) * 0.25;
+        return Some((ctr, q.map(|p| p - ctr)));
+    }
+    if matches!(tool, ActiveTool::Zone(_)) {
+        return None;
+    }
+    let c = hovered.0?;
+    let ctr = Vec2::new((c.x as f32 + 0.5) * CELL_SIZE, (c.y as f32 + 0.5) * CELL_SIZE);
+    Some((ctr, square()))
+}
+
+/// Placement of the faint cell grid (corner `(i, j)` at the origin, `+x`
+/// along the lattice's `+i`): the hovered cell's straight lattice, else the
+/// map grid; none on a strip (it bends).
+fn grid_frame(sim: &SimWorld, hovered: &HoveredCell, point: &HoveredPoint) -> Option<(Vec3, Quat)> {
     if let Some(c) = point.zone_cell
         && let Some(l) = sim.world.zoning.lattice(c.lattice)
     {
+        if l.is_strip() {
+            return None;
+        }
         let p = l.world_at(c.i as f32, c.j as f32);
         return Some((Vec3::new(p[0], 0.0, p[1]), Quat::from_rotation_y(-l.angle())));
     }
@@ -227,29 +271,35 @@ fn move_frame(
     tool: Res<ActiveTool>,
     mats: Res<CursorMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(&mut HoverFrame, &mut Transform, &mut Visibility)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut q: Query<(&mut HoverFrame, &mut Transform, &mut Visibility, &Mesh3d)>,
 ) {
-    let Ok((mut frame, mut t, mut vis)) = q.single_mut() else {
+    let Ok((mut frame, mut t, mut vis, mesh)) = q.single_mut() else {
         return;
     };
     // Inspect highlights what it points at (buildings, roads, cars); a
     // cell frame on bare ground would only look like a stray tile.
     // The bulldozer marks what it would remove (red); a cell frame and the
     // grid mean nothing to it with free-form roads.
-    let frame_at = cell_frame(&sim, &hovered, &point).filter(|_| shows_cells(*tool));
-    let Some((corner, rot)) = frame_at else {
+    let at = hovered_quad(&sim, &hovered, &point, *tool).filter(|_| shows_cells(*tool));
+    let Some((ctr, shape)) = at else {
         vis.set_if_neq(Visibility::Hidden);
         return;
     };
-    let target = corner + Vec3::Y * heights::HIGHLIGHT;
+    if shape.iter().zip(frame.shape.iter()).any(|(a, b)| a.distance(*b) > 0.01)
+        && let Some(mut m) = meshes.get_mut(&mesh.0)
+    {
+        *m = frame_mesh(shape);
+        frame.shape = shape;
+    }
+    let target = Vec3::new(ctr.x, heights::HIGHLIGHT, ctr.y);
     if *vis == Visibility::Hidden || frame.pos.distance(target) > 80.0 {
         frame.pos = target;
-        t.rotation = rot;
     }
     let a = 1.0 - (-time.delta_secs() * 28.0).exp();
     frame.pos = frame.pos.lerp(target, a);
     t.translation = frame.pos;
-    t.rotation = t.rotation.slerp(rot, a);
+    t.rotation = Quat::IDENTITY;
     vis.set_if_neq(Visibility::Inherited);
     if tool.is_changed()
         && let Some(mut m) = materials.get_mut(&mats.frame)
@@ -273,7 +323,8 @@ fn move_grid(
     mut q: Query<(&mut Transform, &mut Visibility), With<CellGrid>>,
 ) {
     let Ok((mut t, mut vis)) = q.single_mut() else { return };
-    match cell_frame(&sim, &hovered, &point) {
+    let zone_land = !matches!(*tool, ActiveTool::Zone(_)) || point.zone_cell.is_some();
+    match grid_frame(&sim, &hovered, &point).filter(|_| zone_land) {
         Some((corner, rot)) if shows_cells(*tool) => {
             t.translation = corner + Vec3::Y * 0.05;
             t.rotation = rot;

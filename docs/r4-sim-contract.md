@@ -559,3 +559,78 @@ green, `CONFLICTS=1`), `happy.rs` (happiness by part and reason in a saved city)
 `traffic::debug_last_denial`, `overlap` with `OVERLAP_DETAIL=1`, `topdown` draws medians and pockets and `day`
 takes `CITYSIM_TOPDOWN_LAYOUT=hierarchy`, `headless` writes journey times, commute happiness and traffic losses per
 day and has the `short_industry` scenarios.
+
+## 2026-11-26 (r5-zoning: zoning that follows curves, blocks filled edge to edge)
+
+The zoning model keeps its parts (lattices, blocks, cells, lots in one lattice); three things change.
+
+### Strips: lattices bent along curved roads
+
+- Every side of a **curved** segment gets its own lattice, a **strip** (`Lattice::strip: Option<Strip>`, check with
+  `Lattice::is_strip()`). `Strip { i0, frames: Vec<(point, dir)>, lo, hi }`: column boundary `i0 + k` is the half-line
+  from `frames[k].0` (on the kerb, 4 m from the centre line) along the unit normal `frames[k].1` (`+j`). Cell `(i, j)`
+  is the quadrilateral between boundaries `i` and `i + 1`, `j..j+1` cell sizes out along them. Neighbouring cells
+  share their edges exactly: a row follows the kerb with no gaps and no overlaps, narrower on the inside of a bend and
+  wider outside. Columns are fitted to the segment (about 8 m along the middle of the first row); a curve continuing
+  a straight road smoothly starts its first column where the straight road's block ends.
+- Rows stop where a cell would get narrower than 4.5 m (inside of a tight bend) or wider than 12.5 m (outside): a
+  street of 24 m radius keeps one row inside, rings of 70 m radius three or four.
+- **Use the lattice's own geometry, never its `u` / `origin`, for strips**: `world_at`, `local`, `cell_of`,
+  `cell_center`, `cell_corners` work for both kinds. New: `Lattice::axes_at(x) -> (u, v)` and `dir_at(x, facing)`
+  (directions at lattice coordinate `x`; constant on a straight lattice), `Lattice::bent(Strip)`. `Lattice::dir(f)` on
+  a strip answers for its first column. `local` far from a strip returns a point no cell is at.
+- `Zoning::block_outline(&Block)` / `rect_outline(lattice, min, max)` (polyline outline; a strip's has every column
+  boundary), `Zoning::lot_quad(&Footprint)` (the quad a lot covers: front-left, front-right, back-right, back-left; on
+  a strip it narrows or widens). `block_corners` still exists (only the four corners on a strip).
+- Straight roads keep straight lattices and share them as before, but only with a lattice they line up with at
+  **both ends** (`LATTICE_ANGLE_TOL_DEG` is 0.2, was 1.0): a road half a degree off a long lattice no longer joins it
+  and drifts across its rows. A right-angle grid on the cell lattice is still lattice 0, cell for cell.
+- A split curve keeps its strips (the halves find the strip their kerb lies on), so zoning and buildings along it
+  survive a T junction.
+
+### Deeper blocks and who keeps overlapping land
+
+- `balance::BLOCK_DEPTH` is **6** (was 2; `MAX_BLOCK_DEPTH` 6): land up to 48 m from a road can be zoned, so streets
+  up to about 100 m apart can be zoned all the way in.
+- Where cells of two lattices overlap, **the cell fewer rows from its own road keeps the land, then the older road**
+  (was: the older road). Front rows always beat deep rows, so a new road never leaves a band of unzoneable land along
+  itself, and rows of different roads meet along a tidy line (a diagonal at corners, a line between parallel roads).
+- Land taken over that way keeps its zone: a newly usable cell takes the zone of the other lattice's cell under its
+  middle (a contested one keeps its zone too, for when it is usable again).
+
+### Lots with yards
+
+- A lot is one or two cells wide and **as deep as the zoned free rows behind it allow** (up to the block depth), but
+  never into rows nearer another road (those are left to that road's lots). `Footprint::size` is `[width, depth]`
+  with depth up to 6; the building stands on the front `balance::BUILT_DEPTH` (2) rows, the rest is its yard.
+  `Footprint::built_area()` (capacity is counted on it: unchanged per metre of street), `yard_depth()`.
+- Renderers: draw the building on the front two rows of the lot (gfx: `buildings::lot_of`), inside `lot_quad` on a
+  strip; the yard behind is grass.
+
+### Zone tool queries
+
+- `zoning::road_walk(world, (segment, m), (segment, m), max_m) -> Option<Vec<RoadPiece>>`: the shortest walk along the
+  roads between two points (through bends, pieces and junctions). `RoadPiece { segment, forward, from_m, to_m }`.
+- `zoning::frontage_walk(world, &walk, side, depth)`: cells along a walk on one side of it (side seen in the
+  direction of travel), up to `depth` rows. `zoning::stretch_walk(world, segment)`: the stretch between junctions,
+  dead ends or corners sharper than 45 degrees. `frontage(world, segment, side, depth)` is `frontage_walk` of it.
+- `zoning::fill_area` links cells of different lattices when their outlines come within a metre, so it fills land
+  enclosed by roads whatever lattices it is made of; clicked on bare land (the middle of a ring) it starts from the
+  nearest land within 48 m that no road separates from the click.
+- `zoning::cells_in_quad` finds strip cells however large the quad.
+
+### Saves
+
+- Format **7**: the body is laid out as version 6; strips travel in **extension block 4** (`ExtensionV4` = block 3 of
+  r5-sim plus `(lattice id, Strip)` pairs). Version 6 loads with the same body; its blocks are made again the current
+  way on load (`blocks::renew_all`): zones move onto the new cells, buildings on curves move onto the new lots under
+  their front where those are free (`growth::reseat`), the rest stay where they stand. Fixture
+  `tests/data/curves_v6.citysave` (a version-6 town with curves, written by the pre-r5 simulation).
+
+### Measured (release, this machine)
+
+- Zone-block regeneration after one road edit in the 10,000-resident hierarchy city (`examples/spikes.rs`): 0.43-0.48
+  ms (was 0.22-0.34 ms with two-row blocks).
+- Zoning test bed (`examples/topdown.rs zonebed`: gentle and tight curves, S-bend, ring, cul-de-sac, curve off a
+  grid, curved avenue, rotated grids): 33 lattices instead of 194 for the same roads; the same zone-tool actions
+  played in the game zone 2,044 cells instead of 490.

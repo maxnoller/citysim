@@ -268,10 +268,12 @@ fn bad_layout_jams_and_a_second_connection_fixes_it() {
     assert!(bad_commute > 1.5 * grid_commute, "{bad_commute} vs {grid_commute}");
     assert!(bad_pop * 2 < grid_pop, "{bad_pop} vs {grid_pop}");
     // Adding connections measurably fixes it: the town grows again, to
-    // more than twice the people (it grows into the new capacity until
+    // about twice the people (it grows into the new capacity until
     // traffic holds it back again), and although it then carries several
     // times the cars, commutes are no longer and no further from free flow.
-    assert!(fix_pop > 2 * bad_pop, "{fix_pop} vs {bad_pop}");
+    // (About twice: the run is chaotic, and six-row zoning blocks give
+    // the district's rectangle a few more cells than two-row ones did.)
+    assert!(fix_pop * 10 > 19 * bad_pop, "{fix_pop} vs {bad_pop}");
     assert!(fix_commute < bad_commute, "{fix_commute} vs {bad_commute}");
     assert!(fix_delay <= bad_delay, "x{fix_delay} vs x{bad_delay}");
 }

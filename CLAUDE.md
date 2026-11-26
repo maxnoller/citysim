@@ -121,9 +121,14 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `traffic::delay_factor` times their free-flow time (what the roads do to real cars).
 - Zoning is on lattices of blocks along each road side (`world.zoning`; `world.grid_view()` answers world-cell
   questions); buildings by centre and rotation (`Footprint`). Contract: `docs/r4-sim-contract.md`.
+- Zoning r5 (`docs/r4-sim-contract.md`, "r5-zoning"): curved road sides are strip lattices (`Lattice::is_strip()`;
+  use `cell_corners` / `axes_at` / `lot_quad`, never `u` on a strip); blocks are 6 rows (`BLOCK_DEPTH`), the cell
+  nearer its own road keeps overlapping land; lots carry a yard behind the 2 built rows (`Footprint::built_area`).
+  Zoning test bed: `cargo run -p citysim_sim --release --example topdown -- zonebed out.png [days]`;
+  `scripts/zplay.py` plays the same layout in the game (`launch EXE load`, `zone`, `modes`, `hood`, `shots`).
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
-- Saves: format version 6 (free-form roads and citizens); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
+- Saves: format version 7 (strips in extension block 4; version 6 loads, its zoning is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
   `crates/sim/tests/data/round1_town.citysave`), version 5 is refused; `World::load` rejects structurally damaged
   saves. Round-1 saves keep their old second-row buildings until they are rebuilt.
 - Scenarios: `scenarios::{GridPlayer, two_districts, add_connections, overbuilt, organic, upgrade_to_hierarchy}`;

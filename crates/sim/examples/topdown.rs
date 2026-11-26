@@ -1233,6 +1233,149 @@ fn draw_blocks(c: &mut Canvas, w: &World, v: &View) {
     }
 }
 
+// ------------------------------------------------------------ zone bed ----
+
+/// Cell coordinates (integer = centre) to metres.
+fn zm(x: f32, y: f32) -> [f32; 2] {
+    [(x + 0.5) * CELL_SIZE, (y + 0.5) * CELL_SIZE]
+}
+
+/// The zoning test bed of awkward roads (the same layout `scripts/zplay.py`
+/// draws in the game): name, centre (cells) and view size (metres).
+fn zone_bed(w: &mut World) -> Vec<(&'static str, [f32; 2], f32)> {
+    let st = RoadKind::Street;
+    let b = |w: &mut World, c: Curve, k: RoadKind| {
+        if let Err(e) = w.apply(Command::BuildCurve { curve: c, kind: k }) {
+            eprintln!("refused {:?}: {e}", c.start());
+        }
+    };
+    let s = |a: (f32, f32), z: (f32, f32)| Curve::straight(zm(a.0, a.1), zm(z.0, z.1));
+    let cv =
+        |a: (f32, f32), c: (f32, f32), z: (f32, f32)| Curve::through_corner(zm(a.0, a.1), zm(c.0, c.1), zm(z.0, z.1));
+    b(w, s((11.0, 128.0), (185.0, 128.0)), st);
+    b(w, cv((16.0, 128.0), (16.0, 102.0), (42.0, 102.0)), st);
+    b(w, cv((24.0, 128.0), (24.0, 131.0), (27.0, 131.0)), st);
+    b(w, s((27.0, 131.0), (38.0, 131.0)), st);
+    b(w, cv((56.0, 128.0), (56.0, 120.0), (62.0, 118.0)), st);
+    b(w, cv((62.0, 118.0), (68.0, 116.0), (68.0, 106.0)), st);
+    b(w, s((66.0, 128.0), (66.0, 134.0)), st);
+    b(w, cv((66.0, 134.0), (75.0, 134.0), (75.0, 143.0)), st);
+    b(w, cv((75.0, 143.0), (75.0, 152.0), (66.0, 152.0)), st);
+    b(w, cv((66.0, 152.0), (57.0, 152.0), (57.0, 143.0)), st);
+    b(w, cv((57.0, 143.0), (57.0, 134.0), (66.0, 134.0)), st);
+    b(w, cv((86.0, 128.0), (86.0, 118.0), (95.0, 114.0)), st);
+    b(w, s((90.0, 128.0), (90.0, 146.0)), st);
+    b(w, s((100.0, 128.0), (100.0, 146.0)), st);
+    b(w, s((90.0, 137.0), (100.0, 137.0)), st);
+    b(w, s((90.0, 146.0), (100.0, 146.0)), st);
+    b(w, cv((100.0, 137.0), (110.0, 137.0), (114.0, 148.0)), st);
+    b(w, cv((108.0, 128.0), (108.0, 104.0), (134.0, 100.0)), RoadKind::Avenue);
+    // A rotated grid of whole-cell blocks (as the grid tool draws it).
+    let th = (13.0f32).to_radians();
+    let (u, v) = ([libm::cosf(th), libm::sinf(th)], [-libm::sinf(th), libm::cosf(th)]);
+    let o = zm(138.0, 132.0);
+    let g = |i: f32, j: f32| [o[0] + (u[0] * i + v[0] * j) * 8.0, o[1] + (u[1] * i + v[1] * j) * 8.0];
+    for j in [0.0, 8.0, 16.0, 24.0] {
+        b(w, Curve::straight(g(0.0, j), g(24.0, j)), st);
+    }
+    for i in [0.0, 8.0, 16.0, 24.0] {
+        b(w, Curve::straight(g(i, 0.0), g(i, 24.0)), st);
+    }
+    b(w, Curve::straight(zm(140.0, 128.0), g(0.0, 0.0)), st);
+    // Rotated streets one by one, blocks not whole cells.
+    let th = (-30.0f32).to_radians();
+    let (u, v) = ([libm::cosf(th), libm::sinf(th)], [libm::sinf(th), -libm::cosf(th)]);
+    let o = zm(146.0, 128.0);
+    let g = |i: f32, j: f32| [o[0] + (u[0] * i + v[0] * j) * 8.0, o[1] + (u[1] * i + v[1] * j) * 8.0];
+    for k in 0..3 {
+        b(w, Curve::straight(g(0.0, 6.6 * k as f32), g(29.2, 6.6 * k as f32)), st);
+    }
+    for k in 0..5 {
+        b(w, Curve::straight(g(7.3 * k as f32, 0.0), g(7.3 * k as f32, 13.2)), st);
+    }
+    vec![
+        ("GENTLE CURVE", zm(28.0, 112.0), 300.0),
+        ("TIGHT CURVE", zm(29.0, 133.0), 140.0),
+        ("S-BEND", zm(62.0, 118.0), 220.0),
+        ("RING", zm(66.0, 143.0), 220.0),
+        ("CUL-DE-SAC", zm(89.0, 120.0), 160.0),
+        ("GRID + CURVE", zm(101.0, 139.0), 240.0),
+        ("CURVED AVENUE", zm(120.0, 113.0), 300.0),
+        ("ROTATED GRID", zm(151.0, 146.0), 300.0),
+        ("ROTATED STREETS", zm(160.0, 113.0), 300.0),
+    ]
+}
+
+/// `zonebed out.png [days]`: the test bed zoned everywhere (homes; shops
+/// and industry on some sites), grown for `days`, one panel per site:
+/// cells by lattice above, zones and buildings below.
+fn zone_bed_sheet(out: &str, days: u32) {
+    let mut w = World::new(7);
+    w.economy.money = i64::MAX / 4;
+    let sites = zone_bed(&mut w);
+    for (k, (_, c, size)) in sites.iter().enumerate() {
+        let h = size * 0.5;
+        let z = [
+            Zone::Residential,
+            Zone::Residential,
+            Zone::Commercial,
+            Zone::Residential,
+            Zone::Residential,
+            Zone::Commercial,
+            Zone::Industrial,
+            Zone::Residential,
+            Zone::Residential,
+        ][k];
+        let _ = w.apply(Command::ZoneArea {
+            quad: [
+                [c[0] - h, c[1] - h],
+                [c[0] + h, c[1] - h],
+                [c[0] + h, c[1] + h],
+                [c[0] - h, c[1] + h],
+            ],
+            zone: Some(z),
+        });
+    }
+    for _ in 0..days * balance::TICKS_PER_DAY {
+        w.step();
+    }
+    w.economy.money = 0;
+    let (pw, ph) = (520usize, 520usize);
+    let cols = 3;
+    let rows = sites.len().div_ceil(cols);
+    let mut cv = Canvas::new(pw * cols * 2, ph * rows + 64, GRASS);
+    for (k, (name, c, size)) in sites.iter().enumerate() {
+        let kpx = pw as f32 / size;
+        let view = View::centred(*c, pw - 6, ph - 6, kpx);
+        let mut a = Canvas::new(pw - 6, ph - 6, GRASS);
+        draw_cells(&mut a, &w, &view, true);
+        draw_world_opts(&mut a, &w, &view, false, false);
+        a.text(6, 6, name, 2, [250, 250, 250]);
+        let mut bm = Canvas::new(pw - 6, ph - 6, GRASS);
+        draw_world_opts(&mut bm, &w, &view, true, false);
+        let (x, y) = ((k % cols) * 2 * pw, (k / cols) * ph + 64);
+        cv.blit(&a, x + 3, y + 3);
+        cv.blit(&bm, x + pw + 3, y + 3);
+    }
+    let n = |f: &dyn Fn(&ZoneCell) -> bool| w.zoning.cells().filter(|(_, c)| f(c)).count();
+    header(
+        &mut cv,
+        "ZONING TEST BED: CELLS BY LATTICE (RED CONTESTED, GREY UNDER ROAD) | ZONES AND BUILDINGS",
+        &format!(
+            "{} LATTICES, {} BLOCKS. CELLS {} USABLE, {} CONTESTED, {} UNDER ROADS. {} BUILDINGS, {} RESIDENTS AFTER {} DAYS",
+            w.zoning.lattices().count(),
+            w.zoning.blocks.len(),
+            n(&|c| c.usable()),
+            n(&|c| c.blocked == Some(Blocked::Contested)),
+            n(&|c| c.blocked == Some(Blocked::Road)),
+            w.buildings.len(),
+            w.stats.population,
+            days
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
 /// A small world without the highway (for close-up sheets).
 fn sheet_world() -> World {
     let mut w = World::new(3);
@@ -1941,6 +2084,7 @@ fn main() {
     match mode {
         "signal" => signal_sheet(&out),
         "lots" => lots(&out),
+        "zonebed" => zone_bed_sheet(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(6)),
         "video" => video(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
         "day" => day(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
         "watch" => watch(&out, &args[2..]),
