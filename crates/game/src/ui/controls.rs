@@ -1,9 +1,10 @@
 //! Global keys and the handler for every [`UiAction`].
 //!
 //! Keys: Space pause, 1/2/3 speed, O cycles overlays, T traffic overlay,
-//! G graphics quality. Escape: cancels the tool action in progress (done by
-//! `tools.rs`), else closes the menu / budget, else drops back to Inspect,
-//! else opens the pause menu. Right click with nothing in progress also
+//! G graphics quality, F3 the performance panel. Escape: cancels the tool
+//! action in progress (done by `tools.rs`), else closes the menu, the city
+//! window or the drawer, else drops back to Inspect, else opens the pause
+//! menu. Right click with nothing in progress also
 //! drops back to Inspect.
 
 use bevy::prelude::*;
@@ -11,7 +12,7 @@ use bevy::prelude::*;
 use super::budget::TAX_STEP;
 use super::tools::ToolState;
 use super::widgets::{UiAction, button_clicks};
-use super::{InfoTray, UiState};
+use super::{CityPage, InfoTray, UiState};
 use crate::shared::{
     ActiveTool, CameraInputBlocked, DisplaySettings, GameSet, GraphicsQuality, OverlayMode, PointerOverUi, RoadChoice,
     RoadMode, SimClock, SimCommand, SimWorld, ToolModes,
@@ -56,6 +57,10 @@ pub(super) fn control_keys(
     mut ui: ResMut<UiState>,
     mut out: MessageWriter<UiAction>,
 ) {
+    // F3 works everywhere, the menu included.
+    if keys.just_pressed(KeyCode::F3) {
+        out.write(UiAction::Perf(super::perf::next_detail(ui.perf)));
+    }
     // Esc in a focused drawer only leaves the focus (`tray::tray_keys`).
     if keys.just_pressed(KeyCode::Escape) && !tools.busy() && !ui.tray_focus {
         if ui.menu_open && ui.settings_open {
@@ -64,6 +69,8 @@ pub(super) fn control_keys(
             out.write(UiAction::Keys);
         } else if ui.menu_open {
             out.write(UiAction::CloseMenu);
+        } else if ui.window.is_some() {
+            ui.window = None;
         } else if ui.tray.is_some() {
             ui.tray = None;
         } else if !people.stack.is_empty() {
@@ -163,6 +170,9 @@ fn handle_actions(
                 };
                 tool.set_if_neq(new);
                 ui.tray = None;
+                if new != ActiveTool::Inspect {
+                    ui.window = None;
+                }
             }
             UiAction::ZoneTool => {
                 let new = if matches!(*tool, ActiveTool::Zone(_)) {
@@ -172,6 +182,7 @@ fn handle_actions(
                 };
                 tool.set_if_neq(new);
                 ui.tray = None;
+                ui.window = None;
             }
             UiAction::Overlay(o) => {
                 // The maps tray picks one; T toggles traffic.
@@ -180,19 +191,26 @@ fn handle_actions(
                 } else {
                     o
                 };
-                if *overlay != OverlayMode::None && ui.tray.is_none() && *tool == ActiveTool::Inspect {
+                if *overlay != OverlayMode::None
+                    && ui.tray.is_none()
+                    && ui.window.is_none()
+                    && *tool == ActiveTool::Inspect
+                {
                     ui.tray = Some(InfoTray::Maps);
                 }
             }
             UiAction::Maps => toggle_tray(&mut ui, &mut tool, InfoTray::Maps),
-            UiAction::Stats => toggle_tray(&mut ui, &mut tool, InfoTray::Stats),
-            UiAction::CityPeople => toggle_tray(&mut ui, &mut tool, InfoTray::People),
+            UiAction::Stats => toggle_window(&mut ui, &mut tool, CityPage::Stats),
+            UiAction::CityPeople => toggle_window(&mut ui, &mut tool, CityPage::People),
+            UiAction::CityPage(p) => open_window(&mut ui, &mut tool, p),
+            UiAction::CloseWindow => ui.window = None,
+            UiAction::Demolish => toggle_demolish(&mut tool, &mut ui),
             UiAction::TogglePause => clock.paused = !clock.paused,
             UiAction::Speed(i) => {
                 clock.speed = i;
                 clock.paused = false;
             }
-            UiAction::ToggleBudget => toggle_tray(&mut ui, &mut tool, InfoTray::Budget),
+            UiAction::ToggleBudget => toggle_window(&mut ui, &mut tool, CityPage::Budget),
             UiAction::TaxStep(n) => {
                 let r = sim.world.economy.tax_rate + n as f32 * TAX_STEP / 5.0;
                 let r = ((r / TAX_STEP).round() * TAX_STEP).clamp(0.0, balance::MAX_TAX_RATE);
@@ -226,6 +244,7 @@ fn handle_actions(
                     modes.road = m;
                     tool.set_if_neq(ActiveTool::Road);
                     ui.tray = None;
+                    ui.window = None;
                 }
             }
             UiAction::ZoneMode(m) => modes.zone = m,
@@ -253,6 +272,7 @@ fn handle_actions(
             UiAction::UiScale(i) => ui.ui_scale = i,
             UiAction::EdgeScroll(on) => display.edge_scroll = on,
             UiAction::LotMarkers(on) => display.lot_markers = on,
+            UiAction::Perf(d) => ui.perf = d,
             // Handled in tools.rs and people_panel.rs.
             UiAction::Undo
             | UiAction::Person(_)
@@ -264,6 +284,7 @@ fn handle_actions(
             | UiAction::ClosePeople
             | UiAction::SetJunction(_)
             | UiAction::Fold(_)
+            | UiAction::JumpToDestination
             | UiAction::None => {}
             // Handled in save_load.rs.
             UiAction::Save | UiAction::Load => {}
@@ -271,10 +292,41 @@ fn handle_actions(
     }
 }
 
-/// Open an info drawer: tools step back to Inspect so their trays make room.
+/// Open an info drawer: tools step back to Inspect so their trays make room
+/// (and the city window closes: one or the other).
 fn open_tray(ui: &mut UiState, tool: &mut ResMut<ActiveTool>, tray: InfoTray) {
     ui.tray = Some(tray);
+    ui.window = None;
     tool.set_if_neq(ActiveTool::Inspect);
+}
+
+/// Open the city window on `page`: tools step back to Inspect (the window
+/// is for looking; a build tool closes it), the maps drawer goes down.
+fn open_window(ui: &mut UiState, tool: &mut ResMut<ActiveTool>, page: CityPage) {
+    ui.window = Some(page);
+    ui.tray = None;
+    tool.set_if_neq(ActiveTool::Inspect);
+}
+
+fn toggle_window(ui: &mut UiState, tool: &mut ResMut<ActiveTool>, page: CityPage) {
+    if ui.window == Some(page) {
+        ui.window = None;
+    } else {
+        open_window(ui, tool, page);
+    }
+}
+
+/// The bulldozer switch (button and B): on from whatever tool is in hand,
+/// off back to that tool.
+pub(super) fn toggle_demolish(tool: &mut ActiveTool, ui: &mut UiState) {
+    if *tool == ActiveTool::Bulldoze {
+        *tool = ui.before_demolish.take().unwrap_or(ActiveTool::Inspect);
+    } else {
+        ui.before_demolish = Some(*tool);
+        *tool = ActiveTool::Bulldoze;
+        ui.window = None;
+        ui.tray = None;
+    }
 }
 
 fn toggle_tray(ui: &mut UiState, tool: &mut ResMut<ActiveTool>, tray: InfoTray) {

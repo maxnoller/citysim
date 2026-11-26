@@ -25,33 +25,63 @@ fn extrude(m: &mut MeshBuilder, prof: &[Vec2], z0: f32, z1: f32, side: Color, ar
     }
 }
 
-/// Six-sided wheel along z with a cap on the outer side only.
+/// Eight-sided wheel along z, flat on the road: tread, a dark tyre wall on
+/// the outer side and a smaller hub standing just proud of it.
 fn wheel(m: &mut MeshBuilder, c: Vec3, r: f32, w: f32) {
-    let n = 6;
-    let p = |i: usize, z: f32| {
+    let n = 8;
+    let p = |i: usize, rad: f32, z: f32| {
         let a = (i as f32 + 0.5) / n as f32 * std::f32::consts::TAU;
-        Vec3::new(c.x + r * a.cos(), c.y + r * a.sin(), z)
+        Vec3::new(c.x + rad * a.cos(), c.y + rad * a.sin(), z)
     };
     let s = if c.z > 0.0 { 1.0 } else { -1.0 };
     let zo = c.z + s * w * 0.5;
+    let zh = zo + s * 0.012;
+    let rh = r * 0.56;
+    let wall = shade(palette::TYRE, 1.25);
+    let hub = shade(palette::GUARDRAIL, 0.62);
     for i in 0..n {
         let j = (i + 1) % n;
         // Tread, facing away from the axle.
         m.quad(
-            p(i, c.z - w * 0.5),
-            p(j, c.z - w * 0.5),
-            p(j, c.z + w * 0.5),
-            p(i, c.z + w * 0.5),
+            p(i, r, c.z - w * 0.5),
+            p(j, r, c.z - w * 0.5),
+            p(j, r, c.z + w * 0.5),
+            p(i, r, c.z + w * 0.5),
             palette::TYRE,
         );
-    }
-    let hub = shade(palette::GUARDRAIL, 0.75);
-    let cap: Vec<Vec3> = (0..n).map(|i| p(i, zo)).collect();
-    for i in 1..n - 1 {
+        // Tyre wall around the hub, then the hub itself.
         if s > 0.0 {
-            m.tri(cap[0], cap[i], cap[i + 1], hub);
+            m.quad(p(i, r, zo), p(j, r, zo), p(j, rh, zo), p(i, rh, zo), wall);
+            m.tri(Vec3::new(c.x, c.y, zh), p(i, rh, zh), p(j, rh, zh), hub);
         } else {
-            m.tri(cap[0], cap[i + 1], cap[i], hub);
+            m.quad(p(j, r, zo), p(i, r, zo), p(i, rh, zo), p(j, rh, zo), wall);
+            m.tri(Vec3::new(c.x, c.y, zh), p(j, rh, zh), p(i, rh, zh), hub);
+        }
+    }
+}
+
+/// How far a car's wheels stand out of its body side, metres. The wheel face
+/// must never lie in the plane of the body side: the two would flicker.
+const WHEEL_PROUD: f32 = 0.035;
+
+/// A dark wheel arch on a body side at `z` (just outside it), around a wheel
+/// of radius `r` centred at `c`, above the sill at `y0`.
+fn wheel_arch(m: &mut MeshBuilder, c: Vec2, r: f32, y0: f32, z: f32) {
+    let n = 5;
+    let ra = r + 0.075;
+    let s = if z > 0.0 { 1.0 } else { -1.0 };
+    let z = z + s * 0.006;
+    let col = shade(palette::TYRE, 0.85);
+    let mut pts = vec![Vec3::new(c.x - ra, y0, z), Vec3::new(c.x + ra, y0, z)];
+    for i in 0..=n {
+        let a = i as f32 / n as f32 * std::f32::consts::PI;
+        pts.push(Vec3::new(c.x + ra * a.cos(), (c.y + ra * a.sin()).max(y0), z));
+    }
+    for i in 1..pts.len() - 1 {
+        if s > 0.0 {
+            m.tri(pts[0], pts[i], pts[i + 1], col);
+        } else {
+            m.tri(pts[0], pts[i + 1], pts[i], col);
         }
     }
 }
@@ -190,8 +220,10 @@ pub fn car_model(body: Color, shape: u32, lod: bool) -> MeshBuilder {
     }
     let wb = hl - 0.75;
     for x in [-wb, wb] {
-        for z in [-(hw - 0.12), hw - 0.12] {
+        for side in [-1.0, 1.0] {
+            let z = side * (hw + WHEEL_PROUD - 0.12);
             wheel(&mut m, Vec3::new(x, wr, z), wr, 0.24);
+            wheel_arch(&mut m, Vec2::new(x, wr), wr, 0.3, side * hw);
         }
     }
     // Soft contact shadow under the car (a dark quad just above the road).

@@ -1,6 +1,6 @@
 //! Settings plate (from the pause menu): graphics quality, interface
-//! scale, edge scrolling, lot markers for zoned-but-empty land; and the key
-//! reference plate. Display settings gfx honours live in `shared::DisplaySettings`.
+//! scale, edge scrolling, lot markers for zoned-but-empty land, the
+//! performance panel; and the key reference plate. Display settings gfx honours live in `shared::DisplaySettings`.
 //!
 //! The choices persist between sessions in `settings.cfg` in the platform
 //! config directory (`$XDG_CONFIG_HOME/citysim`, default `~/.config/citysim`
@@ -18,7 +18,7 @@ use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
     ButtonKind, UiAction, UiButton, approach, caps, label, layout, plate_node, plate_shadow, spawn_button, spawn_key,
 };
-use crate::shared::{DisplaySettings, GameSet, GraphicsQuality};
+use crate::shared::{DisplaySettings, GameSet, GraphicsQuality, PerfDetail};
 
 pub struct SettingsPlugin;
 
@@ -38,6 +38,7 @@ pub struct Saved {
     pub ui_scale: usize,
     pub edge_scroll: bool,
     pub lot_markers: bool,
+    pub perf: PerfDetail,
 }
 
 /// Directory of the settings file.
@@ -72,8 +73,13 @@ impl Saved {
             GraphicsQuality::Medium => "medium",
             GraphicsQuality::High => "high",
         };
+        let perf = match self.perf {
+            PerfDetail::Off => "off",
+            PerfDetail::Small => "small",
+            PerfDetail::Full => "full",
+        };
         format!(
-            "# CitySim settings\nquality={q}\ninterface_size={}\nedge_scroll={}\nlot_markers_always={}\n",
+            "# CitySim settings\nquality={q}\ninterface_size={}\nedge_scroll={}\nlot_markers_always={}\nperformance_panel={perf}\n",
             self.ui_scale, self.edge_scroll, self.lot_markers
         )
     }
@@ -102,6 +108,14 @@ impl Saved {
                 }
                 "edge_scroll" => self.edge_scroll = v.parse().unwrap_or(self.edge_scroll),
                 "lot_markers_always" => self.lot_markers = v.parse().unwrap_or(self.lot_markers),
+                "performance_panel" => {
+                    self.perf = match v {
+                        "off" => PerfDetail::Off,
+                        "small" => PerfDetail::Small,
+                        "full" => PerfDetail::Full,
+                        _ => self.perf,
+                    }
+                }
                 _ => {}
             }
         }
@@ -122,6 +136,7 @@ fn current(quality: GraphicsQuality, state: &UiState, display: &DisplaySettings)
         ui_scale: state.ui_scale,
         edge_scroll: display.edge_scroll,
         lot_markers: display.lot_markers,
+        perf: state.perf,
     }
 }
 
@@ -144,6 +159,7 @@ fn load_settings(
     state.ui_scale = s.ui_scale;
     display.edge_scroll = s.edge_scroll;
     display.lot_markers = s.lot_markers;
+    state.perf = s.perf;
     info!("settings loaded from {}", config_dir().display());
 }
 
@@ -204,8 +220,8 @@ const KEYS: [(&str, &[(&str, &str)]); 3] = [
             ("R", "Roads · again: street / avenue"),
             ("J", "Junctions: lights or priority"),
             ("Z", "Zones · again: next zone type"),
-            ("B", "Clear (bulldoze)"),
-            ("Tab", "Next mode of the tool"),
+            ("B", "Bulldozer on / off · back to the tool"),
+            ("Tab", "Next mode of the tool · window page"),
             ("Enter", "Build the road (or double-click)"),
             ("Backspace", "Remove the last point"),
             ("Alt", "Hold: place without snapping"),
@@ -219,12 +235,13 @@ const KEYS: [(&str, &[(&str, &str)]); 3] = [
         &[
             ("Space", "Pause"),
             ("1  2  3  4", "Speed"),
-            ("P", "People of the city"),
-            ("U", "Budget"),
+            ("P", "City window: people"),
+            ("U", "City window: budget"),
             ("O", "Maps · cycle"),
             ("T", "Traffic map"),
             ("G", "Graphics quality"),
-            ("F6", "Keyboard into the drawer · arrows, Enter"),
+            ("F3", "Performance panel · small, full, off"),
+            ("F6", "Keyboard into window / drawer"),
             ("F5  F9", "Save · load"),
         ],
     ),
@@ -358,6 +375,17 @@ fn spawn_settings(
                         &[
                             (UiAction::LotMarkers(false), "While zoning"),
                             (UiAction::LotMarkers(true), "Always"),
+                        ],
+                    );
+                    setting(
+                        l,
+                        fonts,
+                        icon::GAUGE,
+                        "Performance panel · F3",
+                        &[
+                            (UiAction::Perf(PerfDetail::Off), "Off"),
+                            (UiAction::Perf(PerfDetail::Small), "Small"),
+                            (UiAction::Perf(PerfDetail::Full), "Full"),
                         ],
                     );
                 });
@@ -522,16 +550,18 @@ mod tests {
             ui_scale: 2,
             edge_scroll: true,
             lot_markers: false,
+            perf: PerfDetail::Full,
         };
         let base = Saved {
             quality: GraphicsQuality::High,
             ui_scale: 1,
             edge_scroll: false,
             lot_markers: true,
+            perf: PerfDetail::Off,
         };
         assert_eq!(base.read(&s.to_text()), s);
         assert_eq!(
-            base.read("quality=ultra\ninterface_size=9\nedge_scroll=maybe\nnonsense"),
+            base.read("quality=ultra\ninterface_size=9\nedge_scroll=maybe\nperformance_panel=huge\nnonsense"),
             base
         );
     }

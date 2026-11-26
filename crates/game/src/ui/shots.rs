@@ -22,16 +22,21 @@ use super::shapes::{Draft, Shape};
 use super::toasts::{Toast, ToastKind};
 use super::tools::{Press, ToolState};
 use super::widgets::{UiAction, UiButton};
-use super::{InfoTray, UiState};
+use super::{CityPage, InfoTray, UiState};
 use crate::shared::{
-    ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, RoadChoice, RoadMode, SimClock,
-    SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
+    ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, PerfDetail, RoadChoice, RoadMode,
+    SimClock, SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
 };
 
 /// The scenario's world while a step shows a modified copy (broke, day 1);
 /// `reset` puts it back.
 #[derive(Resource, Default)]
 struct SavedWorld(Option<citysim_sim::World>);
+
+/// The graphics quality the run started with (a step that changes it is
+/// undone by `reset`).
+#[derive(Resource, Default)]
+struct SavedQuality(Option<crate::shared::GraphicsQuality>);
 
 fn stash_world(w: &mut World) {
     let copy = w.resource::<SimWorld>().world.clone();
@@ -66,6 +71,7 @@ impl Plugin for ShotsPlugin {
         })
         .init_resource::<Pointer>()
         .init_resource::<SavedWorld>()
+        .init_resource::<SavedQuality>()
         .add_systems(
             Update,
             run_shots.in_set(GameSet::Input).before(super::widgets::button_clicks),
@@ -176,11 +182,19 @@ fn reset(world: &mut World) {
     world.resource_mut::<WorldHighlight>().selected = None;
     let mut ui = world.resource_mut::<UiState>();
     ui.tray = None;
+    ui.window = None;
+    ui.before_demolish = None;
     ui.hint_visible = false;
     ui.menu_open = false;
     ui.settings_open = false;
     ui.keys_open = false;
     ui.following = false;
+    ui.perf = PerfDetail::Off;
+    let quality = *world.resource::<crate::shared::GraphicsQuality>();
+    let first = *world.resource_mut::<SavedQuality>().0.get_or_insert(quality);
+    if quality != first {
+        *world.resource_mut::<crate::shared::GraphicsQuality>() = first;
+    }
     // Directly (a ClosePeople message would also drop a selection the
     // step makes this frame).
     world.resource_mut::<super::panel::PeopleView>().stack.clear();
@@ -248,6 +262,19 @@ fn street_spot(w: &World, curved: bool) -> Option<([f32; 2], [f32; 2])> {
             let p = g.curve.pose_at(g.length * 0.5, 0.0);
             (p.pos, p.dir)
         })
+}
+
+/// Centre and half-size of a set of points.
+fn extent(pts: &[[f32; 2]]) -> ([f32; 2], f32) {
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in pts {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
+    (c, ((hi[0] - lo[0]).max(hi[1] - lo[1]) * 0.5).max(1.0))
 }
 
 fn add(a: [f32; 2], b: [f32; 2], k: f32) -> [f32; 2] {
@@ -393,7 +420,47 @@ fn steps() -> Vec<Step> {
             wait: 1.2,
             setup: |w| {
                 reset(w);
-                w.resource_mut::<UiState>().tray = Some(InfoTray::Stats);
+                w.resource_mut::<UiState>().window = Some(CityPage::Stats);
+            },
+        },
+        Step {
+            name: "perf-small",
+            wait: 4.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Small;
+            },
+        },
+        Step {
+            name: "perf-full",
+            wait: 4.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+            },
+        },
+        Step {
+            name: "perf-full-busy",
+            wait: 4.0,
+            setup: |w| {
+                // Next to the selection panel and the budget drawer.
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                w.resource_mut::<UiState>().window = Some(CityPage::Budget);
+                if let Some(id) = building_where(w, |b| b.kind == Zone::Residential && b.occupied >= 3) {
+                    w.write_message(UiAction::Place(id));
+                }
+            },
+        },
+        Step {
+            name: "perf-spike",
+            wait: 2.0,
+            setup: |w| {
+                // A real stall: another graphics quality (every pipeline
+                // is specialised again); `reset` switches it back.
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                w.write_message(UiAction::Quality(crate::shared::GraphicsQuality::Low));
             },
         },
         Step {
@@ -737,6 +804,125 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            name: "demolish-switch",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::Demolish);
+            },
+        },
+        Step {
+            name: "demolish-on",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Bulldoze;
+                w.resource_mut::<ToolModes>().bulldoze = BulldozeMode::Road;
+                let Some((p, d)) = street_spot(w, true) else { return };
+                point(w, Some(p));
+                look(w, add(p, d, 20.0), 240.0);
+            },
+        },
+        Step {
+            name: "demolish-building",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Bulldoze;
+                w.resource_mut::<ToolModes>().bulldoze = BulldozeMode::Road;
+                let Some(b) = building_pos(w, building_where(w, |b| b.kind == Zone::Residential && b.occupied >= 3))
+                else {
+                    return;
+                };
+                point(w, Some(b));
+                look(w, b, 170.0);
+            },
+        },
+        Step {
+            name: "window-stats",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::Stats);
+            },
+        },
+        Step {
+            name: "window-people",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::CityPeople);
+            },
+        },
+        Step {
+            name: "window-budget",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::ToggleBudget);
+                // A column of the day-by-day chart read out.
+                w.resource_mut::<Pointer>().target = PointerTarget::None;
+            },
+        },
+        Step {
+            name: "window-beside-perf",
+            wait: 3.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                w.write_message(UiAction::Stats);
+            },
+        },
+        Step {
+            name: "route-car",
+            wait: 2.0,
+            setup: |w| {
+                reset(w);
+                // A car with a long way still to go, near the middle.
+                let s = sim(w);
+                let f = town_focus(w);
+                let car = s
+                    .vehicles
+                    .keys()
+                    .filter_map(|id| {
+                        let pts = super::route::vehicle_path(s, id)?;
+                        let len = super::route::path_length(&pts);
+                        (len > 250.0).then_some((id, pts))
+                    })
+                    .min_by(|a, b| dist(a.1[0], f).total_cmp(&dist(b.1[0], f)));
+                w.resource_mut::<SimClock>().paused = true;
+                if let Some((id, pts)) = car {
+                    w.write_message(UiAction::Vehicle(id));
+                    let (c, r) = extent(&pts);
+                    look(w, c, (r * 2.2).clamp(160.0, 900.0));
+                }
+            },
+        },
+        Step {
+            name: "route-person-home",
+            wait: 2.0,
+            setup: |w| {
+                reset(w);
+                // Someone at home whose next trip is known.
+                let s = sim(w);
+                let who = s
+                    .citizens
+                    .iter()
+                    .filter(|(_, c)| c.job.is_some())
+                    .filter_map(|(id, _)| {
+                        let t = super::route::person_trip(s, id)?;
+                        (t.state == crate::shared::RouteState::Planned && t.points.len() > 4).then_some((id, t.points))
+                    })
+                    .nth(2);
+                w.resource_mut::<SimClock>().paused = true;
+                if let Some((id, pts)) = who {
+                    w.write_message(UiAction::Person(id));
+                    let (c, r) = extent(&pts);
+                    look(w, c, (r * 2.2).clamp(160.0, 900.0));
+                }
+            },
+        },
+        Step {
             name: "inspect-pinned",
             wait: 1.5,
             setup: |w| {
@@ -884,7 +1070,7 @@ fn steps() -> Vec<Step> {
                 f.service_level = 0.55;
                 f.days_in_debt = 4;
                 f.left_last_night = 23;
-                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
+                w.resource_mut::<UiState>().window = Some(CityPage::Budget);
             },
         },
         Step {
@@ -911,7 +1097,7 @@ fn steps() -> Vec<Step> {
             wait: 1.0,
             setup: |w| {
                 reset(w);
-                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
+                w.resource_mut::<UiState>().window = Some(CityPage::Budget);
             },
         },
         Step {
@@ -939,7 +1125,7 @@ fn steps() -> Vec<Step> {
                     fresh.step();
                 }
                 w.resource_mut::<SimWorld>().replace(fresh);
-                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
+                w.resource_mut::<UiState>().window = Some(CityPage::Budget);
             },
         },
         Step {
@@ -1004,8 +1190,7 @@ fn steps() -> Vec<Step> {
             wait: 3.0,
             setup: |w| {
                 reset(w);
-                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
+                w.resource_mut::<UiState>().window = Some(CityPage::Budget);
                 w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::ToggleBudget);
                 if let Ok(mut win) = w.query_filtered::<&mut Window, With<PrimaryWindow>>().single_mut(w) {
                     win.resolution.set(2560.0, 1440.0);
@@ -1200,6 +1385,7 @@ impl Plugin for TourPlugin {
         })
         .init_resource::<TourData>()
         .init_resource::<SavedWorld>()
+        .init_resource::<SavedQuality>()
         .insert_resource(Pointer {
             smooth: true,
             ..default()

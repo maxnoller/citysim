@@ -330,7 +330,7 @@ pub fn tool_card(
         }
         ActiveTool::Bulldoze => {
             state.cursor.filter(|_| state.on_map || state.busy())?;
-            readout::bulldoze(plan).map(|r| readout_card(&r))
+            readout::bulldoze(plan, world, modes.bulldoze).map(|r| readout_card(&r))
         }
     }
 }
@@ -769,9 +769,12 @@ pub fn hours_text(ticks: u64) -> String {
 /// `CONGESTION_JAM`).
 pub const JAM_CRAWL_MPS: f32 = 12.0 / 3.6;
 
-fn tag_style(refused: bool) -> PlateStyle {
+fn tag_style(refused: bool, demolish: bool) -> PlateStyle {
     if refused {
         PlateStyle::fill(t::NEGATIVE_FILL_TOP, t::NEGATIVE_FILL_BOTTOM, t::NEGATIVE)
+    } else if demolish {
+        // The bulldozer's card: a warning-red edge (a click destroys).
+        PlateStyle::fill(t::PLATE_BOTTOM, t::PLATE_BOTTOM, t::NEGATIVE)
     } else {
         PlateStyle::fill(t::PLATE_BOTTOM, t::PLATE_BOTTOM, t::ACCENT)
     }
@@ -805,7 +808,7 @@ fn spawn_tag(mut commands: Commands, fonts: Res<UiFonts>) {
                     UiRect::left(px(4)),
                     [0.0, 0.0, 9.0, 0.0],
                 ),
-                PlateAnim::new(tag_style(false)),
+                PlateAnim::new(tag_style(false, false)),
                 Pickable::IGNORE,
             ))
             .with_children(|p| {
@@ -857,6 +860,8 @@ struct Tag {
     lines: Vec<(String, Color)>,
     hint: String,
     refused: bool,
+    /// The bulldozer's card (red edge).
+    demolish: bool,
 }
 
 /// A card as a tag: the price row moves next to the title, short rows
@@ -915,6 +920,7 @@ fn tag_of(card: &Card) -> Tag {
         // How to use the tool, until there is something to measure.
         hint: if measured { String::new() } else { card.hint.clone() },
         refused: card.title_color == t::NEGATIVE,
+        demolish: false,
     }
 }
 
@@ -932,6 +938,7 @@ fn update_tag(
     mut plate_anim: Query<&mut PlateAnim, With<TagPlate>>,
     mut parts: Query<(&TagPart, &mut Text, &mut TextColor, &mut Node), Without<TagRoot>>,
     (highlight, panel): (Res<WorldHighlight>, Res<super::panel::PanelArea>),
+    (extent, window_area): (Res<super::tray::TrayExtent>, Res<super::city::WindowArea>),
     mut slide: Local<f32>,
     mut cache: Local<TagCache>,
 ) {
@@ -965,7 +972,10 @@ fn update_tag(
                 &sim.world,
                 highlight.hovered.as_ref(),
             )
-            .map(|c| tag_of(&c))
+            .map(|c| Tag {
+                demolish: *tool == ActiveTool::Bulldoze,
+                ..tag_of(&c)
+            })
         };
     }
     let (Some(tag), Some((cursor, win))) = (cache.tag.clone(), cursor) else {
@@ -976,7 +986,7 @@ fn update_tag(
     };
     if cache.shown.as_ref() != Some(&tag) {
         if let Ok(mut a) = plate_anim.single_mut() {
-            let st = tag_style(tag.refused);
+            let st = tag_style(tag.refused, tag.demolish);
             if a.style != st {
                 a.style = st;
             }
@@ -1024,8 +1034,9 @@ fn update_tag(
     if pos.x + size.x > screen.x - 8.0 {
         pos.x = cursor.x - off.x - size.x;
     }
-    let tray = if *tool == ActiveTool::Inspect { 0.0 } else { t::TRAY_H };
-    if pos.y + size.y > screen.y - t::BAR_H - tray - 8.0 {
+    // Above the drawer standing on the bar (whatever drawer is up).
+    let floor = screen.y - t::BAR_H - extent.0 - 8.0;
+    if pos.y + size.y > floor {
         pos.y = cursor.y - off.y * 0.6 - size.y;
     }
     // Clear of the side panel.
@@ -1037,6 +1048,31 @@ fn update_tag(
         pos.x = (cursor.x - off.x - size.x).min(r.min.x - 8.0 - size.x);
     }
     pos = pos.max(Vec2::new(8.0, 64.0));
+    // Never over the city window or a drawer: flip to the other side of the
+    // cursor, and if it still would not fit, don't show it.
+    let tag = |p: Vec2| Rect::from_corners(p, p + size);
+    let blocked = |p: Vec2| {
+        window_area.logical.is_some_and(|w| !w.intersect(tag(p)).is_empty())
+            || (extent.0 > 0.0 && p.y + size.y > floor + 1.0)
+    };
+    if blocked(pos) {
+        let flips = [
+            Vec2::new(cursor.x - off.x - size.x, pos.y),
+            Vec2::new(pos.x, cursor.y - off.y * 0.6 - size.y),
+            Vec2::new(cursor.x - off.x - size.x, cursor.y - off.y * 0.6 - size.y),
+        ];
+        match flips
+            .into_iter()
+            .map(|p| p.max(Vec2::new(8.0, 64.0)))
+            .find(|p| !blocked(*p))
+        {
+            Some(p) => pos = p,
+            None => {
+                vis.set_if_neq(Visibility::Hidden);
+                return;
+            }
+        }
+    }
     let (left, top) = (px(pos.x.round()), px(pos.y.round()));
     if node.left != left || node.top != top {
         node.left = left;

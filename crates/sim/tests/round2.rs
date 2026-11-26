@@ -161,13 +161,17 @@ fn default_controls_by_road_class() {
     assert!(j.arms.iter().all(|a| a.major == (a.kind == RoadKind::Avenue)));
     // Two avenues: signals.
     assert_eq!(ctl(60, 128), Some(JunctionControl::Signal));
-    // Opposite approaches share a phase; avenues get a protected left
-    // phase when `SIGNAL_LEFT_PHASES` (called by a left turner stuck at
-    // the line); two avenues crossing are served alike and not
+    // Opposite approaches share a phase; avenue approaches with a turn
+    // pocket get a protected left phase (`POCKET_LEFT_PHASES`, called once
+    // the pocket fills); two avenues crossing are served alike and not
     // coordinated.
     let j = junction::junction(&w, junction::junction_at(&w, c(60, 128)).unwrap()).unwrap();
     let plan = j.plan.as_ref().unwrap();
-    let lefts = if balance::SIGNAL_LEFT_PHASES { 2 } else { 0 };
+    let lefts = if balance::SIGNAL_LEFT_PHASES || balance::POCKET_LEFT_PHASES {
+        2
+    } else {
+        0
+    };
     assert_eq!(plan.phases.len(), 2 + lefts, "{plan:?}");
     assert!(plan.phases.iter().filter(|p| p.left_only).count() == lefts);
     assert!(plan.phases.iter().all(|p| p.arms.len() == 2));
@@ -178,7 +182,12 @@ fn default_controls_by_road_class() {
         .filter(|p| !p.left_only)
         .map(|p| p.max_green_s)
         .collect();
-    assert_eq!(through, vec![balance::SIGNAL_MAIN_MAX_GREEN_S; 2]);
+    let main_max = if balance::POCKET_LEFT_PHASES {
+        balance::POCKET_MAIN_MAX_GREEN_S
+    } else {
+        balance::SIGNAL_MAIN_MAX_GREEN_S
+    };
+    assert_eq!(through, vec![main_max; 2]);
     // Nodes with fewer than three arms are no junction.
     assert!(junction::junction_at(&w, c(20, 128)).is_none());
 }
@@ -790,4 +799,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0x8788dce3cc7e5ea3;
+const PINNED_CHECKSUM: u64 = 0xa0337783313a4539;

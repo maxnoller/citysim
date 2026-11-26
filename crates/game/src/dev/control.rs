@@ -28,6 +28,9 @@
 //! * `find-home` — the cell under a home near the camera's focus whose
 //!   first resident is at home, leaves for work within 1.5 in-game hours
 //!   and last drove there in 20-90 s: `ok X Y`.
+//! * `find-car [MIN]` — window position (logical px) of a slow car (easy to
+//!   click) near the middle of the screen with at least MIN metres (300)
+//!   still to go.
 //! * `node PREFIX` — window position (logical px) of the first visible UI
 //!   node whose `Name` starts with PREFIX: `X Y` (people-panel links are
 //!   named "Person link", "Place link", "Vehicle link", "Follow").
@@ -528,6 +531,35 @@ fn run(
                 .ok_or("no lived-in home")?;
             let c = Cell::from_pos(best);
             ctl.reply(seq, true, &format!("ok {} {}", c.x, c.y));
+        }
+        "find-car" => {
+            // A car on screen (clear of the bar and the side panel) with at
+            // least MIN metres still to drive: its window position.
+            let min: f32 = num(args, 0).unwrap_or(300.0);
+            let w = &cx.sim.world;
+            let win = cx.window.single().map_err(|_| "no window".to_string())?;
+            let (cam, tf) = cx.cams.single().map_err(|_| "no camera".to_string())?;
+            let size = Vec2::new(win.width(), win.height());
+            let centre = size * 0.5;
+            let len = |s: citysim_sim::SegmentId| w.roads.segments.get(s).map_or(0.0, |g| g.length);
+            let hit = w
+                .vehicles
+                .iter()
+                .filter(|(_, v)| v.junction.is_none() && v.speed < 5.0)
+                .filter_map(|(_, v)| {
+                    let ahead =
+                        v.segment.map_or(0.0, |s| len(s) - v.progress) + v.route.iter().map(|&s| len(s)).sum::<f32>();
+                    if ahead < min {
+                        return None;
+                    }
+                    let pos = citysim_sim::drive::vehicle_pose(w, v).0;
+                    let p = cam.world_to_viewport(tf, crate::shared::sim_to_world(pos, 0.5)).ok()?;
+                    let inside = p.x > 120.0 && p.x < size.x - 460.0 && p.y > 110.0 && p.y < size.y - 170.0;
+                    inside.then_some(p)
+                })
+                .min_by(|a, b| a.distance(centre).total_cmp(&b.distance(centre)))
+                .ok_or("no car on screen with that far to go")?;
+            ctl.reply(seq, true, &format!("{:.0} {:.0}", hit.x, hit.y));
         }
         "node" => {
             let prefix = args.join(" ");

@@ -17,12 +17,14 @@ mod mesh_util;
 mod noise;
 mod overlay;
 mod palette;
+mod perf;
 mod props;
 mod record;
 mod road_geom;
 mod road_ghost;
 mod road_tool;
 mod roads;
+mod route;
 mod scene;
 mod signals;
 mod smoke;
@@ -68,7 +70,9 @@ impl Plugin for GfxPlugin {
             land::LandPlugin,
             road_tool::RoadToolPlugin,
             bench::BenchPlugin,
+            perf::PerfPlugin,
             record::RecordPlugin,
+            route::RoutePlugin,
         ));
     }
 }
