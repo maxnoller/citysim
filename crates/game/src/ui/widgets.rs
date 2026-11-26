@@ -85,6 +85,8 @@ pub enum UiAction {
     UiScale(usize),
     EdgeScroll(bool),
     LotMarkers(bool),
+    /// The performance panel's size.
+    Perf(crate::shared::PerfDetail),
     /// Fold / unfold a section of the side panel.
     Fold(super::people::FoldKey),
     /// Does nothing (a locked item).
@@ -640,6 +642,7 @@ pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
         UiAction::UiScale(i) => cx.state.ui_scale == i,
         UiAction::EdgeScroll(on) => cx.display.edge_scroll == on,
         UiAction::LotMarkers(on) => cx.display.lot_markers == on,
+        UiAction::Perf(d) => cx.state.perf == d,
         UiAction::Snap(r) => cx.opts.rule(r),
         UiAction::ZoneDepth(d) => matches!(cx.tool, ActiveTool::Zone(_)) && cx.opts.zone_depth == d,
         UiAction::JunctionBrush(b) => cx.opts.junction_brush == b,

@@ -9,6 +9,7 @@
 //! ribbons, system buttons), the cursor readout (`context.rs`), menus.
 //! Colours, sizes and fonts live in `theme.rs`; angular plates in
 //! `plate.rs`; reusable pieces in `widgets.rs`.
+//! The performance panel (F3) is `perf.rs`.
 //! `CITYSIM_UI_SHOTS=dir` captures every UI state to `dir`; `CITYSIM_UI_TOUR=1`
 //! plays a scripted walk through the interface for videos (`shots.rs`).
 
@@ -23,6 +24,7 @@ mod loading;
 mod menu;
 mod panel;
 mod people;
+mod perf;
 mod plan;
 mod plate;
 mod pointer;
@@ -80,6 +82,8 @@ pub struct UiState {
     pub compact: bool,
     /// The keyboard works the open drawer (F6; arrows, Enter, Esc).
     pub tray_focus: bool,
+    /// The performance panel's size (F3; remembered in the settings).
+    pub perf: crate::shared::PerfDetail,
 }
 
 impl UiState {
@@ -102,6 +106,7 @@ impl Default for UiState {
             following: false,
             compact: false,
             tray_focus: false,
+            perf: crate::shared::PerfDetail::Off,
         }
     }
 }
@@ -129,7 +134,12 @@ impl Plugin for UiPlugin {
                 menu::MenuPlugin,
                 tooltip::TooltipPlugin,
             ))
-            .add_plugins((fiscal::FiscalPlugin, settings::SettingsPlugin, loading::LoadingPlugin))
+            .add_plugins((
+                fiscal::FiscalPlugin,
+                settings::SettingsPlugin,
+                loading::LoadingPlugin,
+                perf::PerfPlugin,
+            ))
             .add_systems(PostStartup, fallback_ui_camera)
             .add_systems(PreUpdate, scale_ui);
         if let Some(dir) = std::env::var_os("CITYSIM_UI_SHOTS").filter(|d| !d.is_empty()) {

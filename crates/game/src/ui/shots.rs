@@ -24,8 +24,8 @@ use super::tools::{Press, ToolState};
 use super::widgets::{UiAction, UiButton};
 use super::{InfoTray, UiState};
 use crate::shared::{
-    ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, RoadChoice, RoadMode, SimClock,
-    SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
+    ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, PerfDetail, RoadChoice, RoadMode,
+    SimClock, SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
 };
 
 /// The scenario's world while a step shows a modified copy (broke, day 1);
@@ -181,6 +181,7 @@ fn reset(world: &mut World) {
     ui.settings_open = false;
     ui.keys_open = false;
     ui.following = false;
+    ui.perf = PerfDetail::Off;
     // Directly (a ClosePeople message would also drop a selection the
     // step makes this frame).
     world.resource_mut::<super::panel::PeopleView>().stack.clear();
@@ -394,6 +395,49 @@ fn steps() -> Vec<Step> {
             setup: |w| {
                 reset(w);
                 w.resource_mut::<UiState>().tray = Some(InfoTray::Stats);
+            },
+        },
+        Step {
+            name: "perf-small",
+            wait: 4.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Small;
+            },
+        },
+        Step {
+            name: "perf-full",
+            wait: 4.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+            },
+        },
+        Step {
+            name: "perf-full-busy",
+            wait: 4.0,
+            setup: |w| {
+                // Next to the selection panel and the budget drawer.
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
+                if let Some(id) = building_where(w, |b| b.kind == Zone::Residential && b.occupied >= 3) {
+                    w.write_message(UiAction::Place(id));
+                }
+            },
+        },
+        Step {
+            name: "perf-spike",
+            wait: 3.0,
+            setup: |w| {
+                // A real stall: saving and loading the city (only into a
+                // scratch slot) rebuilds every mesh.
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                if std::env::var_os("CITYSIM_SAVE_DIR").is_some_and(|d| !d.is_empty()) {
+                    w.write_message(UiAction::Save);
+                    w.write_message(UiAction::Load);
+                }
             },
         },
         Step {
