@@ -257,6 +257,8 @@ Junctions and driving:
   jammed all-way stop let in fewer cars than the threshold however long its queues).
 - **Departures.** A car does not pull out into a standing queue (`SPAWN_QUEUE_M`, 25 m ahead in its lane); new cars
   never start with their nose over a stop line.
+- **All-way stops.** A car let go pulls up to the line and in without stopping again (it waits a little back from
+  the line now); a car let go last tick keeps its turn over everyone at any junction.
 
 People:
 - Off-screen commutes use the delay factor (`day::road_s`); other off-screen trips the free-flow estimate.
@@ -271,3 +273,18 @@ Tools: `examples/simint.rs` (build a city to a population and save it; replay a 
 time goes, the junctions where cars stand and give up; `node`, `cross`, `flow` junction benches), `topdown save` /
 `savewatch` (views of a saved city), `headless --seeds` writes the day's give-ups, trips, happiness, commute, step time,
 delay factor and attendance; `plot_sweep.py` charts seed sweeps.
+
+Measured (release, this machine, 10 seeds per scripted city; charts `sim-05`..`sim-08` in the shots folder):
+- Car-body overlaps over two rush hours: 10,000-resident avenue city 168 pair-ticks before, **0** after; organic
+  town 16 before, 8 after (at most one pair at a time, all at degree-2 bend nodes with a sharp kink).
+- Step time, 20,000 citizens with the car budget full, one day: mean 0.97 ms / median 0.96 / p99 1.30 / max 18 ms
+  before, **0.84–0.86 ms / 0.83–0.85 / 1.19–1.24 / 2.2–2.3 ms** after; 16 steps (a frame at 16x): mean 15.5 ms
+  before, **13.4–13.7 ms** after, p99 16.7–16.9 ms, max 17–25 ms.
+- Cars given up at day 15 (share of car trips): avenue city 7.8 % before, 6.4 % after; streets city 9.3 % / 8.3 %;
+  a good small town (`two_grid`) day 2 ≈ 0.6 %, both. Residents at day 15: avenue city 11,200 → 12,100, streets
+  city 10,200 → 11,300; the single-artery town still stalls (3,400 → 3,900); the organic town reaches 4,900 by day
+  7; the overbuilt network goes broke.
+- Rescue (`rescue`): upgrading the streets city's main streets on day 8 halves its give-ups the next day (5.3 % →
+  2.2 %) and keeps them below the streets city's (5.2 % vs 8.3 % at day 15); residents 12,200 vs 11,300 and taxes
+  $98k vs $91k a day at day 15. Its commute improves only slightly, and the streets city stays far richer ($80k vs
+  $19k at day 15): the avenue hierarchy is not yet clearly better on commutes (see the r4-sim report).
