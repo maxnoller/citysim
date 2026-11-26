@@ -197,7 +197,7 @@ pub const MIN_GAP_M: f32 = 5.5;
 /// Time headway drivers keep to the car ahead: allowed speed is
 /// `(gap - MIN_GAP_M) / FOLLOW_HEADWAY_S`. 1 s gives about 0.65 cars/s per
 /// lane at street speed.
-pub const FOLLOW_HEADWAY_S: f32 = 0.5;
+pub const FOLLOW_HEADWAY_S: f32 = 1.2;
 /// Acceleration, m/s².
 pub const ACCELERATION: f32 = 3.5;
 /// Comfortable braking used towards stop lines and junctions, m/s².
@@ -238,6 +238,9 @@ pub const DECIDE_DISTANCE_M: f32 = 45.0;
 /// moving off faster than this (m/s) without a full car spacing yet, when
 /// that lane is long (the queue cannot stop right behind the box).
 pub const EXIT_MOVING_SPEED: f32 = 3.0;
+/// How far ahead (seconds) a car about to enter a junction counts the room
+/// a moving out-lane frees for it.
+pub const EXIT_LOOKAHEAD_S: f32 = 2.0;
 /// No lane changes and no cars pulling out of driveways this close behind
 /// a junction box, metres (cars leaving the box need the room).
 pub const NO_LANE_CHANGE_AFTER_BOX_M: f32 = 10.0;
@@ -246,6 +249,18 @@ pub const NO_LANE_CHANGE_AFTER_BOX_M: f32 = 10.0;
 /// it (m).
 pub const STOP_SIGN_SPEED: f32 = 1.0;
 pub const STOP_SIGN_DISTANCE_M: f32 = 1.5;
+/// ... after standing there this long, seconds (a real stop).
+pub const STOP_DWELL_S: f32 = 1.0;
+/// All-way stops: once the box is empty the next car sets off this much
+/// later, seconds (looking both ways).
+pub const ALL_WAY_REACTION_S: f32 = 1.2;
+/// A car slower than this (m/s) that is in the wrong lane for its next turn
+/// asks the car behind in the lane it needs to leave it a gap
+/// (`MERGE_ROOM_M` more than a standing queue's spacing), unless it is
+/// within `MERGE_MIN_LINE_M` of the stop line (it turns from where it is).
+pub const MERGE_ASK_SPEED: f32 = 3.0;
+pub const MERGE_ROOM_M: f32 = 1.2;
+pub const MERGE_MIN_LINE_M: f32 = 8.0;
 /// Critical gaps, seconds: a permissive left turn (and same-class cars)
 /// leaves this much time to a conflicting car with precedence, a car on a
 /// give-way approach this much to the major road.
@@ -258,7 +273,7 @@ pub const BOX_DEADLOCK_S: f32 = 20.0;
 pub const LANE_CHANGE_S: f32 = 1.2;
 /// Cars move into the lane their next turn needs within this distance of
 /// the stop line, metres.
-pub const LANE_PREPARE_M: f32 = 90.0;
+pub const LANE_PREPARE_M: f32 = 150.0;
 /// Extra stop-line distance beyond the carriageways of the crossing roads,
 /// metres: room for a pedestrian crossing and the kerb radius (junctions of
 /// three or more roads).

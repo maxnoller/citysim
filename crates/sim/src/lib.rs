@@ -29,6 +29,7 @@ pub mod balance;
 pub(crate) mod blocks;
 pub(crate) mod build;
 pub mod buildings;
+pub mod capacity;
 pub mod citizens;
 pub mod command;
 pub mod curve;
