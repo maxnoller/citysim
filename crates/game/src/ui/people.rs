@@ -401,8 +401,12 @@ pub fn person_position(world: &World, id: CitizenId) -> Option<[f32; 2]> {
     inspect::citizen_pos(world, id)
 }
 
-fn tick_clock(t: u64) -> String {
-    clock(t % balance::TICKS_PER_DAY as u64)
+/// Clock time of an absolute tick (the game's tick 0 is not midnight: a
+/// new game starts in the morning).
+pub fn tick_clock(world: &World, t: u64) -> String {
+    let day = balance::TICKS_PER_DAY as i64;
+    let tod = (world.time.tick_of_day as i64 + t as i64 - world.time.tick as i64).rem_euclid(day);
+    clock(tod as u64)
 }
 
 /// What a person is doing, in words, and what comes next.
@@ -426,13 +430,16 @@ fn doing(world: &World, id: CitizenId) -> (String, String) {
             )
         }
         None => match p.until_tick {
-            Some(u) if u > now => format!("{} until {}", activity_word(p.activity), tick_clock(u)),
+            Some(u) if u > now => format!("{} until {}", activity_word(p.activity), tick_clock(world, u)),
             _ => activity_word(p.activity).to_string(),
         },
     };
     let next = match p.next {
         Some(n) => {
-            let when = n.at_tick.map(|t| format!(" at {}", tick_clock(t))).unwrap_or_default();
+            let when = n
+                .at_tick
+                .map(|t| format!(" at {}", tick_clock(world, t)))
+                .unwrap_or_default();
             let place = n
                 .place
                 .filter(|_| n.activity != Activity::Home)
@@ -442,7 +449,7 @@ fn doing(world: &World, id: CitizenId) -> (String, String) {
                 (_, _, true) => match n.at_tick {
                     Some(t) => format!(
                         "Expected about {}, then {}",
-                        tick_clock(t),
+                        tick_clock(world, t),
                         activity_word(n.activity).to_lowercase()
                     ),
                     None => format!("Then {}", activity_word(n.activity).to_lowercase()),
@@ -610,7 +617,7 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
     // Journal, newest first.
     let mut sec = Section::new("Journal");
     for e in c.journal.iter().rev().take(6) {
-        sec.line(format!("Day {}", e.day + 1), journal_words(world, e.event), Tone::Muted);
+        sec.line(format!("Day {}", e.day), journal_words(world, e.event), Tone::Muted);
     }
     if c.journal.is_empty() {
         sec.line("", "Nothing yet", Tone::Muted);
@@ -955,6 +962,22 @@ mod tests {
         let a = portrait(7, LifeStage::Adult);
         assert_eq!(a, portrait(7, LifeStage::Adult));
         assert_eq!(portrait(7, LifeStage::Senior).hair, [0.78, 0.78, 0.80]);
+    }
+
+    #[test]
+    fn absolute_ticks_read_as_the_time_of_day() {
+        let mut w = World::new(1);
+        for _ in 0..10 {
+            w.step();
+        }
+        // Whatever tick 0 was, "now" reads as the clock the HUD shows.
+        assert_eq!(tick_clock(&w, w.time.tick), clock(w.time.tick_of_day as u64));
+        let hour = balance::TICKS_PER_HOUR as u64;
+        let later = tick_clock(&w, w.time.tick + 2 * hour);
+        assert_eq!(
+            later,
+            clock((w.time.tick_of_day as u64 + 2 * hour) % balance::TICKS_PER_DAY as u64)
+        );
     }
 
     #[test]

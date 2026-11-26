@@ -25,8 +25,9 @@
 //! * `ready` — ok once the scene draws (shaders built), else err.
 //! * `fps`, `counts` (entities, meshes, materials, vehicles, step time).
 //! * `window W H` — resize the window; `window` alone: its size `W H`.
-//! * `find-home` — the cell under a lived-in home near the camera's focus
-//!   whose residents include someone with a job: `ok X Y`.
+//! * `find-home` — the cell under a home near the camera's focus whose
+//!   first resident is at home, leaves for work within 1.5 in-game hours
+//!   and last drove there in 20-90 s: `ok X Y`.
 //! * `node PREFIX` — window position (logical px) of the first visible UI
 //!   node whose `Name` starts with PREFIX: `X Y` (people-panel links are
 //!   named "Person link", "Place link", "Vehicle link", "Follow").
@@ -488,11 +489,22 @@ fn run(
                     ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
                 })
                 .map_or([1024.0, 1024.0], |p| [p.x, p.z]);
+            // The first resident (the first one its people panel lists) is
+            // at home and leaves for work within two in-game hours.
+            let now = w.time.tick;
+            let hours = 3 * citysim_sim::balance::TICKS_PER_HOUR as u64 / 2;
+            // ... and whose last commute was short (an interesting drive to
+            // follow, not a jam at the door).
             let worker_at_home = |b: citysim_sim::BuildingId| {
-                citysim_sim::inspect::residents(w, b).any(|c| {
-                    w.citizens
-                        .get(c)
-                        .is_some_and(|c| c.job.is_some() && c.location.building() == Some(b))
+                citysim_sim::inspect::residents(w, b).next().is_some_and(|c| {
+                    w.citizens.get(c).is_some_and(|ct| {
+                        ct.job.is_some()
+                            && ct.location.building() == Some(b)
+                            && (20.0..90.0).contains(&ct.last_commute_s)
+                    }) && citysim_sim::inspect::plan(w, c).and_then(|p| p.next).is_some_and(|n| {
+                        n.purpose == Some(citysim_sim::TripPurpose::ToWork)
+                            && n.at_tick.is_some_and(|t| t >= now && t < now + hours)
+                    })
                 })
             };
             let best = w
