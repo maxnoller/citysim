@@ -495,11 +495,12 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         let mut order: Vec<usize> = (k..e).collect();
         order.sort_by(|&x, &y| {
             let (fx, fy) = (&fronts[x], &fronts[y]);
-            class(j, fy)
-                .cmp(&class(j, fx))
-                // Committed: a car let go last tick keeps its turn, so two
-                // cars never swap places tick after tick and both crawl.
-                .then(fy.go_before.cmp(&fx.go_before))
+            // Committed first: a car let go last tick is pulling up to its
+            // line and keeps its turn (it stops behind the line, so it needs
+            // a moment to get there; taking the turn back would stall it).
+            fy.go_before
+                .cmp(&fx.go_before)
+                .then(class(j, fy).cmp(&class(j, fx)))
                 .then(in_batch(fy).cmp(&in_batch(fx)))
                 .then(fx.eta.total_cmp(&fy.eta))
                 .then(fy.wait.cmp(&fx.wait))
@@ -534,9 +535,11 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         _ => false,
                     },
                     // All-way stop (no major road): every car halts at
-                    // the line before it goes.
+                    // the line before it goes; once let go it pulls up to
+                    // the line and in (it stands a little back from it).
                     JunctionControl::Priority => {
                         j.arms.iter().any(|a| a.major)
+                            || f.go_before
                             || (f.speed < balance::STOP_SIGN_SPEED && f.d_line < f.back + balance::STOP_SIGN_DISTANCE_M)
                     }
                 };

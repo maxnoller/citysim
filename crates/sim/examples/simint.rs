@@ -25,6 +25,11 @@ fn player(which: &str, w: &mut World) -> Option<GridPlayer> {
         "hierarchy" => Some(GridPlayer::hierarchy()),
         "streets" | "grid" => Some(GridPlayer::new(&Zone::ALL)),
         "single_artery" => Some(GridPlayer::single_artery()),
+        "two_grid" | "artery" => {
+            let grid = which == "two_grid";
+            scenarios::prebuilt(w, |w| scenarios::two_districts(w, grid));
+            None
+        }
         "organic" => {
             scenarios::prebuilt(w, |w| {
                 scenarios::organic(w);
@@ -47,7 +52,7 @@ fn build(args: &[String]) {
             p.act(&mut w);
         }
         w.step();
-        if w.stats.population >= pop && w.time.tick_of_day == 0 {
+        if w.stats.population >= pop && (w.time.tick_of_day == 0 || std::env::var("SIMINT_NOW").is_ok()) {
             break;
         }
         if w.time.day > 60 {
