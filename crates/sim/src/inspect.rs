@@ -820,9 +820,16 @@ mod route_tests {
                 .map(|(id, b)| (id, b.center()[0] + b.center()[1]))
                 .collect();
             v.sort_by(|a, b| a.1.total_cmp(&b.1));
-            if far { v.last().map(|x| x.0) } else { v.first().map(|x| x.0) }
+            if far {
+                v.last().map(|x| x.0)
+            } else {
+                v.first().map(|x| x.0)
+            }
         };
-        let (home, shop) = (pick(Zone::Residential, false).unwrap(), pick(Zone::Commercial, true).unwrap());
+        let (home, shop) = (
+            pick(Zone::Residential, false).unwrap(),
+            pick(Zone::Commercial, true).unwrap(),
+        );
         let r = planned_route(&w, home, shop).expect("a route");
         assert!(!r.segments.is_empty());
         assert_eq!(*r.segments.last().unwrap(), r.end.segment);

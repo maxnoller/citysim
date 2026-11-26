@@ -402,7 +402,9 @@ fn side_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                     }
                 },
             );
-            l.commands().entity(id).insert(Name::new(format!("Page {}", page.title())));
+            l.commands()
+                .entity(id)
+                .insert(Name::new(format!("Page {}", page.title())));
         }
         l.spawn(layout(Node {
             flex_grow: 1.0,
@@ -566,19 +568,15 @@ fn stats_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                         "Cars on the road at the peak",
                         DAYS,
                         132.0,
-                        &[("Flowing", t::POSITIVE), ("Busy day", t::WARNING), ("Jammed day", t::NEGATIVE)],
+                        &[
+                            ("Flowing", t::POSITIVE),
+                            ("Busy day", t::WARNING),
+                            ("Jammed day", t::NEGATIVE),
+                        ],
                     )
                 });
                 cell(gr, 380.0, |c| {
-                    chart::spawn_chart(
-                        c,
-                        fonts,
-                        C_BUILDINGS,
-                        "Buildings",
-                        DAYS + 1,
-                        132.0,
-                        &[],
-                    )
+                    chart::spawn_chart(c, fonts, C_BUILDINGS, "Buildings", DAYS + 1, 132.0, &[])
                 });
             });
         });
@@ -599,7 +597,12 @@ fn people_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                         "Residents by age",
                         DAYS,
                         132.0,
-                        &[("Children", s[1]), ("Teenagers", s[2]), ("Adults", s[0]), ("Seniors", s[3])],
+                        &[
+                            ("Children", s[1]),
+                            ("Teenagers", s[2]),
+                            ("Adults", s[0]),
+                            ("Seniors", s[3]),
+                        ],
                     )
                 });
                 cell(gr, 380.0, |c| {
@@ -717,7 +720,11 @@ fn place_window(
     if want.is_some() && want != w.shown && (w.t <= 0.001 || w.shown.is_some()) {
         w.shown = want;
         for (p, mut n) in &mut pages {
-            let d = if Some(p.0) == want { Display::Flex } else { Display::None };
+            let d = if Some(p.0) == want {
+                Display::Flex
+            } else {
+                Display::None
+            };
             if n.display != d {
                 n.display = d;
             }
@@ -735,7 +742,11 @@ fn place_window(
     if w.t == 0.0 {
         w.shown = None;
     }
-    vis.set_if_neq(if w.t > 0.0 { Visibility::Inherited } else { Visibility::Hidden });
+    vis.set_if_neq(if w.t > 0.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    });
     let e = 1.0 - (1.0 - w.t).powi(2);
     let y = Val2::px(0.0, (1.0 - e) * 18.0);
     if tf.translation != y {
@@ -794,7 +805,13 @@ fn update_header(
     };
     let w = &sim.world;
     let step = ((w.time.hour() * 6.0) as u32).min(143);
-    let key = (Some(page), w.time.day, step, w.stats.population, w.people.stats.households);
+    let key = (
+        Some(page),
+        w.time.day,
+        step,
+        w.stats.population,
+        w.people.stats.households,
+    );
     if *last == Some(key) {
         return;
     }
@@ -972,7 +989,11 @@ fn update_tiles(
             CityPage::Budget => None,
         };
         let Some((c, v, col)) = row else { continue };
-        let (v, col) = if tile.2 { (c.to_uppercase(), t::TEXT_MUTED) } else { (v.clone(), *col) };
+        let (v, col) = if tile.2 {
+            (c.to_uppercase(), t::TEXT_MUTED)
+        } else {
+            (v.clone(), *col)
+        };
         if text.0 != v {
             text.0 = v;
         }
@@ -990,7 +1011,11 @@ fn axis(first: Option<u32>, n: usize, live: bool) -> (String, String) {
     match first {
         Some(d) if n > 0 => (
             day_label(d),
-            if live { "Now".into() } else { day_label(d + n as u32 - 1) },
+            if live {
+                "Now".into()
+            } else {
+                day_label(d + n as u32 - 1)
+            },
         ),
         _ => (String::new(), String::new()),
     }
@@ -1103,7 +1128,12 @@ pub fn chart_data(id: u32, w: &World) -> ChartData {
     match id {
         C_POPULATION => daily(
             w,
-            |d| (vec![(d.population as f32, s[0])], format!("{} residents", format::group(d.population as u64))),
+            |d| {
+                (
+                    vec![(d.population as f32, s[0])],
+                    format!("{} residents", format::group(d.population as u64)),
+                )
+            },
             Some((
                 vec![(st.population as f32, s[0])],
                 format!("{} residents", format::group(st.population as u64)),
@@ -1116,7 +1146,11 @@ pub fn chart_data(id: u32, w: &World) -> ChartData {
                 let vacant = d.jobs.saturating_sub(d.employed);
                 (
                     vec![(d.employed as f32, s[0]), (vacant as f32, s[4])],
-                    format!("{} jobs · {} vacant", format::group(d.jobs as u64), format::group(vacant as u64)),
+                    format!(
+                        "{} jobs · {} vacant",
+                        format::group(d.jobs as u64),
+                        format::group(vacant as u64)
+                    ),
                 )
             },
             Some((
@@ -1175,7 +1209,12 @@ pub fn chart_data(id: u32, w: &World) -> ChartData {
         ),
         C_BUILDINGS => daily(
             w,
-            |d| (vec![(d.buildings as f32, s[1])], format!("{} buildings", format::group(d.buildings as u64))),
+            |d| {
+                (
+                    vec![(d.buildings as f32, s[1])],
+                    format!("{} buildings", format::group(d.buildings as u64)),
+                )
+            },
             Some((
                 vec![(st.buildings as f32, s[1])],
                 format!("{} buildings", format::group(st.buildings as u64)),
@@ -1311,7 +1350,11 @@ pub fn chart_data(id: u32, w: &World) -> ChartData {
             ChartData {
                 first,
                 last,
-                top: if max > 0.0 { format::money(max.round() as i64) } else { String::new() },
+                top: if max > 0.0 {
+                    format::money(max.round() as i64)
+                } else {
+                    String::new()
+                },
                 empty: NO_DAYS.into(),
                 live_last: false,
                 pick: None,
@@ -1366,12 +1409,10 @@ fn update_charts(
     *age += time.delta_secs();
     let ids = charts_of(page);
     let hovers: Vec<Option<usize>> = ids.iter().map(|&id| nodes.hovered(id)).collect();
-    let hover_changed = ids.iter().zip(&hovers).any(|(id, h)| {
-        shown
-            .iter()
-            .find(|s| s.0 == *id)
-            .is_none_or(|s| s.2 != *h)
-    });
+    let hover_changed = ids
+        .iter()
+        .zip(&hovers)
+        .any(|(id, h)| shown.iter().find(|s| s.0 == *id).is_none_or(|s| s.2 != *h));
     if *age < 0.5 && !hover_changed && !ui.is_changed() {
         return;
     }

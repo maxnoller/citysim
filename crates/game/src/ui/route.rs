@@ -19,9 +19,9 @@ use citysim_sim::citizens::Activity;
 use citysim_sim::inspect::{self, PlannedRoute};
 use citysim_sim::{Access, BuildingId, CitizenId, Place, SegmentId, VehicleId, World, drive, junction};
 
+use super::UiState;
 use super::panel::PeopleView;
 use super::people::Target;
-use super::UiState;
 use super::widgets::UiAction;
 use crate::shared::{CameraGoTo, GameSet, RouteEnd, RouteState, RouteView, SimWorld};
 
@@ -68,7 +68,16 @@ fn smoothstep(x: f32) -> f32 {
 /// over for its turn). Curved roads are sampled at whole multiples of
 /// `STEP_M` from the segment's start, so the samples ahead of a moving car
 /// stay put.
-fn trace_segment(world: &World, s: SegmentId, fwd: bool, from: f32, to: f32, off0: f32, off1: f32, out: &mut Vec<[f32; 2]>) {
+fn trace_segment(
+    world: &World,
+    s: SegmentId,
+    fwd: bool,
+    from: f32,
+    to: f32,
+    off0: f32,
+    off1: f32,
+    out: &mut Vec<[f32; 2]>,
+) {
     let Some(seg) = world.roads.segments.get(s) else {
         return;
     };
@@ -222,7 +231,17 @@ pub fn vehicle_path(world: &World, id: VehicleId) -> Option<Vec<[f32; 2]>> {
             };
             let progress = junction::setback(world, jm.node, jm.to);
             let off = lane_off(world, jm.to, jm.to_lane as f32);
-            trace_route(world, jm.to, jm.to_forward, progress, off, jm.to_lane, route, end, &mut out);
+            trace_route(
+                world,
+                jm.to,
+                jm.to_forward,
+                progress,
+                off,
+                jm.to_lane,
+                route,
+                end,
+                &mut out,
+            );
         }
         None => {
             let s = v.segment?;
@@ -388,7 +407,9 @@ fn publish_route(
     mut route: ResMut<RouteView>,
     mut last: Local<Published>,
 ) {
-    let target = view.current().filter(|t| matches!(t, Target::Person(_) | Target::Vehicle(_)));
+    let target = view
+        .current()
+        .filter(|t| matches!(t, Target::Person(_) | Target::Vehicle(_)));
     let Some(target) = target else {
         if route.state != RouteState::None || !route.points.is_empty() {
             *route = RouteView::default();
@@ -398,7 +419,11 @@ fn publish_route(
     };
     last.age += time.delta_secs();
     let fresh = last.target != Some(target) || sim.is_changed() && last.age > 10.0;
-    let every = if route.state == RouteState::Driving { CAR_EVERY_S } else { PLAN_EVERY_S };
+    let every = if route.state == RouteState::Driving {
+        CAR_EVERY_S
+    } else {
+        PLAN_EVERY_S
+    };
     if !fresh && last.age < every {
         return;
     }

@@ -409,10 +409,7 @@ pub fn bulldoze(plan: &ToolPlan, world: &World, mode: BulldozeMode) -> Option<Re
     let mut lines = Vec::new();
     let removed = plan.eval.removed();
     let road: f32 = removed.iter().map(|(c, _)| c.length()).sum();
-    let upkeep: f64 = removed
-        .iter()
-        .map(|(c, k)| c.length() as f64 * k.upkeep_per_m())
-        .sum();
+    let upkeep: f64 = removed.iter().map(|(c, k)| c.length() as f64 * k.upkeep_per_m()).sum();
     let houses = plan.eval.buildings();
     if let Some(h) = hint {
         lines.push(Line::text(*h, Tone::Muted));

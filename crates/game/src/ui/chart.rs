@@ -314,7 +314,12 @@ pub struct ChartNodes<'w, 's> {
     texts: Query<
         'w,
         's,
-        (&'static TextOf, &'static mut Text, &'static mut TextColor, &'static mut Node),
+        (
+            &'static TextOf,
+            &'static mut Text,
+            &'static mut TextColor,
+            &'static mut Node,
+        ),
         (Without<Part>, Without<ZeroLine>),
     >,
     charts: Query<'w, 's, &'static Chart>,
@@ -323,7 +328,10 @@ pub struct ChartNodes<'w, 's> {
 impl ChartNodes<'_, '_> {
     /// The hovered column of chart `id`.
     pub fn hovered(&self, id: u32) -> Option<usize> {
-        self.slots.iter().find(|(s, h)| s.chart == id && h.get()).map(|(s, _)| s.i)
+        self.slots
+            .iter()
+            .find(|(s, h)| s.chart == id && h.get())
+            .map(|(s, _)| s.i)
     }
 
     /// Show `data` in chart `id`; `hover` is the hovered slot.
@@ -371,7 +379,10 @@ impl ChartNodes<'_, '_> {
                 }
                 None => (zero, 0.0, Color::NONE),
             };
-            let (top, h) = (percent((top * 100.0).clamp(0.0, 100.0)), percent((h * 100.0).clamp(0.0, 100.0)));
+            let (top, h) = (
+                percent((top * 100.0).clamp(0.0, 100.0)),
+                percent((h * 100.0).clamp(0.0, 100.0)),
+            );
             if node.top != top || node.height != h {
                 node.top = top;
                 node.height = h;

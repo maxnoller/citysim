@@ -495,13 +495,26 @@ fn follow(
     mut view: ResMut<PeopleView>,
     mut cam: ResMut<CameraFollow>,
     mut highlight: ResMut<WorldHighlight>,
+    mut owner_of: Local<Option<(citysim_sim::VehicleId, citysim_sim::CitizenId)>>,
 ) {
     let w = &sim.world;
+    // Who the car shown belongs to (its trip goes when it arrives).
+    if let Some(Target::Vehicle(v)) = view.current()
+        && let Some(o) = w.traffic.trips.get(v).and_then(|t| t.owner)
+    {
+        *owner_of = Some((v, o));
+    }
     // A car that arrived: carry on with its owner.
     if let Some(Target::Vehicle(v)) = view.current()
         && !w.vehicles.contains_key(v)
     {
-        let owner = w.traffic.trips.get(v).and_then(|t| t.owner);
+        let owner = w
+            .traffic
+            .trips
+            .get(v)
+            .and_then(|t| t.owner)
+            .or(owner_of.filter(|(car, _)| *car == v).map(|(_, o)| o))
+            .filter(|o| w.citizens.contains_key(*o));
         view.stack.pop();
         if let Some(o) = owner {
             view.open(Target::Person(o));

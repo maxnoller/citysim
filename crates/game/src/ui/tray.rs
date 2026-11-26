@@ -32,8 +32,8 @@ use super::widgets::{
 };
 use super::{InfoTray, UiState};
 use crate::shared::{
-    ActiveTool, CONGESTION_BUSY, CONGESTION_JAM, GameSet, OverlayMode, RoadChoice, RoadMode, SimWorld,
-    ToolModes, WorldHighlight, WorldTarget, ZoneMode,
+    ActiveTool, CONGESTION_BUSY, CONGESTION_JAM, GameSet, OverlayMode, RoadChoice, RoadMode, SimWorld, ToolModes,
+    WorldHighlight, WorldTarget, ZoneMode,
 };
 
 pub struct TrayPlugin;

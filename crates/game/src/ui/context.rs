@@ -1061,7 +1061,11 @@ fn update_tag(
             Vec2::new(pos.x, cursor.y - off.y * 0.6 - size.y),
             Vec2::new(cursor.x - off.x - size.x, cursor.y - off.y * 0.6 - size.y),
         ];
-        match flips.into_iter().map(|p| p.max(Vec2::new(8.0, 64.0))).find(|p| !blocked(*p)) {
+        match flips
+            .into_iter()
+            .map(|p| p.max(Vec2::new(8.0, 64.0)))
+            .find(|p| !blocked(*p))
+        {
             Some(p) => pos = p,
             None => {
                 vis.set_if_neq(Visibility::Hidden);

@@ -47,8 +47,13 @@ const FADE_M: f32 = 9.0;
 const DASH_ON: f32 = 5.0;
 const DASH_OFF: f32 = 3.5;
 
+/// The route's two meshes: the soft dark edge (blended) and the solid
+/// core, chevrons and rings (opaque, so they always draw over the traffic
+/// map's translucent strips and other blended overlays).
 #[derive(Component)]
-struct RouteLine;
+struct RouteLine {
+    solid: bool,
+}
 
 /// The pin above the destination (moved every frame).
 #[derive(Component)]
@@ -76,10 +81,27 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         unlit: true,
         ..default()
     });
+    let solid = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        alpha_mode: AlphaMode::Opaque,
+        unlit: true,
+        depth_bias: 60.0,
+        cull_mode: None,
+        double_sided: true,
+        ..default()
+    });
+    commands.spawn((
+        Name::new("Route edge"),
+        RouteLine { solid: false },
+        MeshMaterial3d(overlay),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
     commands.spawn((
         Name::new("Route"),
-        RouteLine,
-        MeshMaterial3d(overlay.clone()),
+        RouteLine { solid: true },
+        MeshMaterial3d(solid.clone()),
         Transform::default(),
         Visibility::Hidden,
         NotShadowCaster,
@@ -88,7 +110,7 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         Name::new("Route pin"),
         RoutePin,
         Mesh3d(meshes.add(pin_mesh().build())),
-        MeshMaterial3d(overlay),
+        MeshMaterial3d(solid),
         Transform::default(),
         Visibility::Hidden,
         NotShadowCaster,
@@ -187,7 +209,12 @@ fn ribbon(
                 v3(next.0 - next.1, y),
                 v3(next.0 + next.1, y),
             ],
-            [with_alpha(col, a0), with_alpha(col, a0), with_alpha(col, a1), with_alpha(col, a1)],
+            [
+                with_alpha(col, a0),
+                with_alpha(col, a0),
+                with_alpha(col, a1),
+                with_alpha(col, a1),
+            ],
         );
         prev = next;
     }
@@ -201,7 +228,10 @@ fn chevron(m: &mut MeshBuilder, p: Vec2, dir: Vec2, y: f32, col: [f32; 4], k: f3
         let tip = p + dir * len * 0.5;
         let tail = p - dir * len * 0.5 + n * half * s;
         let off = Vec2::new(-(tip - tail).y, (tip - tail).x).normalize_or_zero() * w * 0.5;
-        m.quad_up([v3(tail + off, y), v3(tip + off, y), v3(tip - off, y), v3(tail - off, y)], col);
+        m.quad_up(
+            [v3(tail + off, y), v3(tip + off, y), v3(tip - off, y), v3(tail - off, y)],
+            col,
+        );
     }
 }
 
@@ -241,7 +271,8 @@ fn ring(m: &mut MeshBuilder, c: Vec2, r: f32, w: f32, y: f32, col: [f32; 4]) {
 }
 
 /// The route's mesh: ribbon, chevrons, the two ends on the ground.
-fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> MeshBuilder {
+fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> (MeshBuilder, MeshBuilder) {
+    let mut soft = MeshBuilder::new();
     let mut m = MeshBuilder::new();
     let y = heights::HIGHLIGHT + 0.06;
     let planned = route.state != RouteState::Driving;
@@ -256,13 +287,21 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> MeshBuil
         }
         let total = acc;
         let edge = lin(EDGE.with_alpha(if planned { 0.45 } else { 0.62 }));
+        // Planned: paler (opaque, so mixed towards the edge colour).
         let core = lin(if planned {
-            ACCENT.with_alpha(0.75)
+            super::palette::mix(ACCENT, Color::WHITE, 0.25)
         } else {
-            ACCENT.with_alpha(0.97)
+            ACCENT
         });
-        // A car's line fades in from under the car; a planned one is whole.
-        let fade = move |d: f32| if planned { 1.0 } else { (d / (FADE_M * k)).clamp(0.0, 1.0).powf(0.8) };
+        // A car's dark edge fades in from under the car; a planned one is whole.
+        let fade = move |d: f32| {
+            if planned {
+                1.0
+            } else {
+                (d / (FADE_M * k)).clamp(0.0, 1.0).powf(0.8)
+            }
+        };
+        let whole = |_: f32| 1.0;
         let spans: Vec<(f32, f32)> = if planned {
             let mut v = Vec::new();
             let mut d = 0.0;
@@ -275,13 +314,24 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> MeshBuil
             vec![(0.0, total)]
         };
         for &s in &spans {
-            ribbon(&mut m, &pts, &cum, s, EDGE_W * k, y, edge, &fade);
+            ribbon(&mut soft, &pts, &cum, s, EDGE_W * k, y, edge, &fade);
         }
-        for &s in &spans {
-            ribbon(&mut m, &pts, &cum, s, CORE_W * k, y + 0.01, core, &fade);
+        // The solid core starts a little ahead of the car (under it).
+        let start = if planned { 0.0 } else { 2.5 };
+        for &(a, b) in &spans {
+            ribbon(
+                &mut m,
+                &pts,
+                &cum,
+                (a.max(start), b),
+                CORE_W * k,
+                y + 0.01,
+                core,
+                &whole,
+            );
         }
         if !planned {
-            let white = lin(Color::srgba(1.0, 1.0, 1.0, 0.92));
+            let white = lin(Color::WHITE);
             let mut d = (FADE_M + 4.0) * k;
             while d < total - 4.0 * k {
                 let (p, dir) = at(&pts, &cum, d);
@@ -292,14 +342,14 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> MeshBuil
     }
     let ground = |m: &mut MeshBuilder, b: Option<BuildingId>, pos: [f32; 2], strong: bool| {
         let col = if strong {
-            lin(ACCENT.with_alpha(0.95))
+            lin(ACCENT)
         } else {
-            lin(Color::srgba(1.0, 1.0, 1.0, 0.7))
+            lin(Color::srgb(0.85, 0.85, 0.9))
         };
         match b.and_then(|b| world.buildings.get(b)) {
             Some(bb) => {
                 if strong {
-                    footprint_ring(m, bb.corners(), 1.2, 0.9, y, lin(EDGE.with_alpha(0.6)));
+                    footprint_ring(m, bb.corners(), 1.2, 0.9, y, lin(EDGE));
                     footprint_ring(m, bb.corners(), 1.2, 0.5, y + 0.01, col);
                 } else {
                     footprint_ring(m, bb.corners(), 0.8, 0.35, y, col);
@@ -318,7 +368,7 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> MeshBuil
     if let Some(d) = route.destination {
         ground(&mut m, d.building, d.pos, true);
     }
-    m
+    (soft, m)
 }
 
 #[derive(Default)]
@@ -340,7 +390,7 @@ fn draw_route(
     mut models: ResMut<BuildingModels>,
     mats: Res<RouteMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut line: Query<(Entity, &mut Visibility), With<RouteLine>>,
+    mut lines: Query<(Entity, &RouteLine, &mut Visibility)>,
     camera: Query<&GlobalTransform, With<WorldCamera>>,
     mut drawn: Local<Drawn>,
 ) {
@@ -355,9 +405,11 @@ fn draw_route(
         return;
     }
     drawn.k = k;
-    let Ok((e, mut vis)) = line.single_mut() else { return };
     // The destination building glows (re-made when buildings were rebuilt).
-    let dest = route.destination.and_then(|d| d.building).filter(|_| route.state != RouteState::None);
+    let dest = route
+        .destination
+        .and_then(|d| d.building)
+        .filter(|_| route.state != RouteState::None);
     if drawn.copy.map(|c| c.1) != dest || drawn.buildings != Some(key) {
         if let Some((c, _)) = drawn.copy.take() {
             commands.entity(c).try_despawn();
@@ -384,16 +436,20 @@ fn draw_route(
         }
     }
     drawn.buildings = Some(key);
-    if route.state == RouteState::None {
-        vis.set_if_neq(Visibility::Hidden);
-        return;
-    }
-    let m = route_mesh(&sim.world, &route, k);
-    if m.is_empty() {
-        vis.set_if_neq(Visibility::Hidden);
-    } else {
-        commands.entity(e).insert(Mesh3d(meshes.add(m.build())));
-        vis.set_if_neq(Visibility::Inherited);
+    let built = (route.state != RouteState::None).then(|| route_mesh(&sim.world, &route, k));
+    for (e, line, mut vis) in &mut lines {
+        let m = built
+            .as_ref()
+            .map(|(soft, solid)| if line.solid { solid } else { soft });
+        match m.filter(|m| !m.is_empty()) {
+            Some(m) => {
+                commands.entity(e).insert(Mesh3d(meshes.add(m.clone().build())));
+                vis.set_if_neq(Visibility::Inherited);
+            }
+            None => {
+                vis.set_if_neq(Visibility::Hidden);
+            }
+        }
     }
 }
 

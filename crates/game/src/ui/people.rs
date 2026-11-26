@@ -343,7 +343,10 @@ pub enum Item {
         share: f32,
     },
     /// A line that moves the camera to where the selected trip goes.
-    Jump { label: String, value: String },
+    Jump {
+        label: String,
+        value: String,
+    },
 }
 
 /// A section the player can fold away (its title stays as a one-line
@@ -665,7 +668,9 @@ fn route_section(
 ) -> Option<Section> {
     let r = super::route::person_trip(world, id)?;
     let dest = r.destination?;
-    let to = dest.building.map_or("The highway".to_string(), |b| building_name(world, b));
+    let to = dest
+        .building
+        .map_or("The highway".to_string(), |b| building_name(world, b));
     let km = (!r.points.is_empty()).then(|| super::readout::metres(super::route::path_length(&r.points)));
     let mut sec;
     match (trip, r.state) {
@@ -684,7 +689,11 @@ fn route_section(
                 sec.line("Still to go", left, Tone::Normal);
             }
             if r.state == crate::shared::RouteState::Unseen {
-                sec.line("", "Dashed on the map: the way by road (not drawn under way)", Tone::Muted);
+                sec.line(
+                    "",
+                    "Dashed on the map: the way by road (not drawn under way)",
+                    Tone::Muted,
+                );
             }
         }
         (None, _) => {
@@ -1129,7 +1138,10 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
             "Still to go",
             match left {
                 Some(l) if !s.trip.as_ref().is_some_and(|t| t.late) => {
-                    format!("{} · about {l}", super::readout::metres(super::route::path_length(&pts)))
+                    format!(
+                        "{} · about {l}",
+                        super::readout::metres(super::route::path_length(&pts))
+                    )
                 }
                 _ => super::readout::metres(super::route::path_length(&pts)),
             },
@@ -1276,10 +1288,7 @@ pub fn city_sheet(world: &World) -> Sheet {
     }
     s.sections.push(sec);
     // What happiness is made of, city-wide (1 = content).
-    let mut sec = Section::new(format!(
-        "Happiness · {}",
-        mood_word(st.avg_happiness).to_lowercase()
-    ));
+    let mut sec = Section::new(format!("Happiness · {}", mood_word(st.avg_happiness).to_lowercase()));
     for p in citysim_sim::citizens::HappinessPart::ALL {
         let v = st.avg_parts[p.index()];
         sec.bar(part_title(p), format!("{}", (v * 100.0).round() as i64), v);

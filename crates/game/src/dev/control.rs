@@ -28,8 +28,9 @@
 //! * `find-home` — the cell under a home near the camera's focus whose
 //!   first resident is at home, leaves for work within 1.5 in-game hours
 //!   and last drove there in 20-90 s: `ok X Y`.
-//! * `find-car [MIN]` — window position (logical px) of a moving car near
-//!   the middle of the screen with at least MIN metres (300) still to go.
+//! * `find-car [MIN]` — window position (logical px) of a slow car (easy to
+//!   click) near the middle of the screen with at least MIN metres (300)
+//!   still to go.
 //! * `node PREFIX` — window position (logical px) of the first visible UI
 //!   node whose `Name` starts with PREFIX: `X Y` (people-panel links are
 //!   named "Person link", "Place link", "Vehicle link", "Follow").
@@ -544,9 +545,10 @@ fn run(
             let hit = w
                 .vehicles
                 .iter()
-                .filter(|(_, v)| v.junction.is_none() && !v.stopped())
+                .filter(|(_, v)| v.junction.is_none() && v.speed < 5.0)
                 .filter_map(|(_, v)| {
-                    let ahead = v.segment.map_or(0.0, |s| len(s) - v.progress) + v.route.iter().map(|&s| len(s)).sum::<f32>();
+                    let ahead =
+                        v.segment.map_or(0.0, |s| len(s) - v.progress) + v.route.iter().map(|&s| len(s)).sum::<f32>();
                     if ahead < min {
                         return None;
                     }
