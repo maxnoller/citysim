@@ -1,4 +1,4 @@
-//! The budget drawer of the tray: the balance with a chart of the daily
+//! The budget page of the city window (`city.rs`): the balance with a chart of the daily
 //! net over the last two weeks (`economy.history`), income and costs by
 //! line for yesterday (`economy.last_day`) next to today so far
 //! (`economy::budget_now`), the tax rate (steps and a slider), and the
@@ -18,8 +18,7 @@ use citysim_sim::{Budget, Command, DaySummary, Zone, balance};
 use super::UiState;
 use super::format;
 use super::theme::{self as t, UiFonts, icon};
-use super::tray::Page;
-use super::widgets::{Tooltip, UiAction, caps, figure, label, layout, paragraph, spawn_stepper, title_tick};
+use super::widgets::{Tooltip, UiAction, caps, figure, label, layout, paragraph, spawn_stepper};
 use crate::shared::{GameSet, SimCommand, SimWorld};
 
 pub struct BudgetPlugin;
@@ -205,73 +204,40 @@ const COSTS_W: f32 = 196.0;
 const AMOUNT_W: f32 = 82.0;
 /// Days in the chart.
 pub const CHART_DAYS: usize = 14;
-const CHART_H: f32 = 54.0;
-const CHART_W: f32 = 236.0;
+const CHART_H: f32 = 96.0;
+const CHART_W: f32 = 320.0;
 /// Seconds between refreshes of today's projection.
 const PROJECTION_EVERY: f32 = 0.25;
 /// Tax slider step (fraction).
 pub const TAX_STEP: f32 = 0.005;
 const TRACK_W: f32 = 220.0;
 
+/// A cell of the budget's grid, `width` wide.
 fn column(p: &mut ChildSpawnerCommands, width: f32, f: impl FnOnce(&mut ChildSpawnerCommands)) {
     p.spawn(layout(Node {
         flex_direction: FlexDirection::Column,
         width: px(width),
-        align_self: AlignSelf::Stretch,
-        justify_content: JustifyContent::Center,
+        flex_shrink: 0.0,
         ..default()
     }))
     .with_children(f);
 }
 
-fn rule(p: &mut ChildSpawnerCommands) {
-    p.spawn((
-        Node {
-            width: px(t::LW),
-            height: px(150),
-            flex_shrink: 0.0,
-            ..default()
-        },
-        BackgroundColor(t::LINE),
-        UiTransform {
-            rotation: Rot2::degrees(6.0),
-            ..default()
-        },
-        Pickable::IGNORE,
-    ));
-}
-
-fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entity, &Page)>) {
+fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, bodies: Query<Entity, With<super::city::BudgetBody>>) {
     let fonts = fonts.into_inner();
-    let Some((page, _)) = pages.iter().find(|p| *p.1 == Page::Budget) else {
+    let Ok(body) = bodies.single() else {
         return;
     };
-    commands.entity(page).insert(Name::new("Budget")).with_children(|pg| {
-        // Title.
+    commands.entity(body).with_children(|pg| {
         pg.spawn(layout(Node {
-            flex_direction: FlexDirection::Column,
-            min_width: px(98),
-            align_self: AlignSelf::Center,
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: px(30),
+            row_gap: px(26),
+            width: percent(100),
+            align_items: AlignItems::FlexStart,
             ..default()
         }))
-        .with_children(|c| {
-            c.spawn(title_tick());
-            c.spawn((
-                Text::new("BUDGET"),
-                fonts.figures(t::FONT_TITLE, t::W_BOLD),
-                t::caps_spacing(t::FONT_TITLE, 0.12),
-                TextColor(t::TEXT),
-                Pickable::IGNORE,
-            ));
-            c.spawn((
-                caps(fonts, "Booked at midnight", t::FONT_CAP, t::TEXT_MUTED),
-                Node {
-                    margin: UiRect::top(px(6)),
-                    ..default()
-                },
-            ));
-        });
-        rule(pg);
+        .with_children(|pg| {
         // Balance and chart.
         column(pg, CHART_W, |c| {
             c.spawn(caps(fonts, "Balance", t::FONT_CAP, t::TEXT_MUTED));
@@ -295,7 +261,6 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
             ));
             chart(c, fonts);
         });
-        rule(pg);
         // Table.
         column(pg, 150.0 + 2.0 * AMOUNT_W, |c| {
             c.spawn(layout(Node {
@@ -368,7 +333,6 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                 });
             }
         });
-        rule(pg);
         // Where the running costs go (today, if the day ended now).
         column(pg, COSTS_W, |c| {
             c.spawn((
@@ -414,7 +378,6 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                 },
             ));
         });
-        rule(pg);
         // Taxes and the fiscal state.
         column(pg, 262.0, |c| {
             c.spawn(caps(fonts, "Tax rate", t::FONT_CAP, t::TEXT_MUTED));
@@ -549,6 +512,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                     ));
                 });
             });
+        });
         });
     });
 }

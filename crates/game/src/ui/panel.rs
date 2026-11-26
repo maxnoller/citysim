@@ -6,7 +6,7 @@
 //! symbol with two lines, the trip box, label / value rows, meters, and an
 //! action bar (follow, home, work). Back and links between views.
 //!
-//! Also the city's people (the People drawer of the tray) and following:
+//! Also the city's people (the People page of the city window) and following:
 //! the camera stays on whoever is followed (`CameraFollow`).
 //!
 //! Thin widgets: everything shown comes from `people.rs` sheets and
@@ -24,12 +24,11 @@ use super::plate::{PlateCache, PlateMaterial, PlateStyle};
 use super::readout::Tone;
 use super::theme::{self as t, UiFonts, icon};
 use super::toasts::{Toast, ToastKind};
-use super::tray::Page;
 use super::widgets::{
     ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, approach, caps, figure, hrule, label, layout, paragraph,
     plate_node, plate_shadow, spawn_button, spawn_key,
 };
-use super::{InfoTray, UiState};
+use super::{CityPage, UiState};
 use crate::shared::{ActiveTool, CameraFollow, GameSet, SimCommand, SimWorld, WorldHighlight, WorldTarget};
 
 /// What the panel shows of people, places and cars: the last of `stack`
@@ -170,6 +169,7 @@ enum ItemShape {
     Line(bool),
     Link(Target),
     Bar,
+    Jump,
 }
 
 /// What a sheet's widgets look like, without the texts.
@@ -211,6 +211,7 @@ fn shape_of(s: &Sheet, controls: (bool, bool, bool, Option<JunctionSetting>), fo
                                 Item::Line(l) => ItemShape::Line(l.label.is_empty()),
                                 Item::Link(l) => ItemShape::Link(l.target),
                                 Item::Bar { .. } => ItemShape::Bar,
+                                Item::Jump { .. } => ItemShape::Jump,
                             })
                             .collect()
                     },
@@ -314,12 +315,14 @@ fn text_of(s: &Sheet, tag: SheetText) -> Option<(String, Option<Color>)> {
             Item::Line(l) => (l.label.to_uppercase(), None),
             Item::Link(l) => (l.label.to_uppercase(), None),
             Item::Bar { label, .. } => (label.to_uppercase(), None),
+            Item::Jump { label, .. } => (label.to_uppercase(), None),
         },
         SheetText::Value(i, j) => match s.sections.get(i)?.items.get(j)? {
             Item::Line(l) if l.label.is_empty() => (l.value.clone(), Some(tone_color(l.tone))),
             Item::Line(l) => (l.value.clone(), Some(tone_color(l.tone))),
             Item::Link(l) => (l.value.clone(), None),
             Item::Bar { value, .. } => (value.clone(), None),
+            Item::Jump { value, .. } => (value.clone(), None),
         },
     })
 }
@@ -333,9 +336,6 @@ fn bar_of(s: &Sheet, b: SheetBar) -> Option<f32> {
         },
     }
 }
-
-/// Width of a column of the city's people.
-const CITY_COL: f32 = 200.0;
 
 /// Room above and below the panel (logical px).
 const PANEL_MARGIN_TOP: f32 = 62.0;
@@ -613,7 +613,7 @@ fn draw_sheets(
     hl: Res<WorldHighlight>,
     mut roots: Query<&mut PanelRoot>,
     bodies: Query<(Entity, &Body)>,
-    pages: Query<(Entity, &Page)>,
+    city_body: Query<Entity, With<super::city::CitySheetBody>>,
     mut texts: TextQuery,
     mut bars: BarQuery,
     mut marks: Query<(&Of, &mut Node), With<TripMark>>,
@@ -627,7 +627,7 @@ fn draw_sheets(
     shown.age = 0.0;
     let w = &sim.world;
     let panel = panel_sheet(w, &view, &hl).filter(|_| !ui.menu_open);
-    let city = (ui.tray == Some(InfoTray::People) && !ui.menu_open).then(|| people::city_sheet(w));
+    let city = (ui.window == Some(CityPage::People) && !ui.menu_open).then(|| people::city_sheet(w));
     if let Ok(mut r) = roots.single_mut() {
         r.open = panel.is_some();
     }
@@ -656,7 +656,7 @@ fn draw_sheets(
         if shape != *old {
             let target = match root {
                 Root::Panel => bodies.iter().find(|b| b.1.0 == Root::Panel).map(|b| b.0),
-                Root::City => pages.iter().find(|p| *p.1 == Page::People).map(|p| p.0),
+                Root::City => city_body.single().ok(),
             };
             if let Some(body) = target {
                 commands.entity(body).despawn_children();
@@ -1382,6 +1382,7 @@ fn section(
                     }
                     Item::Line(l) => row(c, fonts, tags, tone_color(l.tone), last, city),
                     Item::Link(l) => link_row(c, fonts, action_of(l.target), tags, last),
+                    Item::Jump { .. } => link_row(c, fonts, UiAction::JumpToDestination, tags, last),
                     Item::Bar { share, .. } => {
                         row(c, fonts, tags, t::TEXT, true, city);
                         c.spawn((
@@ -1466,7 +1467,13 @@ fn link_row(
     let name = match action {
         UiAction::Person(_) => "Person link",
         UiAction::Place(_) => "Place link",
+        UiAction::JumpToDestination => "Destination link",
         _ => "Vehicle link",
+    };
+    let glyph = if action == UiAction::JumpToDestination {
+        icon::MAP_PIN
+    } else {
+        icon::CHEVRON_RIGHT
     };
     let id = spawn_button(
         p,
@@ -1516,7 +1523,7 @@ fn link_row(
                     tags.2,
                 ));
                 r.spawn((
-                    super::widgets::icon(fonts, icon::CHEVRON_RIGHT, 13.0, t::TEXT_MUTED),
+                    super::widgets::icon(fonts, glyph, 13.0, t::TEXT_MUTED),
                     ButtonFg {
                         owner: id,
                         base: t::TEXT_MUTED,
@@ -1532,75 +1539,33 @@ fn link_row(
         .insert((Name::new(name), BorderColor::all(t::RULE)));
 }
 
-/// The city's people in the tray: title block, then the sections in
-/// columns.
-/// Which of the city sheet's sections share a column (by index: ages;
-/// households and money; work; right now; trips and the unhappy).
-const CITY_COLUMNS: [&[usize]; 5] = [&[0], &[1, 6], &[2], &[3], &[4, 5]];
+/// The city's people in the city window: the sections in columns that
+/// wrap to the window's width (which share a column, by index: ages;
+/// households and money; work; right now; trips and the unhappy;
+/// happiness by part).
+const CITY_COLUMNS: [&[usize]; 6] = [&[0], &[1, 6], &[2], &[3], &[4, 5], &[7]];
 
-fn spawn_city_sheet(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet, compact: bool) {
+/// Width of a column of the city's people.
+const CITY_COL: f32 = 236.0;
+
+fn spawn_city_sheet(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &Sheet, _compact: bool) {
     let of = Of(Root::City);
-    p.spawn(layout(Node {
-        flex_direction: FlexDirection::Column,
-        min_width: px(98),
-        align_self: AlignSelf::Start,
-        margin: UiRect::top(px(8)),
-        ..default()
-    }))
-    .with_children(|c| {
-        c.spawn(super::widgets::title_tick());
-        c.spawn((
-            Text::new("PEOPLE"),
-            fonts.figures(t::FONT_TITLE, t::W_BOLD),
-            t::caps_spacing(t::FONT_TITLE, 0.12),
-            TextColor(t::TEXT),
-            Pickable::IGNORE,
-        ));
-        c.spawn((
-            paragraph(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
-            Node {
-                width: px(120),
-                margin: UiRect::top(px(6)),
-                ..default()
-            },
-            SheetText::Subtitle,
-            of,
-        ));
-    });
-    let (col, gap) = if compact {
-        (CITY_COL - 40.0, 14.0)
-    } else {
-        (CITY_COL, 22.0)
-    };
     let folds = Folds::default();
-    p.spawn((
-        Node {
-            column_gap: px(gap),
-            max_height: Val::Vh(if compact { 52.0 } else { 40.0 }),
-            overflow: Overflow::scroll_y(),
-            align_items: AlignItems::FlexStart,
+    for group in CITY_COLUMNS {
+        p.spawn(layout(Node {
+            flex_direction: FlexDirection::Column,
+            width: px(CITY_COL),
+            flex_shrink: 0.0,
             ..default()
-        },
-        ScrollPosition::default(),
-        Hovered::default(),
-    ))
-    .with_children(|g| {
-        for group in CITY_COLUMNS {
-            g.spawn(layout(Node {
-                flex_direction: FlexDirection::Column,
-                width: px(col),
-                flex_shrink: 0.0,
-                ..default()
-            }))
-            .with_children(|c| {
-                for &si in group {
-                    if let Some(sec) = s.sections.get(si) {
-                        section(c, fonts, si, sec, of, true, &folds);
-                    }
+        }))
+        .with_children(|c| {
+            for &si in group {
+                if let Some(sec) = s.sections.get(si) {
+                    section(c, fonts, si, sec, of, true, &folds);
                 }
-            });
-        }
-    });
+            }
+        });
+    }
 }
 
 fn slide_panel(

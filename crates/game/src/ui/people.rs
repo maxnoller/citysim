@@ -342,6 +342,8 @@ pub enum Item {
         value: String,
         share: f32,
     },
+    /// A line that moves the camera to where the selected trip goes.
+    Jump { label: String, value: String },
 }
 
 /// A section the player can fold away (its title stays as a one-line
@@ -395,6 +397,12 @@ impl Section {
     }
     pub fn link(&mut self, label: impl Into<String>, value: impl Into<String>, target: Target) {
         self.items.push(Item::Link(Link::new(label, value, target)));
+    }
+    pub fn jump(&mut self, label: impl Into<String>, value: impl Into<String>) {
+        self.items.push(Item::Jump {
+            label: label.into(),
+            value: value.into(),
+        });
     }
     pub fn bar(&mut self, label: impl Into<String>, value: impl Into<String>, share: f32) {
         self.items.push(Item::Bar {
@@ -646,6 +654,68 @@ fn road_ahead_ticks(world: &World, car: &citysim_sim::Vehicle) -> u64 {
     ((here + rest) / speed * citysim_sim::TICKS_PER_SECOND as f32) as u64
 }
 
+/// The selected person's trip, as the map draws it: where they are going
+/// and why, how far and how long it still is, and a jump to the place.
+/// Before a trip: the next one they will make, as planned.
+fn route_section(
+    world: &World,
+    id: CitizenId,
+    trip: Option<&inspect::TripView>,
+    bar: Option<&TripBar>,
+) -> Option<Section> {
+    let r = super::route::person_trip(world, id)?;
+    let dest = r.destination?;
+    let to = dest.building.map_or("The highway".to_string(), |b| building_name(world, b));
+    let km = (!r.points.is_empty()).then(|| super::readout::metres(super::route::path_length(&r.points)));
+    let mut sec;
+    match (trip, r.state) {
+        (Some(t), _) => {
+            sec = Section::new("Route");
+            sec.jump("Going to", to);
+            sec.line("Why", purpose_title(t.purpose), Tone::Normal);
+            let time = bar.filter(|b| !b.late).map(|b| format!("about {}", b.left));
+            let left = match (km, time) {
+                (Some(k), Some(t)) => format!("{k} · {t}"),
+                (Some(k), None) => k,
+                (None, Some(t)) => t,
+                (None, None) => String::new(),
+            };
+            if !left.is_empty() {
+                sec.line("Still to go", left, Tone::Normal);
+            }
+            if r.state == crate::shared::RouteState::Unseen {
+                sec.line("", "Dashed on the map: the way by road (not drawn under way)", Tone::Muted);
+            }
+        }
+        (None, _) => {
+            let p = inspect::plan(world, id)?;
+            let next = p.next?;
+            sec = Section::new("Next trip");
+            sec.jump("Going to", to);
+            if let Some(pp) = next.purpose {
+                sec.line("Why", purpose_title(pp), Tone::Normal);
+            }
+            if let Some(at) = next.at_tick {
+                let now = world.time.tick;
+                sec.line(
+                    "Leaves",
+                    if at > now {
+                        format!("{} · in {}", tick_clock(world, at), span(at - now))
+                    } else {
+                        "Any moment".into()
+                    },
+                    Tone::Normal,
+                );
+            }
+            if let Some(k) = km {
+                sec.line("By road", k, Tone::Normal);
+            }
+            sec.line("", "Dashed on the map: the way they will drive", Tone::Muted);
+        }
+    }
+    Some(sec)
+}
+
 /// Everything about one person.
 pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
     let v = inspect::citizen(world, id)?;
@@ -716,6 +786,10 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
         sec.link("At", building_name(world, b), Target::Place(b));
     }
     s.sections.push(sec);
+    // The trip on the map: where to, why, how far and how long.
+    if let Some(sec) = route_section(world, id, v.trip.as_ref(), s.trip.as_ref()) {
+        s.sections.push(sec);
+    }
     // Home and work.
     let mut sec = Section::folding("Life", FoldKey::Life);
     sec.link("Home", building_name(world, v.home), Target::Place(v.home));
@@ -1049,6 +1123,22 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
         }
     }
     sec.line("Why", purpose_title(v.purpose), Tone::Normal);
+    if let Some(pts) = super::route::vehicle_path(world, id) {
+        let left = s.trip.as_ref().map(|t| t.left.clone());
+        sec.line(
+            "Still to go",
+            match left {
+                Some(l) if !s.trip.as_ref().is_some_and(|t| t.late) => {
+                    format!("{} · about {l}", super::readout::metres(super::route::path_length(&pts)))
+                }
+                _ => super::readout::metres(super::route::path_length(&pts)),
+            },
+            Tone::Normal,
+        );
+    }
+    if v.destination_building.is_some() || v.destination == Place::Entry {
+        sec.jump("On the map", "Show where it goes");
+    }
     // Game time, like every clock in the panel (a real second at 1x is a
     // game minute and a half).
     sec.line(
@@ -1100,23 +1190,16 @@ pub fn city_sheet(world: &World) -> Sheet {
         ..Default::default()
     };
     let total = st.population.max(1) as f32;
-    // Ages in twenty-year bands, oldest at the top (the sim counts
-    // decades; five rows keep the drawer short).
+    // The age pyramid: ten-year bands, oldest at the top.
     let mut sec = Section::new("Ages");
-    let bands: Vec<(String, u32)> = (0..AGE_BANDS)
-        .step_by(2)
-        .map(|b| {
-            let n: u32 = st.age_pyramid[b..(b + 2).min(AGE_BANDS)].iter().sum();
-            let label = if b + 2 >= AGE_BANDS {
-                format!("{}+", b * 10)
-            } else {
-                format!("{}–{}", b * 10, b * 10 + 19)
-            };
-            (label, n)
-        })
-        .collect();
-    let most = bands.iter().map(|b| b.1).max().unwrap_or(1).max(1) as f32;
-    for (label, n) in bands.into_iter().rev() {
+    let most = st.age_pyramid.iter().copied().max().unwrap_or(1).max(1) as f32;
+    for b in (0..AGE_BANDS).rev() {
+        let n = st.age_pyramid[b];
+        let label = if b + 1 == AGE_BANDS {
+            format!("{}+", b * 10)
+        } else {
+            format!("{}–{}", b * 10, b * 10 + 9)
+        };
         sec.bar(label, format::group(n as u64), n as f32 / most);
     }
     s.sections.push(sec);
@@ -1192,6 +1275,16 @@ pub fn city_sheet(world: &World) -> Sheet {
         sec.line("Households in debt", format::group(st.broke as u64), Tone::Warn);
     }
     s.sections.push(sec);
+    // What happiness is made of, city-wide (1 = content).
+    let mut sec = Section::new(format!(
+        "Happiness · {}",
+        mood_word(st.avg_happiness).to_lowercase()
+    ));
+    for p in citysim_sim::citizens::HappinessPart::ALL {
+        let v = st.avg_parts[p.index()];
+        sec.bar(part_title(p), format!("{}", (v * 100.0).round() as i64), v);
+    }
+    s.sections.push(sec);
     s
 }
 
@@ -1204,7 +1297,7 @@ pub fn vehicle_lines(world: &World, id: VehicleId) -> Option<(String, Vec<Line>)
             match it {
                 Item::Line(l) => lines.push(l.clone()),
                 Item::Link(l) => lines.push(Line::new(l.label.clone(), l.value.clone(), Tone::Normal)),
-                Item::Bar { .. } => {}
+                Item::Bar { .. } | Item::Jump { .. } => {}
             }
         }
     }

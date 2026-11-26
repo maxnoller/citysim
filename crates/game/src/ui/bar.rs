@@ -1,6 +1,7 @@
 //! The bottom bar, flush with the screen edge: money with its daily change,
-//! residents, jobless, the three demand meters (left); the tool slots
-//! (centre); the day strip, the clock and the speed switch (right).
+//! residents, jobless, the three demand meters (left); the tool slots and
+//! the bulldozer's switch with its modes (centre); the day strip, the clock
+//! and the speed switch (right).
 //! Separated by slanted rules. Narrow windows get a compact bar (no day
 //! strip, no stat icons, narrower slots).
 
@@ -16,9 +17,9 @@ use super::theme::{self as t, UiFonts, icon};
 use super::toasts::{Toast, ToastKind};
 use super::widgets::{
     ActiveMark, ButtonFg, ButtonKind, Tooltip, UiAction, UiButton, approach, caps, figure, info_tip, label, layout,
-    plate_node, slant_rule, spawn_button,
+    plate_node, slant_rule, spawn_button, spawn_segments,
 };
-use crate::shared::{ActiveTool, GameSet, RoadMode, SimWorld};
+use crate::shared::{ActiveTool, BulldozeMode, GameSet, RoadMode, SimWorld};
 
 pub struct BarPlugin;
 
@@ -28,7 +29,15 @@ impl Plugin for BarPlugin {
             .add_systems(Startup, spawn_bar)
             .add_systems(
                 Update,
-                (update_vitals, update_demand, update_clock, compact_bar, raise_slots).in_set(GameSet::Render),
+                (
+                    update_vitals,
+                    update_demand,
+                    update_clock,
+                    compact_bar,
+                    raise_slots,
+                    demolish_modes,
+                )
+                    .in_set(GameSet::Render),
             );
     }
 }
@@ -357,14 +366,6 @@ const SLOTS: [&[SlotDef]; 3] = [
             "Zone lots for homes, shops and industry; buildings grow by demand. Z again: next zone type.",
         ),
         (
-            UiAction::Tool(ActiveTool::Bulldoze),
-            icon::BULLDOZE,
-            "Clear",
-            "B",
-            "Clear",
-            "Remove roads (between junctions, or part of one), buildings, or everything in an area.",
-        ),
-        (
             UiAction::RoadMode(RoadMode::Junction),
             icon::WAYPOINTS,
             "Junctions",
@@ -380,7 +381,7 @@ const SLOTS: [&[SlotDef]; 3] = [
             "People",
             "P",
             "People",
-            "Who lives in the city: ages, households, work, what everyone is doing, why people are unhappy.",
+            "Who lives in the city: ages, households, work, happiness and its reasons, trips, day by day.",
         ),
         (
             UiAction::ToggleBudget,
@@ -388,7 +389,7 @@ const SLOTS: [&[SlotDef]; 3] = [
             "Budget",
             "U",
             "Budget",
-            "Income and costs by line, the tax rate, and what would fix a deficit.",
+            "Income and costs by line and by day, the tax rate, and what would fix a deficit.",
         ),
         (
             UiAction::Maps,
@@ -425,8 +426,213 @@ fn spawn_tools(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
             for &(action, glyph, text, key, title, desc) in group.iter() {
                 spawn_slot(row, fonts, action, glyph, text, key, Tooltip::new(title, desc).key(key));
             }
+            // The bulldozer: a switch of its own after the build tools.
+            if g == 1 {
+                row.spawn((layout(Node {
+                    width: px(7),
+                    ..default()
+                }),));
+                spawn_demolish(row, fonts);
+            }
         }
     });
+}
+
+/// Size of the bulldozer's switch (it stands on the bar between the build
+/// tools and the city's pages, smaller than a tool slot).
+const DEMOLISH_W: f32 = 50.0;
+const DEMOLISH_H: f32 = 50.0;
+
+/// The bulldozer's switch, and the small plate of its two modes and undo
+/// that stands above it while it is on.
+fn spawn_demolish(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
+    p.spawn((
+        Name::new("Demolish"),
+        layout(Node {
+            align_self: AlignSelf::End,
+            margin: UiRect::bottom(px((t::SLOT_H - DEMOLISH_H) * 0.5)),
+            flex_shrink: 0.0,
+            justify_content: JustifyContent::Center,
+            ..default()
+        }),
+    ))
+    .with_children(|w| {
+        let id = spawn_button(
+            w,
+            UiButton::new(UiAction::Demolish, ButtonKind::Demolish),
+            Node {
+                width: px(DEMOLISH_W),
+                height: px(DEMOLISH_H),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius {
+                    top_left: px(0).into(),
+                    top_right: px(10).into(),
+                    bottom_right: px(0).into(),
+                    bottom_left: px(10).into(),
+                },
+                ..default()
+            },
+            Some(
+                Tooltip::new(
+                    "Demolish",
+                    "Switch the bulldozer on: click a road for the stretch between junctions, drag along it for a \
+                     part, click a building, or drag over an area (Tab). B or this switch again: back to the tool \
+                     you had.",
+                )
+                .key("B"),
+            ),
+            |b, id| {
+                let base = t::mix(t::SLOT_INK, t::NEGATIVE, 0.45);
+                b.spawn((
+                    super::widgets::icon(fonts, icon::DEMOLISH, 22.0, base),
+                    ButtonFg { owner: id, base },
+                ));
+                b.spawn((
+                    label(fonts, "B", t::FONT_KEY, t::W_SEMIBOLD, t::TEXT_MUTED),
+                    ButtonFg {
+                        owner: id,
+                        base: t::TEXT_MUTED,
+                    },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        right: px(4),
+                        top: px(2),
+                        ..default()
+                    },
+                ));
+            },
+        );
+        w.commands().entity(id).insert(Name::new("Demolish switch"));
+        // Its modes, standing above it while it is on.
+        w.spawn((
+            DemolishModes,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: px(DEMOLISH_H + 12.0),
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                padding: UiRect::new(px(8), px(8), px(6), px(6)),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius {
+                    top_left: px(0).into(),
+                    top_right: px(10).into(),
+                    bottom_right: px(0).into(),
+                    bottom_left: px(10).into(),
+                },
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(t::alpha(t::PLATE_BOTTOM, 0.96)),
+            BorderColor::all(t::NEGATIVE),
+            super::widgets::plate_shadow(),
+        ))
+        .with_children(|m| {
+            m.spawn((
+                layout(Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
+                    right: px(0),
+                    top: px(-1),
+                    height: px(3),
+                    ..default()
+                }),
+                BackgroundColor(t::NEGATIVE),
+            ));
+            spawn_segments(
+                m,
+                fonts,
+                &[
+                    (
+                        UiAction::BulldozeMode(BulldozeMode::Road),
+                        Some(icon::ROUTE),
+                        "Road or building",
+                        Some(
+                            Tooltip::new(
+                                "Road or building",
+                                "Click a road to remove it between two junctions, drag along it to remove a part; \
+                                 click a building.",
+                            )
+                            .key("Tab"),
+                        ),
+                    ),
+                    (
+                        UiAction::BulldozeMode(BulldozeMode::Area),
+                        Some(icon::SCAN),
+                        "Area",
+                        Some(
+                            Tooltip::new("Area", "Drag a rectangle over roads and buildings to remove them.")
+                                .key("Tab"),
+                        ),
+                    ),
+                ],
+            );
+            let undo = spawn_button(
+                m,
+                UiButton::new(UiAction::Undo, ButtonKind::Ghost),
+                Node {
+                    width: px(32),
+                    height: px(32),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                Some(
+                    Tooltip::new(
+                        "Undo",
+                        "Take back the last road, zoning or demolition. Nothing is refunded; demolished buildings \
+                         don't come back.",
+                    )
+                    .key("Ctrl+Z"),
+                ),
+                |b, id| {
+                    b.spawn((
+                        super::widgets::icon(fonts, icon::UNDO, 16.0, t::TEXT_MUTED),
+                        ButtonFg {
+                            owner: id,
+                            base: t::TEXT_MUTED,
+                        },
+                    ));
+                },
+            );
+            m.commands().entity(undo).insert((DemolishUndo, Name::new("Undo")));
+        });
+    });
+}
+
+/// The plate of the bulldozer's modes (shown while it is on).
+#[derive(Component)]
+struct DemolishModes;
+
+/// Its undo button (disabled while there is nothing to undo).
+#[derive(Component)]
+struct DemolishUndo;
+
+/// Show the bulldozer's modes while it is on.
+fn demolish_modes(
+    mut commands: Commands,
+    tool: Res<ActiveTool>,
+    tools: Res<super::tools::ToolState>,
+    ui: Res<UiState>,
+    mut plate: Query<&mut Node, With<DemolishModes>>,
+    undo: Query<(Entity, Has<super::widgets::Disabled>), With<DemolishUndo>>,
+) {
+    let on = *tool == ActiveTool::Bulldoze && !ui.menu_open;
+    for mut n in &mut plate {
+        let d = if on { Display::Flex } else { Display::None };
+        if n.display != d {
+            n.display = d;
+        }
+    }
+    let can = tools.can_undo();
+    for (e, disabled) in &undo {
+        if can && disabled {
+            commands.entity(e).remove::<super::widgets::Disabled>();
+        } else if !can && !disabled {
+            commands.entity(e).insert(super::widgets::Disabled);
+        }
+    }
 }
 
 fn spawn_slot(

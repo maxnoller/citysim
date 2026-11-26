@@ -87,6 +87,13 @@ pub enum UiAction {
     LotMarkers(bool),
     /// Fold / unfold a section of the side panel.
     Fold(super::people::FoldKey),
+    /// Show a page of the city window (opens it).
+    CityPage(super::CityPage),
+    CloseWindow,
+    /// Switch the bulldozer on (from any tool) or off (back to that tool).
+    Demolish,
+    /// Move the camera to where the selected trip goes.
+    JumpToDestination,
     /// Does nothing (a locked item).
     None,
 }
@@ -117,6 +124,9 @@ pub enum ButtonKind {
     Speed,
     /// Small square step button.
     Stepper,
+    /// The bulldozer's switch in the bar: smaller than a tool slot; on, it
+    /// turns warning red (never the accent: it destroys).
+    Demolish,
     /// Icon on the system plate (top right).
     Sys,
 }
@@ -626,19 +636,23 @@ pub struct ActiveCtx<'a> {
 }
 
 pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
-    use super::InfoTray;
+    use super::{CityPage, InfoTray};
     match action {
         UiAction::Tool(ActiveTool::Road) => *cx.tool == ActiveTool::Road && cx.modes.road != RoadMode::Junction,
-        UiAction::Tool(ActiveTool::Inspect) => *cx.tool == ActiveTool::Inspect && cx.state.tray.is_none(),
+        UiAction::Tool(ActiveTool::Inspect) => {
+            *cx.tool == ActiveTool::Inspect && cx.state.tray.is_none() && cx.state.window.is_none()
+        }
         UiAction::Tool(tool) => *cx.tool == tool,
         UiAction::ZoneTool => matches!(cx.tool, ActiveTool::Zone(_)),
         UiAction::Overlay(o) => *cx.overlay == o,
         UiAction::TogglePause => cx.clock.paused,
         UiAction::Speed(i) => !cx.clock.paused && cx.clock.speed == i,
-        UiAction::ToggleBudget => cx.state.tray == Some(InfoTray::Budget),
+        UiAction::ToggleBudget => cx.state.window == Some(CityPage::Budget),
         UiAction::Maps => cx.state.tray == Some(InfoTray::Maps),
-        UiAction::Stats => cx.state.tray == Some(InfoTray::Stats),
-        UiAction::CityPeople => cx.state.tray == Some(InfoTray::People),
+        UiAction::Stats => cx.state.window == Some(CityPage::Stats),
+        UiAction::CityPeople => cx.state.window == Some(CityPage::People),
+        UiAction::CityPage(p) => cx.state.window == Some(p),
+        UiAction::Demolish => *cx.tool == ActiveTool::Bulldoze,
         UiAction::Quality(q) => *cx.quality == q,
         UiAction::RoadMode(m) => *cx.tool == ActiveTool::Road && cx.modes.road == m,
         UiAction::ZoneMode(m) => matches!(cx.tool, ActiveTool::Zone(_)) && cx.modes.zone == m,
@@ -769,6 +783,11 @@ fn active_look(kind: ButtonKind) -> Option<Look> {
                 border: t::ACCENT,
             })
         }
+        ButtonKind::Demolish => Some(Look {
+            top: t::DEMOLISH_TOP,
+            bottom: t::DEMOLISH_BOTTOM,
+            border: t::NEGATIVE,
+        }),
         ButtonKind::Item => Some(Look {
             top: t::SLOT_TOP,
             bottom: t::SLOT_BOTTOM,
@@ -932,6 +951,7 @@ fn button_visuals(
                 c = t::mix(c, t::ACCENT_INK, anim.active);
             }
             ButtonKind::Row | ButtonKind::Sys | ButtonKind::Ghost => c = t::mix(c, t::ACCENT_TEXT, anim.active),
+            ButtonKind::Demolish => c = t::mix(c, t::TEXT, anim.active),
             _ => {}
         }
         if b.kind == ButtonKind::Primary {

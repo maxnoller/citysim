@@ -23,6 +23,7 @@ mod road_geom;
 mod road_ghost;
 mod road_tool;
 mod roads;
+mod route;
 mod scene;
 mod signals;
 mod smoke;
@@ -69,6 +70,7 @@ impl Plugin for GfxPlugin {
             road_tool::RoadToolPlugin,
             bench::BenchPlugin,
             record::RecordPlugin,
+            route::RoutePlugin,
         ));
     }
 }

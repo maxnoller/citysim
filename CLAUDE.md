@@ -39,9 +39,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose; beats
   `CameraFollow`), `CameraFollow { focus }` (gfx keeps the focus there), `CameraGoTo` message (move / zoom once).
 - Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`, `zone_cell_corners`.
-- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B J Esc/right-click, Space 1 2 3 4, O, T, G, F5/F9,
-  F6 (keyboard into the open drawer: arrows, Enter, Esc), Tab, Alt, Enter, Backspace, [ ], Ctrl+Z, P, U, F,
-  arrows + Enter in menus.
+- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B (bulldozer on / off) J Esc/right-click, Space 1 2 3
+  4, O, T, G, F5/F9, F6 (keyboard into the city window or the open drawer: arrows, Enter, Esc), Tab (tool mode; city
+  window page), Alt, Enter, Backspace, [ ], Ctrl+Z, P, U, F, arrows + Enter in menus.
 - Tool feedback (ui writes with `set_if_neq`, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`
   (`RoadMode::{Straight, Curve, Continuous, Grid, Upgrade, Junction}`, `ZoneMode::{Paint, Frontage, Fill, Marquee}`,
   `BulldozeMode::{Road, Area}`), `SnapFeedback` (snapped point, `SnapTarget`, `Guide`s in sim metres, spacing),
@@ -50,6 +50,12 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, doomed buildings,
   `doomed_roads`). Legacy, never written any more (gfx still draws them for its `CITYSIM_GFX_TOOLDEMO` samples):
   `PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells`.
+- `RouteView { state: RouteState::{None, Driving, Planned, Unseen}, points, origin, destination }` (ui writes while a
+  car or person is selected, only when it changes meaningfully: a new route, the car 2.5 m further on; gfx draws it in
+  `gfx/route.rs`): `points` in sim metres along the lanes (lane offsets and junction turn paths included) from the car
+  (or the trip's start when `Planned` / `Unseen`) to where it stops; `RouteEnd { pos, building }` at both ends (gfx
+  rings both, glows the destination building and floats a pin over it). Traced in `ui/route.rs`
+  (`vehicle_path`, `planned_path`, `person_trip`).
 - `DisplaySettings { edge_scroll, lot_markers }`: edge panning (default off); empty zoned lots are marked only while
   zoning unless the player picks "Always" (persisted as `lot_markers_always`).
 - `SceneReady(bool)`: gfx sets it once the render pipelines are built (`gfx/loading.rs`); ui shows a loading card until
@@ -167,13 +173,20 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `PlateCache`; animated ones use `PlateAnim`. Widgets (`widgets.rs`): `ButtonKind::{Slot, Segment, Toggle, Item,
   Action, Primary, Ghost, Row, Danger, Speed, Stepper, Sys}` with hover / press / active / `Disabled` / `Focused`
   looks, `caps`, `figure`, `Justified` (text alignment; text bundles already carry a `TextLayout`). Layout:
-  `bar.rs` (bottom bar), `top.rs` (city plate, `Alert` ribbon, system buttons), `tray.rs` (drawer over the bar:
-  roads / zones / clear / junctions / maps / statistics pages; `budget.rs` and `panel.rs` fill the budget and city
-  people pages), `panel.rs` (right-edge selection panel, `PeopleView`, follow, leader line, `PanelArea`),
+  `bar.rs` (bottom bar; the bulldozer is a small switch after the build slots, `ButtonKind::Demolish`, red when on,
+  with its two modes and undo on a small plate above it; B toggles it and switching it off returns to the tool before,
+  `UiState::before_demolish`), `top.rs` (city plate, `Alert` ribbon, system buttons), `tray.rs` (drawer over the bar:
+  roads / zones / junctions / maps pages only), `city.rs` (the city window: `UiState::window: Option<CityPage>` =
+  statistics / people / budget pages, side list, header, tiles, charts from `economy.history` and `people.history`
+  via `chart.rs`; `budget.rs` and `panel.rs` fill the budget and city people parts; `WindowArea`; the game keeps
+  running behind it, a build tool closes it; new pages: add a `CityPage` and a `page(...)` body), `panel.rs`
+  (right-edge selection panel, `PeopleView`, follow, leader line, `PanelArea`), `route.rs` (the selected trip's
+  `RouteView`, "Going to" jump = `UiAction::JumpToDestination`),
   `context.rs` (cursor readout tag and the card builders), `menu.rs` (pause menu, `MenuFocus`, first-run plate),
-  `settings.rs` (settings and keys plates). `UiState::tray: Option<InfoTray>` (budget / people / maps / stats; a
-  tool's tray replaces it); `tray::TrayExtent` is the drawer's height (the side panel stays above it);
-  `UiState::tray_focus` while F6 keyboard focus is in a drawer. The interface is designed at 1920x1080 (`UiScale` 1.0) and compacts below a logical
+  `settings.rs` (settings and keys plates). `UiState::tray: Option<InfoTray>` (maps only; a tool's tray replaces
+  it); `tray::TrayExtent` is the drawer's height (the side panel and the cursor readout stay above it);
+  `UiState::tray_focus` while F6 keyboard focus is in the window or a drawer. The cursor readout never overlaps the
+  window or a drawer (it flips, else hides). The interface is designed at 1920x1080 (`UiScale` 1.0) and compacts below a logical
   width of 1660 (`UiState::compact`).
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
@@ -181,6 +194,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   day), `CITYSIM_GFX_TOOLDEMO=1|2|3` (gfx-only build: sample road-tool feedback; `4|5|6` the free-form road tool
   from real previews and `7` de-zoning, on `CITYSIM_DEMO=shapes`), `CITYSIM_DEMO_AVENUES=1` (demo main road upgraded
   to an avenue), `CITYSIM_GFX_SHOWCASE_SITES=x,z` (building sites with cranes at a spot).
+- gfx tool feedback: `gfx/cursor.rs` draws the hovered-cell frame and a faint cell grid around the cursor for the road
+  and zone tools only (never for Inspect or the bulldozer, which marks what it would remove in red);
+  `gfx/route.rs` draws `RouteView` (accent ribbon with a dark edge and white chevrons, dashed when planned / unseen,
+  rings at both ends, a glowing destination building and a pin), rebuilt only when `RouteView` changes.
 - gfx shaders: `assets/gfx/shaders/city.wesl` (the shared `CityMaterial`: night glow by the vertex `uv.x` tag
   `mesh_util::Glow`, cloud shadows, ground detail) and `sky.wesl`. Day/night lives in `gfx/daynight.rs`.
 - gfx look: one palette (`gfx/palette.rs`), one shared vertex-coloured material for buildings/roads/trees/cars; models

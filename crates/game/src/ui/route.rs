@@ -1,0 +1,491 @@
+//! The route of the selected car or person, for the map (`shared::RouteView`)
+//! and the side panel's words.
+//!
+//! A car's way still ahead is traced along the lanes the sim has planned
+//! (`Vehicle::route`): the rest of its segment in its lane, then at every
+//! junction the turn path (`junction::Movement`) drivers take there from the
+//! lane nearest to theirs, then the next segment from the box edge to the
+//! stop line, easing across lanes shortly before a turn, as drivers do. The
+//! line ends where the car will stop (`Trip::dest`). A trip that has not
+//! started (or happens off the map) is traced the same way along the route
+//! a car would take now (`inspect::planned_route`).
+//!
+//! Cheap: nothing runs while nobody travelling is selected; a car's line is
+//! re-traced a few times a second and published only when the route changes
+//! or the car is a few metres further on.
+
+use bevy::prelude::*;
+use citysim_sim::citizens::Activity;
+use citysim_sim::inspect::{self, PlannedRoute};
+use citysim_sim::{Access, BuildingId, CitizenId, Place, SegmentId, VehicleId, World, drive, junction};
+
+use super::panel::PeopleView;
+use super::people::Target;
+use super::UiState;
+use super::widgets::UiAction;
+use crate::shared::{CameraGoTo, GameSet, RouteEnd, RouteState, RouteView, SimWorld};
+
+pub struct RoutePlugin;
+
+impl Plugin for RoutePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, (jump_to_destination, publish_route).in_set(GameSet::Render));
+    }
+}
+
+/// Sample spacing along curved roads, metres.
+const STEP_M: f32 = 3.0;
+/// A lane change before a turn: it starts this far before the stop line and
+/// takes `LANE_CHANGE_M`.
+const LANE_CHANGE_BEFORE_M: f32 = 42.0;
+const LANE_CHANGE_M: f32 = 18.0;
+/// The car's line is published again once its head moved this far.
+const REPUBLISH_M: f32 = 2.5;
+
+fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+}
+
+/// Length of a polyline, metres.
+pub fn path_length(pts: &[[f32; 2]]) -> f32 {
+    pts.windows(2).map(|w| dist(w[0], w[1])).sum()
+}
+
+fn push(out: &mut Vec<[f32; 2]>, p: [f32; 2]) {
+    if out.last().is_none_or(|&q| dist(p, q) > 0.05) {
+        out.push(p);
+    }
+}
+
+fn smoothstep(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// Segment `s` driven in direction `fwd` from `from` to `to` metres (along
+/// travel), `off0` metres right of the centre line at the start and `off1`
+/// at the end (the change happens shortly before the end, as a car moves
+/// over for its turn). Curved roads are sampled at whole multiples of
+/// `STEP_M` from the segment's start, so the samples ahead of a moving car
+/// stay put.
+fn trace_segment(world: &World, s: SegmentId, fwd: bool, from: f32, to: f32, off0: f32, off1: f32, out: &mut Vec<[f32; 2]>) {
+    let Some(seg) = world.roads.segments.get(s) else {
+        return;
+    };
+    let (from, to) = (from.clamp(0.0, seg.length), to.clamp(0.0, seg.length));
+    if to < from {
+        return;
+    }
+    let change_end = (to - (LANE_CHANGE_BEFORE_M - LANE_CHANGE_M)).max(from);
+    let change_start = (change_end - LANE_CHANGE_M).max(from);
+    let offset = |d: f32| {
+        if (off1 - off0).abs() < 0.01 {
+            off0
+        } else if change_end - change_start < 0.5 {
+            if d >= change_end { off1 } else { off0 }
+        } else {
+            off0 + (off1 - off0) * smoothstep((d - change_start) / (change_end - change_start))
+        }
+    };
+    let mut ds = vec![from, to];
+    if !seg.curve.is_straight() {
+        let mut d = (from / STEP_M).floor() * STEP_M + STEP_M;
+        while d < to {
+            ds.push(d);
+            d += STEP_M;
+        }
+    }
+    if (off1 - off0).abs() >= 0.01 {
+        let mut d = change_start;
+        while d < change_end {
+            ds.push(d);
+            d += 2.0;
+        }
+        ds.push(change_end);
+    }
+    ds.sort_by(f32::total_cmp);
+    ds.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+    for d in ds {
+        if d < from - 1e-3 || d > to + 1e-3 {
+            continue;
+        }
+        push(out, seg.pose_dir(fwd, d, offset(d)).pos);
+    }
+}
+
+/// Lane offset (metres right of the centre line) of lane `lane` on `s`.
+fn lane_off(world: &World, s: SegmentId, lane: f32) -> f32 {
+    let Some(seg) = world.roads.segments.get(s) else {
+        return 0.0;
+    };
+    let l = lane.round().clamp(0.0, (seg.lane_count().max(1) - 1) as f32) as u8;
+    seg.kind.lane_offset_m(l)
+}
+
+/// From `seg` (driven `fwd`, `progress` metres along, `off` metres right of
+/// the centre line, in lane `lane`) along `route` to `end`.
+#[allow(clippy::too_many_arguments)]
+fn trace_route(
+    world: &World,
+    mut seg_id: SegmentId,
+    mut fwd: bool,
+    mut progress: f32,
+    mut off: f32,
+    mut lane: u8,
+    route: &[SegmentId],
+    end: Option<Access>,
+    out: &mut Vec<[f32; 2]>,
+) {
+    for i in 0..=route.len() {
+        let Some(seg) = world.roads.segments.get(seg_id) else {
+            return;
+        };
+        let len = seg.length;
+        let node = if fwd { seg.b } else { seg.a };
+        let Some(&to) = route.get(i) else {
+            // The last segment: up to where the car stops.
+            let stop = end
+                .filter(|a| a.segment == seg_id)
+                .map_or(len, |a| if fwd { a.from_a } else { len - a.from_a });
+            trace_segment(world, seg_id, fwd, progress, stop.max(progress), off, off, out);
+            return;
+        };
+        let Some(next) = world.roads.segments.get(to) else {
+            trace_segment(world, seg_id, fwd, progress, len, off, off, out);
+            return;
+        };
+        let to_fwd = if next.a == node {
+            true
+        } else if next.b == node {
+            false
+        } else {
+            // Not joined: the route is stale (the car re-plans).
+            trace_segment(world, seg_id, fwd, progress, len, off, off, out);
+            return;
+        };
+        // The turn drivers take here from the lane nearest to this one.
+        let movement = world.traffic.junction_states.get(node).and_then(|j| {
+            let (a, b) = (j.arm_of(seg_id)?, j.arm_of(to)?);
+            j.movements_between(a, b)
+                .map(|(_, m)| m)
+                .min_by_key(|m| (!m.preferred, (m.from_lane as i32 - lane as i32).abs(), m.to_lane))
+        });
+        match movement {
+            Some(m) => {
+                let stop = len - junction::setback(world, node, seg_id);
+                let want = seg.kind.lane_offset_m(m.from_lane);
+                trace_segment(world, seg_id, fwd, progress, stop.max(progress), off, want, out);
+                for p in m.curve.flatten(0.2) {
+                    push(out, p);
+                }
+                lane = m.to_lane;
+                progress = junction::setback(world, node, to);
+            }
+            None => {
+                // A plain bend: the lanes run straight on.
+                trace_segment(world, seg_id, fwd, progress, len, off, off, out);
+                lane = lane.min(next.lane_count().saturating_sub(1));
+                progress = 0.0;
+            }
+        }
+        seg_id = to;
+        fwd = to_fwd;
+        off = lane_off(world, seg_id, lane as f32);
+    }
+}
+
+/// The way still ahead of a car, from its exact lane pose to where it will
+/// stop. `None` for a car not on the road.
+pub fn vehicle_path(world: &World, id: VehicleId) -> Option<Vec<[f32; 2]>> {
+    let v = world.vehicles.get(id)?;
+    let end = world.traffic.trips.get(id).and_then(|t| t.dest);
+    let mut out = Vec::with_capacity(64);
+    push(&mut out, drive::vehicle_pose(world, v).0);
+    match &v.junction {
+        Some(jm) => {
+            let m = world
+                .traffic
+                .junction_states
+                .get(jm.node)
+                .and_then(|j| j.movements.get(jm.movement as usize));
+            if let Some(m) = m {
+                let mut d = jm.distance;
+                while d < m.length {
+                    push(&mut out, m.pose_at(d).0);
+                    d += 1.0;
+                }
+                push(&mut out, m.pose_at(m.length).0);
+            }
+            let route = match v.route.first() {
+                Some(&s) if s == jm.to => &v.route[1..],
+                _ => &v.route[..],
+            };
+            let progress = junction::setback(world, jm.node, jm.to);
+            let off = lane_off(world, jm.to, jm.to_lane as f32);
+            trace_route(world, jm.to, jm.to_forward, progress, off, jm.to_lane, route, end, &mut out);
+        }
+        None => {
+            let s = v.segment?;
+            let seg = world.roads.segments.get(s)?;
+            let off = drive::lane_offset(seg.kind, v.lane, v.lane_shift);
+            trace_route(world, s, v.forward, v.progress, off, v.lane, &v.route, end, &mut out);
+        }
+    }
+    Some(out)
+}
+
+/// The way a car would take for a planned route, from where it pulls out.
+pub fn planned_path(world: &World, r: &PlannedRoute) -> Vec<[f32; 2]> {
+    let mut out = Vec::with_capacity(64);
+    let Some(seg) = world.roads.segments.get(r.start.segment) else {
+        return out;
+    };
+    let progress = if r.forward {
+        r.start.from_a
+    } else {
+        seg.length - r.start.from_a
+    };
+    let off = seg.kind.lane_offset_m(0);
+    trace_route(
+        world,
+        r.start.segment,
+        r.forward,
+        progress,
+        off,
+        0,
+        &r.segments,
+        Some(r.end),
+        &mut out,
+    );
+    out
+}
+
+/// What a selected person or car is up to, as a route.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trip {
+    pub state: RouteState,
+    pub points: Vec<[f32; 2]>,
+    pub origin: Option<RouteEnd>,
+    pub destination: Option<RouteEnd>,
+    /// The car on the road, if any.
+    pub vehicle: Option<VehicleId>,
+}
+
+fn building_end(world: &World, b: BuildingId) -> Option<RouteEnd> {
+    world.buildings.get(b).map(|bb| RouteEnd {
+        pos: bb.center(),
+        building: Some(b),
+    })
+}
+
+fn place_end(world: &World, p: Place, b: Option<BuildingId>) -> Option<RouteEnd> {
+    if let Some(e) = b.and_then(|b| building_end(world, b)) {
+        return Some(e);
+    }
+    match p {
+        Place::At(pos) => Some(RouteEnd { pos, building: None }),
+        Place::Entry => world
+            .roads
+            .entry
+            .and_then(|e| world.roads.nodes.get(e))
+            .map(|n| RouteEnd {
+                pos: n.pos,
+                building: None,
+            }),
+    }
+}
+
+/// A car's trip: its line, where it set off and where it goes.
+pub fn vehicle_trip(world: &World, id: VehicleId) -> Option<Trip> {
+    let t = world.traffic.trips.get(id)?;
+    Some(Trip {
+        state: RouteState::Driving,
+        points: vehicle_path(world, id)?,
+        origin: place_end(world, t.from, t.from_building),
+        destination: place_end(world, t.to, t.to_building),
+        vehicle: Some(id),
+    })
+}
+
+/// A planned trip between two buildings (`None` without a road route).
+fn planned_trip(world: &World, state: RouteState, from: BuildingId, to: BuildingId) -> Option<Trip> {
+    let r = inspect::planned_route(world, from, to)?;
+    Some(Trip {
+        state,
+        points: planned_path(world, &r),
+        origin: building_end(world, from),
+        destination: building_end(world, to),
+        vehicle: None,
+    })
+}
+
+/// A person's trip: the car they are in, a trip off the map, or the next
+/// trip they will make.
+pub fn person_trip(world: &World, id: CitizenId) -> Option<Trip> {
+    let p = inspect::plan(world, id)?;
+    if let Some(t) = p.trip {
+        if let Some(car) = t.vehicle.filter(|c| world.vehicles.contains_key(*c)) {
+            return vehicle_trip(world, car);
+        }
+        let from = t.from?;
+        return planned_trip(world, RouteState::Unseen, from, t.to).or_else(|| {
+            Some(Trip {
+                state: RouteState::Unseen,
+                points: Vec::new(),
+                origin: building_end(world, from),
+                destination: building_end(world, t.to),
+                vehicle: None,
+            })
+        });
+    }
+    let next = p.next.filter(|n| n.activity == Activity::Travelling)?;
+    let (from, to) = (p.inside?, next.place?);
+    if from == to {
+        return None;
+    }
+    planned_trip(world, RouteState::Planned, from, to)
+}
+
+/// "Going to ›": the camera moves to the destination (following stops;
+/// the selection and its route stay).
+fn jump_to_destination(
+    mut actions: MessageReader<UiAction>,
+    route: Res<RouteView>,
+    mut ui: ResMut<UiState>,
+    mut go: MessageWriter<CameraGoTo>,
+) {
+    for a in actions.read() {
+        if *a == UiAction::JumpToDestination
+            && let Some(d) = route.destination
+        {
+            ui.following = false;
+            go.write(CameraGoTo {
+                focus: d.pos,
+                distance: None,
+            });
+        }
+    }
+}
+
+/// What publishing remembers between frames.
+#[derive(Default)]
+struct Published {
+    target: Option<Target>,
+    age: f32,
+    /// The head point of the line last published.
+    head: Option<[f32; 2]>,
+}
+
+/// Seconds between re-traces of a car's line, and of a planned trip.
+const CAR_EVERY_S: f32 = 0.15;
+const PLAN_EVERY_S: f32 = 4.0;
+
+/// Keep `RouteView` on the selected person or car.
+fn publish_route(
+    time: Res<Time<Real>>,
+    sim: Res<SimWorld>,
+    view: Res<PeopleView>,
+    mut route: ResMut<RouteView>,
+    mut last: Local<Published>,
+) {
+    let target = view.current().filter(|t| matches!(t, Target::Person(_) | Target::Vehicle(_)));
+    let Some(target) = target else {
+        if route.state != RouteState::None || !route.points.is_empty() {
+            *route = RouteView::default();
+        }
+        last.target = None;
+        return;
+    };
+    last.age += time.delta_secs();
+    let fresh = last.target != Some(target) || sim.is_changed() && last.age > 10.0;
+    let every = if route.state == RouteState::Driving { CAR_EVERY_S } else { PLAN_EVERY_S };
+    if !fresh && last.age < every {
+        return;
+    }
+    last.age = 0.0;
+    last.target = Some(target);
+    let w = &sim.world;
+    let trip = match target {
+        Target::Person(c) => person_trip(w, c),
+        Target::Vehicle(v) => vehicle_trip(w, v),
+        Target::Place(_) => None,
+    };
+    let Some(trip) = trip else {
+        if *route != RouteView::default() {
+            *route = RouteView::default();
+        }
+        last.head = None;
+        return;
+    };
+    let new = RouteView {
+        state: trip.state,
+        points: trip.points,
+        origin: trip.origin,
+        destination: trip.destination,
+    };
+    // A moving car: publish again only once it is a few metres further on
+    // or anything else changed (the samples ahead of it stay put).
+    let same_rest = new.state == route.state
+        && new.origin == route.origin
+        && new.destination == route.destination
+        && new.points.len() == route.points.len()
+        && new.points.get(1..) == route.points.get(1..);
+    let head_moved = match (new.points.first(), last.head) {
+        (Some(&a), Some(b)) => dist(a, b) > REPUBLISH_M,
+        _ => true,
+    };
+    if same_rest && !head_moved {
+        return;
+    }
+    last.head = new.points.first().copied();
+    if *route != new {
+        *route = new;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lengths_add_up() {
+        assert_eq!(path_length(&[[0.0, 0.0], [3.0, 4.0], [3.0, 10.0]]), 11.0);
+        assert_eq!(path_length(&[]), 0.0);
+    }
+
+    #[test]
+    fn a_car_in_town_has_a_line_to_where_it_stops() {
+        let mut w = citysim_sim::World::new(3);
+        citysim_sim::scenarios::prebuilt(&mut w, |w| {
+            citysim_sim::scenarios::organic(w);
+        });
+        // Into the morning rush.
+        for _ in 0..citysim_sim::balance::TICKS_PER_DAY / 2 {
+            w.step();
+        }
+        let mut checked = 0;
+        let ids: Vec<VehicleId> = w.vehicles.keys().collect();
+        for id in ids {
+            let Some(t) = vehicle_trip(&w, id) else { continue };
+            let car = &w.vehicles[id];
+            assert!(!t.points.is_empty());
+            // It starts at the car.
+            assert!(dist(t.points[0], drive::vehicle_pose(&w, car).0) < 0.01);
+            // No jumps: the lanes and the turns join up.
+            for p in t.points.windows(2) {
+                assert!(dist(p[0], p[1]) < 30.0, "gap {:?}", p);
+            }
+            // It ends where the car will stop.
+            if let Some(dest) = w.traffic.trips[id].dest
+                && car.junction.is_none()
+                && !car.route.is_empty()
+            {
+                let seg = &w.roads.segments[dest.segment];
+                let stop = seg.curve.point_at(dest.from_a, 0.0);
+                assert!(dist(*t.points.last().unwrap(), stop) < 6.0);
+            }
+            checked += 1;
+        }
+        assert!(checked > 5, "only {checked} cars");
+    }
+}
