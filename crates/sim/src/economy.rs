@@ -89,6 +89,13 @@ pub struct DaySummary {
     /// saved by older versions). (Saved in the save file's extension block.)
     #[serde(skip)]
     pub budget: Budget,
+    /// What traffic cost the city that day (`Economy::last_day_traffic` as
+    /// booked at its midnight: commutes, time lost, business tax lost).
+    /// `None` for days booked by saves written before it was kept per day
+    /// (a save of that kind keeps it for its last day only). (Saved in the
+    /// save file's extension block.)
+    #[serde(skip)]
+    pub traffic: Option<TrafficLoss>,
 }
 
 /// How the city's finances stand, for the HUD.
@@ -460,6 +467,7 @@ pub(crate) fn end_of_day(world: &mut World) {
             .peak_congestion_yesterday
             .max(world.traffic.peak_congestion_today),
         budget: b,
+        traffic: Some(traffic),
     };
     e.history.push(summary);
     update_fiscal(world, b);

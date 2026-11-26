@@ -804,5 +804,6 @@ fn long_scripted_run_has_a_pinned_checksum() {
 }
 
 /// Moved by six-row zoning blocks and save format 7 (blocks and the save
-/// layout are part of the state).
-const PINNED_CHECKSUM: u64 = 0x6b38bbbdb21e8e03;
+/// layout are part of the state), then by extension block 5 (the traffic
+/// losses per booked day; the state itself was unchanged).
+const PINNED_CHECKSUM: u64 = 0xdce4ee73a136bade;
