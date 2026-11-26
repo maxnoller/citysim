@@ -1,6 +1,8 @@
-//! Context card next to the cursor: what the next click does and what it
-//! costs (red with the sim's reason when it is not possible); with Inspect,
-//! the hovered building, road or zoned lot with live numbers from the sim.
+//! The cursor readout: a small tag beside the cursor with what the next
+//! click does, what it costs and the snap that applied (red with the sim's
+//! reason when it is refused); with Inspect, the hovered building, road or
+//! car with live numbers. Also the card builders the side panel and the
+//! junction tray use (`inspect_card`, `junction_card`).
 
 use bevy::prelude::*;
 use bevy::ui::ComputedNode;
@@ -14,10 +16,11 @@ use citysim_sim::{
 use super::UiState;
 use super::format;
 use super::fsnap;
+use super::plate::{PlateAnim, PlateStyle};
 use super::readout::{self, Readout, Symbol, Tone};
 use super::theme::{self as t, UiFonts, icon};
 use super::tools::{ToolOptions, ToolState};
-use super::widgets::{approach, label, layout, number, zone_icon};
+use super::widgets::{approach, figure, label, layout, plate_node, zone_icon};
 use crate::shared::{
     ActiveTool, CONGESTION_BUSY, CONGESTION_JAM, GameSet, PointerOverUi, RoadChoice, RoadMode, SimWorld, ToolModes,
     ToolPreview, WorldHighlight, WorldTarget,
@@ -27,33 +30,28 @@ pub struct ContextPlugin;
 
 impl Plugin for ContextPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_card)
-            .add_systems(Update, (update_card, update_pinned).chain().in_set(GameSet::Render));
+        app.add_systems(Startup, spawn_tag)
+            .add_systems(Update, update_tag.in_set(GameSet::Render));
     }
 }
 
-/// Root of a card: 0 follows the cursor, 1 is pinned to the inspected
-/// object (`WorldHighlight::selected`).
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-struct CardRoot(u8);
+#[derive(Component)]
+struct TagRoot;
 
-/// Which card a part belongs to.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-struct CardOwner(u8);
+#[derive(Component)]
+struct TagPlate;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
-enum CardPart {
-    IconBox,
-    Icon,
+enum TagPart {
     Title,
-    /// One label / value row.
-    Row(usize),
-    RowLabel(usize),
-    RowValue(usize),
+    Price,
+    /// One small line under the title.
+    Line(usize),
     Hint,
-    Bar,
-    BarFill,
 }
+
+/// Lines the tag shows under its title.
+const TAG_LINES: usize = 4;
 
 /// Rows a card can show.
 pub const MAX_ROWS: usize = 8;
@@ -147,142 +145,6 @@ pub fn error_text(e: &CommandError) -> String {
     }
 }
 
-fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
-    let fonts = fonts.into_inner();
-    spawn_card_with(&mut commands, fonts, 0);
-    spawn_card_with(&mut commands, fonts, 1);
-}
-
-fn spawn_card_with(commands: &mut Commands, fonts: &UiFonts, which: u8) {
-    commands
-        .spawn((
-            Name::new("Context card"),
-            CardRoot(which),
-            layout(Node {
-                position_type: PositionType::Absolute,
-                min_width: px(190),
-                padding: UiRect::new(px(t::S3 + 2.0), px(t::S4 + 2.0), px(t::S3 + 1.0), px(t::S3 + 2.0)),
-                column_gap: px(t::S3 + 2.0),
-                align_items: AlignItems::Start,
-                border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(t::RADIUS_SM + 1.0)),
-                ..default()
-            }),
-            BackgroundColor(t::PANEL_RAISED),
-            BorderColor::all(t::PANEL_BORDER),
-            BoxShadow(vec![ShadowStyle {
-                color: t::alpha(Color::BLACK, 0.4),
-                x_offset: px(0),
-                y_offset: px(5),
-                spread_radius: px(0),
-                blur_radius: px(16),
-            }]),
-            // The cursor card draws over the pinned one.
-            GlobalZIndex(if which == 0 { 90 } else { 85 }),
-            UiTransform::default(),
-            Visibility::Hidden,
-        ))
-        .with_children(|card| {
-            card.spawn((
-                CardPart::IconBox,
-                CardOwner(which),
-                layout(Node {
-                    width: px(28),
-                    height: px(28),
-                    margin: UiRect::top(px(1)),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    border_radius: BorderRadius::all(px(t::RADIUS_SM)),
-                    flex_shrink: 0.0,
-                    ..default()
-                }),
-                BackgroundColor(t::alpha(t::ACCENT, 0.16)),
-            ))
-            .with_child((
-                super::widgets::icon(fonts, icon::ROAD, t::ICON_SM + 1.0, t::ACCENT),
-                CardPart::Icon,
-                CardOwner(which),
-            ));
-            card.spawn(layout(Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: px(1),
-                flex_grow: 1.0,
-                ..default()
-            }))
-            .with_children(|col| {
-                col.spawn((
-                    label(fonts, "", t::FONT_BODY, t::W_SEMIBOLD, t::TEXT),
-                    CardPart::Title,
-                    CardOwner(which),
-                    Node {
-                        margin: UiRect::bottom(px(1)),
-                        ..default()
-                    },
-                ));
-                for i in 0..MAX_ROWS {
-                    col.spawn((
-                        CardPart::Row(i),
-                        CardOwner(which),
-                        layout(Node {
-                            justify_content: JustifyContent::SpaceBetween,
-                            align_items: AlignItems::Baseline,
-                            column_gap: px(t::S5),
-                            display: Display::None,
-                            ..default()
-                        }),
-                    ))
-                    .with_children(|r| {
-                        r.spawn((
-                            label(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED),
-                            CardPart::RowLabel(i),
-                            CardOwner(which),
-                        ));
-                        r.spawn((
-                            number(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT),
-                            CardPart::RowValue(i),
-                            CardOwner(which),
-                        ));
-                    });
-                    if i == 0 {
-                        col.spawn((
-                            CardPart::Bar,
-                            CardOwner(which),
-                            layout(Node {
-                                height: px(4),
-                                width: percent(100),
-                                margin: UiRect::new(px(0), px(0), px(t::S2), px(t::S2 + 1.0)),
-                                border_radius: BorderRadius::all(px(2)),
-                                overflow: Overflow::clip(),
-                                ..default()
-                            }),
-                            BackgroundColor(t::WELL),
-                        ))
-                        .with_child((
-                            CardPart::BarFill,
-                            CardOwner(which),
-                            layout(Node {
-                                height: percent(100),
-                                width: percent(0),
-                                border_radius: BorderRadius::all(px(2)),
-                                ..default()
-                            }),
-                            BackgroundColor(t::ACCENT),
-                        ));
-                    }
-                }
-                col.spawn((
-                    label(fonts, "", t::FONT_CAPTION + 0.5, t::W_REGULAR, t::TEXT_MUTED),
-                    CardPart::Hint,
-                    CardOwner(which),
-                    Node {
-                        margin: UiRect::top(px(t::S1)),
-                        ..default()
-                    },
-                ));
-            });
-        });
-}
-
 /// Traffic band of a direction's `congestion_in`, as the overlay draws it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Band {
@@ -370,7 +232,7 @@ fn tone_color(t: Tone) -> Color {
     match t {
         Tone::Normal => t::TEXT,
         Tone::Muted => t::TEXT_MUTED,
-        Tone::Accent => t::ACCENT,
+        Tone::Accent => t::ACCENT_TEXT,
         Tone::Good => t::POSITIVE,
         Tone::Warn => t::WARNING,
         Tone::Bad => t::NEGATIVE,
@@ -906,59 +768,191 @@ pub fn hours_text(ticks: u64) -> String {
 /// `CONGESTION_JAM`).
 pub const JAM_CRAWL_MPS: f32 = 12.0 / 3.6;
 
+fn tag_style(refused: bool) -> PlateStyle {
+    if refused {
+        PlateStyle::fill(t::NEGATIVE_FILL_TOP, t::NEGATIVE_FILL_BOTTOM, t::NEGATIVE)
+    } else {
+        PlateStyle::fill(t::PLATE_BOTTOM, t::PLATE_BOTTOM, t::ACCENT)
+    }
+}
+
+fn spawn_tag(mut commands: Commands, fonts: Res<UiFonts>) {
+    let fonts = fonts.into_inner();
+    commands
+        .spawn((
+            Name::new("Cursor readout"),
+            TagRoot,
+            layout(Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            }),
+            GlobalZIndex(90),
+            UiTransform::default(),
+            Visibility::Hidden,
+        ))
+        .with_children(|r| {
+            r.spawn((
+                TagPlate,
+                plate_node(
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::new(px(12), px(14), px(5), px(7)),
+                        row_gap: px(2),
+                        max_width: px(420),
+                        ..default()
+                    },
+                    UiRect::left(px(4)),
+                    [0.0, 0.0, 9.0, 0.0],
+                ),
+                PlateAnim::new(tag_style(false)),
+                Pickable::IGNORE,
+            ))
+            .with_children(|p| {
+                p.spawn(layout(Node {
+                    align_items: AlignItems::Center,
+                    column_gap: px(10),
+                    ..default()
+                }))
+                .with_children(|top| {
+                    top.spawn((
+                        Text::new(""),
+                        fonts.text(13.0, t::W_SEMIBOLD),
+                        t::caps_spacing(13.0, 0.04),
+                        TextColor(t::TEXT),
+                        TextLayout::no_wrap(),
+                        Pickable::IGNORE,
+                        TagPart::Title,
+                    ));
+                    top.spawn((figure(fonts, "", 16.0, t::ACCENT_TEXT), TagPart::Price));
+                });
+                for i in 0..TAG_LINES {
+                    p.spawn((
+                        label(fonts, "", 12.0, t::W_MEDIUM, t::TEXT_MUTED),
+                        TagPart::Line(i),
+                        Node {
+                            display: Display::None,
+                            ..default()
+                        },
+                    ));
+                }
+                p.spawn((
+                    label(fonts, "", 11.0, t::W_MEDIUM, t::TEXT_FAINT),
+                    TagPart::Hint,
+                    Node {
+                        display: Display::None,
+                        margin: UiRect::top(px(1)),
+                        ..default()
+                    },
+                ));
+            });
+        });
+}
+
+/// What the tag shows: title, price, lines (text, colour), hint, refused.
+#[derive(Debug, Clone, PartialEq)]
+struct Tag {
+    title: String,
+    price: String,
+    lines: Vec<(String, Color)>,
+    hint: String,
+    refused: bool,
+}
+
+/// A card as a tag: the price row moves next to the title, short rows
+/// read as "label value", the rest as sentences.
+fn tag_of(card: &Card) -> Tag {
+    let mut price = String::new();
+    let mut lines = Vec::new();
+    let mut title = card.title.clone();
+    let mut measured = false;
+    for r in &card.rows {
+        // The road's length and tightest bend join the title, as in
+        // "Avenue · curve · 212 m · radius 64 m".
+        if r.label == "Length" {
+            title = format!("{title} · {}", r.value.split(" · ").next().unwrap_or_default());
+            measured = true;
+            continue;
+        }
+        if r.label == "Tightest bend" {
+            let rad = r.value.split(" · ").next().unwrap_or_default();
+            title = format!("{title} · {rad}");
+            if r.color != t::TEXT {
+                lines.push((r.value.clone(), r.color));
+            }
+            continue;
+        }
+        if r.label == "Price" && price.is_empty() && r.color != t::TEXT_MUTED {
+            price = r.value.split(" · ").next().unwrap_or_default().to_string();
+            if let Some(rest) = r.value.split_once(" · ") {
+                lines.push((rest.1.to_string(), t::TEXT_MUTED));
+            }
+            continue;
+        }
+        let text = if r.label.is_empty() {
+            r.value.clone()
+        } else {
+            format!("{} · {}", r.label, r.value)
+        };
+        let color = if r.color == t::TEXT { t::SLOT_INK } else { r.color };
+        lines.push((text, color));
+    }
+    // Refusals and snaps first: they matter most at the cursor.
+    lines.sort_by_key(|(_, c)| {
+        if *c == t::NEGATIVE {
+            0
+        } else if *c == t::ACCENT_TEXT {
+            1
+        } else {
+            2
+        }
+    });
+    lines.truncate(TAG_LINES);
+    Tag {
+        title,
+        price,
+        lines,
+        // How to use the tool, until there is something to measure.
+        hint: if measured { String::new() } else { card.hint.clone() },
+        refused: card.title_color == t::NEGATIVE,
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn update_card(
+fn update_tag(
     time: Res<Time<Real>>,
     tool: Res<ActiveTool>,
     (modes, kind): (Res<ToolModes>, Res<RoadChoice>),
     state: Res<ToolState>,
-    preview: Res<ToolPreview>,
-    opts: Res<ToolOptions>,
-    over_ui: Res<PointerOverUi>,
-    ui: Res<UiState>,
-    sim: Res<SimWorld>,
-    ui_scale: Res<UiScale>,
+    (preview, opts, over_ui, ui): (Res<ToolPreview>, Res<ToolOptions>, Res<PointerOverUi>, Res<UiState>),
+    (sim, ui_scale): (Res<SimWorld>, Res<UiScale>),
     window: Query<&Window, With<PrimaryWindow>>,
-    mut root: Query<
-        (
-            &mut Node,
-            &mut Visibility,
-            &ComputedNode,
-            &mut UiTransform,
-            &mut BorderColor,
-            &CardRoot,
-        ),
-        Without<CardPart>,
-    >,
-    mut parts: CardParts,
+    mut root: Query<(&mut Node, &mut Visibility, &mut UiTransform), With<TagRoot>>,
+    plate: Query<&ComputedNode, With<TagPlate>>,
+    mut plate_anim: Query<&mut PlateAnim, With<TagPlate>>,
+    mut parts: Query<(&TagPart, &mut Text, &mut TextColor, &mut Node), Without<TagRoot>>,
     highlight: Res<WorldHighlight>,
     mut slide: Local<f32>,
-    mut cache: Local<CardCache>,
+    mut cache: Local<TagCache>,
 ) {
-    let Some((mut node, mut vis, computed, mut tf, mut border, _)) = root.iter_mut().find(|r| *r.5 == CardRoot(0))
-    else {
+    let Ok((mut node, mut vis, mut tf)) = root.single_mut() else {
         return;
     };
     let cursor = window
         .single()
         .ok()
         .and_then(|w| w.cursor_position().map(|c| (c, Vec2::new(w.width(), w.height()))));
-    // Rebuild the card only when what it describes changed, and a few
-    // times a second for live numbers; texts are touched only on change.
-    // The pinned card already shows the inspected thing under the cursor.
-    let on_pinned = *tool == ActiveTool::Inspect
+    // The side panel already shows what is selected.
+    let on_selected = *tool == ActiveTool::Inspect
         && highlight.selected.is_some()
         && highlight.hovered.is_some()
         && highlight.selected == highlight.hovered;
-    // Over the interface the buttons' own tooltips speak (a path in
-    // progress keeps its corners; the card comes back over the map).
-    let hidden = ui.menu_open || over_ui.0 || on_pinned;
+    let hidden = ui.menu_open || over_ui.0 || on_selected;
     let key = (*tool, *modes, *kind, highlight.hovered.clone(), hidden, sim.generation);
     cache.age += time.delta_secs();
     if cache.key.as_ref() != Some(&key) || preview.is_changed() || state.is_changed() || cache.age >= CARD_REFRESH_S {
         cache.key = Some(key);
         cache.age = 0.0;
-        cache.card = if hidden {
+        cache.tag = if hidden {
             None
         } else {
             tool_card(
@@ -970,40 +964,70 @@ fn update_card(
                 &sim.world,
                 highlight.hovered.as_ref(),
             )
+            .map(|c| tag_of(&c))
         };
     }
-    let (Some(card), Some((cursor, win))) = (cache.card.clone(), cursor) else {
+    let (Some(tag), Some((cursor, win))) = (cache.tag.clone(), cursor) else {
         vis.set_if_neq(Visibility::Hidden);
         cache.shown = None;
         *slide = 0.0;
         return;
     };
-    if cache.shown.as_ref() != Some(&card) {
-        apply_card(&card, &mut parts, 0);
-        cache.shown = Some(card.clone());
+    if cache.shown.as_ref() != Some(&tag) {
+        if let Ok(mut a) = plate_anim.single_mut() {
+            let st = tag_style(tag.refused);
+            if a.style != st {
+                a.style = st;
+            }
+        }
+        for (part, mut text, mut color, mut n) in &mut parts {
+            let (v, c, show) = match *part {
+                TagPart::Title => (tag.title.clone(), if tag.refused { t::TEXT } else { t::TEXT }, true),
+                TagPart::Price => (
+                    tag.price.clone(),
+                    if tag.refused { t::NEGATIVE } else { t::ACCENT_TEXT },
+                    !tag.price.is_empty(),
+                ),
+                TagPart::Line(i) => match tag.lines.get(i) {
+                    Some((l, c)) => (
+                        l.clone(),
+                        if tag.refused && *c == t::NEGATIVE { t::TEXT } else { *c },
+                        true,
+                    ),
+                    None => (String::new(), t::TEXT_MUTED, false),
+                },
+                TagPart::Hint => (tag.hint.clone(), t::TEXT_FAINT, !tag.hint.is_empty()),
+            };
+            if text.0 != v {
+                text.0 = v;
+            }
+            color.set_if_neq(TextColor(c));
+            let d = if show { Display::Flex } else { Display::None };
+            if n.display != d {
+                n.display = d;
+            }
+        }
+        cache.shown = Some(tag.clone());
     }
-    let invalid = card.title_color == t::NEGATIVE;
-    border.set_if_neq(BorderColor::all(if invalid {
-        t::alpha(t::NEGATIVE, 0.55)
-    } else {
-        t::PANEL_BORDER
-    }));
-    // Place beside the cursor, flipping to stay inside the window.
+    // Beside the cursor, flipping to stay inside the window and clear of
+    // the bar and its tray.
     let scale = ui_scale.0.max(0.01);
     let cursor = cursor / scale;
     let screen = win / scale;
-    let size = computed.size * computed.inverse_scale_factor;
-    let off = Vec2::new(22.0, 22.0);
+    let size = plate
+        .single()
+        .map(|c| c.size * c.inverse_scale_factor)
+        .unwrap_or(Vec2::ZERO);
+    let off = Vec2::new(22.0, 20.0);
     let mut pos = cursor + off;
-    if pos.x + size.x > screen.x - t::EDGE {
+    if pos.x + size.x > screen.x - 8.0 {
         pos.x = cursor.x - off.x - size.x;
     }
-    // Keep clear of the toolbar and, for building tools, its options bar.
-    let options_bar = if *tool == ActiveTool::Inspect { 0.0 } else { 52.0 };
-    if pos.y + size.y > screen.y - t::EDGE - t::TOOL_BUTTON - 2.0 * t::EDGE - options_bar {
+    let tray = if *tool == ActiveTool::Inspect { 0.0 } else { t::TRAY_H };
+    if pos.y + size.y > screen.y - t::BAR_H - tray - 8.0 {
         pos.y = cursor.y - off.y * 0.6 - size.y;
     }
-    pos = pos.max(Vec2::splat(t::EDGE));
+    pos = pos.max(Vec2::new(8.0, 64.0));
     let (left, top) = (px(pos.x.round()), px(pos.y.round()));
     if node.left != left || node.top != top {
         node.left = left;
@@ -1023,193 +1047,18 @@ fn update_card(
 
 type CardKey = (ActiveTool, ToolModes, RoadChoice, Option<WorldTarget>, bool, u64);
 
-/// Card for a pinned target and the world point it hangs from (sim m).
-fn pinned_card(world: &World, target: &WorldTarget) -> Option<(Card, [f32; 2])> {
-    match target {
-        WorldTarget::Building(id) => {
-            let b = world.buildings.get(*id)?;
-            Some((building_card(world, *id, b)?, b.center()))
-        }
-        WorldTarget::Junction { node, pos } => Some((junction_card(world, *node)?, *pos)),
-        WorldTarget::Road(stretch) => {
-            let mid = *stretch.points.get(stretch.points.len() / 2)?;
-            Some((road_card(world, &stretch.segments)?, mid))
-        }
-        WorldTarget::Vehicle(v) => {
-            let veh = world.vehicles.get(*v)?;
-            let (pos, _) = citysim_sim::drive::vehicle_pose(world, veh);
-            Some((vehicle_card(world, *v)?, pos))
-        }
-    }
-}
-
-/// The inspected (clicked) building, road or junction keeps a card next to
-/// it, following it on screen, until Escape or a click elsewhere.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn update_pinned(
-    time: Res<Time<Real>>,
-    highlight: Res<WorldHighlight>,
-    tool: Res<ActiveTool>,
-    ui: Res<UiState>,
-    sim: Res<SimWorld>,
-    ui_scale: Res<UiScale>,
-    window: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform), With<crate::shared::WorldCamera>>,
-    mut root: Query<(&mut Node, &mut Visibility, &ComputedNode, &CardRoot), Without<CardPart>>,
-    mut parts: CardParts,
-    mut cache: Local<(f32, Option<Card>, Option<WorldTarget>)>,
-) {
-    let Some((mut node, mut vis, computed, _)) = root.iter_mut().find(|r| *r.3 == CardRoot(1)) else {
-        return;
-    };
-    // Buildings and cars open the people panel instead.
-    let target = highlight
-        .selected
-        .clone()
-        .filter(|t| matches!(t, WorldTarget::Road(_) | WorldTarget::Junction { .. }))
-        .filter(|_| !ui.menu_open && *tool == ActiveTool::Inspect);
-    let Some(target) = target else {
-        vis.set_if_neq(Visibility::Hidden);
-        cache.1 = None;
-        return;
-    };
-    cache.0 += time.delta_secs();
-    let Some((mut card, at)) = pinned_card(&sim.world, &target) else {
-        vis.set_if_neq(Visibility::Hidden);
-        return;
-    };
-    card.hint = "Pinned · Esc or click elsewhere to let go".into();
-    if cache.2.as_ref() != Some(&target) || cache.0 >= CARD_REFRESH_S || cache.1.is_none() {
-        cache.0 = 0.0;
-        cache.2 = Some(target);
-        if cache.1.as_ref() != Some(&card) {
-            apply_card(&card, &mut parts, 1);
-            cache.1 = Some(card);
-        }
-    }
-    let (Ok(win), Ok((cam, cam_tf))) = (window.single(), cameras.single()) else {
-        return;
-    };
-    let Ok(screen_pt) = cam.world_to_viewport(cam_tf, crate::shared::sim_to_world(at, 3.0)) else {
-        vis.set_if_neq(Visibility::Hidden);
-        return;
-    };
-    let scale = ui_scale.0.max(0.01);
-    let p = screen_pt / scale;
-    let screen = Vec2::new(win.width(), win.height()) / scale;
-    let size = computed.size * computed.inverse_scale_factor;
-    let mut pos = Vec2::new(p.x + 18.0, p.y - size.y - 18.0);
-    if pos.x + size.x > screen.x - t::EDGE {
-        pos.x = p.x - 18.0 - size.x;
-    }
-    let top = t::BELOW_TOP_BAR;
-    let bottom = screen.y - t::EDGE - t::TOOL_BUTTON - 3.0 * t::EDGE;
-    pos.y = pos.y.clamp(top, (bottom - size.y).max(top));
-    pos.x = pos.x.clamp(t::EDGE, (screen.x - t::EDGE - size.x).max(t::EDGE));
-    let (left, topv) = (px(pos.x.round()), px(pos.y.round()));
-    if node.left != left || node.top != topv {
-        node.left = left;
-        node.top = topv;
-    }
-    if size.x > 0.0 {
-        vis.set_if_neq(Visibility::Inherited);
-    }
-}
-
-/// Last card built by `update_card` and what it was built from.
+/// Last tag built by `update_tag` and what it was built from.
 #[derive(Default)]
-struct CardCache {
+struct TagCache {
     key: Option<CardKey>,
     age: f32,
-    card: Option<Card>,
-    /// Card currently written into the entities.
-    shown: Option<Card>,
+    tag: Option<Tag>,
+    /// Tag currently written into the entities.
+    shown: Option<Tag>,
 }
 
-/// Seconds between refreshes of the live numbers on a card.
+/// Seconds between refreshes of the live numbers on the tag.
 const CARD_REFRESH_S: f32 = 0.25;
-
-type CardParts<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static CardPart,
-        &'static CardOwner,
-        Option<&'static mut Text>,
-        Option<&'static mut TextColor>,
-        Option<&'static mut BackgroundColor>,
-        Option<&'static mut Node>,
-    ),
-    Without<CardRoot>,
->;
-
-fn apply_card(card: &Card, parts: &mut CardParts, owner: u8) {
-    for (part, of, text, color, bg, pnode) in parts.iter_mut() {
-        if of.0 != owner {
-            continue;
-        }
-        match *part {
-            CardPart::IconBox => {
-                if let Some(mut bg) = bg {
-                    bg.set_if_neq(BackgroundColor(t::alpha(card.color, 0.16)));
-                }
-            }
-            CardPart::Icon => set_text(text, color, card.glyph.to_string(), card.color),
-            CardPart::Title => set_text(text, color, card.title.clone(), card.title_color),
-            CardPart::Row(i) => set_display(pnode, i < card.rows.len()),
-            CardPart::RowLabel(i) => {
-                if let Some(r) = card.rows.get(i) {
-                    set_display(pnode, !r.label.is_empty());
-                    set_text(text, color, r.label.clone(), t::TEXT_MUTED);
-                }
-            }
-            CardPart::RowValue(i) => {
-                if let Some(r) = card.rows.get(i) {
-                    set_text(text, color, r.value.clone(), r.color);
-                }
-            }
-            CardPart::Hint => {
-                let show = !card.hint.is_empty();
-                set_text(text, color, card.hint.clone(), t::TEXT_FAINT);
-                set_display(pnode, show);
-            }
-            CardPart::Bar => set_display(pnode, card.bar.is_some() && !card.rows.is_empty()),
-            CardPart::BarFill => {
-                if let Some((f, c)) = card.bar {
-                    if let Some(mut bg) = bg {
-                        bg.set_if_neq(BackgroundColor(c));
-                    }
-                    if let Some(mut n) = pnode {
-                        let w = percent((f.clamp(0.0, 1.0) * 100.0).max(2.0));
-                        if n.width != w {
-                            n.width = w;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn set_text(text: Option<Mut<Text>>, color: Option<Mut<TextColor>>, s: String, c: Color) {
-    if let Some(mut text) = text
-        && text.0 != s
-    {
-        text.0 = s;
-    }
-    if let Some(mut color) = color {
-        color.set_if_neq(TextColor(c));
-    }
-}
-
-fn set_display(node: Option<Mut<Node>>, show: bool) {
-    if let Some(mut n) = node {
-        let d = if show { Display::Flex } else { Display::None };
-        if n.display != d {
-            n.display = d;
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

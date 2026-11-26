@@ -322,7 +322,7 @@ pub struct Link {
 }
 
 impl Link {
-    fn new(label: impl Into<String>, value: impl Into<String>, target: Target) -> Link {
+    pub fn new(label: impl Into<String>, value: impl Into<String>, target: Target) -> Link {
         Link {
             label: label.into(),
             value: value.into(),
@@ -352,19 +352,19 @@ pub struct Section {
 }
 
 impl Section {
-    fn new(title: impl Into<String>) -> Section {
+    pub fn new(title: impl Into<String>) -> Section {
         Section {
             title: title.into(),
             items: Vec::new(),
         }
     }
-    fn line(&mut self, label: impl Into<String>, value: impl Into<String>, tone: Tone) {
+    pub fn line(&mut self, label: impl Into<String>, value: impl Into<String>, tone: Tone) {
         self.items.push(Item::Line(Line::new(label, value, tone)));
     }
-    fn link(&mut self, label: impl Into<String>, value: impl Into<String>, target: Target) {
+    pub fn link(&mut self, label: impl Into<String>, value: impl Into<String>, target: Target) {
         self.items.push(Item::Link(Link::new(label, value, target)));
     }
-    fn bar(&mut self, label: impl Into<String>, value: impl Into<String>, share: f32) {
+    pub fn bar(&mut self, label: impl Into<String>, value: impl Into<String>, share: f32) {
         self.items.push(Item::Bar {
             label: label.into(),
             value: value.into(),
@@ -373,11 +373,44 @@ impl Section {
     }
 }
 
+/// What a sheet is about (the panel picks its icon and actions by it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SheetKind {
+    #[default]
+    Person,
+    Home,
+    Workplace,
+    Vehicle,
+    Road,
+    Junction,
+    City,
+}
+
+/// A trip in progress: what, how long to go, how far along, from and to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TripBar {
+    pub title: String,
+    /// Expected time still to go ("0:40", hours:minutes of game time).
+    pub left: String,
+    pub progress: f32,
+    pub from: String,
+    pub to: String,
+}
+
 /// What a people view shows: a heading and sections.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sheet {
+    pub kind: SheetKind,
     pub title: String,
+    /// The bold line beside the portrait ("Skilled job · Holm Offices").
+    pub headline: String,
     pub subtitle: String,
+    /// A trip in progress (person, car).
+    pub trip: Option<TripBar>,
+    /// The part of their happiness that is worst, when it hurts.
+    pub mood_reason: Option<String>,
+    /// Where the action buttons lead (home, work, the driver).
+    pub actions: Vec<Link>,
     /// The face of the person (person sheets).
     pub portrait: Option<Portrait>,
     /// Mood `0..=1` (person sheets).
@@ -483,14 +516,80 @@ fn journal_words(world: &World, e: LifeEvent) -> String {
     }
 }
 
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// "0:40": hours and minutes of game time.
+pub fn hours_minutes(ticks: u64) -> String {
+    let day = balance::TICKS_PER_DAY as u64;
+    let minutes = (ticks * 24 * 60 + day / 2) / day;
+    format!("{}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// The trip bar of a journey.
+fn trip_bar(world: &World, t: &inspect::TripView) -> TripBar {
+    let now = world.time.tick;
+    let how = match t.mode {
+        TravelMode::Driving => "Driving",
+        TravelMode::Passenger => "Riding",
+        TravelMode::NoCar => "Getting a lift",
+        TravelMode::Walking => "Walking",
+    };
+    let total = t.expected_tick.saturating_sub(t.departed_tick).max(1);
+    let done = now.saturating_sub(t.departed_tick);
+    TripBar {
+        title: format!("{how} {}", purpose_word(t.purpose)),
+        left: hours_minutes(t.expected_tick.saturating_sub(now)),
+        progress: (done as f32 / total as f32).clamp(0.0, 1.0),
+        from: t.from.map_or("The highway".into(), |b| building_name(world, b)),
+        to: building_name(world, t.to),
+    }
+}
+
 /// Everything about one person.
 pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
     let v = inspect::citizen(world, id)?;
     let c = v.citizen;
     let h = v.household;
+    let headline = match c.job {
+        Some(j) => format!(
+            "{} job · {}",
+            capitalise(tier_word(j.tier)),
+            building_name(world, j.workplace)
+        ),
+        None if c.retired => "Retired".into(),
+        None if c.homemaker => "Looks after the home".into(),
+        None if c.student() => "Student".into(),
+        None if c.job_seeker() => "Looking for work".into(),
+        None => capitalise(stage_word(c.stage)),
+    };
+    let mut actions = vec![Link::new("Home", building_name(world, v.home), Target::Place(v.home))];
+    if let Some(j) = c.job {
+        actions.push(Link::new(
+            "Work",
+            building_name(world, j.workplace),
+            Target::Place(j.workplace),
+        ));
+    }
+    let mood_reason = inspect::happiness_reasons(world, id).and_then(|rs| {
+        rs.iter()
+            .filter(|r| r.value < 0.6)
+            .min_by(|a, b| a.value.total_cmp(&b.value))
+            .map(|r| r.part.complaint().to_string())
+    });
     let mut s = Sheet {
+        kind: SheetKind::Person,
         title: name(world, id),
-        subtitle: format!("{} · {}", v.age_years(), stage_word(c.stage)),
+        headline,
+        subtitle: format!("Age {} · household of {}", v.age_years(), v.members.len()),
+        trip: v.trip.map(|t| trip_bar(world, &t)),
+        mood_reason,
+        actions,
         portrait: Some(portrait(c.seed, c.stage)),
         mood: Some(c.happiness.total),
         at: person_position(world, id),
@@ -631,7 +730,16 @@ pub fn place_sheet(world: &World, id: BuildingId) -> Option<Sheet> {
     let b = world.buildings.get(id)?;
     let v = inspect::building(world, id)?;
     let mut s = Sheet {
+        kind: if b.kind == Zone::Residential {
+            SheetKind::Home
+        } else {
+            SheetKind::Workplace
+        },
         title: building_name(world, id),
+        headline: match b.kind {
+            Zone::Residential => format!("{} households · {} residents", v.households.len(), v.occupied),
+            _ => format!("{} of {} jobs filled", v.occupied, v.capacity),
+        },
         subtitle: match b.kind {
             Zone::Residential => format!("Homes · level {}", b.level),
             Zone::Commercial => format!("Shops & offices · level {}", b.level),
@@ -763,7 +871,21 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
     let v = inspect::vehicle(world, id)?;
     let veh = world.vehicles.get(id)?;
     let truck = v.purpose == TripPurpose::Goods;
+    let driver_trip = v
+        .driver
+        .or(v.owner)
+        .and_then(|c| inspect::citizen(world, c))
+        .and_then(|cv| cv.trip)
+        .filter(|t| t.vehicle == Some(id));
+    let mut actions = Vec::new();
+    if let Some(d) = v.driver.or(v.owner) {
+        actions.push(Link::new("Driver", name(world, d), Target::Person(d)));
+    }
     let mut s = Sheet {
+        kind: SheetKind::Vehicle,
+        headline: format!("{} · {} aboard", purpose_title(v.purpose), v.occupants),
+        trip: driver_trip.map(|t| trip_bar(world, &t)),
+        actions,
         title: if truck {
             "Delivery truck".into()
         } else if let Some(d) = v.driver.or(v.owner) {
@@ -833,6 +955,7 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
 pub fn city_sheet(world: &World) -> Sheet {
     let st = &world.people.stats;
     let mut s = Sheet {
+        kind: SheetKind::City,
         title: "People".into(),
         subtitle: format!(
             "{} residents · {} households · {}",

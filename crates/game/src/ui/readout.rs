@@ -430,6 +430,184 @@ pub fn bulldoze(plan: &ToolPlan) -> Option<Readout> {
     })
 }
 
+/// One big figure of a build tray: caption, value, tone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Figure {
+    pub caption: &'static str,
+    pub value: String,
+    pub tone: Tone,
+}
+
+impl Figure {
+    fn new(caption: &'static str, value: impl Into<String>, tone: Tone) -> Figure {
+        Figure {
+            caption,
+            value: value.into(),
+            tone,
+        }
+    }
+}
+
+const DASH: &str = "\u{2014}";
+
+/// The three live figures of the road tray (length, tightest radius, cost;
+/// a grid's size and blocks; an upgrade's upkeep).
+pub fn road_figures(mode: RoadMode, plan: &ToolPlan) -> [Figure; 3] {
+    let refused = plan.error().is_some();
+    let cost_tone = if refused { Tone::Bad } else { Tone::Accent };
+    match &plan.pending {
+        Pending::Road { curves, kind, grid, .. } => {
+            let total: f32 = curves.iter().map(Curve::length).sum();
+            let cost = if refused {
+                (total as f64 * kind.cost_per_m()).round() as i64
+            } else {
+                plan.eval.cost
+            };
+            if let Some(g) = grid {
+                return [
+                    Figure::new(
+                        "Size",
+                        format!("{}x{}", g.width_m().round() as i64, g.depth_m().round() as i64),
+                        Tone::Normal,
+                    ),
+                    Figure::new("Blocks", format!("{}x{}", g.nu, g.nv.max(1)), Tone::Normal),
+                    Figure::new("Cost", format::money(cost), cost_tone),
+                ];
+            }
+            let radius = match tightest(curves) {
+                Some((_, _, r, _)) => {
+                    let tone = if r < kind.min_radius_m() {
+                        Tone::Bad
+                    } else {
+                        Tone::Normal
+                    };
+                    Figure::new("Radius", metres(r), tone)
+                }
+                None if total > 0.0 => Figure::new("Radius", "straight", Tone::Muted),
+                None => Figure::new("Radius", DASH, Tone::Muted),
+            };
+            [
+                Figure::new(
+                    "Length",
+                    if total > 0.0 { metres(total) } else { DASH.into() },
+                    Tone::Normal,
+                ),
+                radius,
+                Figure::new(
+                    "Cost",
+                    if total > 0.0 { format::money(cost) } else { DASH.into() },
+                    cost_tone,
+                ),
+            ]
+        }
+        Pending::Upgrade { ops, kind, .. } => {
+            let len: f32 = ops
+                .iter()
+                .filter_map(|o| match o {
+                    super::plan::Op::Kind(c, _) => Some(c.length()),
+                    _ => None,
+                })
+                .sum();
+            let up = (len as f64 * kind.upkeep_per_m()).round() as i64;
+            [
+                Figure::new(
+                    "Length",
+                    if len > 0.0 { metres(len) } else { DASH.into() },
+                    Tone::Normal,
+                ),
+                Figure::new(
+                    "Upkeep",
+                    if len > 0.0 {
+                        format!("{}/d", format::money(up))
+                    } else {
+                        DASH.into()
+                    },
+                    Tone::Normal,
+                ),
+                Figure::new(
+                    "Cost",
+                    if len > 0.0 {
+                        format::money(plan.eval.cost)
+                    } else {
+                        DASH.into()
+                    },
+                    cost_tone,
+                ),
+            ]
+        }
+        _ => {
+            let _ = mode;
+            [
+                Figure::new("Length", DASH, Tone::Muted),
+                Figure::new("Radius", DASH, Tone::Muted),
+                Figure::new("Cost", DASH, Tone::Muted),
+            ]
+        }
+    }
+}
+
+/// The zone tray's figures: cells, area, price.
+pub fn zone_figures(plan: &ToolPlan) -> [Figure; 3] {
+    let n = match &plan.pending {
+        Pending::Zone { .. } => plan.eval.zone_cells().len(),
+        _ => 0,
+    };
+    let cell = citysim_sim::CELL_SIZE * citysim_sim::CELL_SIZE;
+    [
+        Figure::new(
+            "Cells",
+            if n > 0 { format::group(n as u64) } else { DASH.into() },
+            Tone::Normal,
+        ),
+        Figure::new(
+            "Area",
+            if n > 0 {
+                format!("{} m²", format::group((n as f32 * cell) as u64))
+            } else {
+                DASH.into()
+            },
+            Tone::Normal,
+        ),
+        Figure::new("Cost", "Free", Tone::Good),
+    ]
+}
+
+/// The bulldozer tray's figures: road, buildings, cost.
+pub fn bulldoze_figures(plan: &ToolPlan) -> [Figure; 3] {
+    let (removed, houses) = match &plan.pending {
+        Pending::Bulldoze { .. } => (
+            plan.eval.removed().iter().map(|(c, _)| c.length()).sum::<f32>(),
+            plan.eval.buildings().len(),
+        ),
+        _ => (0.0, 0),
+    };
+    [
+        Figure::new(
+            "Road",
+            if removed > 0.0 { metres(removed) } else { DASH.into() },
+            Tone::Normal,
+        ),
+        Figure::new(
+            "Buildings",
+            if houses > 0 {
+                format::group(houses as u64)
+            } else {
+                DASH.into()
+            },
+            if houses > 0 { Tone::Warn } else { Tone::Normal },
+        ),
+        Figure::new(
+            "Cost",
+            if plan.eval.cost > 0 {
+                format::money(plan.eval.cost)
+            } else {
+                "Free".into()
+            },
+            Tone::Accent,
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

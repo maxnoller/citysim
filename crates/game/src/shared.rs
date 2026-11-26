@@ -493,8 +493,9 @@ pub struct WorldHighlight {
 pub struct DisplaySettings {
     /// Move the camera when the cursor touches a window edge.
     pub edge_scroll: bool,
-    /// Always mark zoned-but-empty lots, even without the zoning tool or
-    /// zones overlay (issue 9).
+    /// Mark zoned-but-empty lots always; when false (the default) gfx marks
+    /// them only while a zoning tool is active (the zones overlay shows them
+    /// anyway).
     pub lot_markers: bool,
 }
 
@@ -504,7 +505,7 @@ impl Default for DisplaySettings {
             // Off by default: in a window the cursor crosses the border
             // whenever it leaves the game.
             edge_scroll: false,
-            lot_markers: true,
+            lot_markers: false,
         }
     }
 }

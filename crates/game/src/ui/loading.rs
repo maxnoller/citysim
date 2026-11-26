@@ -5,7 +5,7 @@
 use bevy::prelude::*;
 
 use super::theme::{self as t, UiFonts};
-use super::widgets::{label, layout};
+use super::widgets::layout;
 use crate::shared::{GameSet, SceneReady};
 
 pub struct LoadingPlugin;
@@ -28,8 +28,8 @@ struct LoadingBar;
 #[derive(Component)]
 struct LoadingFade(Color);
 
-/// Daytime sky behind the card (the scene fades in under it).
-const SKY: Color = Color::srgb(0.53, 0.71, 0.87);
+/// Behind the plate (the scene fades in under it).
+const SKY: Color = Color::srgb(0.075, 0.083, 0.098);
 const FADE_S: f32 = 0.45;
 const TRACK_W: f32 = 220.0;
 const BAR_W: f32 = 70.0;
@@ -62,46 +62,56 @@ fn spawn_loading(mut commands: Commands, fonts: Res<UiFonts>, ready: Res<SceneRe
             root.spawn((
                 Node {
                     flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: px(t::S4),
-                    padding: UiRect::axes(px(40), px(28)),
-                    border_radius: BorderRadius::all(px(t::RADIUS + 4.0)),
+                    align_items: AlignItems::Start,
+                    row_gap: px(t::S3),
+                    padding: UiRect::new(px(40), px(48), px(30), px(30)),
+                    border: UiRect::new(px(4), px(0), px(t::LW), px(t::LW)),
                     ..default()
                 },
-                BackgroundColor(t::PANEL_RAISED),
-                LoadingFade(t::PANEL_RAISED),
+                BackgroundColor(t::PLATE_BOTTOM),
+                LoadingFade(t::PLATE_BOTTOM),
+                BorderColor::all(t::LINE),
             ))
             .with_children(|card| {
-                card.spawn((label(fonts, "CitySim", 30.0, t::W_BOLD, t::TEXT), LoadingFade(t::TEXT)));
                 card.spawn((
-                    label(
-                        fonts,
-                        "Laying out the town\u{2026}",
-                        t::FONT_LABEL,
-                        t::W_MEDIUM,
-                        t::TEXT_MUTED,
-                    ),
+                    layout(Node {
+                        width: px(34),
+                        height: px(4),
+                        margin: UiRect::bottom(px(6)),
+                        ..default()
+                    }),
+                    BackgroundColor(t::ACCENT),
+                    LoadingFade(t::ACCENT),
+                ));
+                card.spawn((
+                    Text::new("CITYSIM"),
+                    fonts.figures(44.0, t::W_BOLD),
+                    t::caps_spacing(44.0, 0.16),
+                    TextColor(t::TEXT),
+                    LoadingFade(t::TEXT),
+                ));
+                card.spawn((
+                    super::widgets::caps(fonts, "Laying out the town\u{2026}", t::FONT_CAP, t::TEXT_MUTED),
                     LoadingFade(t::TEXT_MUTED),
                 ));
                 card.spawn((
                     layout(Node {
                         width: px(TRACK_W),
-                        height: px(4),
-                        border_radius: BorderRadius::all(px(2)),
+                        height: px(5),
+                        margin: UiRect::top(px(10)),
                         overflow: Overflow::clip(),
                         ..default()
                     }),
-                    BackgroundColor(t::WELL),
-                    LoadingFade(t::WELL),
+                    BackgroundColor(t::LINE),
+                    LoadingFade(t::LINE),
                 ))
                 .with_children(|track| {
                     track.spawn((
                         layout(Node {
                             position_type: PositionType::Absolute,
                             width: px(BAR_W),
-                            height: px(4),
+                            height: px(5),
                             left: px(0),
-                            border_radius: BorderRadius::all(px(2)),
                             ..default()
                         }),
                         BackgroundColor(t::ACCENT),

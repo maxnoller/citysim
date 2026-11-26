@@ -75,6 +75,8 @@ pub struct ToolOptions {
     pub parallel: usize,
     /// Frontage zoning depth in cells (1..=`balance::BLOCK_DEPTH`).
     pub zone_depth: u8,
+    /// What a click with the junction tool sets (None: the next setting).
+    pub junction_brush: Option<JunctionSetting>,
 }
 
 impl Default for ToolOptions {
@@ -84,6 +86,7 @@ impl Default for ToolOptions {
             block: 1,
             parallel: 2,
             zone_depth: balance::BLOCK_DEPTH,
+            junction_brush: None,
         }
     }
 }
@@ -285,6 +288,11 @@ pub struct ToolState {
 }
 
 impl ToolState {
+    /// Something can be taken back with Ctrl+Z.
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
     pub fn busy(&self) -> bool {
         !self.draft.is_empty() || self.press.is_some()
     }
@@ -1164,7 +1172,9 @@ fn use_tool(
                 let setting = citysim_sim::junction::junction(&sim.world, node)
                     .map(|j| j.setting)
                     .unwrap_or_default();
-                let next = super::context::next_setting(setting);
+                let next = opts
+                    .junction_brush
+                    .unwrap_or_else(|| super::context::next_setting(setting));
                 let cmd = Command::SetNodeControl { node, control: next };
                 match sim.world.preview(&cmd) {
                     Ok(p) => {

@@ -1,12 +1,13 @@
-//! Toasts: short stacked messages under the top-right speed controls that
-//! slide in and auto-dismiss. Rejected commands become error toasts.
+//! Toasts: short messages docked to the left edge under the city plate,
+//! sliding in from the edge and away again. (Refused commands go to the
+//! alert ribbon, `top.rs`.)
 
 use bevy::prelude::*;
 
-use super::context::error_text;
+use super::plate::{PlateCache, PlateMaterial, PlateStyle};
 use super::theme::{self as t, UiFonts, icon};
-use super::widgets::{approach, label, layout, panel};
-use crate::shared::{GameSet, LastCommand};
+use super::widgets::{approach, label, layout, plate_node, plate_shadow};
+use crate::shared::GameSet;
 
 pub struct ToastsPlugin;
 
@@ -14,12 +15,7 @@ impl Plugin for ToastsPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<Toast>()
             .add_systems(Startup, spawn_stack)
-            .add_systems(
-                Update,
-                (command_toasts, spawn_toasts, animate_toasts)
-                    .chain()
-                    .in_set(GameSet::Render),
-            );
+            .add_systems(Update, (spawn_toasts, animate_toasts).chain().in_set(GameSet::Render));
     }
 }
 
@@ -68,11 +64,11 @@ fn spawn_stack(mut commands: Commands) {
         ToastStack,
         layout(Node {
             position_type: PositionType::Absolute,
-            top: px(t::BELOW_TOP_BAR),
-            right: px(t::EDGE),
+            top: px(72),
+            left: px(0),
             flex_direction: FlexDirection::Column,
-            align_items: AlignItems::End,
-            row_gap: px(t::S3),
+            align_items: AlignItems::Start,
+            row_gap: px(t::S2 + 2.0),
             ..default()
         }),
         GlobalZIndex(300),
@@ -82,26 +78,17 @@ fn spawn_stack(mut commands: Commands) {
 fn kind_style(kind: ToastKind) -> (char, Color) {
     match kind {
         ToastKind::Success => (icon::CHECK_CIRCLE, t::POSITIVE),
-        ToastKind::Info => (icon::INFO, t::ACCENT),
+        ToastKind::Info => (icon::INFO, t::ACCENT_TEXT),
         ToastKind::Warning => (icon::ALERT, t::WARNING),
         ToastKind::Error => (icon::ERROR, t::NEGATIVE),
-    }
-}
-
-/// Every rejected command as a toast in the sim's own terms (the tools
-/// check their plans first and say themselves when a plan changes nothing).
-fn command_toasts(last: Res<LastCommand>, mut out: MessageWriter<Toast>) {
-    if !last.is_changed() {
-        return;
-    }
-    if let Some((_, Err(e))) = &last.result {
-        out.write(Toast::new(ToastKind::Error, error_text(e)));
     }
 }
 
 fn spawn_toasts(
     mut commands: Commands,
     fonts: Res<UiFonts>,
+    mut cache: ResMut<PlateCache>,
+    mut mats: ResMut<Assets<PlateMaterial>>,
     mut incoming: MessageReader<Toast>,
     stack: Query<Entity, With<ToastStack>>,
     mut items: Query<(Entity, &mut ToastItem)>,
@@ -120,6 +107,7 @@ fn spawn_toasts(
         }
         let (glyph, color) = kind_style(toast.kind);
         let life = if toast.kind == ToastKind::Error { 4.5 } else { 3.2 };
+        let mat = cache.get(&mut mats, PlateStyle::PANEL.slanted([0.0, 0.0, 0.0, 0.5]));
         commands.entity(stack).with_children(|s| {
             s.spawn((
                 ToastItem {
@@ -129,18 +117,33 @@ fn spawn_toasts(
                     t: 0.0,
                     closing: false,
                 },
-                panel(Node {
-                    padding: UiRect::new(px(t::S4), px(t::S5), px(t::S3 + 2.0), px(t::S3 + 2.0)),
-                    align_items: AlignItems::Center,
-                    column_gap: px(t::S3 + 2.0),
-                    ..default()
-                }),
-                UiTransform::from_translation(Val2::px(40.0, 0.0)),
+                plate_node(
+                    Node {
+                        height: px(38),
+                        padding: UiRect::new(px(0), px(34), px(0), px(0)),
+                        align_items: AlignItems::Center,
+                        column_gap: px(10),
+                        ..default()
+                    },
+                    UiRect::new(px(0), px(t::LW), px(t::LW), px(t::LW)),
+                    [0.0; 4],
+                ),
+                mat,
+                plate_shadow(),
+                UiTransform::from_translation(Val2::px(-60.0, 0.0)),
             ))
-            .insert(BorderColor::all(t::alpha(color, 0.35)))
             .with_children(|row| {
-                row.spawn(super::widgets::icon(&fonts, glyph, t::ICON_MD, color));
-                row.spawn(label(&fonts, toast.text.clone(), t::FONT_BODY, t::W_MEDIUM, t::TEXT));
+                row.spawn((
+                    layout(Node {
+                        width: px(5),
+                        height: percent(100),
+                        margin: UiRect::right(px(10)),
+                        ..default()
+                    }),
+                    BackgroundColor(color),
+                ));
+                row.spawn(super::widgets::icon(&fonts, glyph, t::ICON_SM + 1.0, color));
+                row.spawn(label(&fonts, toast.text.clone(), t::FONT_BODY, t::W_SEMIBOLD, t::TEXT));
             });
         });
     }
@@ -169,9 +172,8 @@ fn animate_toasts(
             item.t += (1.0 - item.t) * approach(dt, 0.07);
         }
         let s = item.t.clamp(0.0, 1.0);
-        // Ease: enter from the right, leave to the right.
-        let x = (1.0 - s) * if item.closing { 420.0 } else { 40.0 };
+        // Slide out of the left edge and back into it.
+        let x = -(1.0 - s) * if item.closing { 480.0 } else { 60.0 };
         tf.translation = Val2::px(x, 0.0);
-        tf.scale = Vec2::splat(0.96 + 0.04 * s);
     }
 }

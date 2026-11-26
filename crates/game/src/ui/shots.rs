@@ -17,12 +17,12 @@ use bevy::window::PrimaryWindow;
 use citysim_sim::curve::right_of;
 use citysim_sim::{Building, BuildingId, Command, Curve, LatticeId, RoadKind, Zone};
 
-use super::UiState;
 use super::fsnap::{dist, rotate};
 use super::shapes::{Draft, Shape};
 use super::toasts::{Toast, ToastKind};
 use super::tools::{Press, ToolState};
 use super::widgets::{UiAction, UiButton};
+use super::{InfoTray, UiState};
 use crate::shared::{
     ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, RoadChoice, RoadMode, SimClock,
     SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
@@ -175,15 +175,16 @@ fn reset(world: &mut World) {
     *world.resource_mut::<RoadChoice>() = RoadChoice::Street;
     world.resource_mut::<WorldHighlight>().selected = None;
     let mut ui = world.resource_mut::<UiState>();
-    ui.budget_open = false;
+    ui.tray = None;
     ui.hint_visible = false;
     ui.menu_open = false;
     ui.settings_open = false;
-    ui.city_people_open = false;
+    ui.keys_open = false;
     ui.following = false;
     world.write_message(UiAction::ClosePeople);
     world.write_message(UiAction::StopFollow);
     world.resource_mut::<SimClock>().paused = false;
+    world.resource_mut::<super::top::PinnedAlert>().0 = None;
     *world.resource_mut::<Pointer>() = Pointer::default();
 }
 
@@ -309,12 +310,119 @@ fn press(w: &mut World, at: [f32; 2]) {
     p.hold = true;
 }
 
+/// The owner's chosen mockup in the real game: a curved avenue being
+/// drawn while a driving resident is shown in the side panel.
+fn mockup(w: &mut World) {
+    reset(w);
+    // A driver near open land, so the road being drawn has room.
+    let spot = open_land(w, 45.0).unwrap_or_else(|| town_focus(w));
+    let s = sim(w);
+    let who = s
+        .citizens
+        .iter()
+        .filter_map(|(id, c)| match &c.location {
+            citysim_sim::citizens::Location::Travelling(j)
+                if c.job.is_some() && j.vehicle.is_some_and(|v| s.vehicles.contains_key(v)) =>
+            {
+                let at = super::people::person_position(s, id)?;
+                Some((dist(at, spot), id, at))
+            }
+            _ => None,
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    let focus = match who {
+        Some((_, id, at)) => {
+            w.write_message(UiAction::Person(id));
+            at
+        }
+        None => spot,
+    };
+    *w.resource_mut::<RoadChoice>() = RoadChoice::Avenue;
+    // Screen axes of the shot camera (yaw 0.35): right and down, sim metres.
+    let (s35, c35) = 0.35f32.sin_cos();
+    let right = [c35, -s35];
+    let down = [s35, c35];
+    let at = |x: f32, y: f32| add(add(focus, right, x), down, y);
+    // A curve across the open land, left of the side panel and above the
+    // tray, ending at the cursor.
+    let rel = |p: [f32; 2]| {
+        let d = [p[0] - focus[0], p[1] - focus[1]];
+        (d[0] * right[0] + d[1] * right[1], d[0] * down[0] + d[1] * down[1])
+    };
+    let (sx, sy) = rel(spot);
+    let a = at(sx - 40.0, sy - 10.0);
+    let corner = at(sx + 5.0, sy - 12.0);
+    drawing(w, RoadMode::Curve, Shape::Curve, &[a, corner], &[]);
+    point(w, Some(at(sx + 22.0, sy + 18.0)));
+    // The car right of the middle of the screen, held still; the ribbon
+    // says what the hour is like (the clock is paused for the picture).
+    look(w, at(sx - 22.0, sy - 16.0), 190.0);
+    w.resource_mut::<SimClock>().paused = true;
+    let rush = super::top::Alert {
+        kind: super::top::AlertKind::Warning,
+        text: "Evening rush is building on the avenue".into(),
+    };
+    w.resource_mut::<super::top::PinnedAlert>().0 = Some(rush);
+}
+
 fn steps() -> Vec<Step> {
     vec![
         Step {
             name: "idle",
             wait: 6.0,
             setup: reset,
+        },
+        Step {
+            name: "mockup",
+            wait: 2.0,
+            setup: mockup,
+        },
+        Step {
+            name: "maps",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<OverlayMode>() = OverlayMode::Traffic;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Maps);
+            },
+        },
+        Step {
+            name: "stats",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Stats);
+            },
+        },
+        Step {
+            name: "keys",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::OpenMenu);
+                w.write_message(UiAction::Keys);
+            },
+        },
+        Step {
+            name: "inspect-junction",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                let s = sim(w);
+                let f = town_focus(w);
+                let node = s
+                    .roads
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| n.segments.len() >= 3)
+                    .min_by(|a, b| dist(a.1.pos, f).total_cmp(&dist(b.1.pos, f)))
+                    .map(|(id, n)| (id, n.pos));
+                if let Some((node, pos)) = node {
+                    w.resource_mut::<WorldHighlight>().selected =
+                        Some(crate::shared::WorldTarget::Junction { node, pos });
+                    look(w, pos, 160.0);
+                }
+            },
         },
         Step {
             name: "inspect-home",
@@ -752,7 +860,7 @@ fn steps() -> Vec<Step> {
                 f.service_level = 0.55;
                 f.days_in_debt = 4;
                 f.left_last_night = 23;
-                w.resource_mut::<UiState>().budget_open = true;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
             },
         },
         Step {
@@ -779,7 +887,7 @@ fn steps() -> Vec<Step> {
             wait: 1.0,
             setup: |w| {
                 reset(w);
-                w.resource_mut::<UiState>().budget_open = true;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
             },
         },
         Step {
@@ -807,7 +915,7 @@ fn steps() -> Vec<Step> {
                     fresh.step();
                 }
                 w.resource_mut::<SimWorld>().replace(fresh);
-                w.resource_mut::<UiState>().budget_open = true;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
             },
         },
         Step {
@@ -862,7 +970,7 @@ fn steps() -> Vec<Step> {
             wait: 3.0,
             setup: |w| {
                 reset(w);
-                w.resource_mut::<UiState>().budget_open = true;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
                 *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
                 w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::ToggleBudget);
                 if let Ok(mut win) = w.query_filtered::<&mut Window, With<PrimaryWindow>>().single_mut(w) {
