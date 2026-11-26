@@ -230,6 +230,20 @@ fn a_restore_says_why_the_lot_has_changed() {
         ),
         "{e:?}"
     );
+    // A world whose derived indices were never built (just loaded, or the
+    // interface's scratch copy) agrees.
+    let mut l = World::load(&w.save()).expect("load");
+    restore(&mut l, &rec).expect("restorable in a loaded world");
+    let mut s = World::new(w.seed);
+    s.roads = w.roads.clone();
+    s.zoning = w.zoning.clone();
+    s.buildings = w.buildings.clone();
+    s.growth = w.growth.clone();
+    s.economy = w.economy.clone();
+    s.versions = w.versions.clone();
+    s.versions.roads += 1;
+    let cmd = Command::RestoreBuilding(Box::new(rec.clone()));
+    assert!(s.preview(&cmd).is_ok(), "restorable in a copy of the roads and land");
     // Nothing changed by the refusals.
     let mut y = w.clone();
     let id = restore(&mut y, &rec).expect("still restorable here");

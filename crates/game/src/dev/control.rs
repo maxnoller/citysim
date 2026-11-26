@@ -31,6 +31,8 @@
 //! * `find-car [MIN]` — window position (logical px) of a slow car (easy to
 //!   click) near the middle of the screen with at least MIN metres (300)
 //!   still to go.
+//! * `find-building` — window position (logical px) of the fullest home on
+//!   screen and its residents: `X Y N`.
 //! * `node PREFIX` — window position (logical px) of the first visible UI
 //!   node whose `Name` starts with PREFIX: `X Y` (people-panel links are
 //!   named "Person link", "Place link", "Vehicle link", "Follow").
@@ -622,6 +624,28 @@ fn run(
                 .min_by(|a, b| a.distance(centre).total_cmp(&b.distance(centre)))
                 .ok_or("no car on screen with that far to go")?;
             ctl.reply(seq, true, &format!("{:.0} {:.0}", hit.x, hit.y));
+        }
+        "find-building" => {
+            // The fullest residential building on screen (clear of the bar
+            // and the side panel): window position and residents.
+            let w = &cx.sim.world;
+            let win = cx.window.single().map_err(|_| "no window".to_string())?;
+            let (cam, tf) = cx.cams.single().map_err(|_| "no camera".to_string())?;
+            let size = Vec2::new(win.width(), win.height());
+            let hit = w
+                .buildings
+                .iter()
+                .filter(|(_, b)| b.kind == citysim_sim::Zone::Residential && b.occupied > 0)
+                .filter_map(|(_, b)| {
+                    let p = cam
+                        .world_to_viewport(tf, crate::shared::sim_to_world(b.center(), 2.0))
+                        .ok()?;
+                    let inside = p.x > 120.0 && p.x < size.x - 460.0 && p.y > 110.0 && p.y < size.y - 170.0;
+                    inside.then_some((p, b.occupied))
+                })
+                .max_by_key(|(_, n)| *n)
+                .ok_or("no lived-in home on screen")?;
+            ctl.reply(seq, true, &format!("{:.0} {:.0} {}", hit.0.x, hit.0.y, hit.1));
         }
         "node" => {
             let prefix = args.join(" ");

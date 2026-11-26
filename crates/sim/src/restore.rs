@@ -216,10 +216,46 @@ pub(crate) fn plan(world: &World, rec: &BuildingRecord) -> Result<Footprint, Res
     if let Some(p) = problem {
         return Err(p);
     }
-    if !crate::growth::has_frontage(world, &fp, b.facing) || !crate::growth::footprint_connected(world, fp) {
+    if !crate::growth::has_frontage(world, &fp, b.facing) || !connected(world, &fp) {
         return Err(RestoreProblem::NoRoad);
     }
     Ok(fp)
+}
+
+/// Is a cell of `fp` in a block whose road is connected to the highway
+/// entry? (Worked out from the roads, not the lazily built index, which a
+/// `&World` cannot bring up to date.)
+fn connected(world: &World, fp: &Footprint) -> bool {
+    let roads = &world.roads;
+    let Some(entry) = roads.entry.filter(|&e| roads.nodes.contains_key(e)) else {
+        return false;
+    };
+    let segs: Vec<crate::SegmentId> = world
+        .zoning
+        .blocks
+        .iter()
+        .filter(|bl| fp.cells().any(|c| bl.contains(c)))
+        .map(|bl| bl.segment)
+        .filter(|&s| roads.segments.contains_key(s))
+        .collect();
+    if segs.is_empty() {
+        return false;
+    }
+    let mut seen = std::collections::BTreeSet::from([entry]);
+    let mut stack = vec![entry];
+    while let Some(n) = stack.pop() {
+        for &s in &roads.nodes[n].segments {
+            if segs.contains(&s) {
+                return true;
+            }
+            let Some(seg) = roads.segments.get(s) else { continue };
+            let other = if seg.a == n { seg.b } else { seg.a };
+            if seen.insert(other) {
+                stack.push(other);
+            }
+        }
+    }
+    false
 }
 
 /// Put the building back on `fp` (from [`plan`]). Returns its new id.

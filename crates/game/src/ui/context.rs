@@ -142,6 +142,12 @@ pub fn error_text(e: &CommandError) -> String {
         CommandError::NoSuchRoad => "There's no road there".into(),
         CommandError::NotANode => "Not a junction: point at a crossing of three or more roads".into(),
         CommandError::TooManyArms { arms, .. } => format!("{arms} roads can't meet at one junction (6 at most)"),
+        CommandError::CannotRestore(p) => match p {
+            citysim_sim::RestoreProblem::LandChanged => "the land there has changed since".into(),
+            citysim_sim::RestoreProblem::BuiltOn => "another building stands there now".into(),
+            citysim_sim::RestoreProblem::Rezoned => "the lot isn't zoned for it any more".into(),
+            citysim_sim::RestoreProblem::NoRoad => "no road reaches the lot any more".into(),
+        },
     }
 }
 

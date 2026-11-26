@@ -383,8 +383,8 @@ fn title_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, title: &str, sub: 
                 Some(
                     Tooltip::new(
                         "Undo",
-                        "Take back the last road, zoning or demolition. Nothing is refunded; demolished buildings \
-                         don't come back.",
+                        "Take back the last road, zoning or demolition: demolished buildings come back with their \
+                         people. Rebuilt road is paid again.",
                     )
                     .key("Ctrl+Z"),
                 ),
