@@ -242,6 +242,22 @@ fn turn_speed(turn: Turn, exit_limit: f32) -> f32 {
     }
 }
 
+/// Seconds to cover `d` metres starting at `v` m/s, accelerating up to
+/// `vmax` (a car pulling away in a queue gets there sooner than its speed
+/// says).
+fn arrival_s(d: f32, v: f32, vmax: f32) -> f32 {
+    let d = d.max(0.0);
+    let a = balance::ACCELERATION;
+    let vmax = vmax.max(v).max(0.1);
+    let ta = (vmax - v) / a;
+    let da = (v + vmax) * 0.5 * ta;
+    if d <= da {
+        ((v * v + 2.0 * a * d).sqrt() - v) / a
+    } else {
+        ta + (d - da) / vmax
+    }
+}
+
 /// Speed factor of this driver (`1 ± DRIVER_SPEED_VARIATION`).
 fn driver(seed: u32) -> f32 {
     1.0 + balance::DRIVER_SPEED_VARIATION * ((seed % 1001) as f32 / 500.0 - 1.0)
@@ -502,11 +518,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             d_line,
             back: stop_back_m(is_truck(trip)),
             speed: v.speed,
-            eta: if v.speed > 0.5 {
-                d_line / v.speed
-            } else {
-                (2.0 * d_line / balance::ACCELERATION).sqrt()
-            },
+            eta: arrival_s(d_line, v.speed, seg.speed_limit),
             wait: trip.map_or(0, |t| t.wait_ticks),
             go_before: v.go,
             to: st.to,
