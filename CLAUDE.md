@@ -40,8 +40,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `CameraFollow`), `CameraFollow { focus }` (gfx keeps the focus there), `CameraGoTo` message (move / zoom once).
 - Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`, `zone_cell_corners`.
 - Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B (bulldozer on / off) J Esc/right-click, Space 1 2 3
-  4, O, T, G, F5/F9, F6 (keyboard into the city window or the open drawer: arrows, Enter, Esc), Tab (tool mode; city
-  window page), Alt, Enter, Backspace, [ ], Ctrl+Z, P, U, F, arrows + Enter in menus.
+  4, O, T, G, F5/F9, F3 (performance panel), F6 (keyboard into the city window or the open drawer: arrows, Enter, Esc),
+  Tab (tool mode; city window page), Alt, Enter, Backspace, [ ], Ctrl+Z, P, U, F, arrows + Enter in menus.
 - Tool feedback (ui writes with `set_if_neq`, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`
   (`RoadMode::{Straight, Curve, Continuous, Grid, Upgrade, Junction}`, `ZoneMode::{Paint, Frontage, Fill, Marquee}`,
   `BulldozeMode::{Road, Area}`), `SnapFeedback` (snapped point, `SnapTarget`, `Guide`s in sim metres, spacing),
@@ -52,12 +52,17 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells`.
 - `RouteView { state: RouteState::{None, Driving, Planned, Unseen}, points, origin, destination }` (ui writes while a
   car or person is selected, only when it changes meaningfully: a new route, the car 2.5 m further on; gfx draws it in
-  `gfx/route.rs`): `points` in sim metres along the lanes (lane offsets and junction turn paths included) from the car
+  `gfx/route.rs`): `points` in sim metres along the lanes (lane offsets, left-turn pockets and junction turn paths included) from the car
   (or the trip's start when `Planned` / `Unseen`) to where it stops; `RouteEnd { pos, building }` at both ends (gfx
   rings both, glows the destination building and floats a pin over it). Traced in `ui/route.rs`
   (`vehicle_path`, `planned_path`, `person_trip`).
 - `DisplaySettings { edge_scroll, lot_markers }`: edge panning (default off); empty zoned lots are marked only while
   zoning unless the player picks "Always" (persisted as `lot_markers_always`).
+- `PerfProbe { detail: PerfDetail::{Off, Small, Full}, render: Option<RenderStats> }`: ui writes `detail` (the
+  performance panel's size), gfx (`gfx/perf.rs`) fills `render` four times a second only while `Full` (GPU ms per
+  top-level pass, render-thread CPU ms, draw calls, main-pass triangles, mesh / car entities and how many are on
+  screen, the game's GPU memory, card / backend / driver). Closed, gfx measures nothing: Bevy's render-diagnostics
+  recorder is taken out of the render world while the graph runs.
 - `SceneReady(bool)`: gfx sets it once the render pipelines are built (`gfx/loading.rs`); ui shows a loading card until
   then, autoshot counts its delay from it.
 
@@ -81,9 +86,12 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   services }` with `income()`, `expenses()` (upkeep + services), `net()`; `economy::budget_now(world)` = today so far;
   `economy.history[i].budget` per finished day (`DaySummary`); cost breakdown `economy::running_costs(world)` /
   `economy.last_day_costs`. Shops and works pay tax on the shift time actually worked (`economy.attendance`).
-- Money: start 30,000, street 65 / avenue 140 per cell to build (`balance::ROAD_COST_PER_CELL`,
-  `AVENUE_COST_PER_CELL`; roads are priced by the metre), upkeep 4 / 10 per cell per day, $100 per signalled junction
-  per day, services per resident growing with size and density. Bulldozing is never refused for lack of money. Money
+- Money: start 30,000, street 65 / avenue 90 per cell to build (`balance::ROAD_COST_PER_CELL`,
+  `AVENUE_COST_PER_CELL`; roads are priced by the metre), upkeep 4 / 8 per cell per day, $80 per signalled junction
+  per day, services per resident growing with size and density. Business tax lost to traffic:
+  `economy.last_day_traffic` / `economy::traffic_loss_now(world)` (`TrafficLoss`; the commercial and industrial tax
+  lines are already net of it; the budget page shows it as its own line and, per day seen, as a chart). Why people
+  are jobless: `demand::jobs_view(world)` (`JobsView`, `JoblessReason::text()`; shown under the statistics tiles). Bulldozing is never refused for lack of money. Money
   may go negative.
 - People: individual citizens in households (`world.citizens`, `inspect::*`); every car trip is a car on the road up
   to `traffic::vehicle_budget` (125 per 1,000 residents), the rest happen off screen; commutes off screen take
@@ -130,7 +138,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `CITYSIM_BENCH_SIZE` (1920x1080) along a fixed camera path for `CITYSIM_BENCH_FRAMES` (1500) after
   `CITYSIM_BENCH_WARMUP` (240), sim running (`CITYSIM_BENCH_PAUSED=1` stops it), two GPU frames in flight; writes
   frame-time avg / median / p99 / worst 1 %, GPU ms per pass, triangles, entities, meshes, materials, draw calls, sim
-  step time. Use with a demo and `CITYSIM_GFX_QUALITY`; `CITYSIM_BENCH_SPEED=3` runs the sim at the top speed. Tail
+  step time. Use with a demo and `CITYSIM_GFX_QUALITY`; `CITYSIM_BENCH_SPEED=3` runs the sim at the top speed.
+  `CITYSIM_BENCH_UI=1` draws the interface into the image too (else there is no UI without a window; with
+  `CITYSIM_PERF=off|small|full` it measures the performance panel's cost); `CITYSIM_BENCH_GPU=0` leaves GPU pass timing
+  to the panel, as in a game (on only while it is full). Tail
   figures are only meaningful on a quiet machine (other builds double them).
 - `CITYSIM_RECORD=dir`: windowless video frames (`frame_00000.png`...) at `CITYSIM_RECORD_FPS` (30) with a fixed time
   step, camera on a Catmull-Rom path `CITYSIM_RECORD_PATH="t,x,z,yaw,pitch,dist;..."`; join with ffmpeg.
@@ -140,6 +151,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `CITYSIM_AUTOSHOT=out.png` (or `--autoshot`): screenshot then exit 0. `CITYSIM_SHOT_VIEW=wide|street|close`,
   `CITYSIM_SHOT_DELAY=25` (s, default 3), `CITYSIM_SHOT_OVERLAY=none|zones|traffic`. Without a demo it builds
   a small sample city. Example: `CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png CITYSIM_SHOT_DELAY=25 cargo run -p citysim`.
+- `CITYSIM_PERF=off|small|full`: the performance panel's starting size (over the saved one; for `CITYSIM_BENCH` runs
+  of its cost). `ui/perf.rs` measures frames, the game update, sim steps and the process (`sysinfo`, a worker
+  thread, once a second); its graph is a `UiMaterial` (`assets/ui/shaders/perf_graph.wesl`).
 - `CITYSIM_LOG_FPS=1` logs FPS (meaningless under Xvfb: use `CITYSIM_BENCH`). `CITYSIM_SEED=n`
   world seed (the `hierarchy` demo reaches 10,000 fastest with seed 3). `CITYSIM_CONFIG_DIR` overrides the settings
   folder (`settings.cfg`; not written during autoshot / UI shots).

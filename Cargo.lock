@@ -2173,6 +2173,7 @@ dependencies = [
  "bevy",
  "citysim_sim",
  "slotmap",
+ "sysinfo",
 ]
 
 [[package]]

@@ -39,6 +39,9 @@ enum Line {
     Residential,
     Commercial,
     Industrial,
+    /// Business tax lost to traffic (not collected; the commercial and
+    /// industrial lines are already net of it).
+    TrafficLost,
     Income,
     Upkeep,
     Services,
@@ -47,10 +50,11 @@ enum Line {
 }
 
 impl Line {
-    const ALL: [Line; 8] = [
+    const ALL: [Line; 9] = [
         Line::Residential,
         Line::Commercial,
         Line::Industrial,
+        Line::TrafficLost,
         Line::Income,
         Line::Upkeep,
         Line::Services,
@@ -63,6 +67,7 @@ impl Line {
             Line::Residential => "Residential tax",
             Line::Commercial => "Commercial tax",
             Line::Industrial => "Industrial tax",
+            Line::TrafficLost => "Business tax lost to traffic",
             Line::Income => "Income",
             Line::Upkeep => "Road upkeep",
             Line::Services => "City services",
@@ -77,6 +82,8 @@ impl Line {
             Line::Residential => b.residential_tax,
             Line::Commercial => b.commercial_tax,
             Line::Industrial => b.industrial_tax,
+            // Shown from `TrafficLoss`, never part of the totals.
+            Line::TrafficLost => 0,
             Line::Income => b.income(),
             Line::Upkeep => -b.road_upkeep,
             Line::Services => -b.services,
@@ -180,6 +187,8 @@ struct SliderDrag {
 #[derive(Resource, Default)]
 struct BudgetCache {
     today: Budget,
+    /// Business tax lost to traffic today so far.
+    lost_today: i64,
     costs: RunningCosts,
     age: f32,
     /// Inputs the texts were last written from.
@@ -191,7 +200,7 @@ type BudgetKey = (
     i64,
     u32,
     usize,
-    Budget,
+    (Budget, i64),
     u32,
     u32,
     (citysim_sim::FiscalState, citysim_sim::FiscalReason, u32),
@@ -202,6 +211,8 @@ type BudgetKey = (
 const COSTS_W: f32 = 196.0;
 /// Width of each amount column of the table.
 const AMOUNT_W: f32 = 82.0;
+/// Width of the table's labels.
+const LABEL_W: f32 = 184.0;
 /// Days in the chart.
 pub const CHART_DAYS: usize = 14;
 const CHART_H: f32 = 96.0;
@@ -262,7 +273,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, bodies: Query<Entit
                 chart(c, fonts);
             });
             // Table.
-            column(pg, 150.0 + 2.0 * AMOUNT_W, |c| {
+            column(pg, LABEL_W + 2.0 * AMOUNT_W, |c| {
                 c.spawn(layout(Node {
                     justify_content: JustifyContent::End,
                     margin: UiRect::bottom(px(4)),
@@ -296,7 +307,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, bodies: Query<Entit
                     .insert(BorderColor::all(t::RULE))
                     .with_children(|r| {
                         r.spawn(layout(Node {
-                            width: px(150),
+                            width: px(LABEL_W),
                             align_items: AlignItems::Center,
                             column_gap: px(7),
                             ..default()
@@ -312,7 +323,17 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, bodies: Query<Entit
                                     BackgroundColor(t::zone_color(Some(z))),
                                 ));
                             }
-                            if total {
+                            if *line == Line::TrafficLost {
+                                n.spawn((
+                                    layout(Node {
+                                        width: px(7),
+                                        height: px(2),
+                                        ..default()
+                                    }),
+                                    BackgroundColor(t::WARNING),
+                                ));
+                                n.spawn(label(fonts, line.name(), t::FONT_SMALL, t::W_MEDIUM, t::WARNING));
+                            } else if total {
                                 n.spawn(caps(fonts, line.name(), 11.0, t::TEXT));
                             } else {
                                 n.spawn(label(fonts, line.name(), t::FONT_BODY, t::W_MEDIUM, t::SLOT_INK));
@@ -617,6 +638,7 @@ fn update_budget(
     if cache.age >= PROJECTION_EVERY || cache.key.is_some_and(|k| k.0 != sim.generation) {
         cache.age = 0.0;
         cache.today = budget_now(w);
+        cache.lost_today = citysim_sim::economy::traffic_loss_now(w).business_tax;
         cache.costs = running_costs(w);
     }
     let key = (
@@ -624,7 +646,7 @@ fn update_budget(
         e.money,
         e.tax_rate.to_bits(),
         e.history.len(),
-        cache.today,
+        (cache.today, cache.lost_today),
         w.stats.road_cells,
         w.stats.population,
         (e.fiscal.state, e.fiscal.reason, e.fiscal.left_last_night),
@@ -668,6 +690,20 @@ fn update_budget(
                 },
                 t::TEXT_MUTED,
             ),
+            BudgetText::Amount(li, col) if Line::ALL[li] == Line::TrafficLost => {
+                let lost = if col == 0 {
+                    e.last_day_traffic.business_tax
+                } else {
+                    cache.lost_today
+                };
+                if col == 0 && !booked {
+                    ("\u{2014}".to_string(), t::TEXT_FAINT)
+                } else if lost == 0 {
+                    (format::money(0), t::TEXT_MUTED)
+                } else {
+                    (format::signed_money(-lost), t::WARNING)
+                }
+            }
             BudgetText::Amount(li, col) => {
                 let line = Line::ALL[li];
                 if col == 0 && !booked {

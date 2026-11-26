@@ -44,8 +44,9 @@ working hours and empty out the city's purse.
   tools and the bulldozer's switch in the middle, the clock and five-step speed switch on the right; a drawer that
   rises from the bar for the active tool and the maps; a city window for statistics, people and the budget with
   charts of the city's history (the game keeps running behind it); a selection panel on the right edge with foldable
-  sections; the city plate and alerts along the top. Settings (graphics quality, interface size, edge scrolling, lot markers)
-  are remembered. Designed at 1920x1080, compact down to 1280x720, sharp at 2560x1440.
+  sections; the city plate and alerts along the top; a performance panel (F3) with frame times, CPU against GPU time,
+  the simulation's pace, memory and scene counts. Settings (graphics quality, interface size, edge scrolling, lot
+  markers, the performance panel) are remembered. Designed at 1920x1080, compact down to 1280x720, sharp at 2560x1440.
 - Pause and four speeds (1x, 3x, 6x, 12x: a day in 16 minutes down to 80 seconds), one save slot.
 
 Out of scope for this version: terrain height, water, transit, pedestrians on screen, utilities, land value,
@@ -92,6 +93,7 @@ kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows;
 | WASD or arrows · Q / E | Pan · rotate (Shift pans faster); edge scrolling can be switched on in Settings |
 | Mouse wheel · middle drag | Zoom · rotate and tilt |
 | G | Graphics quality (Low / Medium / High) |
+| F3 | Performance panel: small (frames per second, frame time), full (CPU against GPU, simulation, memory, scene, setup), off; also in Settings |
 | F5 · F9 | Save · load |
 
 ## Project layout

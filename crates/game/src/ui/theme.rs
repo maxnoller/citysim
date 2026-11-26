@@ -270,6 +270,7 @@ pub mod icon {
     pub const ROTATE: char = '\u{e148}'; // rotate-ccw
     pub const DEMOLISH: char = '\u{e18e}'; // trash-2
     pub const MAP_PIN: char = '\u{e111}';
+    pub const GAUGE: char = '\u{e1bf}';
 }
 
 // ---------------------------------------------------------------- fonts

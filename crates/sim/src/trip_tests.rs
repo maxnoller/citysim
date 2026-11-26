@@ -22,7 +22,8 @@ fn town(seed: u64) -> World {
     scenarios::zone(&mut w, (12, 126), (90, 127), Zone::Residential);
     scenarios::zone(&mut w, (12, 129), (50, 130), Zone::Commercial);
     scenarios::zone(&mut w, (51, 129), (90, 130), Zone::Industrial);
-    for _ in 0..DAY / 2 {
+    // Grown until the next day's noon: shops are open (they close at 19:30).
+    for _ in 0..DAY * 9 / 8 {
         w.step();
     }
     w.check_sim_invariants().unwrap();

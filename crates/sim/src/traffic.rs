@@ -608,6 +608,31 @@ pub(crate) fn sync_network(world: &mut World, ended: &mut Vec<Ended>) {
 
 /// Rebuild junction geometry / control for the current road graph (no-op
 /// when it did not change).
+/// Saves written before turn pockets existed: rebuild every junction whose
+/// geometry (its movements) is not what the roads give today, keeping its
+/// setting and counters (a save of this version is left exactly as it was).
+pub(crate) fn upgrade_junction_geometry(world: &mut World) {
+    let roads = &world.roads;
+    let states = &mut world.traffic.junction_states;
+    let stale: Vec<NodeId> = roads
+        .nodes
+        .keys()
+        .filter(|&n| {
+            states
+                .get(n)
+                .is_some_and(|j| junction::build_geometry(roads, n).1.len() != j.movements.len())
+        })
+        .collect();
+    for n in stale {
+        let old = states.remove(n);
+        let mut fresh = junction::build_state(roads, n, old.as_ref());
+        if let Some(o) = old.filter(|o| o.queue.len() == fresh.queue.len()) {
+            fresh.queue = o.queue;
+        }
+        states.insert(n, fresh);
+    }
+}
+
 pub(crate) fn sync_junctions(world: &mut World) {
     if world.traffic.junctions_version == world.versions.roads {
         return;
@@ -1075,6 +1100,13 @@ pub fn debug_denials(world: &World) -> [u64; 4] {
 /// no room beyond, signal, yielding]` (not saved).
 pub fn debug_node_denials(world: &World, n: NodeId) -> [u32; 4] {
     world.cache.node_denials.get(key_index(n)).copied().unwrap_or([0; 4])
+}
+
+/// Debug: why vehicle `id` was last refused entry at a stop line (`0`
+/// conflict in the box, `1` no room beyond, `2` signal, `3` yielding; 255
+/// let in since).
+pub fn debug_last_denial(world: &World, id: VehicleId) -> u8 {
+    world.cache.last_denial.get(key_index(id)).copied().unwrap_or(255)
 }
 
 /// Debug: cars that gave up waiting, `(tick, segment, forward, metres

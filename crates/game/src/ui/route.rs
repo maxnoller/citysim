@@ -76,6 +76,7 @@ fn trace_segment(
     to: f32,
     off0: f32,
     off1: f32,
+    change_by: Option<f32>,
     out: &mut Vec<[f32; 2]>,
 ) {
     let Some(seg) = world.roads.segments.get(s) else {
@@ -85,7 +86,11 @@ fn trace_segment(
     if to < from {
         return;
     }
-    let change_end = (to - (LANE_CHANGE_BEFORE_M - LANE_CHANGE_M)).max(from);
+    // Where the lane change is done: given (a turn pocket's mouth), else
+    // a little before the stop line.
+    let change_end = change_by
+        .unwrap_or(to - (LANE_CHANGE_BEFORE_M - LANE_CHANGE_M))
+        .clamp(from, to);
     let change_start = (change_end - LANE_CHANGE_M).max(from);
     let offset = |d: f32| {
         if (off1 - off0).abs() < 0.01 {
@@ -156,11 +161,11 @@ fn trace_route(
             let stop = end
                 .filter(|a| a.segment == seg_id)
                 .map_or(len, |a| if fwd { a.from_a } else { len - a.from_a });
-            trace_segment(world, seg_id, fwd, progress, stop.max(progress), off, off, out);
+            trace_segment(world, seg_id, fwd, progress, stop.max(progress), off, off, None, out);
             return;
         };
         let Some(next) = world.roads.segments.get(to) else {
-            trace_segment(world, seg_id, fwd, progress, len, off, off, out);
+            trace_segment(world, seg_id, fwd, progress, len, off, off, None, out);
             return;
         };
         let to_fwd = if next.a == node {
@@ -169,7 +174,7 @@ fn trace_route(
             false
         } else {
             // Not joined: the route is stale (the car re-plans).
-            trace_segment(world, seg_id, fwd, progress, len, off, off, out);
+            trace_segment(world, seg_id, fwd, progress, len, off, off, None, out);
             return;
         };
         // The turn drivers take here from the lane nearest to this one.
@@ -183,7 +188,11 @@ fn trace_route(
             Some(m) => {
                 let stop = len - junction::setback(world, node, seg_id);
                 let want = seg.kind.lane_offset_m(m.from_lane);
-                trace_segment(world, seg_id, fwd, progress, stop.max(progress), off, want, out);
+                // Into a left-turn pocket just past where it opens.
+                let by = (seg.kind.pocket_lane() == Some(m.from_lane))
+                    .then(|| junction::turn_pocket(world, seg_id, fwd).map(|p| p.start_m + 8.0))
+                    .flatten();
+                trace_segment(world, seg_id, fwd, progress, stop.max(progress), off, want, by, out);
                 for p in m.curve.flatten(0.2) {
                     push(out, p);
                 }
@@ -192,7 +201,7 @@ fn trace_route(
             }
             None => {
                 // A plain bend: the lanes run straight on.
-                trace_segment(world, seg_id, fwd, progress, len, off, off, out);
+                trace_segment(world, seg_id, fwd, progress, len, off, off, None, out);
                 lane = lane.min(next.lane_count().saturating_sub(1));
                 progress = 0.0;
             }
@@ -501,7 +510,7 @@ mod tests {
                 assert!(dist(p[0], p[1]) < 30.0, "gap {:?}", p);
             }
             // It ends where the car will stop.
-            if let Some(dest) = w.traffic.trips[id].dest
+            if let Some(dest) = w.traffic.trips.get(id).and_then(|t| t.dest)
                 && car.junction.is_none()
                 && !car.route.is_empty()
             {

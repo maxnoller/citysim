@@ -36,6 +36,7 @@ pub struct CityPlugin;
 impl Plugin for CityPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WindowArea>()
+            .init_resource::<LossHistory>()
             .add_systems(Startup, spawn_window)
             .add_systems(
                 Update,
@@ -43,9 +44,39 @@ impl Plugin for CityPlugin {
             )
             .add_systems(
                 Update,
-                (place_window, update_header, update_tiles, update_charts).in_set(GameSet::Render),
+                (place_window, update_header, update_tiles, record_losses, update_charts).in_set(GameSet::Render),
             )
             .add_systems(PostUpdate, window_area.after(bevy::ui::UiSystems::Layout));
+    }
+}
+
+/// Business tax lost to traffic per booked day (`Economy::last_day_traffic`
+/// at each midnight). The sim keeps only yesterday's figure, so the
+/// interface collects the days it sees (yesterday's at once).
+#[derive(Resource, Debug, Default)]
+pub struct LossHistory {
+    generation: Option<u64>,
+    seen: usize,
+    pub days: Vec<(u32, i64, f32)>,
+}
+
+fn record_losses(sim: Res<SimWorld>, mut h: ResMut<LossHistory>) {
+    let e = &sim.world.economy;
+    if h.generation != Some(sim.generation) {
+        h.generation = Some(sim.generation);
+        h.days.clear();
+        h.seen = 0;
+    }
+    if e.history.len() != h.seen {
+        h.seen = e.history.len();
+        if let Some(d) = e.history.last() {
+            let t = e.last_day_traffic;
+            h.days.retain(|x| x.0 != d.day);
+            h.days.push((d.day, t.business_tax, t.per_commute_s()));
+            if h.days.len() > DAYS {
+                h.days.remove(0);
+            }
+        }
     }
 }
 
@@ -91,6 +122,10 @@ enum HeaderText {
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 struct Tile(CityPage, usize, bool);
 
+/// The line under the statistics tiles: why people are out of work.
+#[derive(Component)]
+struct JobsNote;
+
 /// The page's scrolling body.
 #[derive(Component)]
 struct PageScroll;
@@ -100,7 +135,7 @@ const TOP: f32 = 60.0;
 const SIDE: f32 = 18.0;
 const BOTTOM: f32 = t::BAR_H + 12.0;
 /// The window's largest size.
-const MAX_W: f32 = 1400.0;
+const MAX_W: f32 = 1480.0;
 const MAX_H: f32 = 940.0;
 /// Width of the side list of pages.
 const LIST_W: f32 = 196.0;
@@ -120,6 +155,7 @@ const C_HAPPY: u32 = 11;
 const C_HOURS: u32 = 12;
 const C_HOUSEHOLDS: u32 = 13;
 pub const C_FLOWS: u32 = 20;
+const C_LOSS: u32 = 21;
 
 const STATS_TILES: usize = 12;
 const PEOPLE_TILES: usize = 6;
@@ -536,7 +572,19 @@ fn tiles(p: &mut ChildSpawnerCommands, fonts: &UiFonts, page: CityPage, n: usize
 
 fn stats_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
     page(p, CityPage::Stats, |pg| {
-        group(pg, fonts, "Now", |g| tiles(g, fonts, CityPage::Stats, STATS_TILES));
+        group(pg, fonts, "Now", |g| {
+            tiles(g, fonts, CityPage::Stats, STATS_TILES);
+            // Why people are out of work (with the jobs figures).
+            g.spawn(layout(Node {
+                align_items: AlignItems::Center,
+                column_gap: px(10),
+                ..default()
+            }))
+            .with_children(|r| {
+                r.spawn(caps(fonts, "Work", t::FONT_CAP, t::TEXT_MUTED));
+                r.spawn((label(fonts, "", t::FONT_BODY, t::W_MEDIUM, t::SLOT_INK), JobsNote));
+            });
+        });
         group(pg, fonts, "Day by day", |g| {
             grid(g, |gr| {
                 let s = &t::CHART_SERIES;
@@ -682,6 +730,15 @@ fn budget_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                     ("City services", s[3]),
                 ],
             );
+            chart::spawn_chart(
+                g,
+                fonts,
+                C_LOSS,
+                "Business tax lost to traffic per day",
+                DAYS,
+                110.0,
+                &[],
+            );
         });
     });
 }
@@ -712,6 +769,7 @@ fn place_window(
     mut root: Query<(&mut CityWindow, &mut Node, &mut UiTransform, &mut Visibility)>,
     mut pages: Query<(&PageBody, &mut Node), Without<CityWindow>>,
     mut scroll: Query<&mut ScrollPosition, With<PageScroll>>,
+    perf_full: Query<(&super::perf::FullRoot, &ComputedNode)>,
 ) {
     let Ok((mut w, mut node, mut tf, mut vis)) = root.single_mut() else {
         return;
@@ -760,12 +818,31 @@ fn place_window(
         Some(r) => r.min.x - 14.0,
         None => screen.x - SIDE,
     };
-    let avail_w = (right_edge - SIDE).max(400.0);
+    // Beside the full performance panel (docked left) when there is room
+    // for a useful window, else over it; below the small one.
+    let mut left_edge = SIDE;
+    let mut top_edge = TOP;
+    match ui.perf {
+        crate::shared::PerfDetail::Full => {
+            let w = perf_full
+                .single()
+                .map(|(r, c)| c.size.x * c.inverse_scale_factor * r.fit)
+                .unwrap_or(super::perf::FULL_W);
+            if right_edge - (w + 14.0) >= 880.0 {
+                left_edge = w + 14.0;
+            }
+        }
+        crate::shared::PerfDetail::Small => {
+            top_edge = top_edge.max(super::perf::TOP + super::perf::SMALL_H + 8.0);
+        }
+        crate::shared::PerfDetail::Off => {}
+    }
+    let avail_w = (right_edge - left_edge).max(400.0);
     let width = avail_w.min(MAX_W);
-    let left = (screen.x * 0.5 - width * 0.5).clamp(SIDE, (right_edge - width).max(SIDE));
-    let avail_h = (screen.y - TOP - BOTTOM).max(300.0);
+    let left = (screen.x * 0.5 - width * 0.5).clamp(left_edge, (right_edge - width).max(left_edge));
+    let avail_h = (screen.y - top_edge - BOTTOM).max(300.0);
     let height = avail_h.min(MAX_H);
-    let top = TOP + (avail_h - height) * 0.5;
+    let top = top_edge + (avail_h - height) * 0.5;
     let (l, tp, wd, ht) = (px(left.round()), px(top.round()), px(width.round()), px(height.round()));
     if node.left != l || node.top != tp || node.width != wd || node.height != ht {
         node.left = l;
@@ -954,6 +1031,40 @@ fn people_tiles(w: &World) -> [(&'static str, String, Color); PEOPLE_TILES] {
     ]
 }
 
+/// Why people are out of work, with the free jobs and the land for work.
+fn jobs_note(w: &World) -> (String, Color) {
+    use citysim_sim::demand::JoblessReason as R;
+    let j = citysim_sim::demand::jobs_view(w);
+    let mut parts = vec![format!(
+        "{} jobless · {}",
+        format::percent((j.rate() * 1000.0).round() / 1000.0),
+        j.reason.text()
+    )];
+    if j.vacancies > 0 {
+        parts.push(if j.vacancies_reachable < j.vacancies {
+            format!(
+                "{} free jobs, {} within reach",
+                format::group(j.vacancies as u64),
+                format::group(j.vacancies_reachable as u64)
+            )
+        } else {
+            format!("{} free jobs", format::group(j.vacancies as u64))
+        });
+    }
+    if let Some(z) = j.short_of {
+        parts.push(format!(
+            "short of {} land",
+            super::widgets::zone_name(Some(z)).to_lowercase()
+        ));
+    }
+    let c = match j.reason {
+        R::None => t::TEXT_MUTED,
+        R::Searching => t::SLOT_INK,
+        _ => t::WARNING,
+    };
+    (parts.join(" · "), c)
+}
+
 pub fn mood_color(h: f32) -> Color {
     if h >= 0.7 {
         t::POSITIVE
@@ -968,7 +1079,8 @@ fn update_tiles(
     time: Res<Time<Real>>,
     ui: Res<UiState>,
     sim: Res<SimWorld>,
-    mut tiles: Query<(&Tile, &mut Text, &mut TextColor)>,
+    mut tiles: Query<(&Tile, &mut Text, &mut TextColor), Without<JobsNote>>,
+    mut note: Query<(&mut Text, &mut TextColor), With<JobsNote>>,
     mut age: Local<f32>,
     mut smooth: Local<Smoothed>,
 ) {
@@ -981,6 +1093,15 @@ fn update_tiles(
     *age = 0.0;
     let w = &sim.world;
     let stats = (page == CityPage::Stats).then(|| stats_tiles(w, smooth.0));
+    if page == CityPage::Stats
+        && let Ok((mut text, mut color)) = note.single_mut()
+    {
+        let (v, c) = jobs_note(w);
+        if text.0 != v {
+            text.0 = v;
+        }
+        color.set_if_neq(TextColor(c));
+    }
     let ppl = (page == CityPage::People).then(|| people_tiles(w));
     for (tile, mut text, mut color) in &mut tiles {
         let row = match tile.0 {
@@ -1122,7 +1243,7 @@ fn traffic_color(peak_congestion: f32) -> Color {
 }
 
 /// The data of chart `id` now.
-pub fn chart_data(id: u32, w: &World) -> ChartData {
+pub fn chart_data(id: u32, w: &World, losses: &[(u32, i64, f32)]) -> ChartData {
     let s = &t::CHART_SERIES;
     let st = &w.stats;
     match id {
@@ -1361,6 +1482,34 @@ pub fn chart_data(id: u32, w: &World) -> ChartData {
                 columns,
             }
         }
+        C_LOSS => {
+            let columns: Vec<Column> = losses
+                .iter()
+                .map(|&(day, lost, per)| Column {
+                    parts: vec![(lost as f32, t::WARNING)],
+                    label: day_label(day),
+                    value: format!(
+                        "{} lost · {} a commute",
+                        format::money(lost),
+                        super::bar::commute_text(per)
+                    ),
+                })
+                .collect();
+            let max = columns.iter().map(|c| c.parts[0].0).fold(0.0, f32::max);
+            ChartData {
+                first: losses.first().map(|d| day_label(d.0)).unwrap_or_default(),
+                last: losses.last().map(|d| day_label(d.0)).unwrap_or_default(),
+                top: if max > 0.0 {
+                    format::money(max.round() as i64)
+                } else {
+                    String::new()
+                },
+                empty: "Collected at each midnight while you play (a save keeps only yesterday's)".into(),
+                live_last: false,
+                pick: None,
+                columns,
+            }
+        }
         _ => ChartData::default(),
     }
 }
@@ -1388,7 +1537,7 @@ fn charts_of(page: CityPage) -> &'static [u32] {
     match page {
         CityPage::Stats => &[C_POPULATION, C_JOBS, C_MONEY, C_COMMUTE, C_TRAFFIC, C_BUILDINGS],
         CityPage::People => &[C_STAGES, C_HAPPY, C_HOUSEHOLDS, C_HOURS],
-        CityPage::Budget => &[C_FLOWS],
+        CityPage::Budget => &[C_FLOWS, C_LOSS],
     }
 }
 
@@ -1398,6 +1547,7 @@ fn update_charts(
     time: Res<Time<Real>>,
     ui: Res<UiState>,
     sim: Res<SimWorld>,
+    losses: Res<LossHistory>,
     mut nodes: ChartNodes,
     mut shown: Local<Vec<(u32, ChartData, Option<usize>)>>,
     mut age: Local<f32>,
@@ -1418,7 +1568,7 @@ fn update_charts(
     }
     *age = 0.0;
     for (&id, &hover) in ids.iter().zip(&hovers) {
-        let data = chart_data(id, &sim.world);
+        let data = chart_data(id, &sim.world, &losses.days);
         let same = shown.iter().any(|s| s.0 == id && s.1 == data && s.2 == hover);
         if same {
             continue;
@@ -1445,7 +1595,7 @@ mod tests {
         let w = World::new(1);
         for page in CityPage::ALL {
             for &id in charts_of(page) {
-                let d = chart_data(id, &w);
+                let d = chart_data(id, &w, &[]);
                 // No day booked yet: either the live column or the note.
                 assert!(d.columns.len() <= DAYS + 1, "{id}");
                 if d.columns.is_empty() {

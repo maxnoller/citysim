@@ -54,6 +54,55 @@ fn main() {
             deepest = deepest.max(depth);
             let va = &w.vehicles[bodies[a].0];
             let vb = &w.vehicles[bodies[b].0];
+            if std::env::var("OVERLAP_DETAIL").is_ok() {
+                let desc = |v: &Vehicle| -> String {
+                    match v.junction {
+                        Some(jm) => format!(
+                            "box node {:?} deg {} {:?} from lane {} to lane {} at {:.1}/{:.1} m, {:.1} m/s",
+                            jm.node,
+                            w.roads.nodes[jm.node].segments.len(),
+                            jm.turn,
+                            jm.from_lane,
+                            jm.to_lane,
+                            jm.distance,
+                            jm.length,
+                            v.speed
+                        ),
+                        None => {
+                            let s = v.segment.unwrap();
+                            let seg = &w.roads.segments[s];
+                            let (lo, hi) = drive::drivable_range(&w, s, v.forward).unwrap();
+                            format!(
+                                "lane {:?} {:?} lane {} shift {:.2} at {:.1} (range {:.1}..{:.1} of {:.1}) {:.1} m/s",
+                                s, seg.kind, v.lane, v.lane_shift, v.progress, lo, hi, seg.length, v.speed
+                            )
+                        }
+                    }
+                };
+                println!("t {} depth {depth:.2}: {} | {}", w.time.tick, desc(va), desc(vb));
+                for v in [va, vb] {
+                    let (p, d) = drive::vehicle_pose(&w, v);
+                    println!(
+                        "    pose {:.2},{:.2} dir {:.3},{:.3} fwd {} seg {:?}",
+                        p[0], p[1], d[0], d[1], v.forward, v.segment
+                    );
+                    if let Some(jm) = v.junction {
+                        let j = junction::junction(&w, jm.node)
+                            .or(w.traffic.junction_states.get(jm.node))
+                            .unwrap();
+                        let m = &j.movements[jm.movement as usize];
+                        println!(
+                            "    movement {:?} -> {:?}, arms {:?}",
+                            m.curve.start(),
+                            m.curve.end(),
+                            j.arms
+                                .iter()
+                                .map(|a| (a.segment, a.setback, a.lanes_in, a.dir))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
             let k = match (va.junction.is_some(), vb.junction.is_some()) {
                 (true, true) => "both in a junction box",
                 (true, false) | (false, true) => "box and lane",

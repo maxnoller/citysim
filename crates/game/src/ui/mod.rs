@@ -11,6 +11,7 @@
 //! cursor readout (`context.rs`), menus.
 //! Colours, sizes and fonts live in `theme.rs`; angular plates in
 //! `plate.rs`; reusable pieces in `widgets.rs`.
+//! The performance panel (F3) is `perf.rs`.
 //! `CITYSIM_UI_SHOTS=dir` captures every UI state to `dir`; `CITYSIM_UI_TOUR=1`
 //! plays a scripted walk through the interface for videos (`shots.rs`).
 
@@ -27,6 +28,7 @@ mod loading;
 mod menu;
 mod panel;
 mod people;
+mod perf;
 mod plan;
 mod plate;
 mod pointer;
@@ -116,6 +118,8 @@ pub struct UiState {
     pub tray_focus: bool,
     /// The tool to go back to when the bulldozer is switched off.
     pub before_demolish: Option<ActiveTool>,
+    /// The performance panel's size (F3; remembered in the settings).
+    pub perf: crate::shared::PerfDetail,
 }
 
 impl UiState {
@@ -140,6 +144,7 @@ impl Default for UiState {
             compact: false,
             tray_focus: false,
             before_demolish: None,
+            perf: crate::shared::PerfDetail::Off,
         }
     }
 }
@@ -173,6 +178,7 @@ impl Plugin for UiPlugin {
                 loading::LoadingPlugin,
                 route::RoutePlugin,
                 city::CityPlugin,
+                perf::PerfPlugin,
             ))
             .add_systems(PostStartup, fallback_ui_camera)
             .add_systems(PreUpdate, scale_ui);

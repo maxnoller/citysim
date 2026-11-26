@@ -1,9 +1,10 @@
 //! Global keys and the handler for every [`UiAction`].
 //!
 //! Keys: Space pause, 1/2/3 speed, O cycles overlays, T traffic overlay,
-//! G graphics quality. Escape: cancels the tool action in progress (done by
-//! `tools.rs`), else closes the menu, the city window or the drawer, else
-//! drops back to Inspect, else opens the pause menu. Right click with nothing in progress also
+//! G graphics quality, F3 the performance panel. Escape: cancels the tool
+//! action in progress (done by `tools.rs`), else closes the menu, the city
+//! window or the drawer, else drops back to Inspect, else opens the pause
+//! menu. Right click with nothing in progress also
 //! drops back to Inspect.
 
 use bevy::prelude::*;
@@ -56,6 +57,10 @@ pub(super) fn control_keys(
     mut ui: ResMut<UiState>,
     mut out: MessageWriter<UiAction>,
 ) {
+    // F3 works everywhere, the menu included.
+    if keys.just_pressed(KeyCode::F3) {
+        out.write(UiAction::Perf(super::perf::next_detail(ui.perf)));
+    }
     // Esc in a focused drawer only leaves the focus (`tray::tray_keys`).
     if keys.just_pressed(KeyCode::Escape) && !tools.busy() && !ui.tray_focus {
         if ui.menu_open && ui.settings_open {
@@ -267,6 +272,7 @@ fn handle_actions(
             UiAction::UiScale(i) => ui.ui_scale = i,
             UiAction::EdgeScroll(on) => display.edge_scroll = on,
             UiAction::LotMarkers(on) => display.lot_markers = on,
+            UiAction::Perf(d) => ui.perf = d,
             // Handled in tools.rs and people_panel.rs.
             UiAction::Undo
             | UiAction::Person(_)

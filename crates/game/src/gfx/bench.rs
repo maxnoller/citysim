@@ -6,7 +6,12 @@
 //! the city, frame by frame (`CITYSIM_BENCH_FRAMES`, default 1500, after
 //! `CITYSIM_BENCH_WARMUP` frames, default 240), with the simulation running
 //! at 1x (`CITYSIM_BENCH_SPEED=i`: speed index, 3 = the top speed). Use it with a demo city (`CITYSIM_DEMO=town|city|hierarchy`) and
-//! `CITYSIM_GFX_QUALITY=low|medium|high`.
+//! `CITYSIM_GFX_QUALITY=low|medium|high`. `CITYSIM_BENCH_UI=1` draws the
+//! interface into the image as well (it is not drawn otherwise: there is no
+//! window); with `CITYSIM_PERF=off|small|full` that measures the
+//! performance panel's own cost. `CITYSIM_BENCH_GPU=0` leaves GPU pass
+//! timing (and draw counts) to the panel (`perf.rs`: on only while it is
+//! full), as in a game.
 //!
 //! Without a swapchain nothing would hold the CPU back from queueing frames
 //! faster than the GPU draws them, so the render world waits (after each
@@ -15,23 +20,17 @@
 //!
 //! The report has the average, median, 99th percentile ("worst 1 %") and
 //! worst frame times, the GPU time of each render pass (timestamp queries,
-//! `RenderDiagnosticsPlugin`), triangles rasterised in the main and shadow
+//! `RenderDiagnosticsPlugin`, added by `perf.rs`), triangles rasterised in the main and shadow
 //! passes (pipeline statistics), and entity, mesh, material, light and
 //! draw-call counts (draw calls counted from the render phases: one per
 //! multi-draw batch set, batchable bin and unbatchable entity, per view).
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bevy::camera::RenderTarget;
-use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
-use bevy::core_pipeline::prepass::Opaque3dPrepass;
 use bevy::diagnostic::DiagnosticsStore;
-use bevy::pbr::Shadow;
 use bevy::prelude::*;
-use bevy::render::diagnostic::RenderDiagnosticsPlugin;
-use bevy::render::render_phase::{BinnedPhaseItem, BinnedRenderPhase, ViewBinnedRenderPhases, ViewSortedRenderPhases};
 use bevy::render::render_resource::{PollType, TextureFormat};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};
@@ -50,20 +49,6 @@ fn env<T: std::str::FromStr>(name: &str) -> Option<T> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
 }
 
-/// Render-world draw counts of the last frame, shared with the main world.
-#[derive(Resource, Clone, Default)]
-struct DrawCounts(Arc<Mutex<Counts>>);
-
-#[derive(Clone, Copy, Default, Debug)]
-struct Counts {
-    /// Draw calls in the main camera's passes (prepass, opaque, transparent).
-    main: usize,
-    /// Draw calls in all shadow views.
-    shadow: usize,
-    /// Number of views with a shadow phase (cascades).
-    shadow_views: usize,
-}
-
 pub struct BenchPlugin;
 
 impl Plugin for BenchPlugin {
@@ -79,33 +64,30 @@ impl Plugin for BenchPlugin {
                 Some((a.parse().ok()?, b.parse().ok()?))
             })
             .unwrap_or((1920u32, 1080u32));
-        let counts = DrawCounts::default();
-        app.add_plugins(RenderDiagnosticsPlugin)
-            .insert_resource(Bench {
-                path,
-                size: (w, h),
-                warmup: env("CITYSIM_BENCH_WARMUP").unwrap_or(240),
-                frames: env("CITYSIM_BENCH_FRAMES").unwrap_or(1500),
-                quality: match std::env::var("CITYSIM_GFX_QUALITY").as_deref() {
-                    Ok("low") => GraphicsQuality::Low,
-                    Ok("medium") => GraphicsQuality::Medium,
-                    _ => GraphicsQuality::High,
-                },
-                paused: env::<u32>("CITYSIM_BENCH_PAUSED") == Some(1),
-                speed: env::<usize>("CITYSIM_BENCH_SPEED").unwrap_or(0),
-                ..default()
-            })
-            .insert_resource(counts.clone())
-            .init_resource::<SimTiming>()
-            .add_systems(FixedUpdate, sim_start.before(SimStep))
-            .add_systems(FixedUpdate, sim_end.after(SimStep))
-            .add_systems(Update, drive.in_set(GameSet::Input));
+        // Render diagnostics and draw counts: `perf.rs` (always on here).
+        app.insert_resource(Bench {
+            path,
+            size: (w, h),
+            warmup: env("CITYSIM_BENCH_WARMUP").unwrap_or(240),
+            frames: env("CITYSIM_BENCH_FRAMES").unwrap_or(1500),
+            quality: match std::env::var("CITYSIM_GFX_QUALITY").as_deref() {
+                Ok("low") => GraphicsQuality::Low,
+                Ok("medium") => GraphicsQuality::Medium,
+                _ => GraphicsQuality::High,
+            },
+            paused: env::<u32>("CITYSIM_BENCH_PAUSED") == Some(1),
+            speed: env::<usize>("CITYSIM_BENCH_SPEED").unwrap_or(0),
+            ui: env::<u32>("CITYSIM_BENCH_UI") == Some(1),
+            ..default()
+        })
+        .init_resource::<SimTiming>()
+        .add_systems(FixedUpdate, sim_start.before(SimStep))
+        .add_systems(FixedUpdate, sim_end.after(SimStep))
+        .add_systems(Update, drive.in_set(GameSet::Input));
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
-            render.insert_resource(counts).init_resource::<InFlight>().add_systems(
+            render.init_resource::<InFlight>().add_systems(
                 Render,
-                (count_draws, throttle_gpu)
-                    .after(RenderSystems::Render)
-                    .before(RenderSystems::Cleanup),
+                throttle_gpu.after(RenderSystems::Render).before(RenderSystems::Cleanup),
             );
         }
     }
@@ -148,47 +130,6 @@ fn throttle_gpu(device: Res<RenderDevice>, queue: Res<RenderQueue>, mut in_fligh
     }
 }
 
-fn binned_draws<P: BinnedPhaseItem>(phase: &BinnedRenderPhase<P>) -> usize {
-    phase.multidrawable_meshes.len()
-        + phase.batchable_meshes.len()
-        + phase
-            .unbatchable_meshes
-            .values()
-            .map(|u| u.entities.len())
-            .sum::<usize>()
-        + phase.non_mesh_items.values().map(|u| u.entities.len()).sum::<usize>()
-}
-
-fn count_draws(
-    opaque: Option<Res<ViewBinnedRenderPhases<Opaque3d>>>,
-    mask: Option<Res<ViewBinnedRenderPhases<AlphaMask3d>>>,
-    prepass: Option<Res<ViewBinnedRenderPhases<Opaque3dPrepass>>>,
-    transparent: Option<Res<ViewSortedRenderPhases<Transparent3d>>>,
-    shadow: Option<Res<ViewBinnedRenderPhases<Shadow>>>,
-    out: Res<DrawCounts>,
-) {
-    let mut c = Counts::default();
-    if let Some(p) = opaque {
-        c.main += p.0.values().map(binned_draws).sum::<usize>();
-    }
-    if let Some(p) = mask {
-        c.main += p.0.values().map(binned_draws).sum::<usize>();
-    }
-    if let Some(p) = prepass {
-        c.main += p.0.values().map(binned_draws).sum::<usize>();
-    }
-    if let Some(p) = transparent {
-        c.main += p.0.values().map(|s| s.items.len()).sum::<usize>();
-    }
-    if let Some(p) = shadow {
-        c.shadow = p.0.values().map(binned_draws).sum();
-        c.shadow_views = p.0.len();
-    }
-    if let Ok(mut o) = out.0.lock() {
-        *o = c;
-    }
-}
-
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     #[default]
@@ -210,6 +151,9 @@ struct Bench {
     paused: bool,
     /// `CITYSIM_BENCH_SPEED=i`: index into `SPEEDS` (default 0, 1x).
     speed: usize,
+    /// `CITYSIM_BENCH_UI=1`: the interface is drawn into the image too
+    /// (without a window it is not drawn at all otherwise).
+    ui: bool,
     phase: Phase,
     frame: u32,
     started: Option<Instant>,
@@ -311,7 +255,7 @@ fn drive(
     mut images: ResMut<Assets<Image>>,
     cams: Query<(Entity, Option<&RenderTarget>), With<WorldCamera>>,
     store: Res<DiagnosticsStore>,
-    counts: Res<DrawCounts>,
+    counts: Res<super::perf::RenderShared>,
     mut sim_timing: ResMut<SimTiming>,
     queries: (
         Query<Entity>,
@@ -337,6 +281,9 @@ fn drive(
             let (w, h) = bench.size;
             let image = images.add(Image::new_target_texture(w, h, TextureFormat::Bgra8UnormSrgb, None));
             commands.entity(cam).insert(RenderTarget::Image(image.into()));
+            if bench.ui {
+                commands.entity(cam).insert(bevy::ui::IsDefaultUiCamera);
+            }
         }
     }
     let (centre, radius) = *bench.city.get_or_insert_with(|| city_extent(&sim));
@@ -409,7 +356,7 @@ fn drive(
                 e.1 += 1;
                 bench.seen.insert(path, n);
             }
-            let c = counts.0.lock().map(|c| *c).unwrap_or_default();
+            let c = counts.0.lock().map(|c| c.last).unwrap_or_default();
             let visible = queries.1.iter().filter(|(_, v)| v.get()).count();
             let frame = Sums {
                 visible: visible as f64,
@@ -481,7 +428,7 @@ fn report(
     let secs = bench.times.iter().sum::<f64>() / 1000.0;
     let sim_rate = (bench.sim_ticks.1 - bench.sim_ticks.0) as f64 / secs.max(1e-6);
     format!(
-        "{{\n  \"quality\": \"{:?}\",\n  \"sim_paused\": {},\n  \"sim_speed\": {},\n  \"size\": [{}, {}],\n  \"frames\": {},\n  \
+        "{{\n  \"quality\": \"{:?}\",\n  \"ui\": {},\n  \"sim_paused\": {},\n  \"sim_speed\": {},\n  \"size\": [{}, {}],\n  \"frames\": {},\n  \
          \"population\": {},\n  \"buildings\": {},\n  \"vehicles\": {},\n  \"sim_ticks_per_s\": {:.1},\n  \"sim_step_ms\": {{ \"avg\": {:.3}, \"p99\": {:.3}, \"max\": {:.3}, \"per_frame\": {:.3} }},\n  \
          \"frame_ms\": {{ \"avg\": {:.3}, \"median\": {:.3}, \"p99\": {:.3}, \"worst_1pct\": {:.3}, \"max\": {:.3} }},\n  \
          \"fps_avg\": {:.1},\n  \
@@ -491,6 +438,7 @@ fn report(
          \"draw_calls\": {{ \"main_avg\": {:.0}, \"main_max\": {:.0}, \"shadow_avg\": {:.0}, \"shadow_max\": {:.0}, \
          \"shadow_views\": {:.0} }}\n}}\n",
         bench.quality,
+        bench.ui,
         bench.paused,
         crate::shared::SPEEDS[bench.speed.min(crate::shared::SPEEDS.len() - 1)],
         bench.size.0,

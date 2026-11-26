@@ -57,9 +57,16 @@
 //   the city (services cost more per resident in a bigger and denser city,
 //   avenues and traffic lights cost upkeep), so money stays a constraint
 //   for the whole game: the block-by-block player holds $20-40k before
-//   5,000 residents, the avenue city holds tens of thousands at 10,000
-//   (enough for the next district or an avenue upgrade, not hundreds of
-//   thousands), and the longest wait for money is a few real minutes.
+//   5,000 residents, every sensible layout holds tens of thousands at
+//   10,000 (enough for the next district or an avenue upgrade, not
+//   hundreds of thousands), and the longest wait for money is a few real
+//   minutes.
+// * Traffic decides who comes out ahead (round 5): commuting time lost in
+//   jams costs business tax (`TRAFFIC_OUTPUT_PER_S`, shown as
+//   `economy::TrafficLoss`), jammed residents are unhappy, move nearer work
+//   or leave, and newcomers stay away. A road hierarchy earns back its
+//   extra construction and upkeep; the same blocks on streets only run
+//   into a deficit as they grow past 12,000 residents.
 // * A network far bigger than its town needs (the pre-built `overbuilt`
 //   mesh, ~9,000 cells) loses money every day.
 
@@ -68,9 +75,10 @@ pub const STARTING_MONEY: i64 = 30_000;
 /// Cost of one cell of newly built road (per cell-to-cell piece of length).
 /// The main money sink: an expanding city spends most of its surplus here.
 pub const ROAD_COST_PER_CELL: i64 = 65;
-/// Cost of one cell of avenue. Upgrading a street to an avenue costs the
-/// difference; downgrading is free (no refund).
-pub const AVENUE_COST_PER_CELL: i64 = 140;
+/// Cost of one cell of avenue (round 5: 140 -> 90, a hierarchy must be
+/// affordable to the player who builds it). Upgrading a street to an
+/// avenue costs the difference; downgrading is free (no refund).
+pub const AVENUE_COST_PER_CELL: i64 = 90;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
@@ -79,31 +87,44 @@ pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// or two; a mesh many times bigger than its town still sinks it.
 /// ($1 per 4 real minutes, as in round 2.)
 pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 4;
-/// Daily upkeep per avenue cell (four lanes, more to maintain).
-pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 10;
+/// Daily upkeep per avenue cell (four lanes, more to maintain; round 5:
+/// 10 -> 8).
+pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 8;
 /// Daily upkeep of a junction with traffic lights (power, maintenance),
 /// part of road upkeep. Busy junctions get lights automatically, so a city
 /// whose traffic needs many lights pays for them.
-pub const SIGNAL_UPKEEP_PER_DAY: i64 = 100;
+pub const SIGNAL_UPKEEP_PER_DAY: i64 = 80;
 /// Daily cost of city services per resident (police, fire, schools...,
 /// abstracted), charged at midnight with road upkeep. Keeps the margin per
 /// resident moderate (residents and their jobs pay ~$9 a day in taxes at
-/// the default rate), so a bigger city is not a money machine.
-pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 3.0;
+/// the default rate), so a bigger city is not a money machine (round 5:
+/// 3.0 -> 3.6, with a gentler size term below).
+pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 3.6;
 /// A bigger city needs more complex services (hospitals, a fire brigade
 /// with ladders, transit, courts): each resident costs up to this much more
 /// per day, `* pop² / (pop² + SERVICES_CITY_SIZE_POP²)`: little in a town
-/// ($0.6 at 3,000 residents), $2.2 at 10,000, $2.75 at 20,000. Total
-/// services therefore grow faster than the population, and the surplus of
-/// a big city stays modest (enough for the next district) without turning
-/// into a wall.
-pub const SERVICES_CITY_SIZE_PER_RESIDENT: f32 = 3.0;
+/// ($0.2 at 3,000 residents), $1.2 at 10,000, $1.8 at 20,000. Total
+/// services therefore grow faster than the population, but a well-run
+/// bigger city still nets more per day than a smaller one (round 5: the
+/// size term was steep enough to cancel a hierarchy's extra residents).
+pub const SERVICES_CITY_SIZE_PER_RESIDENT: f32 = 2.2;
 /// Population at which half of [`SERVICES_CITY_SIZE_PER_RESIDENT`] applies.
-pub const SERVICES_CITY_SIZE_POP: f32 = 6_000.0;
+pub const SERVICES_CITY_SIZE_POP: f32 = 9_000.0;
 /// The cost of density: extra services per resident per day by the level
 /// of their home `[1, 2, 3]` (apartment blocks need more fire cover,
 /// policing and rubbish collection than houses).
 pub const SERVICES_DENSITY_PER_RESIDENT: [f32; 3] = [0.0, 0.4, 1.0];
+
+/// Traffic costs business: every commute's time beyond
+/// `TRAFFIC_FREE_FACTOR` times its free-flow estimate is output lost at
+/// `TRAFFIC_OUTPUT_PER_S` dollars per vehicle second ($10 an in-game hour
+/// of one worker), and the business tax on it (tax rate times that)
+/// is not paid, up to `TRAFFIC_LOSS_MAX_SHARE` of the day's business tax
+/// (`economy::TrafficLoss`, taken off the commercial and industrial tax
+/// lines).
+pub const TRAFFIC_FREE_FACTOR: f32 = 1.6;
+pub const TRAFFIC_OUTPUT_PER_S: f32 = 0.9;
+pub const TRAFFIC_LOSS_MAX_SHARE: f32 = 0.7;
 
 /// Debt: every midnight with money below zero cuts city services by this
 /// share (services cost less, but all demand falls), down to
@@ -177,7 +198,7 @@ pub const COMMUTE_DRIVE_SHARE: f32 = 1.0;
 // ------------------------------------------------------------- vehicles ----
 
 /// Speed limit of ordinary streets, metres per second (50 km/h).
-pub const STREET_SPEED_LIMIT: f32 = 13.9;
+pub const STREET_SPEED_LIMIT: f32 = 11.1;
 /// Speed limit of the highway stub, metres per second (100 km/h).
 pub const HIGHWAY_SPEED_LIMIT: f32 = 27.8;
 /// Speed limit of avenues, metres per second (60 km/h).
@@ -201,7 +222,7 @@ pub const MIN_GAP_M: f32 = 5.5;
 pub const FOLLOW_HEADWAY_S: f32 = 1.1;
 /// ... on streets: 2.75 m lanes lined with driveways and kerbside activity
 /// are driven with more distance (about 0.45 cars/s per lane from a queue).
-pub const STREET_FOLLOW_HEADWAY_S: f32 = 1.5;
+pub const STREET_FOLLOW_HEADWAY_S: f32 = 2.0;
 /// Acceleration, m/s².
 pub const ACCELERATION: f32 = 3.5;
 /// Comfortable braking used towards stop lines and junctions, m/s².
@@ -287,10 +308,52 @@ pub const LANE_PREPARE_M: f32 = 150.0;
 pub const JUNCTION_MARGIN_M: f32 = 2.5;
 /// The same for a bend (two roads meeting at an angle): kerb radius only.
 pub const BEND_MARGIN_M: f32 = 0.5;
+/// Two pieces of road meeting at a slight kink (turning by more than about
+/// 1.8°: cosine below this) get a bend box sized to the kink.
+pub const BEND_KINK_COS: f32 = 0.9995;
 /// Two movements through a junction whose paths come closer than this
 /// (centre lines, metres) conflict even when they do not cross: a car is
 /// about 1.9 m wide, plus room so the bodies never brush.
 pub const MOVEMENT_CLEARANCE_M: f32 = 2.6;
+/// ... two movements from neighbouring lanes of one approach, which start
+/// side by side like the lanes: closer than this (a car's width plus a
+/// little) only where they really close in on each other.
+pub const NEIGHBOUR_CLEARANCE_M: f32 = 2.2;
+/// Turn pockets: before a junction an avenue approach gets a short
+/// left-turn lane cut into its median (lane `RoadKind::pocket_lane`), as
+/// long as `POCKET_MAX_M`, never shorter than `POCKET_MIN_M` (no pocket on
+/// a block too short for it). When both ends of a segment have one, they
+/// share the drivable length and leave `POCKET_GAP_M` of median between
+/// them; a pocket alone leaves `NO_LANE_CHANGE_AFTER_BOX_M` plus this gap
+/// behind the box it follows. Left turners move into it from the inner
+/// lane; one that finds it full waits at its entry, `POCKET_ENTRY_M` in,
+/// so the queue spills back into the inner lane.
+pub const POCKET_MAX_M: f32 = 40.0;
+pub const POCKET_MIN_M: f32 = 11.0;
+pub const POCKET_GAP_M: f32 = 6.0;
+pub const POCKET_ENTRY_M: f32 = 4.0;
+/// Offset of the pocket lane's centre from the centre line (right of
+/// travel), metres, and the avenue median's half-width (the pocket is cut
+/// into it).
+pub const POCKET_OFFSET_M: f32 = 0.0;
+pub const AVENUE_MEDIAN_HALF_M: f32 = 1.0;
+/// Signalled junctions give approaches with a turn pocket a protected left
+/// phase (called by a left turner standing at the pocket's line; both
+/// opposite pockets turn together), before the through phase.
+pub const POCKET_LEFT_PHASES: bool = true;
+/// ... called only once this many cars stand in the pocket (fewer clear
+/// out permissively at the end of the through green).
+pub const POCKET_CALL_CARS: u16 = 3;
+/// Maximum greens at junctions whose approaches have pockets: the left
+/// phase, and the main through phases (longer, so the left phase's lost
+/// time is spread over more cars).
+pub const POCKET_LEFT_MAX_GREEN_S: f32 = 14.0;
+pub const POCKET_MAIN_MAX_GREEN_S: f32 = 30.0;
+/// Right turns of the other road go during a left-arrow phase.
+pub const RIGHT_TURN_OVERLAP: bool = true;
+/// Routing: a left turn from a turn pocket costs this share of the usual
+/// left-turn cost (`ROUTE_LEFT_PER_LANE_S`): it waits out of the way.
+pub const ROUTE_POCKET_LEFT_SHARE: f32 = 0.5;
 /// Length of the merge box where a road changes its number of lanes
 /// without a junction (split between both sides of the node), metres.
 pub const LANE_MERGE_TAPER_M: f32 = 14.0;
@@ -501,8 +564,16 @@ pub const SHOP_JOBS_PER_WORKER: f32 = 0.44;
 pub const INDUSTRY_PER_SHOP: f32 = 1.5;
 /// Weight of the relative job shortfall on C / I demand.
 pub const JOB_SHORTFALL_WEIGHT: f32 = 1.4;
-/// Extra C / I demand per unit of unemployment rate.
-pub const UNEMPLOYMENT_JOB_BOOST: f32 = 1.5;
+/// Extra C / I demand per unit of unemployment rate (a quarter to each kind
+/// of work, the other half by their shortfall of jobs, `demand::target`: 9 %
+/// out of work with only industry short adds about 0.6 to industrial
+/// demand).
+pub const UNEMPLOYMENT_JOB_BOOST: f32 = 4.5;
+/// `demand::jobs_view`: below this share of the workforce out of work
+/// nothing is wrong; fewer free zoned cells of the short kind of work than
+/// this counts as no land zoned.
+pub const JOBLESS_OK: f32 = 0.03;
+pub const JOBLESS_LAND_CELLS: u32 = 24;
 /// C / I demand falls by this per unit of unfilled-job rate above
 /// [`JOB_VACANCY_OK`].
 pub const JOB_VACANCY_WEIGHT: f32 = 2.0;
@@ -706,10 +777,10 @@ pub const JOB_DIST_SCALE_M: f32 = 1000.0;
 /// Shift starts (hours) per workplace: industry, offices (commercial level
 /// 3) and shops (early shift; the late shift starts
 /// [`LATE_SHIFT_OFFSET_H`] later).
-pub const INDUSTRY_START_H: [f32; 2] = [5.5, 8.0];
-pub const OFFICE_START_H: [f32; 2] = [8.0, 9.5];
-pub const SHOP_START_H: [f32; 2] = [7.0, 9.0];
-pub const LATE_SHIFT_OFFSET_H: f32 = 6.0;
+pub const INDUSTRY_START_H: [f32; 2] = [6.5, 8.5];
+pub const OFFICE_START_H: [f32; 2] = [8.5, 9.5];
+pub const SHOP_START_H: [f32; 2] = [8.0, 9.5];
+pub const LATE_SHIFT_OFFSET_H: f32 = 4.5;
 /// Shop workers on the late shift (shops stay staffed into the evening).
 pub const LATE_SHIFT_SHARE: f32 = 0.35;
 /// Industrial workers on the night shift (from ~21:00).
@@ -745,7 +816,7 @@ pub const SLEEP_SPREAD_H: f32 = 1.0;
 pub const HOME_RECHECK_H: f32 = 1.0;
 /// Shops are visited between these hours ...
 pub const SHOP_OPEN_H: f32 = 8.0;
-pub const SHOP_CLOSE_H: f32 = 21.0;
+pub const SHOP_CLOSE_H: f32 = 19.5;
 /// Nobody sets off shopping who would arrive later than this before
 /// closing, hours; a shopper whose car arrives after closing finds the shop
 /// shut and goes home; a visit ends at closing time.
@@ -779,15 +850,15 @@ pub const LEISURE_GO_NEED: f32 = 0.55;
 /// two hours before [`LEISURE_CLOSE_H`]; above this need they go earlier.
 pub const LEISURE_URGENT_NEED: f32 = 0.85;
 pub const LEISURE_OPEN_H: f32 = 10.0;
-pub const LEISURE_CLOSE_H: f32 = 21.0;
+pub const LEISURE_CLOSE_H: f32 = 19.5;
 /// Venues close at this hour: nights out end then at the latest, and
 /// nobody sets off who would not have at least [`LEISURE_DURATION_H`] there
 /// before it.
-pub const LEISURE_LAST_H: f32 = 23.5;
+pub const LEISURE_LAST_H: f32 = 21.5;
 pub const LEISURE_FREE_H: f32 = 4.0;
 /// A night out lasts this long plus up to the spread (personal), hours.
-pub const LEISURE_DURATION_H: f32 = 1.5;
-pub const LEISURE_DURATION_SPREAD_H: f32 = 1.5;
+pub const LEISURE_DURATION_H: f32 = 1.25;
+pub const LEISURE_DURATION_SPREAD_H: f32 = 1.0;
 /// Venues compared when choosing one; a venue's score is its restoration
 /// rate over `1 + distance / this`.
 pub const LEISURE_SAMPLES: usize = 6;
@@ -815,6 +886,11 @@ pub const MAX_TRIP_H: f32 = 2.0;
 /// instead of driven (off screen, about as long as the drive would take),
 /// unless the citizen has the car with them or drives children along.
 pub const WALK_MAX_M: f32 = 100.0;
+/// A trip made off screen takes at most this many in-game hours in a city
+/// whose traffic is fine, longer in proportion as it gets worse
+/// (`* max(1, delay_factor / DELAY_OK_FACTOR)`): nobody's trip takes most
+/// of a day unless the roads are gridlocked.
+pub const OFFSCREEN_MAX_TRIP_H: f32 = 2.5;
 /// Without a free car a trip takes this many times as long (stands in for
 /// lifts, buses and walking until stage 3).
 pub const CARLESS_TIME_FACTOR: f32 = 1.8;
@@ -882,7 +958,25 @@ pub const MAX_AGE_YEARS: u32 = 104;
 
 /// Weights of the happiness components `[employment, commute,
 /// affordability, access, taxes, finances, housing]`.
-pub const HAPPINESS_WEIGHTS: [f32; 7] = [0.25, 0.15, 0.2, 0.15, 0.1, 0.1, 0.05];
+/// (Round 5: the commute weighs as much as having a job: a resident stuck in
+/// traffic every day is clearly unhappy about it.)
+pub const HAPPINESS_WEIGHTS: [f32; 7] = [0.22, 0.30, 0.16, 0.12, 0.08, 0.08, 0.04];
+/// A worker's commute happiness is the worse of its length
+/// (`COMMUTE_OK_S` .. `HOPELESS_COMMUTE_S`) and of how much longer than the
+/// free-flow time it took them: fine up to `COMMUTE_RATIO_OK` times,
+/// nothing left at `COMMUTE_RATIO_BAD` (their own trip, on screen or off,
+/// over its free-flow time plus `COMMUTE_RATIO_SLACK_S`: one red light does
+/// not make a short hop "slow").
+pub const COMMUTE_RATIO_OK: f32 = 1.3;
+pub const COMMUTE_RATIO_BAD: f32 = 3.0;
+pub const COMMUTE_RATIO_SLACK_S: f32 = 15.0;
+/// A household whose workers all have commute happiness below this at a
+/// midnight is fed up with the traffic: with this chance it moves to a free
+/// home nearer the first worker's job (at least `COMMUTE_MOVE_NEARER` times
+/// as close), and failing that leaves the city.
+pub const COMMUTE_FED_UP_BELOW: f32 = 0.25;
+pub const COMMUTE_FED_UP_CHANCE: f32 = 0.2;
+pub const COMMUTE_MOVE_NEARER: f32 = 0.7;
 /// Happiness of a newcomer (and of every component before the first
 /// midnight).
 pub const HAPPINESS_START: f32 = 0.88;
