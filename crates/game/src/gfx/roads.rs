@@ -23,7 +23,10 @@ struct RoadChunks {
     layout: Option<((u64, u64), road_geom::RoadLayout)>,
     quality: Option<GraphicsQuality>,
     /// Chunk -> (content hash, road entity, lamp light pools entity).
-    chunks: HashMap<IVec2, (u64, Entity, Entity)>,
+    /// Per chunk: hash of its pieces, the road mesh and the lamp-light
+    /// mesh entities (`None` while that mesh would be empty: Bevy warns
+    /// about meshes without vertices).
+    chunks: HashMap<IVec2, (u64, Option<Entity>, Option<Entity>)>,
 }
 
 /// Additive material of the street lamps' light pools; its brightness
@@ -167,8 +170,9 @@ fn rebuild_roads(
         .collect();
     for c in gone {
         if let Some((_, e, g)) = state.chunks.remove(&c) {
-            commands.entity(e).despawn();
-            commands.entity(g).despawn();
+            for e in e.into_iter().chain(g) {
+                commands.entity(e).despawn();
+            }
         }
     }
     for (&c, &hash) in &hashes {
@@ -187,37 +191,57 @@ fn rebuild_roads(
                 road_geom::light_pool(&mut glow, tip, POOL_R, road_geom::WALK_Y + 0.025, Color::WHITE);
             }
         }
-        let mesh = meshes.add(m.build());
-        let glow_mesh = meshes.add(glow.build());
         rebuilt += 1;
-        match state.chunks.get_mut(&c) {
-            Some((h, e, g)) => {
-                *h = hash;
-                commands.entity(*e).insert(Mesh3d(mesh));
-                commands.entity(*g).insert(Mesh3d(glow_mesh));
+        let (h, e, g) = state.chunks.entry(c).or_insert((hash, None, None));
+        *h = hash;
+        // A chunk can hold a node without a surface of its own, and most
+        // chunks hold no lamps: empty meshes get no entity at all.
+        match (e.as_ref(), m.is_empty()) {
+            (Some(&ent), false) => {
+                commands.entity(ent).insert(Mesh3d(meshes.add(m.build())));
             }
-            None => {
-                let e = commands
-                    .spawn((
-                        Name::new(format!("Roads {c}")),
-                        Mesh3d(mesh),
-                        MeshMaterial3d(mats.lit.clone()),
-                        Transform::default(),
-                    ))
-                    .id();
-                let g = commands
-                    .spawn((
-                        Name::new(format!("Lamp light {c}")),
-                        LampPoolMesh,
-                        Mesh3d(glow_mesh),
-                        MeshMaterial3d(pools.material.clone()),
-                        Transform::default(),
-                        Visibility::Hidden,
-                        bevy::light::NotShadowCaster,
-                    ))
-                    .id();
-                state.chunks.insert(c, (hash, e, g));
+            (None, false) => {
+                *e = Some(
+                    commands
+                        .spawn((
+                            Name::new(format!("Roads {c}")),
+                            Mesh3d(meshes.add(m.build())),
+                            MeshMaterial3d(mats.lit.clone()),
+                            Transform::default(),
+                        ))
+                        .id(),
+                );
             }
+            (Some(&ent), true) => {
+                commands.entity(ent).despawn();
+                *e = None;
+            }
+            (None, true) => {}
+        }
+        match (g.as_ref(), glow.is_empty()) {
+            (Some(&ent), false) => {
+                commands.entity(ent).insert(Mesh3d(meshes.add(glow.build())));
+            }
+            (None, false) => {
+                *g = Some(
+                    commands
+                        .spawn((
+                            Name::new(format!("Lamp light {c}")),
+                            LampPoolMesh,
+                            Mesh3d(meshes.add(glow.build())),
+                            MeshMaterial3d(pools.material.clone()),
+                            Transform::default(),
+                            Visibility::Hidden,
+                            bevy::light::NotShadowCaster,
+                        ))
+                        .id(),
+                );
+            }
+            (Some(&ent), true) => {
+                commands.entity(ent).despawn();
+                *g = None;
+            }
+            (None, true) => {}
         }
     }
     debug!("roads: rebuilt {rebuilt} of {} chunks", state.chunks.len());
