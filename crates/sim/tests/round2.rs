@@ -790,4 +790,6 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0xa0337783313a4539;
+/// Moved by six-row zoning blocks and save format 7 (blocks and the save
+/// layout are part of the state).
+const PINNED_CHECKSUM: u64 = 0x6b38bbbdb21e8e03;

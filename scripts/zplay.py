@@ -285,6 +285,104 @@ def zone():
     play.log(play.cmd("zonestats"))
 
 
+def held(path, shot_path):
+    """Press at the first point, move through the rest, take a picture
+    while the button is still held, then release."""
+    move(*path[0])
+    play.press()
+    for p in path[1:]:
+        move(*p)
+    play.wait_frames(3)
+    play.shot(shot_path)
+    play.release()
+
+
+def depth(label):
+    """Pick the zone depth by clicking its button in the drawer."""
+    x, y = play.cmd(f"node Depth {label}").split()[:2]
+    play.move_px(float(x), float(y))
+    play.wait_frames()
+    play.click()
+
+
+def modes(out, n0):
+    """Each zone mode's preview on a curve, pictured mid-action."""
+    play.focus()
+    k = n0
+    # Along the road, dragged round the S-bend (both bends) on its east side.
+    site("sbend")
+    zone_tool("r")
+    zmode("Frontage")
+    held([(57.4, 126), (57.6, 122), (60, 119.8), (64, 118.4), (66.8, 114), (66.9, 108)],
+         os.path.join(out, f"zone-{k:02d}-mode-along-road-sbend.png"))
+    k += 1
+    # Fill: hovering the bare middle of the ring previews its whole inside.
+    site("ring")
+    zone_tool("c")
+    zmode("Fill")
+    move(66, 143)
+    play.wait_frames(3)
+    play.shot(os.path.join(out, f"zone-{k:02d}-mode-fill-ring-middle.png"))
+    k += 1
+    # Rectangle across the cul-de-sac's strips and the trunk's grid.
+    site("culdesac")
+    zone_tool("i")
+    zmode("Marquee")
+    held([(84.5, 126.5), (90, 120), (93, 116)], os.path.join(out, f"zone-{k:02d}-mode-rectangle-culdesac.png"))
+    k += 1
+    # Paint across the gentle curve's strip and the trunk's grid where they meet.
+    site("gentle")
+    zone_tool("c")
+    zmode("Paint")
+    held([(18.5, 112), (18.2, 118), (18.4, 124), (21, 126.4), (26, 126.5)],
+         os.path.join(out, f"zone-{k:02d}-mode-paint-gentle.png"))
+    k += 1
+    # De-zoning along the road, dragged.
+    site("sbend")
+    zone_tool("none")
+    zmode("Frontage")
+    held([(54.6, 126), (55.4, 120), (60, 116.8)], os.path.join(out, f"zone-{k:02d}-mode-dezone-along-road.png"))
+    k += 1
+    play.select_tool("inspect")
+    return k
+
+
+def neighbourhood():
+    """A curvy neighbourhood zoned in a few actions: ring and S-bend homes,
+    shops and industry on the other curves for jobs."""
+    play.focus()
+    site("ring")
+    zone_tool("r")
+    zmode("Fill")
+    click_at(66, 143)                 # the whole inside of the ring
+    zmode("Frontage")
+    click_at(77, 143)                 # all round its outside
+    site("sbend")
+    zmode("Frontage")
+    drag([(57.4, 126), (57.6, 122), (60, 119.8), (64, 118.4), (66.8, 114), (66.9, 108)])
+    drag([(54.6, 126), (55.4, 120), (61, 116.4), (69.3, 112), (69.4, 108)])
+    site("gentle")
+    zone_tool("c")
+    zmode("Fill")
+    click_at(22, 110)
+    zone_tool("i")
+    zmode("Frontage")
+    click_at(14.6, 112)
+    site("avenue")
+    zone_tool("i")
+    zmode("Fill")
+    click_at(116, 115)
+    zone_tool("c")
+    zmode("Frontage")
+    click_at(105.5, 114)
+    site("culdesac")
+    zone_tool("c")
+    zmode("Marquee")
+    drag([(83, 112), (97, 126.5)])
+    play.select_tool("inspect")
+    play.log(play.cmd("zonestats"))
+
+
 def shots(prefix, out, n0, suffix):
     """Top-down (zone overlay on) and street-level pictures of every site."""
     k = n0
@@ -358,6 +456,10 @@ def main():
         roads()
     elif a.phase == "zone":
         zone()
+    elif a.phase == "modes":
+        print(modes(a.args[0], int(a.args[1])))
+    elif a.phase == "hood":
+        neighbourhood()
     elif a.phase == "grow":
         play.cmd("speed") if False else None
         print(play.cmd(f"until-day {a.args[0]} 60", timeout=3600))
