@@ -6,8 +6,9 @@
 //! ```text
 //! cargo run -p citysim_sim --release --example overlap -- organic 6
 //! ```
-//! Arguments: scenario (`organic`, `hierarchy`), days to grow first. It then
-//! measures the next two in-game hours from 07:00.
+//! Arguments: scenario (`organic`, `hierarchy`, `streets`), days to grow
+//! first, hour to start (default 7). It then measures the next two in-game
+//! hours.
 
 use std::collections::BTreeMap;
 
@@ -26,7 +27,8 @@ fn main() {
             scenarios::organic(w);
         }),
     }
-    let start = days as u64 * balance::TICKS_PER_DAY as u64 + 7 * balance::TICKS_PER_HOUR as u64
+    let hour: u64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(7);
+    let start = days as u64 * balance::TICKS_PER_DAY as u64 + hour * balance::TICKS_PER_HOUR as u64
         - balance::START_TICK_OF_DAY as u64;
     while w.time.tick < start {
         if let Some(p) = p.as_mut() {
