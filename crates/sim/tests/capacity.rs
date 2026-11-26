@@ -53,9 +53,8 @@ fn a_four_way_avenue_crossing_passes_well_over_a_hundred_cars_a_minute() {
 #[test]
 fn an_avenue_carries_more_than_twice_a_street_through_a_junction() {
     // Straight through: more than twice; with a tenth of the cars turning
-    // each way (left turners share the inner lane: no turn pockets) still
-    // close to it.
-    for (left, right, factor) in [(0.0, 0.0, 2.0), (0.1, 0.1, 1.8)] {
+    // each way (left turners wait in turn pockets) clearly more than twice.
+    for (left, right, factor) in [(0.0, 0.0, 2.0), (0.1, 0.1, 2.5)] {
         let street = bench(Bench::crossing(K::Street, K::Street, S::Signal).turning(left, right));
         let avenue = bench(Bench::crossing(K::Avenue, K::Avenue, S::Signal).turning(left, right));
         eprintln!(

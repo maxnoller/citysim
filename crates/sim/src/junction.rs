@@ -374,6 +374,11 @@ impl JunctionState {
 }
 
 fn phase_allows(phase: &SignalPhase, m: &Movement) -> bool {
+    if phase.left_only && balance::RIGHT_TURN_OVERLAP && m.turn == Turn::Right && !phase.arms.contains(&m.from_arm) {
+        // The other road's right turns run beside a left-arrow phase
+        // (they hug the near corner; the box still keeps them apart).
+        return true;
+    }
     phase.arms.contains(&m.from_arm) && (!phase.left_only || matches!(m.turn, Turn::Left | Turn::UTurn))
 }
 
@@ -584,6 +589,19 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             a.setback = (balance::LANE_MERGE_TAPER_M * 0.5).min(len * 0.4);
         }
     }
+    // Turn pockets: an avenue approach into a junction with a left turn
+    // gets a pocket lane (lane `lanes_in`, in the median) for its left
+    // turns and U-turns. Whether the block is long enough for one is
+    // decided with both ends' stop lines known (`pocket_lengths`); without
+    // room the pocket's movements are simply never used.
+    let pocket: Vec<bool> = (0..deg)
+        .map(|i| {
+            deg >= 3
+                && arms[i].kind.pocket_lane().is_some()
+                && arms[i].lanes_in >= 2
+                && (0..deg).any(|j| j != i && classify([-arms[i].dir[0], -arms[i].dir[1]], arms[j].dir) == Turn::Left)
+        })
+        .collect();
     // Movements.
     let mut movements = Vec::new();
     for i in 0..deg {
@@ -598,7 +616,7 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             // kerb lane, inner to inner), so neighbouring lanes turning
             // together do not cut across each other; lefts line up from
             // the inner side, rights from the kerb.
-            let lanes: Vec<(u8, u8, bool)> = match turn {
+            let mut lanes: Vec<(u8, u8, bool)> = match turn {
                 Turn::Right => (0..ni).map(|l| (l, l.min(no - 1), l == 0)).collect(),
                 Turn::Left => (0..ni)
                     .map(|l| (l, (l + no).saturating_sub(ni).min(no - 1), l == ni - 1))
@@ -606,6 +624,10 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
                 Turn::UTurn => (0..ni).map(|l| (l, no - 1, l == ni - 1)).collect(),
                 Turn::Straight => (0..ni).map(|l| (l, l.min(no - 1), true)).collect(),
             };
+            // From the pocket: left turns into the inner out-lane, U-turns.
+            if pocket[i] && matches!(turn, Turn::Left | Turn::UTurn) {
+                lanes.push((ni, no - 1, true));
+            }
             // Stop line and box edge on the arms' centre lines, and the
             // travel directions there (the arms may be curved).
             let line_a = arm_pose(roads, n, a.segment, a.setback);
@@ -672,7 +694,16 @@ pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec
             } else {
                 let (a0, a1) = ends[i];
                 let (b0, b1) = ends[j];
-                on_arc(a0, a1, b0) != on_arc(a0, a1, b1) || paths_brush(a, b)
+                // Neighbouring lanes of one approach start side by side, as
+                // close as the lanes are: they only conflict when they come
+                // closer than that (a pocket's left turn beside the inner
+                // lane going straight on).
+                let clearance = if a.from_arm == b.from_arm {
+                    balance::NEIGHBOUR_CLEARANCE_M
+                } else {
+                    balance::MOVEMENT_CLEARANCE_M
+                };
+                on_arc(a0, a1, b0) != on_arc(a0, a1, b1) || paths_brush(a, b, clearance)
             };
             if c {
                 out[i] |= 1 << j;
@@ -737,9 +768,9 @@ pub(crate) fn build_clear(movements: &[Movement], conflicts: &[u128]) -> Vec<f32
 /// that do not cross topologically but pass side by side in a small box
 /// (opposite left turns, a turn sweeping past a neighbouring lane). Only
 /// products and sums of the curve points: the same on every machine.
-fn paths_brush(a: &Movement, b: &Movement) -> bool {
+fn paths_brush(a: &Movement, b: &Movement, clearance: f32) -> bool {
     const SAMPLES: usize = 16;
-    let clear2 = balance::MOVEMENT_CLEARANCE_M * balance::MOVEMENT_CLEARANCE_M;
+    let clear2 = clearance * clearance;
     let pts = |m: &Movement| -> [[f32; 2]; SAMPLES + 1] {
         let mut out = [[0.0; 2]; SAMPLES + 1];
         for (k, p) in out.iter_mut().enumerate() {
@@ -795,7 +826,14 @@ fn mark_major(arms: &mut [Arm]) {
 /// Phase plan from the arms: opposite approaches share a phase, the main
 /// road first; avenues get a protected left phase before their through
 /// phase.
-fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
+fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm], movements: &[Movement]) -> SignalPlan {
+    let pockets: Vec<bool> = (0..arms.len())
+        .map(|i| {
+            movements
+                .iter()
+                .any(|m| m.from_arm as usize == i && m.from_lane >= arms[i].lanes_in)
+        })
+        .collect();
     let deg = arms.len();
     let mut groups: Vec<Vec<u8>> = Vec::new();
     let mut used = vec![false; deg];
@@ -828,13 +866,20 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
     // main roads, served alike.
     let equal = groups.len() >= 2 && score(&groups[0]) == score(&groups[1]);
     for (k, g) in groups.iter().enumerate() {
-        let wide = balance::SIGNAL_LEFT_PHASES && g.len() == 2 && g.iter().any(|&a| arms[a as usize].lanes_in >= 2);
+        let pocketed =
+            balance::POCKET_LEFT_PHASES && g.iter().any(|&a| pockets.get(a as usize).copied().unwrap_or(false));
+        let wide = pocketed
+            || (balance::SIGNAL_LEFT_PHASES && g.len() == 2 && g.iter().any(|&a| arms[a as usize].lanes_in >= 2));
         if wide {
             phases.push(SignalPhase {
                 arms: g.clone(),
                 left_only: true,
                 min_green_s: balance::SIGNAL_LEFT_MIN_GREEN_S,
-                max_green_s: balance::SIGNAL_LEFT_MAX_GREEN_S,
+                max_green_s: if pocketed {
+                    balance::POCKET_LEFT_MAX_GREEN_S
+                } else {
+                    balance::SIGNAL_LEFT_MAX_GREEN_S
+                },
             });
         }
         if k == 0 {
@@ -844,7 +889,11 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
             arms: g.clone(),
             left_only: false,
             min_green_s: balance::SIGNAL_MIN_GREEN_S,
-            max_green_s: if k == 0 || (equal && k == 1) {
+            max_green_s: if pocketed && (k == 0 || equal) {
+                // Its lefts wait in pockets: a longer green pays for the
+                // left phase's lost time.
+                balance::POCKET_MAIN_MAX_GREEN_S
+            } else if k == 0 || (equal && k == 1) {
                 balance::SIGNAL_MAIN_MAX_GREEN_S
             } else {
                 balance::SIGNAL_SIDE_MAX_GREEN_S
@@ -950,7 +999,7 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
     } else {
         JunctionControl::Priority
     };
-    let plan = (deg >= 3).then(|| build_plan(roads, n, &arms));
+    let plan = (deg >= 3).then(|| build_plan(roads, n, &arms, &movements));
     let same_shape = old
         .is_some_and(|o| o.arms.len() == arms.len() && o.arms.iter().zip(&arms).all(|(a, b)| a.segment == b.segment));
     let signal = match old {
@@ -1165,6 +1214,117 @@ fn time_to_change(j: &JunctionState, arm: usize, any_demand_elsewhere: bool) -> 
     }
 }
 
+// -------------------------------------------------------- turn pockets ----
+
+/// A left-turn pocket: a short lane cut into an avenue's median before a
+/// junction, for the cars turning left (or U-turning) there. Cars move
+/// into it from the inner lane once past `start_m` and wait at its own
+/// stop line, out of the way of the through traffic; a full pocket makes
+/// the next left turner wait at its entry in the inner lane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TurnPocket {
+    /// The junction it leads to.
+    pub node: NodeId,
+    pub segment: SegmentId,
+    /// Travel direction it serves (`a -> b` when true).
+    pub forward: bool,
+    /// Its lane index (`RoadKind::pocket_lane`).
+    pub lane: u8,
+    /// Where it opens and where its stop line is, metres along the
+    /// direction of travel (0 = the node the car came from); its length is
+    /// `stop_m - start_m`.
+    pub start_m: f32,
+    pub stop_m: f32,
+    /// Lateral offset of its centre from the centre line, metres to the
+    /// right of travel (`RoadKind::lane_offset_m(lane)`), and its half-width.
+    pub offset_m: f32,
+    pub half_width_m: f32,
+}
+
+impl TurnPocket {
+    /// `(start, stop)` in metres from the segment's `a` end (for meshing
+    /// along the curve `a -> b`).
+    pub fn from_a(&self, length: f32) -> (f32, f32) {
+        if self.forward {
+            (self.start_m, self.stop_m)
+        } else {
+            (length - self.stop_m, length - self.start_m)
+        }
+    }
+}
+
+/// Does the approach on arm `arm` have a pocket lane (movements from it)?
+fn has_pocket(j: &JunctionState, arm: usize) -> bool {
+    let lanes = j.arms.get(arm).map_or(u8::MAX, |a| a.lanes_in);
+    j.movements
+        .iter()
+        .any(|m| m.from_arm as usize == arm && m.from_lane >= lanes)
+}
+
+/// Pocket lengths of segment `s`, `[travel a -> b, travel b -> a]`, metres
+/// (0: none): an avenue approach into a junction where it can turn left
+/// gets one if the block leaves at least `POCKET_MIN_M` for it.
+pub(crate) fn pocket_lengths(
+    roads: &RoadNetwork,
+    states: &crate::side::SideTable<NodeId, JunctionState>,
+    s: SegmentId,
+) -> [f32; 2] {
+    let Some(seg) = roads.segments.get(s) else {
+        return [0.0; 2];
+    };
+    if seg.kind.pocket_lane().is_none() {
+        return [0.0; 2];
+    }
+    // (wants a pocket, stop line setback) at node `n`.
+    let end = |n: NodeId| -> (bool, f32) {
+        match states.get(n).and_then(|j| j.arm_of(s).map(|a| (j, a))) {
+            Some((j, a)) => (j.arms.len() >= 3 && has_pocket(j, a), j.arms[a].setback),
+            None => (false, 0.0),
+        }
+    };
+    let (want_b, sb_b) = end(seg.b);
+    let (want_a, sb_a) = end(seg.a);
+    let drivable = seg.length - sb_a - sb_b;
+    let one = |both: bool| -> f32 {
+        let room = if both {
+            (drivable - balance::POCKET_GAP_M) * 0.5
+        } else {
+            drivable - balance::NO_LANE_CHANGE_AFTER_BOX_M - balance::POCKET_GAP_M
+        };
+        let len = room.min(balance::POCKET_MAX_M);
+        if len >= balance::POCKET_MIN_M { len } else { 0.0 }
+    };
+    let both = want_a && want_b;
+    [
+        if want_b { one(both) } else { 0.0 },
+        if want_a { one(both) } else { 0.0 },
+    ]
+}
+
+/// The turn pocket at the end of segment `s` in direction `forward`, if it
+/// has one (renderers: cut the median over `start_m..stop_m`, draw the
+/// lane, its arrow and its stop line).
+pub fn turn_pocket(world: &World, s: SegmentId, forward: bool) -> Option<TurnPocket> {
+    let seg = world.roads.segments.get(s)?;
+    let lane = seg.kind.pocket_lane()?;
+    let len = pocket_lengths(&world.roads, &world.traffic.junction_states, s)[usize::from(!forward)];
+    if len <= 0.0 {
+        return None;
+    }
+    let node = if forward { seg.b } else { seg.a };
+    let stop_m = seg.length - setback(world, node, s);
+    Some(TurnPocket {
+        node,
+        segment: s,
+        forward,
+        lane,
+        start_m: stop_m - len,
+        stop_m,
+        offset_m: seg.kind.lane_offset_m(lane),
+        half_width_m: seg.kind.median_half_width_m(),
+    })
+}
+
 // -------------------------------------------------------------- queries ----
 
 /// State of the junction at node `n`, if it has one (three or more arms).
@@ -1201,6 +1361,12 @@ pub fn movement_aspect(world: &World, n: NodeId, from: SegmentId, to: SegmentId)
 }
 
 /// (main aspect, left aspect, left protected) of an arm.
+fn arm_has_straight(j: &JunctionState, arm: usize) -> bool {
+    j.movements
+        .iter()
+        .any(|m| m.from_arm as usize == arm && m.turn == Turn::Straight)
+}
+
 fn approach_aspects(j: &JunctionState, arm: usize) -> (Option<Aspect>, Option<Aspect>, bool) {
     if j.control != JunctionControl::Signal {
         return (None, None, false);
@@ -1223,6 +1389,10 @@ fn approach_aspects(j: &JunctionState, arm: usize) -> (Option<Aspect>, Option<As
                 prot = true;
             }
             &mut left
+        } else if m.turn == Turn::Right && balance::RIGHT_TURN_OVERLAP && arm_has_straight(j, arm) {
+            // The main head follows straight on (a right turn may run
+            // beside the other road's left arrow).
+            continue;
         } else {
             &mut main
         };

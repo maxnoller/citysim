@@ -291,6 +291,45 @@ pub const BEND_MARGIN_M: f32 = 0.5;
 /// (centre lines, metres) conflict even when they do not cross: a car is
 /// about 1.9 m wide, plus room so the bodies never brush.
 pub const MOVEMENT_CLEARANCE_M: f32 = 2.6;
+/// ... two movements from neighbouring lanes of one approach, which start
+/// side by side like the lanes: closer than this (a car's width plus a
+/// little) only where they really close in on each other.
+pub const NEIGHBOUR_CLEARANCE_M: f32 = 2.2;
+/// Turn pockets: before a junction an avenue approach gets a short
+/// left-turn lane cut into its median (lane `RoadKind::pocket_lane`), as
+/// long as `POCKET_MAX_M`, never shorter than `POCKET_MIN_M` (no pocket on
+/// a block too short for it). When both ends of a segment have one, they
+/// share the drivable length and leave `POCKET_GAP_M` of median between
+/// them; a pocket alone leaves `NO_LANE_CHANGE_AFTER_BOX_M` plus this gap
+/// behind the box it follows. Left turners move into it from the inner
+/// lane; one that finds it full waits at its entry, `POCKET_ENTRY_M` in,
+/// so the queue spills back into the inner lane.
+pub const POCKET_MAX_M: f32 = 40.0;
+pub const POCKET_MIN_M: f32 = 11.0;
+pub const POCKET_GAP_M: f32 = 6.0;
+pub const POCKET_ENTRY_M: f32 = 4.0;
+/// Offset of the pocket lane's centre from the centre line (right of
+/// travel), metres, and the avenue median's half-width (the pocket is cut
+/// into it).
+pub const POCKET_OFFSET_M: f32 = 0.0;
+pub const AVENUE_MEDIAN_HALF_M: f32 = 1.0;
+/// Signalled junctions give approaches with a turn pocket a protected left
+/// phase (called by a left turner standing at the pocket's line; both
+/// opposite pockets turn together), before the through phase.
+pub const POCKET_LEFT_PHASES: bool = true;
+/// ... called only once this many cars stand in the pocket (fewer clear
+/// out permissively at the end of the through green).
+pub const POCKET_CALL_CARS: u16 = 3;
+/// Maximum greens at junctions whose approaches have pockets: the left
+/// phase, and the main through phases (longer, so the left phase's lost
+/// time is spread over more cars).
+pub const POCKET_LEFT_MAX_GREEN_S: f32 = 10.0;
+pub const POCKET_MAIN_MAX_GREEN_S: f32 = 30.0;
+/// Right turns of the other road go during a left-arrow phase.
+pub const RIGHT_TURN_OVERLAP: bool = true;
+/// Routing: a left turn from a turn pocket costs this share of the usual
+/// left-turn cost (`ROUTE_LEFT_PER_LANE_S`): it waits out of the way.
+pub const ROUTE_POCKET_LEFT_SHARE: f32 = 0.5;
 /// Length of the merge box where a road changes its number of lanes
 /// without a junction (split between both sides of the node), metres.
 pub const LANE_MERGE_TAPER_M: f32 = 14.0;

@@ -234,6 +234,8 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     }
     restore_derived(&mut world);
     world.roads.refresh_tables();
+    // Junctions saved before turn pockets: today's geometry.
+    crate::traffic::upgrade_junction_geometry(&mut world);
     world.cache.ensure_roads(&world.roads, world.versions.roads);
     world.cache.ensure_zoning(&world.zoning);
     if version == 3 {
