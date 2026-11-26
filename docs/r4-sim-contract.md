@@ -527,14 +527,30 @@ turning carries 4.4 times a street crossing.
   9-10 % jobless with industrial demand 0.97-1.0 and no industrial land free; zoned on day 3, nearly nobody is out
   of work by the next morning.
 
-### Measured (release, 10 seeds per city; the numbers of the final run are in `sim-data/after`)
+### Measured (release, 10 seeds per city; data in `sim-data/after`, `before`, `before2`)
 
-See the r5 report for the tables; in short, day 15: avenue city $74k money (was $85k), net $12.3k a day, $18.7k
-lost to traffic a day; streets city $65k (was $165k), net $4.5k, $27.1k lost to traffic; main streets upgraded on
-day 8 $96.5k (was $74.5k); relief roads $68k. Commute over free flow at 9,000-11,000 residents: avenue city 2.2x
-(was 2.3x), give-ups 0.65 %; streets city 3.3x (was 3.1x), 2.1 %; at 6,000-8,000 the streets city runs 2.5-2.8x
-(target 3-4x not reached). Car bodies: no overlaps in the organic town's morning and evening rush (was 4 and 31
-pair-ticks) nor in the 10,000-resident cities.
+Day 15 (money · net per day · business tax lost to traffic per day): avenue city $77k · $12.7k · $18.3k (before
+$85k · $24.6k); streets city $65k · $4.5k · $27.1k (before $165k · $24.3k); streets with main streets upgraded on
+day 8 $96k · $15.8k · $14.4k (before $75k); streets with relief roads $68k · $4.8k · $26.8k (before $163k). At 10,000
+residents the avenue city holds $38-44k, the streets city about $55k; the avenue player's longest wait for money is
+4-6 real minutes at 2.5x (before 5-6).
+
+Commute over free flow · car trips given up, by size (10 seeds): avenue city 7-9k 1.9x · 0.43 %, 9-11k 2.2x ·
+0.71 % (before 2.1x · 0.46 %, 2.3x · 0.60 %); streets city 5-7k 2.5x, 7-9k 2.8x · 0.94 %, 9-11k 3.3x · 2.1 %,
+13-16k 3.6x · 3.9 % (before 1.9x, 2.2x · 0.48 %, 3.1x · 1.5 %, 3.5x · 3.5 %); upgraded 9-11k 1.9x · 0.45 %;
+relief roads cut give-ups by a quarter to a third (2.1 -> 1.5 %, 3.9 -> 2.9 %) but not commutes. Targets missed:
+avenue city at most ~2x with well under 0.5 % (2.2x, 0.7 % at 10,000); streets city 3-4x from 6,000-8,000 (2.5-2.8x).
+
+Cars on the road per 1,000 residents, days 8-10 (avenue city / streets city): morning peak 06:00-08:00, evening
+peak 18:00-19:00 at 60 / 65 (before 17:00-18:00, 50 / 57); 22:00 27 / 43 (before 19 / 31); 23:00 13 / 27 (14 /
+22); 02:00 1.5 / 5 (3.4 / 7); noon 11 / 15. Journeys: in a sensible player's town at day 4, under 0.1 % of
+commutes take over 8 in-game hours and about 2 % over 4 (the longest journeys are newcomers queuing at the highway
+gateway).
+
+Car bodies: no overlaps in the organic town's morning and evening rush (was 4 and 31 pair-ticks) nor in the
+10,000-resident avenue and streets cities. Step time (20,000 citizens, 2,290 cars at the peak): no change against
+the previous build measured back to back on the same (heavily loaded) machine, mean 2.05 -> 1.99 ms, p99 8.4 ->
+7.5 ms; the absolute figure needs a quiet machine.
 
 ### Tools
 
