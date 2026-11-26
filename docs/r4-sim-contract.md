@@ -421,3 +421,125 @@ Commute over free-flow time (`delay_factor`) · car trips given up · residents 
   avenue town 32.5 -> 26.0 (every car trip is still a car there; trips are faster, so fewer are on the road at once);
   4,000–6,000: 59–75 -> 17–23; 9,000–11,000: 89–97 -> 23–31 (the car share; a 12,000-resident city still shows
   500–700 cars in its evening rush).
+
+## 2026-11-26 (r5-sim: good roads pay, turn pockets, the day, people and jobs)
+
+Goal: a road hierarchy pays for itself, congestion costs a city visibly, rush hours line up with the day, jammed
+residents are unhappy and say so, and the demand bars tell the player what work land is missing. Charts `sim-01`..
+`sim-08` and `sim.mp4` in `/home/max/citysim-shots/r5/`, data in `sim-data/` there.
+
+### Turn pockets (renderers: read this)
+
+- **Avenue cross-section changed.** Still 13 m (`half_width_m` 6.5), now two 2.75 m lanes each way either side of
+  a 2 m median: `RoadKind::Avenue.lane_offset_m(0)` = 5.125 (was 4.75), `lane_offset_m(1)` = 2.375 (was 1.75).
+  New `RoadKind::median_half_width_m()` (avenue 1.0, else 0) and `RoadKind::pocket_lane()` (`Some(2)` for avenues).
+  `lane_offset_m(2)` on an avenue is the pocket lane, `balance::POCKET_OFFSET_M` (0.0, the median's centre).
+- **`junction::turn_pocket(world, segment, forward) -> Option<TurnPocket>`**: the left-turn pocket at the end of a
+  segment for travel `a -> b` (`forward`) or `b -> a`. `TurnPocket { node, segment, forward, lane, start_m, stop_m,
+  offset_m, half_width_m }`; `start_m..stop_m` are metres along travel (`stop_m` is the stop line),
+  `TurnPocket::from_a(length)` gives the same range from the `a` end. Draw the median only between pockets (gfx:
+  `SegLayout::pockets`, `median_span()`), the pocket's edges, a left-only arrow and a stop bar. Pockets depend on
+  the road graph and stop lines only (rebuild with the roads).
+- Which approaches get one: every avenue approach into a junction of three or more arms with a left exit, if the
+  block leaves at least `POCKET_MIN_M` (11 m); at most `POCKET_MAX_M` (40 m). Two pockets of one segment share it
+  (`POCKET_GAP_M` of median between them); when both do not fit, the end with more arterial arms gets one
+  (`junction::pocket_lengths`).
+- Vehicles: lane index 2 (`Vehicle::lane`) is the pocket; `drive::vehicle_pose` and `lane_offset` already place
+  cars there (gfx's `vehicle_offset` works unchanged). Lane slots per direction are 3.
+- Driving: left turners (and U-turns) move into the pocket from the inner lane once past `start_m`; cars bound for
+  a pocket move over from twice `LANE_PREPARE_M`, and nobody overtakes or keeps right out of the lanes the next
+  turn needs within that distance. A left turner that finds the pocket full waits in the inner lane at its entry
+  (`POCKET_ENTRY_M` in): queues spill back. Movements from the pocket exist for left turns and U-turns
+  (`Movement::from_lane == lanes_in`); the inner lane keeps its (fallback) left turn.
+- Signals: a junction whose approaches have pockets gets a protected left phase per opposite pair before the
+  through phase, called only once `POCKET_CALL_CARS` (3) stand in a pocket (fewer go permissively and clear out at
+  the end of green), up to `POCKET_LEFT_MAX_GREEN_S` (14 s); its through phases may run to `POCKET_MAIN_MAX_GREEN_S`
+  (30 s). The other road's right turns run beside a left-arrow phase (`RIGHT_TURN_OVERLAP`);
+  `ApproachView::aspect` follows straight-on movements only, so the main head stays red then.
+- Conflicts: movements from neighbouring lanes of one approach, both preferred, conflict only when their paths come
+  within `NEIGHBOUR_CLEARANCE_M` (2.2 m).
+- Routing: a left turn from a pocket costs `ROUTE_POCKET_LEFT_SHARE` of the usual.
+- Saves: junctions saved without pocket lanes get today's geometry on load (`traffic::upgrade_junction_geometry`).
+
+Bench (cars per minute, all approaches saturated, before -> after): avenue x avenue straight 145 -> 158, 20 %
+turning 63 -> 116, 30 % turning 62 -> 103, 15 % left 61 -> 103; avenue x street 30 % turning 49 -> 67; street x
+street signal 56 -> 46 (streets are slower now, below), with 20 % turning 33 -> 27. An avenue crossing with 20 %
+turning carries 4.4 times a street crossing.
+
+### Other road and driving changes
+
+- Residential streets: `STREET_SPEED_LIMIT` 13.9 -> 11.1 m/s (40 km/h), `STREET_FOLLOW_HEADWAY_S` 1.5 -> 2.0 s.
+- A path through a node without a box (a smooth join of two curves) is a 0.5 m straight hop; cars on it were drawn
+  with an arbitrary heading. Two pieces meeting at a kink (more than ~1.8°, `BEND_KINK_COS`) get a bend box sized to
+  it, so `junction_shape` returns a shape there.
+- The scripted `GridPlayer` lays the `x = 20` spine to every block away from the trunk (a block could be
+  unreachable until the one between was built, and a town could stall).
+
+### Money
+
+- **Traffic losses.** Every commute's time beyond `TRAFFIC_FREE_FACTOR` (1.6) times its free-flow estimate is
+  business output lost at `TRAFFIC_OUTPUT_PER_S` ($0.9 per vehicle second); the tax on it is not paid, up to
+  `TRAFFIC_LOSS_MAX_SHARE` (70 %) of the day's business tax. The commercial and industrial tax lines of `Budget`
+  are net of it; the loss itself: `Economy::last_day_traffic` / `traffic_today` (`TrafficLoss { commutes, lost_s,
+  business_tax }`, `per_commute_s()`), today so far `economy::traffic_loss_now(world)`. The interface should show
+  "Business tax lost to traffic" beside the tax lines (the `Budget` struct is unchanged).
+- Services: base `SERVICES_COST_PER_RESIDENT_PER_DAY` 3.0 -> 3.6, size term 3.0 at 6,000 -> 2.2 at 9,000
+  (`SERVICES_CITY_SIZE_*`): a well-run bigger city nets more than a smaller one.
+- Avenues `AVENUE_COST_PER_CELL` 140 -> 90, `AVENUE_UPKEEP_PER_CELL_PER_DAY` 10 -> 8; `SIGNAL_UPKEEP_PER_DAY`
+  100 -> 80.
+- Saves: extension block version 3 (`ExtensionV3`: version 2 plus the traffic losses, the journey times and the
+  commute moves below). Older blocks load.
+
+### The day
+
+- Shifts start later (`INDUSTRY_START_H` 6.5-8.5, `OFFICE_START_H` 8.5-9.5, `SHOP_START_H` 8-9.5,
+  `LATE_SHIFT_OFFSET_H` 4.5); shops close at 19:30 (`SHOP_CLOSE_H`), nobody sets off for a night out after 19:30
+  (`LEISURE_CLOSE_H`), venues close at 21:30 (`LEISURE_LAST_H`), nights out 1.25 + up to 1 h.
+- Off-screen trips take at most `OFFSCREEN_MAX_TRIP_H` (2.5 in-game hours) while traffic is fine, longer in
+  proportion to `delay_factor / DELAY_OK_FACTOR` (`day::offscreen_s`).
+- New statistics: `People::trip_times_today` / `trip_times_yesterday` (`TripTimes`: journeys door to door by
+  duration bins `BINS_H`, commutes apart, the longest with its purpose, journeys over 4 h by purpose and on / off
+  screen; `share_over(h)`).
+
+### People
+
+- Commute happiness is each worker's own last commute over its free-flow estimate plus
+  `COMMUTE_RATIO_SLACK_S` (15 s): full up to `COMMUTE_RATIO_OK` (1.3), nothing at `COMMUTE_RATIO_BAD` (3.0), or
+  the old absolute measure if worse (`life::commute_ratio(world, citizen)`). `HAPPINESS_WEIGHTS` [0.22, 0.30, 0.16,
+  0.12, 0.08, 0.08, 0.04] (the commute weighs as much as the job).
+- `inspect::happiness_reasons` says "Stuck in traffic every day" when a long commute is slow for its distance (the
+  roads) and "Long commute" when it is long because of the distance.
+- A household whose workers all have commute happiness below `COMMUTE_FED_UP_BELOW` at midnight is fed up: with
+  `COMMUTE_FED_UP_CHANCE` (0.2) a night it moves to a free home at most `COMMUTE_MOVE_NEARER` (0.7) times as far
+  from the first worker's job, or else leaves. Counted in `People::commute_moves_today` / `_yesterday`
+  (`CommuteMoves { moved_nearer, left }`; also in `moved_home` / `households_left`).
+
+### Jobs and demand
+
+- `demand::jobs_view(world) -> JobsView { workforce, unemployed, vacancies, vacancies_reachable, free_cells,
+  short_of: Option<Zone>, reason: JoblessReason }`, `rate()`; `JoblessReason::{None, Searching, NoJobsWithinReach,
+  NoLandZoned, BuildingsComing}` with `text()`. O(buildings + zone cells): every few frames at most.
+- Unemployment pushes job demand harder (`UNEMPLOYMENT_JOB_BOOST` 1.5 -> 4.5), a quarter to each kind of work and
+  half by their shortfall: a town short of industrial land shows industry near 1.0.
+- A jobless citizen's employment reason names the cause ("Out of work: not enough jobs in the city", "... no jobs
+  within reach", "Out of work until new workplaces open").
+- `scenarios::short_of_industry` / `add_industry_land` (headless `short_industry`, `short_industry_fixed`):
+  9-10 % jobless with industrial demand 0.97-1.0 and no industrial land free; zoned on day 3, nearly nobody is out
+  of work by the next morning.
+
+### Measured (release, 10 seeds per city; the numbers of the final run are in `sim-data/after`)
+
+See the r5 report for the tables; in short, day 15: avenue city $74k money (was $85k), net $12.3k a day, $18.7k
+lost to traffic a day; streets city $65k (was $165k), net $4.5k, $27.1k lost to traffic; main streets upgraded on
+day 8 $96.5k (was $74.5k); relief roads $68k. Commute over free flow at 9,000-11,000 residents: avenue city 2.2x
+(was 2.3x), give-ups 0.65 %; streets city 3.3x (was 3.1x), 2.1 %; at 6,000-8,000 the streets city runs 2.5-2.8x
+(target 3-4x not reached). Car bodies: no overlaps in the organic town's morning and evening rush (was 4 and 31
+pair-ticks) nor in the 10,000-resident cities.
+
+### Tools
+
+`examples/pocketdiag.rs` (an avenue crossing on the bench second by second, what each lane's front car does on
+green, `CONFLICTS=1`), `happy.rs` (happiness by part and reason in a saved city), `capacity::run_traced`,
+`traffic::debug_last_denial`, `overlap` with `OVERLAP_DETAIL=1`, `topdown` draws medians and pockets and `day`
+takes `CITYSIM_TOPDOWN_LAYOUT=hierarchy`, `headless` writes journey times, commute happiness and traffic losses per
+day and has the `short_industry` scenarios.

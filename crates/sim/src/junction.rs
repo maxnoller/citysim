@@ -721,8 +721,9 @@ pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec
                 // Neighbouring lanes of one approach start side by side, as
                 // close as the lanes are: they only conflict when they come
                 // closer than that (a pocket's left turn beside the inner
-                // lane going straight on).
-                let clearance = if a.from_arm == b.from_arm {
+                // lane going straight on). Not a turn from the wrong lane
+                // (it swings across its neighbour).
+                let clearance = if a.from_arm == b.from_arm && a.preferred && b.preferred {
                     balance::NEIGHBOUR_CLEARANCE_M
                 } else {
                     balance::MOVEMENT_CLEARANCE_M
