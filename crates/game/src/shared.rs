@@ -15,6 +15,8 @@
 //! * Round 4, written by ui, drawn / honoured by gfx: `CurveToolView` (the
 //!   free-form road tool), `ToolPreview::area`, `WorldHighlight::doomed_roads`,
 //!   `WorldTarget::Vehicle`, `CameraFollow`, `CameraGoTo`.
+//! * Round 5, written by ui, drawn by gfx: `RouteView` (the trip of the
+//!   selected car or person).
 //! * Performance panel: `PerfProbe::detail` written by ui, `PerfProbe::render`
 //!   filled by gfx.
 
@@ -523,6 +525,48 @@ pub struct WorldHighlight {
     pub doomed_roads: Vec<(Curve, RoadKind)>,
 }
 
+/// How a [`RouteView`] is under way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RouteState {
+    /// Nothing selected that travels (gfx draws nothing).
+    #[default]
+    None,
+    /// A car on the road: `points` start at the car and follow the lanes it
+    /// has planned (the part already driven is not in it).
+    Driving,
+    /// A trip that has not started yet (a person at home, at work...): the
+    /// way they would drive now, from the building they are in.
+    Planned,
+    /// Under way where the map draws nothing (on foot, a lift, a car beyond
+    /// the cars shown): the way a car would take, start to end.
+    Unseen,
+}
+
+/// One end of a [`RouteView`]: a ground point (sim metres) and the
+/// building there, if any (the highway entry has none).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteEnd {
+    pub pos: [f32; 2],
+    pub building: Option<BuildingId>,
+}
+
+/// The trip of the selected car or person, drawn on the map. Written by ui
+/// (only when it changes meaningfully: a new route, the car a few metres on,
+/// another selection), drawn by gfx. Empty (`state: None`) when nothing
+/// travelling is selected.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct RouteView {
+    pub state: RouteState,
+    /// The way still ahead along the lanes, sim metres (lane offsets
+    /// included), in driving order: from where they are now (`Driving`) or
+    /// from the start (`Planned`, `Unseen`) to where the car will stop.
+    pub points: Vec<[f32; 2]>,
+    /// Where the trip started (quiet marker) and where it goes (strong
+    /// marker; gfx also highlights that building).
+    pub origin: Option<RouteEnd>,
+    pub destination: Option<RouteEnd>,
+}
+
 /// Player display settings that gfx honours (written by ui from the
 /// settings panel). Both off by default: in a window the cursor crosses
 /// the border whenever it leaves the game.
@@ -729,6 +773,7 @@ impl Plugin for SharedPlugin {
         .init_resource::<DisplaySettings>()
         .init_resource::<CurveToolView>()
         .init_resource::<CameraFollow>()
+        .init_resource::<RouteView>()
         .init_resource::<PerfProbe>()
         .add_message::<CameraGoTo>()
         // Without gfx there is nothing to wait for.

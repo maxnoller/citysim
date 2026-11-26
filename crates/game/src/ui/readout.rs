@@ -3,13 +3,13 @@
 //! what the point snapped to, why the simulation refuses, how many zoning
 //! cells change. A card, a tooltip or a side panel can show it.
 
-use citysim_sim::{Curve, RoadKind, Zone};
+use citysim_sim::{Curve, RoadKind, World, Zone};
 
 use super::format;
 use super::fsnap::{Snapped, turn_deg};
 use super::shapes::tightest;
 use super::tools::{Pending, ToolPlan};
-use crate::shared::{RoadMode, SnapTarget, ZoneMode};
+use crate::shared::{BulldozeMode, RoadMode, SnapTarget, ZoneMode};
 
 /// How a line should read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,47 +400,97 @@ pub fn zone(plan: &ToolPlan, mode: ZoneMode, dragging: bool) -> Option<Readout> 
     })
 }
 
-/// The bulldozer.
-pub fn bulldoze(plan: &ToolPlan) -> Option<Readout> {
+/// The bulldozer: what a click removes, what it costs, what it saves, and
+/// who it affects (the cursor card is the tool's only readout).
+pub fn bulldoze(plan: &ToolPlan, world: &World, mode: BulldozeMode) -> Option<Readout> {
     let Pending::Bulldoze { hint, building, .. } = &plan.pending else {
         return None;
     };
     let mut lines = Vec::new();
-    let removed: f32 = plan.eval.removed().iter().map(|(c, _)| c.length()).sum();
-    let houses = plan.eval.buildings().len();
+    let removed = plan.eval.removed();
+    let road: f32 = removed.iter().map(|(c, _)| c.length()).sum();
+    let upkeep: f64 = removed.iter().map(|(c, k)| c.length() as f64 * k.upkeep_per_m()).sum();
+    let houses = plan.eval.buildings();
     if let Some(h) = hint {
         lines.push(Line::text(*h, Tone::Muted));
     }
-    if removed > 0.0 {
-        lines.push(Line::new("Road", metres(removed), Tone::Normal));
+    if road > 0.0 {
+        // "Length" joins the card's title ("Demolish road · 120 m").
+        lines.push(Line::new("Length", metres(road), Tone::Normal));
     }
-    if houses > 0 {
-        lines.push(Line::new(
-            "Buildings",
-            format!("{} demolished", format::group(houses as u64)),
-            Tone::Warn,
-        ));
+    if !houses.is_empty() {
+        let mut kinds = [0u32; 3];
+        let (mut residents, mut jobs) = (0u32, 0u32);
+        for b in houses.iter().filter_map(|b| world.buildings.get(*b)) {
+            let i = match b.kind {
+                Zone::Residential => 0,
+                Zone::Commercial => 1,
+                Zone::Industrial => 2,
+            };
+            kinds[i] += 1;
+            if b.kind == Zone::Residential {
+                residents += b.occupied;
+            } else {
+                jobs += b.occupied;
+            }
+        }
+        let words: Vec<String> = [("home", "homes"), ("shop", "shops"), ("works", "works")]
+            .iter()
+            .zip(kinds)
+            .filter(|(_, n)| *n > 0)
+            .map(|((one, many), n)| format!("{n} {}", if n == 1 { one } else { many }))
+            .collect();
+        lines.push(Line::new("Demolishes", words.join(", "), Tone::Warn));
+        let mut who = Vec::new();
+        if residents > 0 {
+            who.push(format!("{} residents move out", format::group(residents as u64)));
+        }
+        if jobs > 0 {
+            who.push(format!("{} jobs go", format::group(jobs as u64)));
+        }
+        if !who.is_empty() {
+            lines.push(Line::text(who.join(" · "), Tone::Warn));
+        }
     }
-    if hint.is_none() && removed == 0.0 && houses == 0 {
+    if hint.is_none() && road == 0.0 && houses.is_empty() {
         lines.push(Line::text("Nothing to remove here", Tone::Muted));
     }
-    if plan.eval.cost > 0 {
-        lines.push(Line::new("Demolition", format::money(plan.eval.cost), Tone::Normal));
+    if road > 0.0 || !houses.is_empty() {
+        lines.push(Line::new(
+            "Price",
+            if plan.eval.cost > 0 {
+                format!("{} · no refund", format::money(plan.eval.cost))
+            } else {
+                "Free · no refund".into()
+            },
+            Tone::Accent,
+        ));
+    }
+    if upkeep >= 0.5 {
+        lines.push(Line::new(
+            "Upkeep saved",
+            format!("{}/day", format::money(upkeep.round() as i64)),
+            Tone::Good,
+        ));
     }
     if let Some(e) = plan.error() {
         lines.push(Line::text(super::context::error_text(e), Tone::Bad));
     }
-    let title = if building.is_some() {
-        "Demolish building"
-    } else {
-        "Bulldoze"
+    let title = match (building.is_some(), mode) {
+        (true, _) => "Demolish building",
+        (false, BulldozeMode::Road) => "Demolish road",
+        (false, BulldozeMode::Area) => "Demolish area",
     };
     Some(Readout {
         symbol: Symbol::Bulldoze,
         title: title.into(),
         refused: plan.error().is_some(),
         lines,
-        hint: "Click a road or building · drag along a road for a part · Ctrl+Z undoes".into(),
+        hint: match mode {
+            BulldozeMode::Road => "Click: a stretch or a building · drag along a road: a part · Tab: area",
+            BulldozeMode::Area => "Drag a rectangle over roads and buildings · Tab: road or building",
+        }
+        .into(),
     })
 }
 
@@ -583,42 +633,6 @@ pub fn zone_figures(plan: &ToolPlan) -> [Figure; 3] {
             Tone::Normal,
         ),
         Figure::new("Cost", "Free", Tone::Good),
-    ]
-}
-
-/// The bulldozer tray's figures: road, buildings, cost.
-pub fn bulldoze_figures(plan: &ToolPlan) -> [Figure; 3] {
-    let (removed, houses) = match &plan.pending {
-        Pending::Bulldoze { .. } => (
-            plan.eval.removed().iter().map(|(c, _)| c.length()).sum::<f32>(),
-            plan.eval.buildings().len(),
-        ),
-        _ => (0.0, 0),
-    };
-    [
-        Figure::new(
-            "Road",
-            if removed > 0.0 { metres(removed) } else { DASH.into() },
-            Tone::Normal,
-        ),
-        Figure::new(
-            "Buildings",
-            if houses > 0 {
-                format::group(houses as u64)
-            } else {
-                DASH.into()
-            },
-            if houses > 0 { Tone::Warn } else { Tone::Normal },
-        ),
-        Figure::new(
-            "Cost",
-            if plan.eval.cost > 0 {
-                format::money(plan.eval.cost)
-            } else {
-                "Free".into()
-            },
-            Tone::Accent,
-        ),
     ]
 }
 

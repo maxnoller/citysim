@@ -33,19 +33,22 @@ working hours and empty out the city's purse.
   are standing and how much longer trips take than on empty roads.
 - **People**: click a home, a workplace or a car to see who lives, works or rides there; click a person for what
   they are doing now and next, their trip (and how late they are), household, work, money, happiness and its reasons,
-  and a journal. Follow anyone with the camera. The People drawer shows the whole city: ages, households, work, what
-  everyone is doing right now, trips today and why people are unhappy.
+  and a journal. A selected car or person has their route drawn on the map: the lanes still ahead to where they are
+  going, the destination marked, and for someone at home the trip they will make next. Follow anyone with the camera.
+  The city window's People page shows the whole city: the age pyramid, households, work, what everyone is doing right
+  now, trips by hour, happiness and its reasons, day by day.
 - **Money**: taxes per zone (businesses pay on the hours their staff actually work, so jams cost money), road upkeep
   by kind, traffic lights, and city services that cost more per resident as the city grows and densifies. The budget
-  drawer shows yesterday, today so far, where the running costs go, a two-week chart and the tax rate. Debt cuts city
-  services; demand falls and people leave until the budget is fixed, and the drawer says what would fix it.
+  page shows yesterday, today so far, where the running costs go, income and costs day by day and the tax rate. Debt
+  cuts city services; demand falls and people leave until the budget is fixed, and the page says what would fix it.
 - **Day and night** on a 16-minute day: the sun and moon cross the sky, street lamps, windows, headlights and brake
   lights come on at dusk, rush hours fill the roads.
 - **A game HUD docked to the screen edges**: money, residents, jobless and demand on the left of the bottom bar, the
-  tools in the middle, the clock and five-step speed switch on the right; a drawer that rises from the bar for the
-  active tool, the budget, people, maps and statistics; a selection panel on the right edge with foldable sections;
-  the city plate and alerts along the top; a performance panel (F3) with frame times, CPU against GPU time, the
-  simulation's pace, memory and scene counts. Settings (graphics quality, interface size, edge scrolling, lot
+  tools and the bulldozer's switch in the middle, the clock and five-step speed switch on the right; a drawer that
+  rises from the bar for the active tool and the maps; a city window for statistics, people and the budget with
+  charts of the city's history (the game keeps running behind it); a selection panel on the right edge with foldable
+  sections; the city plate and alerts along the top; a performance panel (F3) with frame times, CPU against GPU time,
+  the simulation's pace, memory and scene counts. Settings (graphics quality, interface size, edge scrolling, lot
   markers, the performance panel) are remembered. Designed at 1920x1080, compact down to 1280x720, sharp at 2560x1440.
 - Pause and four speeds (1x, 3x, 6x, 12x: a day in 16 minutes down to 80 seconds), one save slot.
 
@@ -77,17 +80,18 @@ kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows;
 
 | Input | Action |
 |---|---|
-| Left click / drag | Use the current tool. Roads: click points (or drag a straight piece); Enter or a double-click builds the whole road. Zones and the bulldozer: click, drag or paint, by the mode chosen in the drawer or with Tab |
-| Right click, Esc | Step back (the piece in progress, then the whole road); again: back to Inspect, then the pause menu |
+| Left click / drag | Use the current tool. Roads: click points (or drag a straight piece); Enter or a double-click builds the whole road. Zones: click, drag or paint, by the mode chosen in the drawer or with Tab. Bulldozer: click a road (the stretch between junctions) or a building, drag along a road for a part, or drag an area (its mode switch above it in the bar, or Tab) |
+| Right click, Esc | Step back (the piece in progress, then the whole road); again: back to Inspect, then the pause menu. Esc also closes the city window |
 | I | Inspect: point at buildings, roads and cars; click one to show it in the side panel |
 | R | Roads (again: street / avenue) · J junctions: lights or priority |
-| Z | Zones (again: homes / shops / industry / de-zone) · B clear (bulldoze) |
-| Tab | Next mode of the tool (roads: straight, curve, chain, grid, upgrade; zones: paint, along a road, fill, rectangle) |
+| Z | Zones (again: homes / shops / industry / de-zone) |
+| B | Bulldozer on / off (off: back to the tool you had) |
+| Tab | Next mode of the tool (roads: straight, curve, chain, grid, upgrade; zones: paint, along a road, fill, rectangle; bulldozer: road or building, area); in the city window: next page (Shift+Tab: back) |
 | Alt · Backspace · [ ] | Hold to place without snapping · remove the last point · grid block size |
 | Ctrl+Z | Undo the last road, zoning or demolition (no refund for demolitions) |
-| P · U · O · T | The city's people · budget · maps (cycles zones and traffic) · traffic map |
+| P · U · O · T | City window: people · budget (the chart button top right: statistics) · maps (cycles zones and traffic) · traffic map |
 | F | Follow the person or car in the side panel (a pan key or Esc lets go) |
-| F6 | Move the keyboard into the open drawer: arrow keys choose, Enter presses, Esc leaves |
+| F6 | Move the keyboard into the city window or the open drawer: arrow keys choose, Enter presses, Esc leaves |
 | Space · 1 2 3 4 | Pause · speed 1x / 3x / 6x / 12x |
 | WASD or arrows · Q / E | Pan · rotate (Shift pans faster); edge scrolling can be switched on in Settings |
 | Mouse wheel · middle drag | Zoom · rotate and tilt |

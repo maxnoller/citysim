@@ -708,6 +708,62 @@ pub fn vehicle(world: &World, id: VehicleId) -> Option<VehicleView> {
     })
 }
 
+/// A car route the traffic would plan right now between two buildings:
+/// the segment the car would pull out on and in which direction, the
+/// segments after it (the last one is the segment the destination lies
+/// on), and where it would stop. Read only: for showing a trip that has
+/// not started yet (or happens off the map). The live route of a car on
+/// the road is `Vehicle::route`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedRoute {
+    pub start: crate::Access,
+    /// Driving `start.segment` from `a` towards `b`.
+    pub forward: bool,
+    pub segments: Vec<crate::SegmentId>,
+    pub end: crate::Access,
+}
+
+/// [`PlannedRoute`] from one building to another, by expected travel time
+/// at today's loads and junction delays (the search a departing car makes).
+/// `None` when either has no road nearby or no route joins them. Allocates
+/// its own search buffers: call it when the plan changes, not every frame.
+pub fn planned_route(world: &World, from: BuildingId, to: BuildingId) -> Option<PlannedRoute> {
+    let access = |b: BuildingId| {
+        let p = crate::derived::rect_center(world.buildings.get(b)?.footprint);
+        world.cache.access_near(&world.roads, p)
+    };
+    let (start, end) = (access(from)?, access(to)?);
+    let seg = world.roads.segments.get(start.segment)?;
+    if start.segment == end.segment {
+        return Some(PlannedRoute {
+            start,
+            forward: end.from_a >= start.from_a,
+            segments: Vec::new(),
+            end,
+        });
+    }
+    let sources = [
+        (seg.a, crate::path::drive_time(seg, false, start.from_a)),
+        (seg.b, crate::path::drive_time(seg, true, seg.length - start.from_a)),
+    ];
+    let mut scratch = crate::path::PathScratch::default();
+    let mut budget = i64::MAX;
+    let found = scratch.search(
+        &world.roads,
+        &world.cache.route_delay,
+        &world.cache.route_turns,
+        &sources,
+        crate::path::Target::Access(end),
+        &mut budget,
+    )?;
+    Some(PlannedRoute {
+        start,
+        forward: found.first == seg.b,
+        segments: found.segments,
+        end,
+    })
+}
+
 /// Citizens in a vehicle, driver first (no allocation).
 pub fn occupants(world: &World, id: VehicleId) -> impl Iterator<Item = CitizenId> + '_ {
     let driver = world
@@ -737,4 +793,65 @@ pub fn household_mix(world: &World) -> [(HouseholdKind, u32); 4] {
 pub fn employment_by_tier(world: &World) -> [(JobTier, u32); 3] {
     let k = world.people.stats.employed_by_tier;
     JobTier::ALL.map(|x| (x, k[x.index()]))
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use crate::{Cell, Command, RoadKind, scenarios};
+
+    #[test]
+    fn a_planned_route_joins_the_two_buildings_segment_by_segment() {
+        let mut w = World::new(5);
+        w.apply(Command::BuildRoad {
+            from: Cell::new(11, 128),
+            to: Cell::new(60, 128),
+            kind: RoadKind::Street,
+        })
+        .unwrap();
+        // A side street, so the route has to turn at a junction.
+        w.apply(Command::BuildRoad {
+            from: Cell::new(35, 128),
+            to: Cell::new(35, 150),
+            kind: RoadKind::Street,
+        })
+        .unwrap();
+        scenarios::zone(&mut w, (12, 126), (60, 127), Zone::Residential);
+        scenarios::zone(&mut w, (36, 135), (37, 150), Zone::Commercial);
+        for _ in 0..balance::TICKS_PER_DAY / 3 {
+            w.step();
+        }
+        let pick = |z: Zone, far: bool| {
+            let mut v: Vec<(BuildingId, f32)> = w
+                .buildings
+                .iter()
+                .filter(|(_, b)| b.kind == z)
+                .map(|(id, b)| (id, b.center()[0] + b.center()[1]))
+                .collect();
+            v.sort_by(|a, b| a.1.total_cmp(&b.1));
+            if far {
+                v.last().map(|x| x.0)
+            } else {
+                v.first().map(|x| x.0)
+            }
+        };
+        let (home, shop) = (
+            pick(Zone::Residential, false).unwrap(),
+            pick(Zone::Commercial, true).unwrap(),
+        );
+        let r = planned_route(&w, home, shop).expect("a route");
+        assert!(!r.segments.is_empty());
+        assert_eq!(*r.segments.last().unwrap(), r.end.segment);
+        // Each segment starts where the one before ends.
+        let seg = &w.roads.segments[r.start.segment];
+        let mut at = if r.forward { seg.b } else { seg.a };
+        for &s in &r.segments {
+            let seg = &w.roads.segments[s];
+            assert!(seg.a == at || seg.b == at, "segments joined end to end");
+            at = seg.other(at);
+        }
+        // Same building: no segments, still a route.
+        let same = planned_route(&w, home, home).unwrap();
+        assert!(same.segments.is_empty());
+    }
 }

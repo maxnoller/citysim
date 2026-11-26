@@ -4,14 +4,15 @@
 //! switches for the options, lit switches for the snapping rules, and the
 //! live figures as large numerals.
 //!
-//! Pages: roads, zones, clear (bulldozer), junctions, maps, statistics;
-//! the budget (`budget.rs`) and the city's people (`panel.rs`) fill their
-//! own pages. One page shows at a time; the drawer rises from behind the
-//! bar when it opens and sinks when it closes.
+//! Pages: roads, zones, junctions, maps: the trays of tools (the pages of
+//! figures are in the city window, `city.rs`; the bulldozer has no drawer).
+//! One page shows at a time; the drawer rises from behind the bar when it
+//! opens and sinks when it closes.
 //!
-//! Keyboard: F6 moves the focus into the open drawer (and out again); the
-//! arrow keys move it to the nearest control in that direction, Enter
-//! presses it, Esc leaves. The camera ignores the arrows meanwhile.
+//! Keyboard: F6 moves the focus into the open city window or drawer (and
+//! out again); the arrow keys move it to the nearest control in that
+//! direction, Enter presses it, Esc leaves. The camera ignores the arrows
+//! meanwhile.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
@@ -31,8 +32,8 @@ use super::widgets::{
 };
 use super::{InfoTray, UiState};
 use crate::shared::{
-    ActiveTool, BulldozeMode, CONGESTION_BUSY, CONGESTION_JAM, GameSet, OverlayMode, RoadChoice, RoadMode, SimWorld,
-    ToolModes, WorldHighlight, WorldTarget, ZoneMode,
+    ActiveTool, CONGESTION_BUSY, CONGESTION_JAM, GameSet, OverlayMode, RoadChoice, RoadMode, SimWorld, ToolModes,
+    WorldHighlight, WorldTarget, ZoneMode,
 };
 
 pub struct TrayPlugin;
@@ -51,7 +52,6 @@ impl Plugin for TrayPlugin {
                     update_conditions,
                     update_junction,
                     update_maps,
-                    update_stats,
                 )
                     .in_set(GameSet::Render),
             )
@@ -91,8 +91,11 @@ fn tray_keys(
     )>,
     mut focus: Local<TrayFocus>,
     mut out: MessageWriter<UiAction>,
+    window_area: Res<super::city::WindowArea>,
 ) {
-    let up = root.single().is_ok_and(|r| r.t > 0.9 && r.shown.is_some());
+    // The city window first (it stands over everything), else the drawer.
+    let window = window_area.physical.filter(|_| ui.window.is_some());
+    let up = window.is_some() || root.single().is_ok_and(|r| r.t > 0.9 && r.shown.is_some());
     if keys.just_pressed(KeyCode::F6) && !ui.menu_open {
         let want = !ui.tray_focus && up;
         ui.tray_focus = want;
@@ -100,11 +103,14 @@ fn tray_keys(
     if ui.tray_focus && (!up || ui.menu_open || keys.just_pressed(KeyCode::Escape)) {
         ui.tray_focus = false;
     }
-    // The drawer's controls: visible buttons inside the plate.
-    let area = plate
-        .single()
-        .ok()
-        .map(|(n, tf)| Rect::from_center_size(tf.translation, n.size));
+    // Its controls: visible buttons inside the plate (physical px).
+    let area = match window {
+        Some(r) => Some(r),
+        None => plate
+            .single()
+            .ok()
+            .map(|(n, tf)| Rect::from_center_size(tf.translation, n.size)),
+    };
     let controls: Vec<(Entity, Vec2, UiAction)> = match area {
         Some(area) if ui.tray_focus => buttons
             .iter()
@@ -171,12 +177,8 @@ fn tray_keys(
 pub enum Page {
     Road,
     Zone,
-    Clear,
     Junction,
     Maps,
-    Stats,
-    Budget,
-    People,
 }
 
 /// The page the tray should show now.
@@ -188,12 +190,11 @@ pub fn current_page(tool: ActiveTool, modes: ToolModes, ui: &UiState) -> Option<
         ActiveTool::Road if modes.road == RoadMode::Junction => Some(Page::Junction),
         ActiveTool::Road => Some(Page::Road),
         ActiveTool::Zone(_) => Some(Page::Zone),
-        ActiveTool::Bulldoze => Some(Page::Clear),
+        // The bulldozer has no drawer: its two modes sit on its switch in
+        // the bar, what a click does is at the cursor.
+        ActiveTool::Bulldoze => None,
         ActiveTool::Inspect => ui.tray.map(|t| match t {
-            InfoTray::Budget => Page::Budget,
-            InfoTray::People => Page::People,
             InfoTray::Maps => Page::Maps,
-            InfoTray::Stats => Page::Stats,
         }),
     }
 }
@@ -238,7 +239,6 @@ enum TrayLabel {
     RoadPrice(RoadChoice),
     ZoneDemand(Zone),
     ZoneHint,
-    ClearHint,
     JunctionTitle,
     /// Label and value of junction row `i`.
     JunctionLabel(usize),
@@ -246,14 +246,12 @@ enum TrayLabel {
     JunctionHint,
     MapFigure(usize, bool),
     ZoneCount(usize),
-    Stat(usize, bool),
 }
 
 #[derive(Component, Clone, Copy)]
 struct JunctionRow(usize);
 
 const JUNCTION_ROWS: usize = 8;
-const STATS: usize = 12;
 
 fn spawn_tray(
     mut commands: Commands,
@@ -305,12 +303,8 @@ fn spawn_tray(
             .with_children(|tray| {
                 road_page(tray, fonts, &hatch);
                 zone_page(tray, fonts, &hatch);
-                clear_page(tray, fonts);
                 junction_page(tray, fonts);
                 maps_page(tray, fonts);
-                stats_page(tray, fonts);
-                page(tray, Page::Budget, |_| {});
-                page(tray, Page::People, |_| {});
             });
         });
 }
@@ -1074,55 +1068,6 @@ fn zone_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts, hatch: &MaterialNode
     });
 }
 
-fn clear_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    page(p, Page::Clear, |pg| {
-        title_block(pg, fonts, "Clear", "Roads & buildings", true);
-        tray_rule(pg);
-        options(pg, |o| {
-            opt_row(o, fonts, "Mode", |r| {
-                spawn_segments(
-                    r,
-                    fonts,
-                    &[
-                        (
-                            UiAction::BulldozeMode(BulldozeMode::Road),
-                            Some(icon::ROUTE),
-                            "Road or building",
-                            Some(
-                                Tooltip::new(
-                                    "Road or building",
-                                    "Click a road to remove it between two junctions, drag along it to remove \
-                                     part; click a building.",
-                                )
-                                .key("Tab"),
-                            ),
-                        ),
-                        (
-                            UiAction::BulldozeMode(BulldozeMode::Area),
-                            Some(icon::SCAN),
-                            "Area",
-                            Some(
-                                Tooltip::new("Area", "Drag a rectangle over roads and buildings to remove them.")
-                                    .key("Tab"),
-                            ),
-                        ),
-                    ],
-                );
-            });
-            o.spawn((
-                paragraph(fonts, "", t::FONT_BODY, t::W_MEDIUM, t::TEXT_MUTED),
-                TrayLabel::ClearHint,
-                Node {
-                    width: px(330),
-                    ..default()
-                },
-            ));
-        });
-        tray_rule(pg);
-        figures(pg, fonts, Page::Clear);
-    });
-}
-
 fn junction_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
     page(p, Page::Junction, |pg| {
         title_block(pg, fonts, "Junctions", "Lights & signs", false);
@@ -1499,34 +1444,6 @@ pub fn traffic_bands() -> [(Band, &'static str, String); 3] {
     ]
 }
 
-fn stats_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    page(p, Page::Stats, |pg| {
-        title_block(pg, fonts, "Statistics", "Live", false);
-        tray_rule(pg);
-        pg.spawn(layout(Node {
-            flex_wrap: FlexWrap::Wrap,
-            column_gap: px(26),
-            row_gap: px(12),
-            width: px(6.0 * 126.0 + 5.0 * 26.0),
-            ..default()
-        }))
-        .with_children(|g| {
-            for i in 0..STATS {
-                g.spawn(layout(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(4),
-                    width: px(126),
-                    ..default()
-                }))
-                .with_children(|c| {
-                    c.spawn((figure(fonts, "", t::FONT_TITLE, t::TEXT), TrayLabel::Stat(i, false)));
-                    c.spawn((caps(fonts, "", 10.5, t::TEXT_MUTED), TrayLabel::Stat(i, true)));
-                });
-            }
-        });
-    });
-}
-
 // ---------------------------------------------------------------- systems
 
 /// Show the page that belongs to the tool / info slot.
@@ -1630,12 +1547,10 @@ fn update_figures(
         _ => None,
     };
     let zone = matches!(*tool, ActiveTool::Zone(_)).then(|| readout::zone_figures(plan));
-    let clear = (*tool == ActiveTool::Bulldoze).then(|| readout::bulldoze_figures(plan));
     for (f, mut text, mut color) in &mut figs {
         let set = match f.0 {
             Page::Road => road.as_ref(),
             Page::Zone => zone.as_ref(),
-            Page::Clear => clear.as_ref(),
             _ => None,
         };
         let Some(set) = set else { continue };
@@ -1666,17 +1581,6 @@ fn update_figures(
                 (word.to_uppercase(), c)
             }
             TrayLabel::ZoneHint => (String::new(), t::TEXT_MUTED),
-            TrayLabel::ClearHint => (
-                match modes.bulldoze {
-                    BulldozeMode::Road => {
-                        "Click a road for the stretch between junctions, drag along it for a part, or click a \
-                         building."
-                    }
-                    BulldozeMode::Area => "Drag a rectangle over the roads and buildings to remove.",
-                }
-                .to_string(),
-                t::TEXT_MUTED,
-            ),
             _ => continue,
         };
         if text.0 != v {
@@ -1817,7 +1721,7 @@ fn update_maps(
     }
     smooth.add(sim.world.traffic.stopped_share, time.delta_secs());
     let s = &sim.world.stats;
-    let delay = delay_stat(&sim.world);
+    let delay = super::city::delay_stat(&sim.world);
     let key = (
         *overlay,
         (s.avg_speed * 10.0) as u32,
@@ -1877,93 +1781,5 @@ impl Smoothed {
         } else {
             self.0 += (v - self.0) * (dt / 3.0).min(1.0);
         }
-    }
-}
-
-/// "+40%": how much longer car trips take than on empty roads.
-fn delay_stat(w: &citysim_sim::World) -> (&'static str, String, Color) {
-    let f = citysim_sim::traffic::delay_factor(w);
-    let extra = f - 1.0;
-    (
-        "Trip delay",
-        if w.stats.vehicles_on_road == 0 && extra < 0.005 {
-            "\u{2014}".into()
-        } else {
-            format!("+{}", pct(extra))
-        },
-        if extra > 1.0 {
-            t::NEGATIVE
-        } else if extra > 0.5 {
-            t::WARNING
-        } else {
-            t::TEXT
-        },
-    )
-}
-
-fn update_stats(
-    time: Res<Time<Real>>,
-    ui: Res<UiState>,
-    sim: Res<SimWorld>,
-    mut labels: Query<(&TrayLabel, &mut Text, &mut TextColor)>,
-    mut age: Local<f32>,
-    mut smooth: Local<Smoothed>,
-) {
-    if ui.tray != Some(InfoTray::Stats) {
-        return;
-    }
-    smooth.add(sim.world.traffic.stopped_share, time.delta_secs());
-    *age += time.delta_secs();
-    if *age < 0.3 && !ui.is_changed() {
-        return;
-    }
-    *age = 0.0;
-    let s = &sim.world.stats;
-    let g = |v: u32| format::group(v as u64);
-    let stats: [(&str, String, Color); STATS] = [
-        ("Residents", g(s.population), t::TEXT),
-        ("Households", g(s.households), t::TEXT),
-        ("Workforce", g(s.workforce), t::TEXT),
-        ("Employed", g(s.employed), t::TEXT),
-        (
-            "Jobless",
-            g(s.unemployed),
-            if s.unemployment > 0.15 { t::NEGATIVE } else { t::TEXT },
-        ),
-        ("Jobs", g(s.jobs), t::TEXT),
-        ("Vacant jobs", g(s.vacant_jobs), t::TEXT),
-        (
-            "Avg commute",
-            super::bar::commute_text(s.avg_commute_s),
-            super::bar::commute_color(s.avg_commute_s),
-        ),
-        ("Cars on roads", g(s.vehicles_on_road), t::TEXT),
-        (
-            "Cars standing",
-            pct(smooth.0),
-            if smooth.0 > 0.5 { t::WARNING } else { t::TEXT },
-        ),
-        delay_stat(&sim.world),
-        (
-            "Homes · shops · industry",
-            format!(
-                "{} · {} · {}",
-                s.buildings_by_kind[0], s.buildings_by_kind[1], s.buildings_by_kind[2]
-            ),
-            t::TEXT,
-        ),
-    ];
-    for (l, mut text, mut color) in &mut labels {
-        let TrayLabel::Stat(i, cap) = l else { continue };
-        let (c, v, col) = &stats[*i];
-        let (v, col) = if *cap {
-            (c.to_uppercase(), t::TEXT_MUTED)
-        } else {
-            (v.clone(), *col)
-        };
-        if text.0 != v {
-            text.0 = v;
-        }
-        color.set_if_neq(TextColor(col));
     }
 }

@@ -4,9 +4,11 @@
 //!
 //! The interface is a game HUD docked to the screen edges: the bottom bar
 //! (`bar.rs`: money, residents, demand, tool slots, clock, speed), the
-//! build tray standing on it (`tray.rs`, `budget.rs`), the right-edge
-//! selection panel (`panel.rs`), the top edge (`top.rs`: city plate, alert
-//! ribbons, system buttons), the cursor readout (`context.rs`), menus.
+//! build tray standing on it (`tray.rs`), the city window with its pages
+//! of figures (`city.rs`, `chart.rs`, `budget.rs`), the right-edge
+//! selection panel (`panel.rs`) and the selected trip's route (`route.rs`),
+//! the top edge (`top.rs`: city plate, alert ribbons, system buttons), the
+//! cursor readout (`context.rs`), menus.
 //! Colours, sizes and fonts live in `theme.rs`; angular plates in
 //! `plate.rs`; reusable pieces in `widgets.rs`.
 //! The performance panel (F3) is `perf.rs`.
@@ -15,6 +17,8 @@
 
 mod bar;
 mod budget;
+mod chart;
+mod city;
 mod context;
 mod controls;
 mod fiscal;
@@ -29,6 +33,7 @@ mod plan;
 mod plate;
 mod pointer;
 mod readout;
+mod route;
 mod save_load;
 mod settings;
 mod shapes;
@@ -46,23 +51,51 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowResized};
 use citysim_sim::Zone;
 
-use crate::shared::WorldCamera;
+use crate::shared::{ActiveTool, WorldCamera};
 
 /// The drawers of the bar that are not tools: only one at a time, and none
-/// while a tool's build tray is up.
+/// while a tool's build tray is up. (Pages of figures open in the city
+/// window instead, [`CityPage`].)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfoTray {
-    Budget,
-    People,
     Maps,
+}
+
+/// Pages of the city window (`city.rs`): figures and history, not tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CityPage {
     Stats,
+    People,
+    Budget,
+}
+
+impl CityPage {
+    /// In the order of the window's side list.
+    pub const ALL: [CityPage; 3] = [CityPage::Stats, CityPage::People, CityPage::Budget];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            CityPage::Stats => "Statistics",
+            CityPage::People => "People",
+            CityPage::Budget => "Budget",
+        }
+    }
+
+    pub fn next(self, step: i32) -> CityPage {
+        let i = CityPage::ALL.iter().position(|p| *p == self).unwrap_or(0) as i32;
+        let n = CityPage::ALL.len() as i32;
+        CityPage::ALL[(i + step).rem_euclid(n) as usize]
+    }
 }
 
 /// Interface state that only ui cares about.
 #[derive(Resource, Debug)]
 pub struct UiState {
-    /// The open info drawer (budget, city people, maps, statistics).
+    /// The open info drawer (the maps).
     pub tray: Option<InfoTray>,
+    /// The city window and its page (people, budget, statistics). The game
+    /// keeps running behind it; a build tool closes it.
+    pub window: Option<CityPage>,
     pub menu_open: bool,
     /// Clock state to restore when the menu closes.
     pub paused_before_menu: bool,
@@ -80,15 +113,18 @@ pub struct UiState {
     pub following: bool,
     /// The bar is in its compact form (narrow window).
     pub compact: bool,
-    /// The keyboard works the open drawer (F6; arrows, Enter, Esc).
+    /// The keyboard works the open window or drawer (F6; arrows, Enter,
+    /// Esc).
     pub tray_focus: bool,
+    /// The tool to go back to when the bulldozer is switched off.
+    pub before_demolish: Option<ActiveTool>,
     /// The performance panel's size (F3; remembered in the settings).
     pub perf: crate::shared::PerfDetail,
 }
 
 impl UiState {
     pub fn budget_open(&self) -> bool {
-        self.tray == Some(InfoTray::Budget)
+        self.window == Some(CityPage::Budget)
     }
 }
 
@@ -96,6 +132,7 @@ impl Default for UiState {
     fn default() -> Self {
         UiState {
             tray: None,
+            window: None,
             menu_open: false,
             paused_before_menu: false,
             hint_visible: false,
@@ -106,6 +143,7 @@ impl Default for UiState {
             following: false,
             compact: false,
             tray_focus: false,
+            before_demolish: None,
             perf: crate::shared::PerfDetail::Off,
         }
     }
@@ -138,6 +176,8 @@ impl Plugin for UiPlugin {
                 fiscal::FiscalPlugin,
                 settings::SettingsPlugin,
                 loading::LoadingPlugin,
+                route::RoutePlugin,
+                city::CityPlugin,
                 perf::PerfPlugin,
             ))
             .add_systems(PostStartup, fallback_ui_camera)

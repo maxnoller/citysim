@@ -3,8 +3,9 @@
 //! * a hovered-cell frame that glides to the cursor, tinted by the tool,
 //!   turned to the zoning lattice under the cursor (cells along a rotated
 //!   or curved road are rotated with it);
-//! * a faint cell grid around the cursor while a tool is active, on the
-//!   same lattice;
+//! * a faint cell grid around the cursor while the road or zone tool is
+//!   active, on the same lattice (not for the bulldozer, which marks what
+//!   it would remove);
 //! * the tool ghost: a translucent road (red and hatched when invalid), or
 //!   the zone / bulldoze rectangle with its affected cells.
 
@@ -278,7 +279,9 @@ fn move_frame(
     };
     // Inspect highlights what it points at (buildings, roads, cars); a
     // cell frame on bare ground would only look like a stray tile.
-    let at = hovered_quad(&sim, &hovered, &point, *tool).filter(|_| *tool != ActiveTool::Inspect);
+    // The bulldozer marks what it would remove (red); a cell frame and the
+    // grid mean nothing to it with free-form roads.
+    let at = hovered_quad(&sim, &hovered, &point, *tool).filter(|_| shows_cells(*tool));
     let Some((ctr, shape)) = at else {
         vis.set_if_neq(Visibility::Hidden);
         return;
@@ -306,6 +309,12 @@ fn move_frame(
     }
 }
 
+/// Tools that work on cells: the hovered-cell frame and the faint grid
+/// around the cursor show while they are active.
+fn shows_cells(tool: ActiveTool) -> bool {
+    !matches!(tool, ActiveTool::Inspect | ActiveTool::Bulldoze)
+}
+
 fn move_grid(
     hovered: Res<HoveredCell>,
     point: Res<HoveredPoint>,
@@ -316,7 +325,7 @@ fn move_grid(
     let Ok((mut t, mut vis)) = q.single_mut() else { return };
     let zone_land = !matches!(*tool, ActiveTool::Zone(_)) || point.zone_cell.is_some();
     match grid_frame(&sim, &hovered, &point).filter(|_| zone_land) {
-        Some((corner, rot)) if *tool != ActiveTool::Inspect => {
+        Some((corner, rot)) if shows_cells(*tool) => {
             t.translation = corner + Vec3::Y * 0.05;
             t.rotation = rot;
             vis.set_if_neq(Visibility::Inherited);

@@ -26,7 +26,8 @@
 //! * Tab cycles the current tool's modes, Ctrl+Z undoes (`plan::UndoRecord`).
 //!
 //! Keys: I inspect, R road (again: street / avenue), Z zone (cycles
-//! R/C/I/de-zone), B bulldoze, J junctions.
+//! R/C/I/de-zone), B bulldozer on / off (back to the tool before), J
+//! junctions.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -423,7 +424,10 @@ fn tool_keys(
             modes.road = RoadMode::Junction;
             Some(ActiveTool::Road)
         } else if keys.just_pressed(KeyCode::KeyB) {
-            Some(ActiveTool::Bulldoze)
+            // A switch: on from any tool, off back to it.
+            let mut t = *tool;
+            super::controls::toggle_demolish(&mut t, &mut ui);
+            Some(t)
         } else if keys.just_pressed(KeyCode::KeyZ) {
             Some(ActiveTool::Zone(match *tool {
                 ActiveTool::Zone(Some(Zone::Residential)) => Some(Zone::Commercial),
