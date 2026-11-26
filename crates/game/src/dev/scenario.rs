@@ -14,6 +14,11 @@
 //!
 //! `CITYSIM_DEMO_POP=n` overrides the population target, `CITYSIM_DEMO_HOUR=h`
 //! the time of day the fast-forward stops at (default 08:00, morning rush).
+//!
+//! A built world is cached as a save (`~/.cache/citysim/demos`, shared by all
+//! checkouts) and loaded in well under a second next time, until the
+//! simulation's sources change; `CITYSIM_DEMO_CACHE=0` turns that off (see
+//! [`cached_build`]).
 
 use std::time::Instant;
 
@@ -174,34 +179,90 @@ fn load_scenario(pending: Res<Pending>, mut sim: ResMut<SimWorld>, mut clock: Re
     clock.paused = false;
 }
 
-/// `CITYSIM_DEMO_CACHE=dir`: keep each built demo world as a save in `dir`
-/// (keyed by kind, seed, population target and hour) and load it instead
-/// of building it again (dev aid: the 10,000-resident city takes ~50 s).
+/// Where built demo worlds are kept: `CITYSIM_DEMO_CACHE=dir`, by default
+/// `~/.cache/citysim/demos` (`$XDG_CACHE_HOME`), shared by every checkout;
+/// `CITYSIM_DEMO_CACHE=0` builds every time.
+fn cache_dir() -> Option<std::path::PathBuf> {
+    match std::env::var_os("CITYSIM_DEMO_CACHE") {
+        Some(d) if d == "0" || d == "off" => None,
+        Some(d) if !d.is_empty() => Some(d.into()),
+        _ => std::env::var_os("XDG_CACHE_HOME")
+            .filter(|d| !d.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".cache")))
+            .map(|d| d.join("citysim").join("demos")),
+    }
+}
+
+/// A built demo world is reused from the cache (see [`cache_dir`]) when
+/// nothing that decides it has changed: the key holds the kind, seed,
+/// population target, hour, avenue flag and `CITYSIM_SIM_FINGERPRINT`
+/// (`build.rs`: a hash of the simulation's sources, the scenario code and
+/// `Cargo.lock`), so a simulation edit never loads a stale city. Saves load
+/// in lockstep with the world that was saved (`World::save` / `load`).
 fn cached_build(kind: DemoKind, seed: u64) -> World {
-    let Some(dir) = std::env::var_os("CITYSIM_DEMO_CACHE").filter(|d| !d.is_empty()) else {
+    let Some(dir) = cache_dir() else {
         return build(kind, seed);
     };
     let name = format!(
-        "{kind:?}-seed{seed}-pop{}-hour{}-avenues{}.citysave",
+        "{kind:?}-seed{seed}-pop{}-hour{}-avenues{}-sim{}.citysave",
         std::env::var("CITYSIM_DEMO_POP").unwrap_or_default(),
         std::env::var("CITYSIM_DEMO_HOUR").unwrap_or_default(),
         std::env::var("CITYSIM_DEMO_AVENUES").unwrap_or_default(),
+        env!("CITYSIM_SIM_FINGERPRINT"),
     );
-    let path = std::path::Path::new(&dir).join(name);
+    let path = dir.join(&name);
     if let Ok(bytes) = std::fs::read(&path) {
+        let started = Instant::now();
         match World::load(&bytes) {
             Ok(w) => {
-                info!("dev scenario {kind:?}: loaded {}", path.display());
+                // Mark it used, so `prune` keeps it.
+                let _ = std::fs::File::options()
+                    .append(true)
+                    .open(&path)
+                    .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+                info!(
+                    "dev scenario {kind:?}: loaded {} in {:.2} s (CITYSIM_DEMO_CACHE=0 builds it)",
+                    path.display(),
+                    started.elapsed().as_secs_f32()
+                );
                 return w;
             }
             Err(e) => warn!("dev scenario: cannot load {}: {e:?}", path.display()),
         }
     }
     let w = build(kind, seed);
-    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, w.save())) {
-        warn!("dev scenario: cannot write {}: {e}", path.display());
+    // Write under a temporary name and rename: a checkout reading the same
+    // file at the same time never sees half of it.
+    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+    let written = std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(&tmp, w.save()))
+        .and_then(|_| std::fs::rename(&tmp, &path));
+    match written {
+        Ok(()) => prune(&dir),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            warn!("dev scenario: cannot write {}: {e}", path.display());
+        }
     }
     w
+}
+
+/// Drop cached worlds nobody has used for a week (old fingerprints).
+fn prune(dir: &std::path::Path) {
+    let week = std::time::Duration::from_secs(7 * 24 * 3600);
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > week);
+        if old && e.path().extension().is_some_and(|x| x == "citysave" || x == "tmp") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 #[cfg(test)]

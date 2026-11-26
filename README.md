@@ -66,6 +66,10 @@ cargo run -p citysim --release      # play (the first build takes about 10 minut
 cargo test --workspace              # simulation and game tests
 ```
 
+Working on the game: `scripts/dev-setup.sh --build` prepares a checkout for fast builds (linker, shared compiled
+dependencies), `cargo nextest run -p citysim_sim -P quick` runs the quick simulation tests, `scripts/ci-local.sh` runs
+what CI runs; see `CLAUDE.md` for every loop.
+
 The save slot is `~/.local/share/citysim/city.citysave` on Linux (`~/Library/Application Support/CitySim` on macOS,
 `%APPDATA%\CitySim` on Windows); `CITYSIM_SAVE_DIR` overrides it. Saves from the first versions still load. Settings are
 kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows; `CITYSIM_CONFIG_DIR` overrides it).
@@ -116,6 +120,7 @@ CITYSIM_DEMO=organic cargo run -p citysim --release # a ~3,900-resident town of 
 CITYSIM_DEMO=city cargo run -p citysim --release    # start in a ~5,000-resident town (also: town, jam, shapes)
 CITYSIM_DEMO=hierarchy cargo run -p citysim --release   # ~10,000 residents, avenues and streets (about 50 s to build)
 CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png cargo run -p citysim --release   # screenshot and exit
+CITYSIM_DEMO=town CITYSIM_STILLS=/tmp/s CITYSIM_STILLS_LIST="a=wide;b=street" cargo run -p citysim   # no window
 cargo run -p citysim_sim --release --example headless   # balance runs of scripted cities, no window
 ```
 
