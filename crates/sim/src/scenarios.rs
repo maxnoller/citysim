@@ -94,6 +94,33 @@ pub fn two_districts(w: &mut World, grid: bool) {
     }
 }
 
+/// The grid town of [`two_districts`] (good roads) zoned with far too
+/// little industry: housing as there, shops on the first block of their row, industrial
+/// land only in the first two columns of the southern rows (about a
+/// tenth). Build it
+/// inside [`prebuilt`]. Its jobless rate stays high while industry demand
+/// shows what is missing; [`add_industry_land`] is the fix.
+pub fn short_of_industry(w: &mut World) {
+    two_districts(w, true);
+    // Shops on the western half of their row only; industry on a strip.
+    let _ = w.apply(Command::SetZone {
+        min: c(WEST_X + 11, 130),
+        max: c(EAST_X + 2, 137),
+        zone: None,
+    });
+    let _ = w.apply(Command::SetZone {
+        min: c(WEST_X + 4, 139),
+        max: c(EAST_X + 2, SOUTH_RIBS[4] + 2),
+        zone: None,
+    });
+}
+
+/// Zone the rest of [`short_of_industry`]'s southern rows for industry, as
+/// [`two_districts`] does.
+pub fn add_industry_land(w: &mut World) {
+    zone(w, (WEST_X + 4, 139), (EAST_X + 2, SOUTH_RIBS[4] + 2), Zone::Industrial);
+}
+
 /// Fix for the bad layout: link the far ends of all streets and add a
 /// middle north-south street, giving traffic alternatives to the one
 /// junction.
@@ -207,6 +234,14 @@ struct Block {
 impl Block {
     fn build(&self, w: &mut World, z: Zone, layout: Layout) -> bool {
         let (x0, y0, x1, y1) = (self.x0, self.y0, self.x0 + 10, self.y0 + 5);
+        // A block away from the trunk is reached along the first column's
+        // spine (x = 20) even before the blocks in between are built.
+        if x0 == 20 && (y0 > 128 || y1 < 128) {
+            let (a, b) = if y0 > 128 { (128, y0) } else { (y1, 128) };
+            if let Some(k) = layout.vertical(20) {
+                road_of(w, (20, a), (20, b), k);
+            }
+        }
         let mut ok = road_of(w, (x0, y0), (x1, y0), layout.horizontal(y0))
             && road_of(w, (x0, y1), (x1, y1), layout.horizontal(y1));
         for x in [x0, x1] {

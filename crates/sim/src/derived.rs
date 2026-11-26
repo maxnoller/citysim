@@ -58,6 +58,10 @@ pub(crate) struct Derived {
     /// `traffic.junctions_version` `setbacks_key`.
     pub setbacks: Vec<[f32; 2]>,
     pub setbacks_key: Option<u64>,
+    /// Turn pocket lengths per segment slot, `[travel a -> b (at b), b -> a
+    /// (at a)]`, metres (0: none), built with `setbacks`
+    /// (`junction::pocket_lengths`).
+    pub pockets: Vec<[f32; 2]>,
     /// Expected junction wait per segment slot and direction, for routing
     /// (`drive::build_route_delays`), for `(junctions_version,
     /// control_version)` `route_delay_key`.

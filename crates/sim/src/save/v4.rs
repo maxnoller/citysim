@@ -161,6 +161,8 @@ impl EconomyV4 {
             fiscal: self.fiscal,
             last_day_costs: Default::default(),
             attendance: Default::default(),
+            traffic_today: Default::default(),
+            last_day_traffic: Default::default(),
         }
     }
 

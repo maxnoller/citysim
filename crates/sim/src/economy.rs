@@ -198,6 +198,62 @@ pub struct Economy {
     /// Shift hours scheduled and actually worked (commutes eat into them):
     /// shops and works pay their tax on the hours worked.
     pub attendance: Attendance,
+    /// Commuting time lost in traffic today and what it costs in business
+    /// tax (`traffic_loss_now` for today so far). Saved in the extension
+    /// block.
+    #[serde(skip)]
+    pub traffic_today: TrafficLoss,
+    /// The same for yesterday, as booked: `commercial_tax` and
+    /// `industrial_tax` of `last_day` are already net of its
+    /// `business_tax`.
+    #[serde(skip)]
+    pub last_day_traffic: TrafficLoss,
+}
+
+/// What congestion cost the city in a day: commuters' time beyond
+/// free-flow (`balance::TRAFFIC_FREE_FACTOR` times the free-flow estimate),
+/// the business output lost with it, and the business tax that output
+/// would have paid (taken off the commercial and industrial tax lines).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct TrafficLoss {
+    /// Commutes (to work and home) that ended.
+    pub commutes: u32,
+    /// Vehicle seconds they spent beyond free flow.
+    pub lost_s: f64,
+    /// Business tax lost (whole dollars; set when the day is booked, or by
+    /// `traffic_loss_now`).
+    pub business_tax: i64,
+}
+
+impl TrafficLoss {
+    /// Average time lost per commute, vehicle seconds.
+    pub fn per_commute_s(&self) -> f32 {
+        (self.lost_s / self.commutes.max(1) as f64) as f32
+    }
+}
+
+/// Count one finished commute of `took_s` against its free-flow estimate.
+pub(crate) fn record_commute_time(world: &mut World, took_s: f32, free_s: f32) {
+    let t = &mut world.economy.traffic_today;
+    t.commutes += 1;
+    t.lost_s += (took_s - free_s * balance::TRAFFIC_FREE_FACTOR).max(0.0) as f64;
+}
+
+/// Business tax lost to traffic today so far, before the cap
+/// (`TRAFFIC_LOSS_MAX_SHARE` of the business tax).
+fn traffic_tax(world: &World, lost_s: f64) -> f64 {
+    lost_s * balance::TRAFFIC_OUTPUT_PER_S as f64 * world.economy.tax_rate as f64
+}
+
+/// Today's traffic losses so far, with the business tax they cost.
+pub fn traffic_loss_now(world: &World) -> TrafficLoss {
+    let mut t = world.economy.traffic_today;
+    let b = budget_before_traffic(world);
+    let business = (b.commercial_tax + b.industrial_tax) as f64;
+    t.business_tax = traffic_tax(world, t.lost_s)
+        .min(business * balance::TRAFFIC_LOSS_MAX_SHARE as f64)
+        .round() as i64;
+    t
 }
 
 /// Work time booked today and yesterday's share actually worked.
@@ -245,6 +301,8 @@ impl Default for Economy {
             fiscal: FiscalStatus::default(),
             last_day_costs: RunningCosts::default(),
             attendance: Attendance::default(),
+            traffic_today: TrafficLoss::default(),
+            last_day_traffic: TrafficLoss::default(),
         }
     }
 }
@@ -322,8 +380,21 @@ pub fn running_costs(world: &World) -> RunningCosts {
     }
 }
 
-/// What today's budget would be if the day ended now.
+/// What today's budget would be if the day ended now (business tax net of
+/// what traffic cost it, `traffic_loss_now`).
 pub fn budget_now(world: &World) -> Budget {
+    let mut b = budget_before_traffic(world);
+    let lost = traffic_loss_now(world).business_tax;
+    let business = b.commercial_tax + b.industrial_tax;
+    if business > 0 && lost > 0 {
+        let c = (lost as f64 * b.commercial_tax as f64 / business as f64).round() as i64;
+        b.commercial_tax -= c;
+        b.industrial_tax -= lost - c;
+    }
+    b
+}
+
+fn budget_before_traffic(world: &World) -> Budget {
     let rate = world.economy.tax_rate;
     let (mut com, mut ind) = (0u64, 0u64);
     for b in world.buildings.values() {
@@ -354,8 +425,11 @@ pub(crate) fn end_of_day(world: &mut World) {
     let mut b = budget_now(world);
     b.residential_tax = tax;
     let costs = running_costs(world);
+    let traffic = traffic_loss_now(world);
     let e = &mut world.economy;
     e.last_day_costs = costs;
+    e.last_day_traffic = traffic;
+    e.traffic_today = TrafficLoss::default();
     e.attendance = Attendance {
         scheduled_ticks: 0,
         worked_ticks: 0,
