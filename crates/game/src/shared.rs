@@ -158,9 +158,9 @@ pub enum ActiveTool {
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HoveredCell(pub Option<Cell>);
 
-/// The ground point under the mouse (sim metres) and the zoning cell there
-/// (on whatever lattice owns that spot; `None` where there is no zoning
-/// cell). `None` under the same conditions as [`HoveredCell`]. Computed by
+/// The ground point under the mouse (sim metres) and the usable zoning
+/// cell there (on whatever lattice owns that spot; `None` where there is no
+/// zoneable land, e.g. on a road). `None` under the same conditions as [`HoveredCell`]. Computed by
 /// shared together with it.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct HoveredPoint {
@@ -740,6 +740,9 @@ fn compute_hover(
     hovered.set_if_neq(HoveredCell(cell));
     point.set_if_neq(HoveredPoint {
         pos: ground,
-        zone_cell: ground.and_then(|p| sim.world.zoning.cell_at(p)),
+        zone_cell: ground.and_then(|p| {
+            let z = &sim.world.zoning;
+            z.cell_at(p).filter(|&c| z.cell(c).is_some_and(|x| x.usable()))
+        }),
     });
 }

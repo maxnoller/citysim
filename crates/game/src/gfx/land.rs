@@ -366,12 +366,77 @@ pub fn fit_checked(lot: Lot, edges: &RoadEdges) -> (Inset, bool) {
 }
 
 /// The lot frame of zoning cell `(i, j)` of `l`: local x along the
-/// lattice's `+i`, local y along `+j`.
+/// lattice's `+i`, local y along `+j` (a strip cell: the rectangle of its
+/// mean width, turned to its middle).
 pub fn cell_lot(l: &Lattice, i: i32, j: i32) -> Lot {
+    let (_, v) = l.axes_at(i as f32 + 0.5);
+    let half = if l.is_strip() {
+        let q = l.cell_corners(i, j).map(Vec2::from);
+        Vec2::new(
+            (q[0].distance(q[1]) + q[3].distance(q[2])) * 0.25,
+            citysim_sim::CELL_SIZE * 0.5,
+        )
+    } else {
+        Vec2::splat(citysim_sim::CELL_SIZE * 0.5)
+    };
     Lot {
         c: Vec2::from(l.cell_center(i, j)),
-        f: Vec2::from(l.v()),
-        half: Vec2::splat(citysim_sim::CELL_SIZE * 0.5),
+        f: Vec2::from(v),
+        half,
+    }
+}
+
+/// A fitted rectangle (`inset` of `lot`) laid onto the quadrilateral `q`
+/// the lot stands for (corners in lattice order, as
+/// `Lattice::cell_corners`): the same shares of its width and depth.
+pub fn quad_corners(lot: &Lot, inset: &Inset, q: [Vec2; 4]) -> [Vec2; 4] {
+    let (lo, hi) = inset.rect(lot);
+    let at = |p: Vec2| {
+        let s = (p.x / lot.half.x + 1.0) * 0.5;
+        let t = (p.y / lot.half.y + 1.0) * 0.5;
+        q[0] * (1.0 - s) * (1.0 - t) + q[1] * s * (1.0 - t) + q[2] * s * t + q[3] * (1.0 - s) * t
+    };
+    [at(lo), at(Vec2::new(hi.x, lo.y)), at(hi), at(Vec2::new(lo.x, hi.y))]
+}
+
+/// Fit a building's lot clear of the roads and inside the quadrilateral
+/// `quad` of its cells (front-left, front-right, back-right, back-left;
+/// on a curve the lot narrows or widens towards the back), keeping
+/// `gap` metres from the quad's sides so neighbours never touch.
+pub fn fit_in_quad(lot: Lot, quad: [Vec2; 4], gap: f32, edges: &RoadEdges) -> Inset {
+    // Lot frame: x to the left of the front seen from outside, y to the
+    // front. Allowed x range at the lot's front and back edges.
+    let l = quad.map(|p| lot.local(p));
+    // Left side: back-left (3) -> front-left (0); right: 2 -> 1.
+    let x_at = |a: Vec2, b: Vec2, y: f32| {
+        if (b.y - a.y).abs() < 1e-4 {
+            a.x
+        } else {
+            a.x + (b.x - a.x) * ((y - a.y) / (b.y - a.y))
+        }
+    };
+    let (yf, yb) = (lot.half.y, -lot.half.y);
+    let (l0, l1) = (x_at(l[3], l[0], yf), x_at(l[3], l[0], yb));
+    let (r0, r1) = (x_at(l[2], l[1], yf), x_at(l[2], l[1], yb));
+    // The quad's two sides bound the narrower of the front and back.
+    let (left, right) = if l0 < r0 {
+        (l0.max(l1), r0.min(r1))
+    } else {
+        (r0.max(r1), l0.min(l1))
+    };
+    let room = ((right - left) * 0.5 - gap).max(lot.half.x * MIN_INSET_SCALE);
+    let half_x = lot.half.x.min(room);
+    let mid = if half_x < lot.half.x { (left + right) * 0.5 } else { 0.0 };
+    let narrowed = Lot {
+        c: lot.world(Vec2::new(mid, 0.0)),
+        f: lot.f,
+        half: Vec2::new(half_x, lot.half.y),
+    };
+    let i = fit(narrowed, edges);
+    let k = half_x / lot.half.x;
+    Inset {
+        scale: Vec3::new(i.scale.x * k, i.scale.y, i.scale.z),
+        shift: Vec2::new(mid + i.shift.x, i.shift.y),
     }
 }
 
@@ -444,10 +509,17 @@ pub fn cells_by_chunk(
             // of, are not drawn as land.
             let Some(quad) = *cache.quads.entry(cell).or_insert_with(|| {
                 let (inset, ok) = fit_checked(lot, edges);
-                (ok && inset.scale.x * inset.scale.z > 0.3).then(|| corners(&lot, &inset))
+                (ok && inset.scale.x * inset.scale.z > 0.3).then(|| {
+                    if l.is_strip() {
+                        quad_corners(&lot, &inset, l.cell_corners(i, j).map(Vec2::from))
+                    } else {
+                        corners(&lot, &inset)
+                    }
+                })
             }) else {
                 continue;
             };
+            let (u, v) = l.axes_at(i as f32 + 0.5);
             out.entry(road_geom::chunk_of(lot.c, chunk))
                 .or_default()
                 .push(CellView {
@@ -455,8 +527,8 @@ pub fn cells_by_chunk(
                     zone: zc.zone,
                     free: zc.free(),
                     quad,
-                    u: Vec2::from(l.u),
-                    v: Vec2::from(l.v()),
+                    u: Vec2::from(u),
+                    v: Vec2::from(v),
                     fronts: zc.fronts,
                 });
         }
