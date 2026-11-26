@@ -643,8 +643,17 @@ pub(crate) fn arrivals(world: &mut World) {
     } else {
         1.0
     };
+    // Newcomers arrive by day (the same number per day, few at night).
+    let h = world.time.hour();
+    let by_day = if (balance::MOVE_IN_DAY_H[0]..balance::MOVE_IN_DAY_H[1]).contains(&h) {
+        1.0 + (1.0 - balance::MOVE_IN_NIGHT_SHARE) * (24.0 - balance::MOVE_IN_DAY_H[1] + balance::MOVE_IN_DAY_H[0])
+            / (balance::MOVE_IN_DAY_H[1] - balance::MOVE_IN_DAY_H[0])
+    } else {
+        balance::MOVE_IN_NIGHT_SHARE
+    };
     let rate = if world.growth.attractiveness > balance::MOVE_IN_MIN_DEMAND && free >= 1.0 {
-        (free / balance::ARRIVAL_AVG_SIZE * balance::MOVE_IN_FILL_PER_HOUR * mood).min(balance::MOVE_IN_MAX_PER_HOUR)
+        (free / balance::ARRIVAL_AVG_SIZE * balance::MOVE_IN_FILL_PER_HOUR * mood * by_day)
+            .min(balance::MOVE_IN_MAX_PER_HOUR)
     } else {
         0.0
     };

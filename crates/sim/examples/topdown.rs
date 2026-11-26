@@ -1652,6 +1652,92 @@ fn organic(out: &str, days: u32) {
     );
 }
 
+/// A saved world run on to an hour of its next day, top-down:
+/// `save out.png <save> <hour> <x m> <y m> <px per m> [title]`.
+fn save_view(out: &str, args: &[String]) {
+    let bytes = std::fs::read(&args[0]).expect("save file");
+    let hour: f32 = args[1].parse().unwrap();
+    let cx: f32 = args[2].parse().unwrap();
+    let cy: f32 = args[3].parse().unwrap();
+    let k: f32 = args[4].parse().unwrap();
+    let title = args.get(5).cloned().unwrap_or_default();
+    let mut w = World::load(&bytes).expect("loads");
+    let target = (hour * balance::TICKS_PER_HOUR as f32) as u32;
+    let day = w.time.day;
+    while w.time.day == day && w.time.tick_of_day < target {
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([cx, cy], wpx, hpx - 64, k);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, false, true);
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    let stopped = w.vehicles.values().filter(|v| v.stopped()).count();
+    header(
+        &mut cv,
+        &title,
+        &format!(
+            "DAY {} {:05.2}H  POP {}  CARS {} ({} STANDING)  GIVEN UP {}",
+            w.time.day,
+            w.time.hour(),
+            w.stats.population,
+            w.vehicles.len(),
+            stopped,
+            w.traffic.stuck_removed
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// Twelve frames of a saved world from an hour of its next day:
+/// `savewatch out.png <save> <hour> <x m> <y m> <ticks between frames>`.
+fn save_watch(out: &str, args: &[String]) {
+    let bytes = std::fs::read(&args[0]).expect("save file");
+    let hour: f32 = args[1].parse().unwrap();
+    let cx: f32 = args[2].parse().unwrap();
+    let cy: f32 = args[3].parse().unwrap();
+    let every: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(40);
+    let mut w = World::load(&bytes).expect("loads");
+    w.traffic.junctions_version = u64::MAX;
+    let target = (hour * balance::TICKS_PER_HOUR as f32) as u32;
+    let day = w.time.day;
+    while w.time.day == day && w.time.tick_of_day < target {
+        w.step();
+    }
+    let (fw, fh, cols, rows) = (420usize, 420usize, 4usize, 3usize);
+    let mut sheet = Canvas::new(cols * fw + (cols + 1) * 6, rows * fh + (rows + 1) * 6, [22, 24, 28]);
+    for i in 0..cols * rows {
+        let mut f = Canvas::new(fw, fh, GRASS);
+        let view = View::centred(
+            [cx, cy],
+            fw,
+            fh,
+            std::env::var("TD_ZOOM")
+                .ok()
+                .and_then(|z| z.parse().ok())
+                .unwrap_or(5.0),
+        );
+        draw_world(&mut f, &w, &view, false);
+        f.text(
+            6,
+            6,
+            &format!(
+                "{:05.2}H T+{:.0}S",
+                w.time.hour(),
+                (i as u32 * every) as f32 / TICKS_PER_SECOND as f32
+            ),
+            2,
+            [255, 255, 255],
+        );
+        sheet.blit(&f, 6 + (i % cols) * (fw + 6), 6 + (i / cols) * (fh + 6));
+        for _ in 0..every {
+            w.step();
+        }
+    }
+    ffmpeg_png(&sheet, out);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first().map(String::as_str).unwrap_or("signal");
@@ -1673,6 +1759,8 @@ fn main() {
         "queue" => queue_sheet(&out),
         "organic-zoom" => organic_zoom(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(12)),
         "organic-video" => organic_video(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(25)),
+        "save" => save_view(&out, &args[2..]),
+        "savewatch" => save_watch(&out, &args[2..]),
         _ => panic!("modes: signal, lots, video, day, watch, organic, curve, junctions, blocks, lattices, queue"),
     }
 }

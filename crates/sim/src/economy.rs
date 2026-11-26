@@ -195,6 +195,42 @@ pub struct Economy {
     /// The previous day's running costs by category ([`RunningCosts`];
     /// today's so far: [`running_costs`]).
     pub last_day_costs: RunningCosts,
+    /// Shift hours scheduled and actually worked (commutes eat into them):
+    /// shops and works pay their tax on the hours worked.
+    pub attendance: Attendance,
+}
+
+/// Work time booked today and yesterday's share actually worked.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Attendance {
+    /// Ticks of shifts workers set off to today.
+    pub scheduled_ticks: u64,
+    /// Ticks of those shifts left when the workers got there.
+    pub worked_ticks: u64,
+    /// Yesterday's `worked / scheduled` (1 when nobody worked).
+    pub last_day_share: f32,
+}
+
+impl Default for Attendance {
+    fn default() -> Self {
+        Attendance {
+            scheduled_ticks: 0,
+            worked_ticks: 0,
+            last_day_share: 1.0,
+        }
+    }
+}
+
+impl Attendance {
+    /// Today's share of scheduled shift time worked so far (yesterday's
+    /// until enough shifts have begun).
+    pub fn share(&self) -> f32 {
+        if self.scheduled_ticks < 50 * balance::TICKS_PER_HOUR as u64 {
+            self.last_day_share
+        } else {
+            (self.worked_ticks as f64 / self.scheduled_ticks as f64).clamp(0.0, 1.0) as f32
+        }
+    }
 }
 
 impl Default for Economy {
@@ -208,6 +244,7 @@ impl Default for Economy {
             history: Vec::new(),
             fiscal: FiscalStatus::default(),
             last_day_costs: RunningCosts::default(),
+            attendance: Attendance::default(),
         }
     }
 }
@@ -296,7 +333,9 @@ pub fn budget_now(world: &World) -> Budget {
             Zone::Industrial => ind += b.occupied as u64,
         }
     }
-    let tax = |n: u64, base: f32| (n as f64 * base as f64 * rate as f64).round() as i64;
+    // Business pays on the hours its workers were actually there.
+    let worked = world.economy.attendance.share() as f64;
+    let tax = |n: u64, base: f32| (n as f64 * base as f64 * rate as f64 * worked).round() as i64;
     let costs = running_costs(world);
     Budget {
         residential_tax: crate::people::residential_tax(world),
@@ -317,6 +356,11 @@ pub(crate) fn end_of_day(world: &mut World) {
     let costs = running_costs(world);
     let e = &mut world.economy;
     e.last_day_costs = costs;
+    e.attendance = Attendance {
+        scheduled_ticks: 0,
+        worked_ticks: 0,
+        last_day_share: e.attendance.share(),
+    };
     e.money += b.income() - b.expenses();
     e.last_day = b;
     e.last_day_income = b.income();

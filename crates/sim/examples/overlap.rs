@@ -82,6 +82,40 @@ fn main() {
                     vb.junction.map(|j| (j.movement, j.distance)),
                     tr(bodies[b].0)
                 );
+                for v in [va, vb] {
+                    if let Some(jm) = v.junction {
+                        let j = w.traffic.junction_states.get(jm.node).unwrap();
+                        print!("    deg {} ", j.arms.len());
+                        let m = &j.movements[jm.movement as usize];
+                        println!(
+                            "    box: node {:?} from {:?} to {:?} {:?} arm {}->{} lane {}->{} dist {:.2}/{:.2}",
+                            jm.node,
+                            jm.from,
+                            jm.to,
+                            m.turn,
+                            m.from_arm,
+                            m.to_arm,
+                            m.from_lane,
+                            m.to_lane,
+                            jm.distance,
+                            m.length
+                        );
+                    } else {
+                        let s = v.segment.unwrap();
+                        let seg = &w.roads.segments[s];
+                        let (start, stop) = drive::drivable_range(&w, s, v.forward).unwrap();
+                        println!(
+                            "    lane: seg {:?} ahead node {:?} behind node {:?} start {:.2} stop {:.2} prog {:.2} len {:.2}",
+                            s,
+                            if v.forward { seg.b } else { seg.a },
+                            if v.forward { seg.a } else { seg.b },
+                            start,
+                            stop,
+                            v.progress,
+                            seg.length
+                        );
+                    }
+                }
             }
         }
     }

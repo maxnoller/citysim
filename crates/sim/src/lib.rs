@@ -75,7 +75,7 @@ pub use command::{
 pub use curve::{Curve, Pose};
 pub use demand::Demand;
 pub use derived::Access;
-pub use economy::{Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus, RunningCosts};
+pub use economy::{Attendance, Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus, RunningCosts};
 pub use geom::{Cell, CellRect};
 pub use grid::{CellData, GridView, Occupant, Zone};
 pub use growth::{BuildingMeta, GrowthState};

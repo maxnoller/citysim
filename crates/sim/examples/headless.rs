@@ -108,6 +108,8 @@ struct DayExtra {
     happiness: f32,
     avg_commute_s: f32,
     step_mean_us: f64,
+    delay_factor: f32,
+    worked_share: f32,
 }
 
 /// Per-hour vehicle measurements.
@@ -229,6 +231,8 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
                 happiness: w.people.stats.avg_happiness,
                 avg_commute_s: w.traffic.avg_commute_s,
                 step_mean_us: (sum_ns - day_ns_before) as f64 / balance::TICKS_PER_DAY as f64 / 1e3,
+                delay_factor: w.traffic.delay_factor,
+                worked_share: w.economy.attendance.share(),
             });
             given_up_before = w.traffic.stuck_removed;
             day_ns_before = sum_ns;
@@ -246,7 +250,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
     let mut daily = String::from(
         "day,minutes,population,peak_vehicles,money,income,expenses,residential_tax,commercial_tax,industrial_tax,road_upkeep,services,road_cells,\
          streets,avenues,highway,signals,signal_count,services_base,services_city_size,services_density,\
-         given_up,trips,happiness,avg_commute_s,step_mean_us\n",
+         given_up,trips,happiness,avg_commute_s,step_mean_us,delay_factor,worked_share\n",
     );
     for (i, h) in w.economy.history.iter().enumerate() {
         let b = h.budget;
@@ -280,8 +284,8 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         let e = extra.get(i).copied().unwrap_or_default();
         let _ = writeln!(
             daily,
-            ",{},{},{:.4},{:.1},{:.1}",
-            e.given_up, e.trips, e.happiness, e.avg_commute_s, e.step_mean_us
+            ",{},{},{:.4},{:.1},{:.1},{:.3},{:.3}",
+            e.given_up, e.trips, e.happiness, e.avg_commute_s, e.step_mean_us, e.delay_factor, e.worked_share
         );
     }
     std::fs::write(format!("{out_dir}/{}_seed{seed}_days.csv", sc.name), daily).expect("write csv");
