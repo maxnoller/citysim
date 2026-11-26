@@ -31,9 +31,10 @@
 //!   pair) has right of way; the others give way and enter on a gap.
 //!
 //! `JunctionSetting::Auto` picks signals where avenues (or an avenue and
-//! the highway) meet, where a street crosses an avenue, and where a
-//! junction was busy yesterday; elsewhere priority, so a side street
-//! joining an avenue (a T) gives way to it until it gets busy.
+//! the highway) meet and where a junction was busy yesterday (vehicles let
+//! in plus vehicles still queued in its busiest minute); elsewhere
+//! priority, so streets joining or crossing an avenue give way to it until
+//! the junction gets busy.
 //! The player overrides it per junction with `Command::SetJunctionControl`.
 
 use serde::{Deserialize, Serialize};
@@ -252,7 +253,8 @@ pub struct JunctionState {
     /// Vehicles stopped or crawling on each approach (by arm).
     pub queue: Vec<u16>,
     /// Vehicles that entered the box in the current minute of vehicle
-    /// time, and the busiest minute today / yesterday (auto control).
+    /// time, and the busiest minute today / yesterday (auto control: the
+    /// vehicles let in during a minute plus those still queued at its end).
     pub entered_minute: u16,
     pub peak_minute_today: u16,
     pub peak_minute_yesterday: u16,
@@ -543,9 +545,16 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             let turn = if i == j { Turn::UTurn } else { classify(din, dout) };
             let (ni, no) = (a.lanes_in, b.lanes_out);
             // (from lane, to lane, preferred)
+            // Turning lanes keep their order (a double turn: kerb lane to
+            // kerb lane, inner to inner), so neighbouring lanes turning
+            // together do not cut across each other; lefts line up from
+            // the inner side, rights from the kerb.
             let lanes: Vec<(u8, u8, bool)> = match turn {
-                Turn::Right => (0..ni).map(|l| (l, 0, l == 0)).collect(),
-                Turn::Left | Turn::UTurn => (0..ni).map(|l| (l, no - 1, l == ni - 1)).collect(),
+                Turn::Right => (0..ni).map(|l| (l, l.min(no - 1), l == 0)).collect(),
+                Turn::Left => (0..ni)
+                    .map(|l| (l, (l + no).saturating_sub(ni).min(no - 1), l == ni - 1))
+                    .collect(),
+                Turn::UTurn => (0..ni).map(|l| (l, no - 1, l == ni - 1)).collect(),
                 Turn::Straight => (0..ni).map(|l| (l, l.min(no - 1), true)).collect(),
             };
             // Stop line and box edge on the arms' centre lines, and the
@@ -598,7 +607,16 @@ pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec
             let (a, b) = (&movements[i], &movements[j]);
             let same_in = a.from_arm == b.from_arm && a.from_lane == b.from_lane;
             let same_out = a.to_arm == b.to_arm && a.to_lane == b.to_lane;
-            let c = if same_in {
+            // Side by side from one arm to another in their own lanes, in
+            // the same order (two lanes going straight on, a double turn):
+            // neighbours, as on the road itself, however close the lanes.
+            let parallel = a.from_arm == b.from_arm
+                && a.to_arm == b.to_arm
+                && a.from_lane != b.from_lane
+                && a.to_lane != b.to_lane
+                && (a.from_lane < b.from_lane) == (a.to_lane < b.to_lane)
+                && a.turn != Turn::UTurn;
+            let c = if same_in || parallel {
                 false
             } else if same_out || a.turn == Turn::UTurn || b.turn == Turn::UTurn {
                 true
@@ -708,6 +726,9 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
     groups.insert(0, main_group);
     let mut phases = Vec::new();
     let mut main = 0u8;
+    // Two through roads of the same class (avenues crossing): both are
+    // main roads, served alike.
+    let equal = groups.len() >= 2 && score(&groups[0]) == score(&groups[1]);
     for (k, g) in groups.iter().enumerate() {
         let wide = g.len() == 2 && g.iter().any(|&a| arms[a as usize].lanes_in >= 2);
         if wide {
@@ -725,19 +746,21 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
             arms: g.clone(),
             left_only: false,
             min_green_s: balance::SIGNAL_MIN_GREEN_S,
-            max_green_s: if k == 0 {
+            max_green_s: if k == 0 || (equal && k == 1) {
                 balance::SIGNAL_MAIN_MAX_GREEN_S
             } else {
                 balance::SIGNAL_SIDE_MAX_GREEN_S
             },
         });
     }
-    // Coordination along avenues: the main group is an avenue pair.
+    // Coordination along avenues: wherever the main group is an avenue
+    // pair crossing or met by lesser roads, the avenue's green starts at a
+    // fixed point of a common cycle shifted by the distance along it: a
+    // green wave for its platoons. Two avenues crossing are served alike,
+    // on demand (holding one for its platoons would starve the other), and
+    // so is a crossing of streets.
     let g0 = &groups[0];
-    // Only where arterials meet: a street crossing is served on demand.
-    let coordinated = g0.len() == 2
-        && g0.iter().all(|&a| arms[a as usize].kind == RoadKind::Avenue)
-        && arms.iter().all(|a| a.kind.rank() >= RoadKind::Avenue.rank());
+    let coordinated = g0.len() == 2 && g0.iter().all(|&a| arms[a as usize].kind == RoadKind::Avenue) && !equal;
     let cycle_s = balance::SIGNAL_COORD_CYCLE_S;
     let offset_s = if coordinated {
         // Canonical axis direction (pointing to +x, or +y when vertical).
@@ -762,9 +785,8 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
 
 /// Control `Auto` resolves to.
 pub(crate) fn auto_control(arms: &[Arm], busy: bool) -> JunctionControl {
-    // Arterials meeting (avenues, the highway), or a street crossing an
-    // avenue: signals. A side street joining an avenue (a T) gives way
-    // until it gets busy.
+    // Arterials meeting (avenues, the highway): signals. Streets joining
+    // or crossing an avenue give way to it until the junction gets busy.
     let arterial = arms.iter().filter(|a| a.kind.rank() >= RoadKind::Avenue.rank()).count();
     let through_pair = arterial == 2
         && arms.iter().enumerate().any(|(i, a)| {
@@ -772,7 +794,8 @@ pub(crate) fn auto_control(arms: &[Arm], busy: bool) -> JunctionControl {
                 && a.opposite
                     .is_some_and(|o| arms[o as usize].kind.rank() >= RoadKind::Avenue.rank() && o as usize != i)
         });
-    let crossing = arterial >= 1 && arms.len() >= 4;
+    // An avenue ending at a crossing of streets has no through road: lights.
+    let crossing = arterial == 1 && arms.len() >= 4;
     if busy || arterial >= 3 || (arterial == 2 && !through_pair) || crossing {
         JunctionControl::Signal
     } else {
