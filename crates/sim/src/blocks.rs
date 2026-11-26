@@ -423,8 +423,26 @@ fn place(z: &mut Zoning, d: &Draft) -> (LatticeId, [i32; 2], [i32; 2], Facing) {
 
 /// World bounds of a block.
 fn block_bounds(z: &Zoning, b: &Block) -> ([f32; 2], [f32; 2]) {
-    let c = z.block_outline(b).expect("block lattice exists");
-    bounds_of(&c)
+    let l = z.lattice(b.lattice).expect("block lattice exists");
+    let (y0, y1) = (b.min[1] as f32, (b.max[1] + 1) as f32);
+    let mut lo = [f32::INFINITY; 2];
+    let mut hi = [f32::NEG_INFINITY; 2];
+    let mut add = |p: [f32; 2]| {
+        lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+        hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+    };
+    let (x0, x1) = (b.min[0], b.max[0] + 1);
+    let step = if l.is_strip() { 1 } else { (x1 - x0).max(1) };
+    let mut x = x0;
+    loop {
+        add(l.world_at(x as f32, y0));
+        add(l.world_at(x as f32, y1));
+        if x >= x1 {
+            break;
+        }
+        x = (x + step).min(x1);
+    }
+    (lo, hi)
 }
 
 fn bounds_of(c: &[[f32; 2]]) -> ([f32; 2], [f32; 2]) {
@@ -562,6 +580,12 @@ impl Ctx {
         let mut buildings = Tiles::new();
         let mut bpolys = Vec::new();
         for (id, b) in world.buildings.iter() {
+            // Cheap test first: a circle round the lot.
+            let r = (b.footprint.size[0].max(b.footprint.size[1]) as f32) * CELL_SIZE * 0.75;
+            let p = b.footprint.center;
+            if !mask.touches([p[0] - r, p[1] - r], [p[0] + r, p[1] + r], m) {
+                continue;
+            }
             let c = z.lot_quad(&b.footprint).unwrap_or_else(|| b.corners());
             let (lo, hi) = bounds_of(&c);
             if !mask.touches(lo, hi, m) {
@@ -816,7 +840,7 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
     let z = &world.zoning;
     // Candidate cells: block cells and existing cells with their centre in
     // a marked tile.
-    let mut cand: BTreeSet<CellRef> = BTreeSet::new();
+    let mut cand: Vec<CellRef> = Vec::new();
     let mut scratch: Vec<u32> = Vec::new();
     for (k, b) in z.blocks.iter().enumerate() {
         let (lo, hi) = ctx.bbounds[k];
@@ -826,7 +850,7 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
         let l = z.lattice(b.lattice).expect("block lattice");
         for c in b.cells() {
             if mask.contains(l.cell_center(c.i, c.j)) {
-                cand.insert(c);
+                cand.push(c);
             }
         }
     }
@@ -835,7 +859,7 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
         for (c, _) in z.cells() {
             let l = z.lattice(c.lattice).expect("lattice");
             if mask.contains(l.cell_center(c.i, c.j)) {
-                cand.insert(c);
+                cand.push(c);
             }
         }
     } else {
@@ -843,7 +867,7 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
         for (id, l) in z.lattices().filter(|(_, l)| l.is_strip()) {
             for &(i, j) in l.cells.keys() {
                 if mask.contains(l.cell_center(i, j)) {
-                    cand.insert(CellRef::new(id, i, j));
+                    cand.push(CellRef::new(id, i, j));
                 }
             }
         }
@@ -856,7 +880,7 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
                 let (j0, j1) = (libm::floorf(llo[1]) as i32 - 1, libm::ceilf(lhi[1]) as i32 + 1);
                 for (&(i, j), _) in l.cells.range((i0, i32::MIN)..=(i1, i32::MAX)) {
                     if j >= j0 && j <= j1 && mask.contains(l.cell_center(i, j)) {
-                        cand.insert(CellRef::new(id, i, j));
+                        cand.push(CellRef::new(id, i, j));
                     }
                 }
             }
@@ -878,6 +902,8 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
         fronts: u8,
         blocked: Option<Blocked>,
     }
+    cand.sort_unstable();
+    cand.dedup();
     let mut results: Vec<(CellRef, New)> = Vec::with_capacity(cand.len());
     let mut s2: Vec<u32> = Vec::new();
     for &c in &cand {
