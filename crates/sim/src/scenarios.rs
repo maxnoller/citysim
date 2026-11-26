@@ -139,6 +139,30 @@ pub fn upgrade_to_hierarchy(w: &mut World) -> (u32, u32, i64) {
     (ok, refused, before - w.economy.money)
 }
 
+/// A second fix a player would try for a jammed [`GridPlayer`] city: a
+/// parallel route around its worst junction, the first crossing behind the
+/// highway gateway (`(20, 128)`), where every car from the highway queues
+/// today. Two relief roads of `kind` leave the highway stub at `(5, 128)`
+/// and run diagonally into the grid's west edge at `(20, 118)` and
+/// `(20, 138)`, so traffic from the highway reaches the north and the south
+/// of the city without that junction. Returns `(roads built, money spent)`.
+pub fn add_gateway_bypass(w: &mut World, kind: RoadKind) -> (u32, i64) {
+    let before = w.economy.money;
+    let start = c(5, 128).center();
+    let mut built = 0;
+    for y in [118, 138] {
+        if curve_road(w, crate::Curve::straight(start, c(20, y).center()), kind) {
+            built += 1;
+        }
+    }
+    (built, before - w.economy.money)
+}
+
+/// Money a [`GridPlayer`] keeps in hand beyond the price of its next block:
+/// it builds only with more (a sensible player keeps about a hundred road
+/// cells' worth for repairs and the night's bills).
+const PLAYER_RESERVE: i64 = 5_000;
+
 /// How a [`GridPlayer`] lays out its roads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
@@ -330,7 +354,7 @@ impl GridPlayer {
             if !want || free[zi] >= 24 {
                 continue;
             }
-            if w.economy.money <= Block::max_cost(self.layout) + 1_000 {
+            if w.economy.money <= Block::max_cost(self.layout) + PLAYER_RESERVE {
                 short_of_money = true;
             } else if b.build(w, z, self.layout) {
                 self.next[zi] += 1;

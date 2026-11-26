@@ -221,12 +221,14 @@ fn path_exists_and_vehicles_arrive() {
 }
 
 /// Mean speed of all cars (moving or standing in queues) over the ticks
-/// with cars, the final average commute, and the population.
-fn run_layout(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32, u32) {
+/// with cars, the final average commute, the mean delay factor (commutes
+/// over free-flow time) over the same stretch, and the population.
+fn run_layout_delay(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32, f32, u32) {
     let mut w = World::new(8);
     scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, grid));
     let (mut speed, mut n) = (0.0f64, 0u32);
     let mut commute = Vec::new();
+    let mut delay = Vec::new();
     for _ in 0..days as u64 * DAY {
         if Some(w.time.day) == fix_on_day && w.time.tick_of_day == 0 {
             scenarios::add_connections(&mut w);
@@ -237,30 +239,35 @@ fn run_layout(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32, u32)
             speed += (w.stats.avg_speed * (1.0 - w.traffic.stopped_share)) as f64;
             n += 1;
             commute.push(w.stats.avg_commute_s);
+            delay.push(traffic::delay_factor(&w));
         }
     }
     w.check_sim_invariants().unwrap();
     let c = commute.iter().sum::<f32>() / commute.len().max(1) as f32;
-    ((speed / n.max(1) as f64) as f32, c, w.stats.population)
+    let d = delay.iter().sum::<f32>() / delay.len().max(1) as f32;
+    ((speed / n.max(1) as f64) as f32, c, d, w.stats.population)
 }
 
 #[test]
 fn bad_layout_jams_and_a_second_connection_fixes_it() {
-    let (grid_speed, grid_commute, grid_pop) = run_layout(true, None, 6);
-    let (bad_speed, bad_commute, bad_pop) = run_layout(false, None, 6);
-    let (fix_speed, fix_commute, fix_pop) = run_layout(false, Some(3), 6);
-    println!("grid {grid_speed:.1} m/s {grid_commute:.0} s pop {grid_pop}");
-    println!("bad  {bad_speed:.1} m/s {bad_commute:.0} s pop {bad_pop}");
-    println!("fix  {fix_speed:.1} m/s {fix_commute:.0} s pop {fix_pop}");
+    let (grid_speed, grid_commute, grid_delay, grid_pop) = run_layout_delay(true, None, 6);
+    let (bad_speed, bad_commute, bad_delay, bad_pop) = run_layout_delay(false, None, 6);
+    let (fix_speed, fix_commute, fix_delay, fix_pop) = run_layout_delay(false, Some(3), 6);
+    println!("grid {grid_speed:.1} m/s {grid_commute:.0} s x{grid_delay:.2} pop {grid_pop}");
+    println!("bad  {bad_speed:.1} m/s {bad_commute:.0} s x{bad_delay:.2} pop {bad_pop}");
+    println!("fix  {fix_speed:.1} m/s {fix_commute:.0} s x{fix_delay:.2} pop {fix_pop}");
     // Same zoning: the one-junction city has much longer commutes although
     // it carries fewer than half the people (every car on the road stands
     // in some queue in both, so their mean speeds are alike).
-    assert!(bad_commute > 1.3 * grid_commute, "{bad_commute} vs {grid_commute}");
+    assert!(bad_commute > 1.5 * grid_commute, "{bad_commute} vs {grid_commute}");
     assert!(bad_pop * 2 < grid_pop, "{bad_pop} vs {grid_pop}");
-    // Adding connections measurably fixes it: shorter commutes, and the
-    // town grows again.
-    assert!(fix_commute < 0.85 * bad_commute, "{fix_commute} vs {bad_commute}");
-    assert!(fix_pop as f32 > 1.5 * bad_pop as f32, "{fix_pop} vs {bad_pop}");
+    // Adding connections measurably fixes it: the town grows again, to
+    // more than twice the people (it grows into the new capacity until
+    // traffic holds it back again), and although it then carries several
+    // times the cars, commutes are no longer and no further from free flow.
+    assert!(fix_pop > 2 * bad_pop, "{fix_pop} vs {bad_pop}");
+    assert!(fix_commute < bad_commute, "{fix_commute} vs {bad_commute}");
+    assert!(fix_delay <= bad_delay, "x{fix_delay} vs x{bad_delay}");
 }
 
 #[test]

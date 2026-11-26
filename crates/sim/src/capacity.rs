@@ -225,10 +225,8 @@ pub fn run(b: &Bench, seed: u64, warmup_s: u32, measure_s: u32) -> BenchResult {
     let mut green_ticks = [0u64; 4];
     let mut green_entries = [0u64; 4];
     let mut gave_up_base = w.traffic.stuck_removed;
-    let trace_s: Option<u32> = std::env::var("CAPACITY_TRACE").ok().and_then(|x| x.parse().ok());
     for t in 0..total_s * tps {
         let measuring = t >= warmup_s * tps;
-        let trace = measuring && trace_s.is_some_and(|s| t < (warmup_s + s) * tps);
         if t == warmup_s * tps {
             gave_up_base = w.traffic.stuck_removed;
         }
@@ -286,30 +284,6 @@ pub fn run(b: &Bench, seed: u64, warmup_s: u32, measure_s: u32) -> BenchResult {
                             .iter()
                             .position(|a| a.as_ref().is_some_and(|a| a.segment == jm.from));
                         if let Some(f) = from {
-                            if trace && f == 0 {
-                                let asp = junction::signal_aspect(&w, n, jm.from);
-                                let (q, sp): (Vec<f32>, Vec<f32>) = w
-                                    .vehicles
-                                    .values()
-                                    .filter(|v| {
-                                        v.segment == Some(jm.from) && v.junction.is_none() && heads_in(&w, v, node)
-                                    })
-                                    .map(|v| (v.progress, v.speed))
-                                    .unzip();
-                                eprintln!(
-                                    "t {:.2} enter lane {} turn {:?} v {:.1} asp {:?} queue {} front {:?}",
-                                    t as f32 / tps as f32,
-                                    jm.from_lane,
-                                    jm.turn,
-                                    v.speed,
-                                    asp,
-                                    q.len(),
-                                    q.iter()
-                                        .zip(&sp)
-                                        .map(|(a, b)| ((a * 10.0).round() / 10.0, (b * 10.0).round() / 10.0))
-                                        .max_by(|a, b| a.0.total_cmp(&b.0))
-                                );
-                            }
                             counted[f] += 1;
                             if f < 2 {
                                 lane_count[(jm.from_lane as usize).min(1)] += 1;
@@ -328,49 +302,6 @@ pub fn run(b: &Bench, seed: u64, warmup_s: u32, measure_s: u32) -> BenchResult {
                 }
             }
             in_box = now_in;
-            if trace && t % 10 == 0 {
-                let a0 = arms[0].as_ref().map(|a| a.segment);
-                let j = junction::junction(&w, n).expect("bench junction");
-                let mut line = format!(
-                    "  {:.1} ph {:?} deny {:?} box {} |",
-                    t as f32 / tps as f32,
-                    (j.signal.phase, j.signal.stage),
-                    traffic::debug_denials(&w),
-                    in_box.len()
-                );
-                for lane in 0..2u8 {
-                    let mut fr: Vec<(f32, f32, bool, Option<usize>)> = w
-                        .vehicles
-                        .values()
-                        .filter(|v| v.segment == a0 && v.lane == lane && v.junction.is_none() && heads_in(&w, v, node))
-                        .map(|v| {
-                            let to = v.route.first().and_then(|s| j.arm_of(*s));
-                            (v.progress, v.speed, v.go, to)
-                        })
-                        .collect();
-                    fr.sort_by(|a, b| b.0.total_cmp(&a.0));
-                    let n_l = fr.len();
-                    fr.truncate(3);
-                    line.push_str(&format!(" L{lane} n{n_l} "));
-                    for f in fr {
-                        line.push_str(&format!(
-                            "({:.0} {:.1}{} >{:?}) ",
-                            f.0,
-                            f.1,
-                            if f.2 { "G" } else { "" },
-                            f.3
-                        ));
-                    }
-                }
-                let boxed: Vec<String> = w
-                    .vehicles
-                    .values()
-                    .filter_map(|v| v.junction.filter(|jm| jm.node == n).map(|jm| (jm, v.speed)))
-                    .map(|(jm, sp)| format!("{}{:?}{:.0}", j.arm_of(jm.from).unwrap_or(9), jm.turn, sp))
-                    .collect();
-                line.push_str(&format!(" BOX {boxed:?}"));
-                eprintln!("{line}");
-            }
             if measuring {
                 for (i, a) in arms.iter().enumerate() {
                     if let Some(a) = a

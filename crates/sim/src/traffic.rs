@@ -387,10 +387,7 @@ pub fn has_room(world: &World) -> bool {
 /// Share of citizens' car trips driven as real cars right now
 /// (`balance::CAR_SHARE_*`, by residents).
 pub fn car_share(world: &World) -> f32 {
-    let large = std::env::var("CITYSIM_CAR_SHARE")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(balance::CAR_SHARE_LARGE);
+    let large = balance::CAR_SHARE_LARGE;
     let pop = world.stats.population as f32;
     let t = ((pop - balance::CAR_SHARE_FROM_POP) / (balance::CAR_SHARE_TO_POP - balance::CAR_SHARE_FROM_POP))
         .clamp(0.0, 1.0);

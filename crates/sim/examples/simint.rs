@@ -330,8 +330,8 @@ fn day(args: &[String]) {
         kinds.sort();
         let key = format!("{} {:?}", kinds.join("+"), j.control);
         let e = by_type.entry(key).or_default();
-        for k in 0..3 {
-            e.0[k] += c[k];
+        for (acc, x) in e.0.iter_mut().zip(c) {
+            *acc += x;
         }
         e.1 += 1;
     }
@@ -683,6 +683,13 @@ fn main() {
         Some("flow") => flow(&args[1..]),
         Some("cross") => cross(&args[1..]),
         Some("controls") => controls(&args[1..]),
+        Some("bypass") => {
+            // `bypass <save> <out>`: add the gateway relief roads to a saved city.
+            let mut w = World::load(&std::fs::read(&args[1]).unwrap()).unwrap();
+            let (n, cost) = scenarios::add_gateway_bypass(&mut w, RoadKind::Street);
+            println!("{n} relief roads, ${cost}, money now ${}", w.economy.money);
+            std::fs::write(&args[2], w.save()).unwrap();
+        }
         _ => eprintln!("usage: simint build <scenario> <seed> <pop> <out> | simint day <save> [hours]"),
     }
 }

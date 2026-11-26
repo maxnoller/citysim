@@ -48,6 +48,15 @@ fn driver_at_home(w: &mut World) -> (CitizenId, BuildingId, BuildingId) {
         .households
         .iter()
         .filter_map(|(hid, h)| {
+            // Nobody of it on the road right now (teleporting a driver home
+            // would leave their car without them).
+            let driving = h
+                .citizens
+                .iter()
+                .any(|&c| matches!(w.citizens[c].location, Location::Travelling(j) if j.vehicle.is_some()));
+            if driving {
+                return None;
+            }
             let d = h.citizens.iter().copied().find(|&c| w.citizens[c].drives())?;
             let hp = centre(w, h.home);
             let near = shop_pos.iter().map(|&p| geom::dist(hp, p)).fold(f32::MAX, f32::min);

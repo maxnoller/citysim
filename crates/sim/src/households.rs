@@ -772,6 +772,7 @@ pub(crate) fn tick(world: &mut World) {
     // commute ever finishing to correct it.
     if world.households.is_empty() {
         world.traffic.avg_commute_s = 0.0;
+        world.traffic.delay_factor = 0.0;
     }
 }
 

@@ -326,11 +326,13 @@ pub const SIGNAL_COORD_CYCLE_S: f32 = 60.0;
 pub const SIGNAL_COORD_MAIN_SHARE: f32 = 0.5;
 /// ... and offsets follow a platoon driving at this speed, m/s.
 pub const SIGNAL_PROGRESSION_SPEED: f32 = 14.0;
-/// Auto control turns a priority junction into signals when its busiest
-/// minute of vehicle time yesterday let in at least this many vehicles,
-/// and back below the lower number.
-pub const AUTO_SIGNAL_PER_MINUTE: u16 = 16;
-pub const AUTO_PRIORITY_PER_MINUTE: u16 = 9;
+/// Auto control turns an all-way junction (equal roads, no major one)
+/// into signals when its busiest minute of vehicle time yesterday let in
+/// plus left queued at least this many vehicles (about what an all-way
+/// stop passes: signals every short block cost more than they bring
+/// below it), and back below the lower number.
+pub const AUTO_SIGNAL_PER_MINUTE: u16 = 30;
+pub const AUTO_PRIORITY_PER_MINUTE: u16 = 18;
 /// Junctions with a major road (an avenue through streets, a street
 /// through a T): signals once the minor approaches' busiest minute (cars
 /// from them let in plus those still queued) reaches this, back to
@@ -395,7 +397,7 @@ pub const MIN_VEHICLE_BUDGET: usize = 150;
 /// residents. A fixed share, whatever the traffic: the network carries the
 /// cars of this share and the layout decides how well (see
 /// `traffic::car_share`).
-pub const CAR_SHARE_LARGE: f32 = 0.5;
+pub const CAR_SHARE_LARGE: f32 = 0.4;
 pub const CAR_SHARE_FROM_POP: f32 = 1_500.0;
 pub const CAR_SHARE_TO_POP: f32 = 5_000.0;
 /// Goods deliveries and exports driven as real trucks, as a share of the
@@ -519,6 +521,13 @@ pub const LOW_TAX_DEMAND_MAX: f32 = 0.06;
 /// demand (round 3: 70 s with a sample of the commuters on the road; every
 /// car trip is on the road now, so rush hours are fuller) ...
 pub const COMMUTE_OK_S: f32 = 130.0;
+/// The city's traffic (`traffic::delay_factor`, commutes over free-flow
+/// time): up to `DELAY_OK_FACTOR` nobody minds; beyond it residential
+/// demand drops by `DELAY_DEMAND_PER_UNIT` per unit, and commuters' commute
+/// happiness falls to zero at `DELAY_HOPELESS_FACTOR`.
+pub const DELAY_OK_FACTOR: f32 = 2.5;
+pub const DELAY_HOPELESS_FACTOR: f32 = 5.0;
+pub const DELAY_DEMAND_PER_UNIT: f32 = 0.5;
 /// ... by 1.0 per this many extra seconds.
 pub const COMMUTE_DEMAND_SCALE_S: f32 = 180.0;
 
