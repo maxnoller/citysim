@@ -2,14 +2,34 @@
 
 Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.20.1.
 
-## Build / test / run
-- `cargo test --workspace` · `cargo clippy --workspace --all-targets` (warning-free) · `cargo fmt --all --check` (width 120)
-- CI: `.github/workflows/ci.yml` (fmt, clippy `-D warnings` + tests for the sim; `cargo check` of all three feature sets +
-  tests for the game, with `Swatinem/rust-cache`). CI's clippy is the latest stable: keep the sim lint-clean on it.
-- Run: `cargo run -p citysim`. Fast loop (≈3 s/edit vs ≈13 s): `--features bevy/dynamic_linking` on the command
-  line only, never as a default. First Bevy build ≈ 9–10 min. Never commit a `.cargo/config.toml` naming a linker.
+## Build / test / run (fastest correct way first; times on the owner's 12-core desktop)
+- **New checkout, first thing:** `scripts/dev-setup.sh --build`. It writes a git-ignored `.cargo/config.toml` for
+  this checkout (linker flags that work here: mold, and lld off where the toolchain's wrapper is broken; `jobs` = half
+  the cores), copies the machine's compiled dependencies (the "seed", `~/.cache/citysim/seed`) into `target/`, builds
+  the game and every test, and saves a seed if there was none. Seeded: ≈SEEDED_MIN min; cold: 18–27 min. Then plain
+  `cargo ...`: no `RUSTFLAGS`, no `-j` (an exported `RUSTFLAGS` replaces the file's flags and rebuilds everything).
+  `--build-release` also builds the release game. Never commit a `.cargo/config.toml`: CI and other machines build
+  without one.
+- **Profiles:** `dev` for everything — tests, demo cities, screenshots, play-testing (game crate opt-level 1 and
+  incremental; Bevy and the simulation at opt-level 3). `--release` only to play at full speed or to measure
+  performance (`CITYSIM_BENCH`); a release rebuild of the game crate takes about a minute (≈3 min under load).
+- **Sim edit → tests:** `cargo nextest run -p citysim_sim -P quick` after each edit (≈QUICK s: every test except the
+  ones that grow cities for 10 s or more, list in `.config/nextest.toml`); one test: `cargo nextest run -p citysim_sim
+  NAME` (≈9 s); everything before pushing: `cargo nextest run -p citysim_sim` (≈FULL s, all tests at once; `cargo test`
+  runs the test files one after another, ≈3× longer). Simulation-only agents never build the game: `-p citysim_sim`.
+- **Game edit → picture:** `cargo build -p citysim` (≈GAME_EDIT s for a one-line change in `ui/` or `gfx/`), then a
+  windowless still: `CITYSIM_DEMO=organic CITYSIM_STILLS=/tmp/s CITYSIM_STILLS_LIST="a=wide;b=street"
+  target/debug/citysim` (≈STILL s with the demo cached; no display, see Dev flags).
+- **Balance edit → scenario numbers:** `cargo run -p citysim_sim --release --example headless -- --seeds 10 hierarchy`
+  (one seed per core; ≈40 s to rebuild the sim in release, then HEADLESS for ten 10,000-resident cities).
+- **Before pushing:** `scripts/ci-local.sh` runs exactly what CI runs (`sim` / `game` for one job); `--full` adds
+  clippy on the game in all three feature sets. `cargo fmt --all --check` (width 120) and clippy warning-free.
+- CI: `.github/workflows/ci.yml` (fmt, clippy `-D warnings` + nextest for the sim; `cargo check` of all three feature
+  sets + tests for the game, with `Swatinem/rust-cache`). CI's clippy is the latest stable: keep the sim lint-clean on it.
 - Ownership check (must stay warning-free): `cargo clippy -p citysim --no-default-features --features gfx`
   and `... --features ui`. Both must also run.
+- `--features bevy/dynamic_linking` (command line only, never a default) builds a second copy of Bevy; with mold the
+  static dev build relinks in about a second, so it buys little.
 
 ## Layout and ownership (sim, gfx and ui are owned separately; keep the boundaries)
 - `crates/sim` (`citysim_sim`) — SIM only. ALL state and rules. No Bevy, deterministic (only `world.rng`), serde.
@@ -111,15 +131,26 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   busiest minute. New games start at 09:00 (`START_TICK_OF_DAY`). The pinned checksum in `tests/round2.rs` moves
   with any rule change: update it deliberately.
 
-## Dev / headless flags (need a display, see below, except the windowless modes)
+## Dev / headless flags (the windowless modes need no display; the others run under Xvfb, see below)
+- **Screenshots: `CITYSIM_STILLS=dir`** (windowless: no display, no Xvfb, no window can open). Renders off screen at
+  `CITYSIM_SHOT_SIZE` (1920x1080) with the HUD, several shots from one start, then exits 0 once every file is written:
+  `CITYSIM_STILLS_LIST="name=view;..."` saves `dir/name.png`; a view is `wide|street|close` (the autoshot presets of
+  the demo) or an exact pose `x,z,yaw,pitch,dist` (sim metres, radians, as `CITYSIM_GFX_POSE`), `+zones` / `+traffic`
+  shows that overlay. Time of day: the demo's (`CITYSIM_DEMO_HOUR`) or `CITYSIM_GFX_HOUR=h`. `CITYSIM_STILLS_SETTLE`
+  (s between camera move and capture, 0.75), `CITYSIM_SHOT_DELAY` (s after the scene is ready, 1). Example:
+  `CITYSIM_DEMO=organic CITYSIM_GFX_HOUR=21 CITYSIM_STILLS=/tmp/s CITYSIM_STILLS_LIST="w=wide;s=street;t=close+traffic"
+  target/debug/citysim` (≈STILL s with the demo cached). Nothing is hovered (no cursor): interface states with hover
+  or tools still need `CITYSIM_UI_SHOTS` under Xvfb.
 - `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000, streets only) · `hierarchy` (`GridPlayer::hierarchy`,
-  ~10,000 with avenues, ~50 s to build in release) · `jam` (bad layout, one overloaded junction): real towns
-  built by `citysim_sim::scenarios` through commands and fast-forwarded before the first frame (< 1 s release, a few s
-  debug). `CITYSIM_DEMO_POP=n` target, `CITYSIM_DEMO_HOUR=h` stop time (default 8 = morning rush).
-  `organic` = the sim's free-form town (`scenarios::organic`, ~3,400 residents); `shapes` = gfx's road-shape test town
-  (`dev/shapes.rs`: 5-arm junction, a street meeting the avenue at 30°, a T on the outside of a bend, 25° grid, ring).
-  `CITYSIM_DEMO_CACHE=dir` keeps each built demo world as a save and loads it next time (keyed by kind, seed, pop,
-  hour; delete the files after a sim change).
+  ~10,000 with avenues, ~50 s to build) · `jam` (bad layout, one overloaded junction): real towns built by
+  `citysim_sim::scenarios` through commands and fast-forwarded before the first frame. `CITYSIM_DEMO_POP=n` target,
+  `CITYSIM_DEMO_HOUR=h` stop time (default 8 = morning rush). `organic` = the sim's free-form town
+  (`scenarios::organic`, ~4,300 residents, ~13 s to build); `shapes` = gfx's road-shape test town (`dev/shapes.rs`:
+  5-arm junction, a street meeting the avenue at 30°, a T on the outside of a bend, 25° grid, ring).
+  Built demo worlds are cached as saves in `~/.cache/citysim/demos` (shared by all checkouts; `CITYSIM_DEMO_CACHE=dir`
+  elsewhere, `=0` off) and load in well under a second. The key includes `CITYSIM_SIM_FINGERPRINT` (`crates/game/
+  build.rs`: a hash of the sim's sources, `dev/scenario.rs`, `dev/shapes.rs` and `Cargo.lock`), so a sim edit
+  rebuilds the demo once; unused files go after a week.
 - `CITYSIM_BENCH=out.json`: windowless benchmark (no winit, no `DISPLAY` needed): renders off screen at
   `CITYSIM_BENCH_SIZE` (1920x1080) along a fixed camera path for `CITYSIM_BENCH_FRAMES` (1500) after
   `CITYSIM_BENCH_WARMUP` (240), sim running (`CITYSIM_BENCH_PAUSED=1` stops it), two GPU frames in flight; writes
@@ -128,10 +159,11 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   figures are only meaningful on a quiet machine (other builds double them).
 - `CITYSIM_RECORD=dir`: windowless video frames (`frame_00000.png`...) at `CITYSIM_RECORD_FPS` (30) with a fixed time
   step, camera on a Catmull-Rom path `CITYSIM_RECORD_PATH="t,x,z,yaw,pitch,dist;..."`; join with ffmpeg.
-- Running the game on the owner's desktop: never open a window there; use `xvfb-run -a -s "-screen 0 1920x1080x24"
-  env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE ...` (renders on the GPU, presents slowly) or the windowless modes.
-  `CITYSIM_SHOT_SIZE=1920x1080` sets the autoshot window size.
-- `CITYSIM_AUTOSHOT=out.png` (or `--autoshot`): screenshot then exit 0. `CITYSIM_SHOT_VIEW=wide|street|close`,
+- Running the game on the owner's desktop: never open a window there; use the windowless modes (stills, bench,
+  record) or `xvfb-run -a -s "-screen 0 1920x1080x24" env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE ...` (renders on the
+  GPU, presents at 12-16 fps). `CITYSIM_SHOT_SIZE=1920x1080` sets the autoshot window size.
+- `CITYSIM_AUTOSHOT=out.png` (or `--autoshot`, in a window: under Xvfb; prefer `CITYSIM_STILLS`): screenshot then
+  exit 0. `CITYSIM_SHOT_VIEW=wide|street|close`,
   `CITYSIM_SHOT_DELAY=25` (s, default 3), `CITYSIM_SHOT_OVERLAY=none|zones|traffic`. Without a demo it builds
   a small sample city. Example: `CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png CITYSIM_SHOT_DELAY=25 cargo run -p citysim`.
 - `CITYSIM_LOG_FPS=1` logs FPS (meaningless under Xvfb: use `CITYSIM_BENCH`). `CITYSIM_SEED=n`
