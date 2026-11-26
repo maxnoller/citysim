@@ -466,14 +466,23 @@ pub fn happiness_reasons(world: &World, id: CitizenId) -> Option<[HappinessReaso
             HappinessPart::Employment => match (c.job.is_some(), c.retired, c.in_workforce(), good) {
                 (true, _, _, _) => "Has a job",
                 (_, true, _, _) => "Retired on a pension",
-                (_, _, true, _) if c.unemployed_days >= 2 => "Out of work for days",
-                (_, _, true, _) => "Looking for a job",
+                (_, _, true, _) => match crate::demand::jobs_view(world).reason {
+                    crate::demand::JoblessReason::NoLandZoned => "Out of work: not enough jobs in the city",
+                    crate::demand::JoblessReason::NoJobsWithinReach => "Out of work: no jobs within reach",
+                    crate::demand::JoblessReason::BuildingsComing => "Out of work until new workplaces open",
+                    _ if c.unemployed_days >= 2 => "Out of work for days",
+                    _ => "Looking for a job",
+                },
                 (_, _, false, true) => "The household has an income",
                 _ => "Nobody in the household earns",
             },
             HappinessPart::Commute if c.job.is_none() => "No commute",
             HappinessPart::Commute if c.hopeless_commutes > 0 => "Hopeless commute",
             HappinessPart::Commute if good => "Short commute",
+            // Slow for the distance: the roads, not where they live.
+            HappinessPart::Commute if crate::life::commute_ratio(world, id) >= balance::COMMUTE_RATIO_OK + 0.4 => {
+                "Stuck in traffic every day"
+            }
             HappinessPart::Commute => "Long commute",
             HappinessPart::Affordability if h.money < 0 => "The household is in debt",
             HappinessPart::Affordability if h.austerity => "Money is tight: essentials only",

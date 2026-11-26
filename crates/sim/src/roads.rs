@@ -65,17 +65,23 @@ impl RoadKind {
     /// Lateral offset of lane `lane`'s centre from the road's centre line,
     /// metres, to the right of travel (traffic drives on the right; in sim
     /// space "right" of a travel direction `d` is `(-d.y, d.x)`). Lanes
-    /// beyond `lane_count` are clamped to the leftmost lane.
+    /// beyond `lane_count` are clamped to the leftmost lane, except an
+    /// avenue's turn pocket (lane [`RoadKind::lane_count`], see
+    /// [`RoadKind::pocket_lane`]), which lies in the median.
     pub fn lane_offset_m(self, lane: u8) -> f32 {
+        if self == RoadKind::Avenue && lane >= self.lane_count() {
+            return balance::POCKET_OFFSET_M;
+        }
         let l = lane.min(self.lane_count().saturating_sub(1));
         match self {
             RoadKind::Street => 1.4,
-            // 13 m: 0.5 m median strip each side of the centre, 3 m lanes.
+            // 13 m: a 2 m median (±1 m, cut into turn pockets before
+            // junctions), 2.75 m lanes.
             RoadKind::Avenue => {
                 if l == 0 {
-                    4.75
+                    5.125
                 } else {
-                    1.75
+                    2.375
                 }
             }
             RoadKind::Highway => {
@@ -85,6 +91,23 @@ impl RoadKind {
                     1.3
                 }
             }
+        }
+    }
+
+    /// Index of the left-turn pocket lane on approaches that have one
+    /// (avenues; `None` for roads that never get pockets). The pocket is the
+    /// lane after the through lanes, in the median, only over the last
+    /// metres before a junction (`junction::turn_pocket`).
+    pub fn pocket_lane(self) -> Option<u8> {
+        (self == RoadKind::Avenue).then(|| self.lane_count())
+    }
+
+    /// Half-width of the median between the two directions (0: a painted
+    /// centre line), metres. Turn pockets are cut into it.
+    pub fn median_half_width_m(self) -> f32 {
+        match self {
+            RoadKind::Avenue => balance::AVENUE_MEDIAN_HALF_M,
+            _ => 0.0,
         }
     }
 

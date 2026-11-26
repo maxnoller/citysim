@@ -32,8 +32,9 @@ use crate::roads::{NodeId, RoadNetwork, RoadSegment, SegmentId};
 use crate::traffic::{self, DT, Ended, JunctionMove, TrafficState, TripEnd, VehicleId, secs_to_ticks};
 use crate::{World, balance};
 
-/// Lanes per direction the lane index space allows.
-const LANE_SLOTS: usize = 2;
+/// Lanes per direction the lane index space allows (two through lanes and
+/// an avenue's turn pocket).
+const LANE_SLOTS: usize = 3;
 
 /// Index of a lane: segment slot, direction, lane.
 pub(crate) fn lane_key(s: SegmentId, forward: bool, lane: u8) -> usize {
@@ -120,7 +121,15 @@ pub(crate) fn build_route_turns(
         for (pi, &si) in node.segments.iter().enumerate() {
             let Some(a) = j.arm_of(si) else { continue };
             let arm = &j.arms[a];
-            let oncoming = arm.opposite.map_or(1.0, |o| j.arms[o as usize].lanes_in as f32);
+            let mut oncoming = arm.opposite.map_or(1.0, |o| j.arms[o as usize].lanes_in as f32);
+            // A left turn waiting in a pocket (with its own phase at
+            // signals) costs less.
+            if j.movements
+                .iter()
+                .any(|m| m.from_arm as usize == a && m.from_lane >= arm.lanes_in)
+            {
+                oncoming *= balance::ROUTE_POCKET_LEFT_SHARE;
+            }
             let major_lanes: f32 = j
                 .arms
                 .iter()
@@ -153,10 +162,32 @@ pub(crate) fn build_route_turns(
     out
 }
 
+/// Turn pocket lengths per segment slot (`junction::pocket_lengths`).
+pub(crate) fn build_pockets(
+    roads: &RoadNetwork,
+    states: &crate::side::SideTable<NodeId, JunctionState>,
+) -> Vec<[f32; 2]> {
+    let mut out = vec![[0.0f32; 2]; roads.segments.slot_count()];
+    for (s, seg) in roads.segments.iter() {
+        if seg.kind.pocket_lane().is_some() {
+            out[key_index(s)] = crate::junction::pocket_lengths(roads, states, s);
+        }
+    }
+    out
+}
+
+/// Where the turn pocket of segment `s` in direction `forward` opens, as
+/// progress along travel, given its stop line (`None`: no pocket).
+fn pocket_start(pockets: &[[f32; 2]], s: SegmentId, forward: bool, stop: f32) -> Option<f32> {
+    let len = pockets.get(key_index(s))?[usize::from(!forward)];
+    (len > 0.0).then_some(stop - len)
+}
+
 /// Make sure the stop lines and routing delays match the junctions.
 pub(crate) fn ensure_tables(world: &mut World) {
     if world.cache.setbacks_key != Some(world.traffic.junctions_version) {
         world.cache.setbacks = build_setbacks(&world.roads, &world.traffic.junction_states);
+        world.cache.pockets = build_pockets(&world.roads, &world.traffic.junction_states);
         world.cache.setbacks_key = Some(world.traffic.junctions_version);
     }
     let key = (world.traffic.junctions_version, world.traffic.control_version);
@@ -286,23 +317,47 @@ fn next_step(roads: &RoadNetwork, seg_id: SegmentId, forward: bool, route: &[Seg
     Some(Step { node, to, to_forward })
 }
 
-/// The turn a vehicle makes at the end of its segment and the lanes (bit
-/// set) drivers make it from (`Movement::preferred`).
-fn next_turn(roads: &RoadNetwork, traffic: &TrafficState, v: &traffic::Vehicle) -> Option<(Turn, u8)> {
-    let s = v.segment?;
-    let st = next_step(roads, s, v.forward, &v.route)?;
-    let j = traffic.junction_states.get(st.node)?;
-    let (a, b) = (j.arm_of(s)?, j.arm_of(st.to)?);
-    let mut mask = 0u8;
+/// The turn from arm `a` to arm `b` and the lanes (bit set) drivers make
+/// it from (`Movement::preferred`): the turn pocket alone when the
+/// approach has one (`pocket`), else the through lanes' preferred ones.
+fn turn_lanes(j: &JunctionState, a: usize, b: usize, pocket: bool) -> Option<(Turn, u8)> {
+    let lanes = j.arms.get(a)?.lanes_in;
+    let (mut mask, mut pocket_mask) = (0u8, 0u8);
     let mut turn = None;
     for (_, m) in j.movements_between(a, b) {
         turn = Some(m.turn);
-        if m.preferred && m.from_lane < 8 {
+        if !m.preferred || m.from_lane >= 8 {
+            continue;
+        }
+        if m.from_lane >= lanes {
+            if pocket {
+                pocket_mask |= 1 << m.from_lane;
+            }
+        } else {
             mask |= 1 << m.from_lane;
         }
     }
     let turn = turn?;
+    let mask = if pocket_mask != 0 { pocket_mask } else { mask };
     Some((turn, if mask == 0 { u8::MAX } else { mask }))
+}
+
+/// The turn a vehicle makes at the end of its segment and the lanes (bit
+/// set) drivers make it from (see [`turn_lanes`]).
+fn next_turn(
+    roads: &RoadNetwork,
+    traffic: &TrafficState,
+    pockets: &[[f32; 2]],
+    v: &traffic::Vehicle,
+) -> Option<(Turn, u8)> {
+    let s = v.segment?;
+    let st = next_step(roads, s, v.forward, &v.route)?;
+    let j = traffic.junction_states.get(st.node)?;
+    let (a, b) = (j.arm_of(s)?, j.arm_of(st.to)?);
+    let pocket = pockets
+        .get(key_index(s))
+        .is_some_and(|p| p[usize::from(!v.forward)] > 0.0);
+    turn_lanes(j, a, b, pocket)
 }
 
 /// The front car of a lane, about to reach a junction.
@@ -335,6 +390,8 @@ struct Front {
     held_by_box: bool,
     /// Reaches the stop line this tick.
     reaches: bool,
+    /// Cars in this lane when it is a turn pocket (0 otherwise).
+    pocket_cars: u16,
 }
 
 /// Has the front car come to a stop at its line (all-way stops: it stood
@@ -425,6 +482,8 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
     let traffic: &mut TrafficState = traffic;
     let setbacks_vec: Vec<[f32; 2]> = std::mem::take(&mut cache.setbacks);
     let setbacks: &[[f32; 2]] = &setbacks_vec;
+    let pockets_vec: Vec<[f32; 2]> = std::mem::take(&mut cache.pockets);
+    let pockets: &[[f32; 2]] = &pockets_vec;
     let nkeys = roads.segments.slot_count() * 2 * LANE_SLOTS;
 
     // Lane lists (front first) and box lists.
@@ -530,6 +589,11 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             permit: false,
             held_by_box: false,
             reaches: d_line <= reach,
+            pocket_cars: if seg.kind.pocket_lane().is_some_and(|pl| v.lane >= pl) {
+                on_lane[k as usize]
+            } else {
+                0
+            },
         });
     }
     fronts.sort_by_key(|f| (key_index(f.node), f.idx));
@@ -883,11 +947,14 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         {
             continue;
         }
-        if let Some((_, mask)) = next_turn(roads, traffic, v)
+        // (Towards a turn pocket: the inner lane first.)
+        let n = seg.lane_count();
+        if let Some((_, mask)) = next_turn(roads, traffic, pockets, v)
             && mask & (1 << v.lane.min(7)) == 0
-            && let Some(want) = (0..seg.lane_count())
+            && let Some(want) = (0..n)
                 .filter(|l| mask & (1 << l) != 0)
                 .min_by_key(|l| l.abs_diff(v.lane))
+                .or_else(|| (mask & !((1u8 << n) - 1) != 0 && v.lane + 1 < n).then(|| v.lane + 1))
         {
             ghosts.push((lane_key(s, v.forward, want) as u32, p - balance::MERGE_ROOM_M));
         }
@@ -957,6 +1024,22 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     && gk == key
                 {
                     target = target.min(follow_speed(gp - v.progress, hw));
+                }
+            }
+            // A left turner in the inner lane that has not got into its
+            // turn pocket (full) waits at the pocket's entry: the queue
+            // spills back into the inner lane.
+            if let Some(pl) = seg.kind.pocket_lane()
+                && v.lane + 1 == pl
+                && arrive_at.is_none()
+                && let Some(p0) = pocket_start(pockets, s, v.forward, stop)
+            {
+                let entry = p0 + balance::POCKET_ENTRY_M;
+                if v.progress <= entry + 0.5
+                    && entry - v.progress < 40.0
+                    && next_turn(roads, traffic, pockets, v).is_some_and(|(_, m)| m & (1 << pl) != 0)
+                {
+                    target = target.min(stop_speed(entry - v.progress));
                 }
             }
             if let Some(lp) = leader {
@@ -1160,6 +1243,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         done.push((id, TripEnd::GaveUp(secs)));
     }
     world.cache.setbacks = setbacks_vec;
+    world.cache.pockets = pockets_vec;
     for (id, f) in done {
         traffic::remove_vehicle(world, id, f, ended);
     }
@@ -1246,9 +1330,14 @@ fn tick_signals(
                 let near = f.eta <= balance::SIGNAL_PASSAGE_S || f.d_line < f.back + balance::STOP_SIGN_DISTANCE_M;
                 if matches!(f.turn, Turn::Left | Turn::UTurn) {
                     // The protected left phase is called by a left turner
-                    // stuck at the line (it found no gap); the others go
-                    // permissively through the green.
-                    if f.speed < balance::STOP_SIGN_SPEED && f.d_line < f.back + balance::STOP_SIGN_DISTANCE_M {
+                    // stuck at the line (it found no gap) and, from a turn
+                    // pocket, only once the pocket fills up (the others go
+                    // permissively through the green and clear out at its
+                    // end).
+                    if f.speed < balance::STOP_SIGN_SPEED
+                        && f.d_line < f.back + balance::STOP_SIGN_DISTANCE_M
+                        && (f.pocket_cars == 0 || f.pocket_cars >= balance::POCKET_CALL_CARS)
+                    {
                         d.left = true;
                     }
                     d.through_left = true;
@@ -1275,6 +1364,7 @@ fn lane_changes(world: &mut World) {
         ..
     } = world;
     let setbacks: &[[f32; 2]] = &cache.setbacks;
+    let pockets: &[[f32; 2]] = &cache.pockets;
     // Cars on multi-lane roads, by lane, sorted by progress (rear first).
     // Cars that just entered a box still count in the lane they left (at
     // the stop line plus their distance in): nobody changes lanes into the
@@ -1341,33 +1431,50 @@ fn lane_changes(world: &mut World) {
         if p < start + balance::NO_LANE_CHANGE_AFTER_BOX_M {
             continue;
         }
+        // The turn pocket of this approach: open from `p0` on.
+        let pocket_from = pocket_start(pockets, s, v.forward, stop);
+        let lanes_here = if pocket_from.is_some_and(|p0| p >= p0) {
+            n + 1
+        } else {
+            n
+        };
         // Lanes the next movement can be made from (all lanes when the
         // junction is still far), as a bit set.
         let all: u8 = if n >= 8 { u8::MAX } else { (1u8 << n) - 1 };
         let mut allowed = all;
         let mut need: Option<u8> = None;
-        if d_line < balance::LANE_PREPARE_M
+        // (A car bound for a turn pocket moves over from twice as far: it
+        // may need two lane changes.)
+        if d_line < 2.0 * balance::LANE_PREPARE_M
             && let Some(st) = next_step(roads, s, v.forward, &v.route)
             && let Some(j) = traffic.junction_states.get(st.node)
             && let (Some(a), Some(b)) = (j.arm_of(s), j.arm_of(st.to))
+            && let Some((_, ok)) = turn_lanes(j, a, b, pocket_from.is_some())
+            && ok != u8::MAX
+            && (d_line < balance::LANE_PREPARE_M || ok & !all != 0)
         {
-            let mut ok = 0u8;
-            for (_, m) in j.movements_between(a, b) {
-                if m.preferred && m.from_lane < 8 {
-                    ok |= 1 << m.from_lane;
-                }
+            if ok & (1 << v.lane.min(7)) == 0 {
+                need = (0..8u8)
+                    .filter(|l| ok & (1 << l) != 0)
+                    .min_by_key(|l| l.abs_diff(v.lane));
             }
-            if ok != 0 {
-                if ok & (1 << v.lane.min(7)) == 0 {
-                    need = (0..8u8)
-                        .filter(|l| ok & (1 << l) != 0)
-                        .min_by_key(|l| l.abs_diff(v.lane));
-                }
-                allowed = ok;
-            }
+            allowed = ok;
         } else if v.route.is_empty() && v.lane > 0 {
             need = Some(0);
         }
+        // In a pocket it no longer needs (a new route): back out.
+        if v.lane >= n && need.is_none() && allowed & (1 << v.lane.min(7)) == 0 {
+            need = Some(n - 1);
+        }
+        if v.lane >= n && need.is_none() {
+            continue;
+        }
+        // One lane at a time (from the kerb lane to the pocket takes two).
+        let need = need.map(|l| match l.cmp(&v.lane) {
+            std::cmp::Ordering::Greater => v.lane + 1,
+            std::cmp::Ordering::Less => v.lane - 1,
+            std::cmp::Ordering::Equal => l,
+        });
         let want = match need {
             Some(l) => l,
             None => {
@@ -1393,29 +1500,50 @@ fn lane_changes(world: &mut World) {
                         && lanes.get(i + 1).is_some_and(|x| {
                             x.0 == key
                                 && vehicles[x.3].junction.is_none()
-                                && next_turn(roads, traffic, &vehicles[x.3]).is_some_and(|t| t.0 == Turn::Left)
+                                && next_turn(roads, traffic, pockets, &vehicles[x.3]).is_some_and(|t| {
+                                    // (with a pocket only while it waits
+                                    // at the pocket's entry)
+                                    t.0 == Turn::Left && (t.1 & (1 << (n - 1).min(7)) != 0 || vehicles[x.3].speed < 2.0)
+                                })
                         });
                     if (g_o > g_me + 12.0 && g_me < 60.0) || (ahead_turns_left && g_o >= g_me - 6.0) {
                         other
                     } else {
                         continue;
                     }
-                } else if v.lane == 0 {
-                    // Overtake a slow car or queue ahead.
-                    if g_me < 40.0 && s_me + 2.0 < speed.max(seg.speed_limit * 0.6) && g_o > g_me + 15.0 {
-                        1
+                } else {
+                    // Further back: overtaking and keeping right, but not
+                    // out of the lanes the next turn needs when it is
+                    // within twice the preparing distance (a queue there
+                    // leaves no gap to get back).
+                    let turn_ok = |l: u8| {
+                        d_line > 2.0 * balance::LANE_PREPARE_M
+                            || next_turn(roads, traffic, pockets, v).is_none_or(|(_, m)| {
+                                let through = m & ((1u8 << n) - 1);
+                                through == 0 || through & (1 << l) != 0
+                            })
+                    };
+                    if v.lane == 0 {
+                        // Overtake a slow car or queue ahead.
+                        if g_me < 40.0
+                            && s_me + 2.0 < speed.max(seg.speed_limit * 0.6)
+                            && g_o > g_me + 15.0
+                            && turn_ok(1)
+                        {
+                            1
+                        } else {
+                            continue;
+                        }
+                    } else if (g_o > 50.0 || g_o >= g_me) && turn_ok(0) {
+                        // Keep right.
+                        0
                     } else {
                         continue;
                     }
-                } else if g_o > 50.0 || g_o >= g_me {
-                    // Keep right.
-                    0
-                } else {
-                    continue;
                 }
             }
         };
-        if want == v.lane || want >= n {
+        if want == v.lane || want >= lanes_here {
             continue;
         }
         let tkey = lane_key(s, v.forward, want) as u32;

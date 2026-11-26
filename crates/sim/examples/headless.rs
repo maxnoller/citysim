@@ -95,6 +95,16 @@ const SCENARIOS: &[Scenario] = &[
         days: 3,
     },
     Scenario {
+        name: "short_industry",
+        about: "the grid town zoned with a tenth of the industry it needs",
+        days: 5,
+    },
+    Scenario {
+        name: "short_industry_fixed",
+        about: "the same town, the rest of its industrial land zoned at the start of day 3",
+        days: 5,
+    },
+    Scenario {
         name: "organic",
         about: "free-form roads: curved avenue, turned grid, ring, cul-de-sacs (pre-built)",
         days: 7,
@@ -147,6 +157,9 @@ struct DayExtra {
     step_mean_us: f64,
     delay_factor: f32,
     worked_share: f32,
+    journeys: citysim_sim::TripTimes,
+    unhappy_commute: f32,
+    commute_happiness: f32,
 }
 
 /// Per-hour vehicle measurements.
@@ -214,6 +227,10 @@ fn start(sc: &Scenario, w: &mut World) -> Option<GridPlayer> {
             scenarios::prebuilt(w, |w| scenarios::two_districts(w, false));
             None
         }
+        "short_industry" | "short_industry_fixed" => {
+            scenarios::prebuilt(w, scenarios::short_of_industry);
+            None
+        }
         "overbuilt" => {
             scenarios::prebuilt(w, scenarios::overbuilt);
             None
@@ -241,6 +258,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
     let (mut sum_ns, mut max_ns, mut n) = (0u128, 0u128, 0u64);
     let mut reached = [None::<u64>; 3];
     let mut costs: Vec<citysim_sim::RunningCosts> = Vec::new();
+    let mut losses: Vec<citysim_sim::TrafficLoss> = Vec::new();
     let mut extra: Vec<DayExtra> = Vec::new();
     let (mut given_up_before, mut day_ns_before) = (0u32, 0u128);
     while w.time.tick < total {
@@ -249,6 +267,9 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         }
         if sc.name == "artery_fixed" && w.time.day == 2 && w.time.tick_of_day == 0 {
             scenarios::add_connections(&mut w);
+        }
+        if sc.name == "short_industry_fixed" && w.time.day == 3 && w.time.tick_of_day == 0 {
+            scenarios::add_industry_land(&mut w);
         }
         rescue(sc, &mut w, &mut player);
         let t0 = Instant::now();
@@ -260,6 +281,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         sample(&w, &mut acc);
         if w.time.tick_of_day == 0 {
             costs.push(w.economy.last_day_costs);
+            losses.push(w.economy.last_day_traffic);
         }
         if w.time.tick_of_day == balance::TICKS_PER_DAY - 1 {
             // Just before midnight: the day's trips and give-ups.
@@ -271,6 +293,21 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
                 step_mean_us: (sum_ns - day_ns_before) as f64 / balance::TICKS_PER_DAY as f64 / 1e3,
                 delay_factor: w.traffic.delay_factor,
                 worked_share: w.economy.attendance.share(),
+                journeys: w.people.trip_times_today,
+                unhappy_commute: {
+                    let r = w.people.stats.unhappy_reasons;
+                    r[citysim_sim::HappinessPart::Commute.index()] as f32 / w.stats.population.max(1) as f32
+                },
+                commute_happiness: {
+                    let (mut sum, mut n) = (0.0f64, 0u32);
+                    for c in w.citizens.values() {
+                        if c.job.is_some() {
+                            sum += c.happiness.commute as f64;
+                            n += 1;
+                        }
+                    }
+                    (sum / n.max(1) as f64) as f32
+                },
             });
             given_up_before = w.traffic.stuck_removed;
             day_ns_before = sum_ns;
@@ -288,7 +325,9 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
     let mut daily = String::from(
         "day,minutes,population,peak_vehicles,money,income,expenses,residential_tax,commercial_tax,industrial_tax,road_upkeep,services,road_cells,\
          streets,avenues,highway,signals,signal_count,services_base,services_city_size,services_density,\
-         given_up,trips,happiness,avg_commute_s,step_mean_us,delay_factor,worked_share\n",
+         given_up,trips,happiness,avg_commute_s,step_mean_us,delay_factor,worked_share,\
+         journeys,journey_mean_h,journey_over3h,journey_over4h,journey_over8h,journey_max_h,journey_max_purpose,journey_max_offscreen,commute_over4h,\
+         unhappy_commute_share,commute_happiness,traffic_lost_tax,traffic_lost_per_commute_s\n",
     );
     for (i, h) in w.economy.history.iter().enumerate() {
         let b = h.budget;
@@ -320,11 +359,34 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         );
         daily.pop();
         let e = extra.get(i).copied().unwrap_or_default();
+        let tt = e.journeys;
+        let th = balance::TICKS_PER_HOUR as f64;
+        let commutes: u32 = tt.commutes.iter().sum();
         let _ = writeln!(
             daily,
-            ",{},{},{:.4},{:.1},{:.1},{:.3},{:.3}",
-            e.given_up, e.trips, e.happiness, e.avg_commute_s, e.step_mean_us, e.delay_factor, e.worked_share
+            ",{},{},{:.4},{:.1},{:.1},{:.3},{:.3},{},{:.3},{:.4},{:.4},{:.5},{:.2},{},{},{:.4},{:.4},{:.3}",
+            e.given_up,
+            e.trips,
+            e.happiness,
+            e.avg_commute_s,
+            e.step_mean_us,
+            e.delay_factor,
+            e.worked_share,
+            tt.total(),
+            tt.total_ticks as f64 / tt.total().max(1) as f64 / th,
+            tt.share_over(3.0),
+            tt.share_over(4.0),
+            tt.share_over(8.0),
+            tt.max_ticks as f64 / th,
+            tt.max_purpose,
+            tt.max_off_screen,
+            tt.commutes[4..].iter().sum::<u32>() as f32 / commutes.max(1) as f32,
+            e.unhappy_commute,
+            e.commute_happiness
         );
+        daily.pop();
+        let l = losses.get(i).copied().unwrap_or_default();
+        let _ = writeln!(daily, ",{},{:.1}", l.business_tax, l.per_commute_s());
     }
     std::fs::write(format!("{out_dir}/{}_seed{seed}_days.csv", sc.name), daily).expect("write csv");
     std::fs::write(format!("{out_dir}/{}_seed{seed}_hours.csv", sc.name), hours).expect("write csv");
@@ -405,6 +467,9 @@ fn run(sc: &Scenario, out_dir: &str) {
         }
         if sc.name == "artery_fixed" && w.time.day == 2 && w.time.tick_of_day == 0 {
             scenarios::add_connections(&mut w);
+        }
+        if sc.name == "short_industry_fixed" && w.time.day == 3 && w.time.tick_of_day == 0 {
+            scenarios::add_industry_land(&mut w);
         }
         rescue(sc, &mut w, &mut player);
         let t0 = Instant::now();

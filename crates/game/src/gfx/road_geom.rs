@@ -70,13 +70,14 @@ pub fn style(kind: RoadKind) -> Style {
             median: 0.0,
             lanes: 1,
         },
-        // 13 m carriageway (two 3 m lanes each way either side of a narrow
-        // planted median), wider sidewalks: 16 m overall.
+        // 13 m carriageway (two 2.75 m lanes each way either side of a 2 m
+        // planted median, cut into turn pockets before junctions), wider
+        // sidewalks: 16 m overall.
         RoadKind::Avenue => Style {
             h: RoadKind::Avenue.half_width_m(),
             walk: 1.5,
             highway: false,
-            median: 0.25,
+            median: RoadKind::Avenue.median_half_width_m(),
             lanes: 2,
         },
         RoadKind::Highway => Style {
@@ -282,6 +283,10 @@ pub struct SegLayout {
     /// Points on the sidewalks to keep clear (driveway mouths): no
     /// furniture there, lamps step aside.
     pub avoid: Vec<Vec2>,
+    /// Turn pockets cut into the median (`junction::turn_pocket`), as
+    /// `(entry or stop line, stop line or entry)` metres from `a`, sorted:
+    /// `[0]` for travel `a -> b` (at `b`), `[1]` for `b -> a` (at `a`).
+    pub pockets: [Option<(f32, f32)>; 2],
 }
 
 impl SegLayout {
@@ -299,7 +304,21 @@ impl SegLayout {
             box_a: false,
             box_b: false,
             avoid: Vec::new(),
+            pockets: [None; 2],
         }
+    }
+
+    /// Where the planted median runs: the drawn span, ended short of the
+    /// turn pockets cut into it.
+    pub fn median_span(&self) -> (f32, f32) {
+        let (mut t0, mut t1) = self.span();
+        if let Some((lo, _)) = self.pockets[0] {
+            t1 = t1.min(lo - 0.3);
+        }
+        if let Some((_, hi)) = self.pockets[1] {
+            t0 = t0.max(hi + 0.3);
+        }
+        (t0, t1)
     }
 
     pub fn len(&self) -> f32 {
@@ -406,6 +425,8 @@ pub fn layout(world: &World) -> RoadLayout {
             box_a: boxed.contains(&seg.a),
             box_b: boxed.contains(&seg.b),
             avoid: Vec::new(),
+            pockets: [true, false]
+                .map(|fwd| citysim_sim::junction::turn_pocket(world, sid, fwd).map(|p| p.from_a(seg.length))),
         });
     }
     // The highway continues off the map into the fog.
@@ -424,6 +445,7 @@ pub fn layout(world: &World) -> RoadLayout {
                 box_a: false,
                 box_b: false,
                 avoid: Vec::new(),
+                pockets: [None; 2],
             });
         }
     }
@@ -858,14 +880,21 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
             dashes(m, f, side * h * 0.5, m0, m1, 4.0, 6.0, 0.15, white);
         }
     } else if st.median > 0.0 {
-        // Avenue: raised planted median, lane lines, turn arrows.
-        let (q0, q1) = (m0 + 0.4, m1 - 0.4);
+        // Avenue: raised planted median (cut into turn pockets), lane
+        // lines, turn arrows.
+        let (md0, md1) = s.median_span();
+        let (q0, q1) = ((m0 + 0.4).max(md0), (m1 - 0.4).min(md1));
         if q1 - q0 > 1.0 {
             median_strip(m, f, st.median, q0, q1);
         }
         let lane_line = (lane_offset(s.kind, 0) + lane_offset(s.kind, 1)) * 0.5;
         for side in [1.0f32, -1.0] {
             dashes(m, f, side * lane_line, m0, m1, 3.0, 5.0, 0.14, white);
+        }
+        for (k, pocket) in s.pockets.iter().enumerate() {
+            if let Some(&(lo, hi)) = pocket.as_ref() {
+                turn_pocket_marks(m, s, k == 0, lo.max(m0), hi.min(m1), white);
+            }
         }
         for (at_a, deg) in [(true, s.deg_a), (false, s.deg_b)] {
             if deg < 3 || m1 - m0 < 16.0 {
@@ -876,7 +905,9 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
             let (p, d) = f.pose(t);
             let travel = if at_a { -d } else { d };
             let right = perp(travel);
-            for (lane, turn) in [(0u8, 1.0f32), (1, -1.0)] {
+            // With a turn pocket the inner lane goes straight on only.
+            let pocket = s.pockets[usize::from(at_a)].is_some();
+            for (lane, turn) in [(0u8, 1.0f32), (1, if pocket { 0.0 } else { -1.0 })] {
                 turn_arrow(m, p + right * lane_offset(s.kind, lane), travel, turn, white);
             }
         }
@@ -1048,7 +1079,7 @@ fn median_strip(m: &mut MeshBuilder, f: &Frame, hw: f32, t0: f32, t1: f32) {
 }
 
 /// Painted turn arrow at `p` pointing along `travel`; `turn` +1 adds a
-/// right-turn head, -1 a left-turn head (always with straight on).
+/// right-turn head, -1 a left-turn head, 0 none (always with straight on).
 fn turn_arrow(m: &mut MeshBuilder, p: Vec2, travel: Vec2, turn: f32, c: [f32; 4]) {
     let right = perp(travel);
     let y = MARK_Y;
@@ -1057,10 +1088,78 @@ fn turn_arrow(m: &mut MeshBuilder, p: Vec2, travel: Vec2, turn: f32, c: [f32; 4]
     m.quad_up([q(-2.2, -0.09), q(1.0, -0.09), q(1.0, 0.09), q(-2.2, 0.09)], c);
     // Straight head.
     m.tri_up(q(1.0, -0.38), q(1.0, 0.38), q(2.0, 0.0), c);
-    // Turn branch from the middle of the shaft, bent to the side.
-    let s = turn;
+    if turn != 0.0 {
+        turn_branch(m, p, travel, turn, c);
+    }
+}
+
+/// The bent branch and head of a turn arrow (from the shaft at `p`).
+fn turn_branch(m: &mut MeshBuilder, p: Vec2, travel: Vec2, s: f32, c: [f32; 4]) {
+    let right = perp(travel);
+    let q = |along: f32, side: f32| lift(p + travel * along + right * side, MARK_Y);
     m.quad_up([q(-0.7, 0.0), q(-0.35, 0.0), q(0.1, s * 0.62), q(-0.25, s * 0.62)], c);
     m.tri_up(q(-0.45, s * 0.52), q(0.35, s * 0.52), q(0.05, s * 1.05), c);
+}
+
+/// A left-turn-only arrow (a pocket): the shaft bends left, no straight
+/// head.
+fn left_arrow(m: &mut MeshBuilder, p: Vec2, travel: Vec2, c: [f32; 4]) {
+    let right = perp(travel);
+    let q = |along: f32, side: f32| lift(p + travel * along + right * side, MARK_Y);
+    m.quad_up([q(-2.2, -0.09), q(-0.5, -0.09), q(-0.5, 0.09), q(-2.2, 0.09)], c);
+    turn_branch(m, p, travel, -1.0, c);
+}
+
+/// Markings of a turn pocket between `lo` and `hi` (metres from `a`;
+/// `forward`: it serves travel `a -> b` and its stop line is at `hi`): its
+/// edge to the through lane (dashed where cars move in, solid towards the
+/// line), its edge to the oncoming lanes (solid), a left arrow and a stop
+/// bar.
+fn turn_pocket_marks(m: &mut MeshBuilder, s: &SegLayout, forward: bool, lo: f32, hi: f32, c: [f32; 4]) {
+    if hi - lo < 4.0 {
+        return;
+    }
+    let f = &s.frame;
+    let hw = s.style.median;
+    // Offsets are to the right of `a -> b`; the pocket's own right (the
+    // through lanes beside it) is `side`.
+    let side = if forward { 1.0f32 } else { -1.0 };
+    let (inner, outer) = (side * hw, -side * hw);
+    let solid = |m: &mut MeshBuilder, t0: f32, t1: f32, o: f32| {
+        strip(m, f, t0, t1, o - 0.07, o + 0.07, MARK_Y, c);
+    };
+    let len = hi - lo;
+    // Where cars come in (the entry end) the line to the through lane is
+    // dashed.
+    let dashed = (len * 0.4).min(12.0);
+    if forward {
+        dashes(m, f, inner, lo, lo + dashed, 1.5, 1.5, 0.14, c);
+        solid(m, lo + dashed, hi, inner);
+    } else {
+        solid(m, lo, hi - dashed, inner);
+        dashes(m, f, inner, hi - dashed, hi, 1.5, 1.5, 0.14, c);
+    }
+    solid(m, lo, hi, outer);
+    // Stop bar across the pocket and its arrow.
+    let (stop, toward) = if forward { (hi, -1.0f32) } else { (lo, 1.0) };
+    let bar = [stop, stop + toward * 0.4];
+    strip(
+        m,
+        f,
+        bar[0].min(bar[1]),
+        bar[0].max(bar[1]),
+        -hw + 0.12,
+        hw - 0.12,
+        MARK_Y + 0.002,
+        c,
+    );
+    if len > 10.0 {
+        let t = stop + toward * 6.0;
+        let (p, d) = f.pose(t);
+        let travel = if forward { d } else { -d };
+        let o = s.kind.lane_offset_m(s.kind.pocket_lane().unwrap_or(0));
+        left_arrow(m, p + perp(travel) * o, travel, c);
+    }
 }
 
 /// Street lamp positions along a segment: (pole base, lamp head) on
@@ -1071,7 +1170,12 @@ pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
         return Vec::new();
     }
     if s.style.median > 0.0 {
-        return median_lamp_spots(s);
+        // On the median, unless turn pockets leave too little of it: then
+        // on the sidewalks like a street.
+        let spots = median_lamp_spots(s);
+        if !spots.is_empty() {
+            return spots;
+        }
     }
     let f = &s.frame;
     let off = s.style.h + s.style.walk * 0.62;
@@ -1113,7 +1217,9 @@ pub fn lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
 /// carriageway.
 fn median_lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
     let f = &s.frame;
-    let (t0, t1) = (s.s_a + 6.0, s.len() - s.s_b - 6.0);
+    // On the planted median only (not in a turn pocket).
+    let (m0, m1) = s.median_span();
+    let (t0, t1) = (m0 + 6.0, m1 - 6.0);
     if t1 <= t0 {
         return Vec::new();
     }
@@ -1136,7 +1242,7 @@ fn median_lamp_spots(s: &SegLayout) -> Vec<(Vec2, Vec2)> {
 /// Street lamps: pole, arm over the road and a glowing head.
 fn street_lamps(m: &mut MeshBuilder, s: &SegLayout) {
     let pole = palette::LAMP;
-    let on_median = s.style.median > 0.0;
+    let on_median = s.style.median > 0.0 && !median_lamp_spots(s).is_empty();
     let ground = if on_median { ROAD_Y + 0.13 } else { WALK_Y };
     let mut last: Option<Vec2> = None;
     for (base, tip) in lamp_spots(s) {
