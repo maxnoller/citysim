@@ -316,12 +316,13 @@ pub enum ZoneMode {
     #[default]
     Paint,
     /// Click a road side: that whole frontage between two junctions, to the
-    /// chosen depth. Drag along a road: the frontage passed over.
+    /// chosen depth. Drag along the roads: the frontage passed over, through
+    /// bends, pieces and junctions.
     Frontage,
     /// Click: the connected zoneable area under the cursor.
     Fill,
-    /// Drag a rectangle that follows the lattice of the block it starts on
-    /// (`ToolPreview::area`).
+    /// Drag a rectangle turned to the cell it starts on; it takes the cells
+    /// of every lattice inside (`ToolPreview::area`).
     Marquee,
 }
 

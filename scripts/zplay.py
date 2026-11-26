@@ -64,7 +64,8 @@ def look(cx, cy, dist=300.0, yaw=0.0, pitch=1.2):
 
 
 def top(cx, cy, dist=300.0):
-    look(cx, cy, dist, 0.0, 1.45)
+    # Shifted so the site sits above the zone drawer at the bottom.
+    look(cx, cy + dist * 0.012, dist, 0.0, 1.45)
 
 
 def street(cx, cy, dist=70.0, yaw=0.6):
@@ -309,39 +310,40 @@ def modes(out, n0):
     """Each zone mode's preview on a curve, pictured mid-action."""
     play.focus()
     k = n0
-    # Along the road, dragged round the S-bend (both bends) on its east side.
-    site("sbend")
-    zone_tool("r")
-    zmode("Frontage")
-    held([(57.4, 126), (57.6, 122), (60, 119.8), (64, 118.4), (66.8, 114), (66.9, 108)],
-         os.path.join(out, f"zone-{k:02d}-mode-along-road-sbend.png"))
-    k += 1
-    # Fill: hovering the bare middle of the ring previews its whole inside.
-    site("ring")
-    zone_tool("c")
-    zmode("Fill")
-    move(66, 143)
-    play.wait_frames(3)
-    play.shot(os.path.join(out, f"zone-{k:02d}-mode-fill-ring-middle.png"))
-    k += 1
+    if not os.environ.get("ZPLAY_SKIP_FIRST"):
+        # Along the road, dragged round the S-bend (both bends), east side.
+        site("sbend")
+        zone_tool("r")
+        zmode("Frontage")
+        held([(57.4, 125), (57.6, 122), (60, 119.8), (64, 118.4), (66.8, 114), (66.9, 108)],
+             os.path.join(out, f"zone-{k:02d}-mode-along-road-sbend.png"))
+        k += 1
+        # Fill: hovering the bare middle of the ring previews its inside.
+        site("ring")
+        zone_tool("c")
+        zmode("Fill")
+        move(66, 143)
+        play.wait_frames(3)
+        play.shot(os.path.join(out, f"zone-{k:02d}-mode-fill-ring-middle.png"))
+        k += 1
     # Rectangle across the cul-de-sac's strips and the trunk's grid.
     site("culdesac")
     zone_tool("i")
     zmode("Marquee")
-    held([(84.5, 126.5), (90, 120), (93, 116)], os.path.join(out, f"zone-{k:02d}-mode-rectangle-culdesac.png"))
+    held([(84.0, 125.0), (88, 121), (93, 115.5)], os.path.join(out, f"zone-{k:02d}-mode-rectangle-culdesac.png"))
     k += 1
     # Paint across the gentle curve's strip and the trunk's grid where they meet.
     site("gentle")
     zone_tool("c")
     zmode("Paint")
-    held([(18.5, 112), (18.2, 118), (18.4, 124), (21, 126.4), (26, 126.5)],
-         os.path.join(out, f"zone-{k:02d}-mode-paint-gentle.png"))
+    path = [(18.6, 110)] + [(18.6 + 0.2 * t, 110 + t) for t in range(1, 15)] + [(19 + t, 125.6) for t in range(1, 8)]
+    held(path, os.path.join(out, f"zone-{k:02d}-mode-paint-gentle.png"))
     k += 1
     # De-zoning along the road, dragged.
     site("sbend")
     zone_tool("none")
     zmode("Frontage")
-    held([(54.6, 126), (55.4, 120), (60, 116.8)], os.path.join(out, f"zone-{k:02d}-mode-dezone-along-road.png"))
+    held([(54.6, 125), (55.4, 120), (60, 116.8)], os.path.join(out, f"zone-{k:02d}-mode-dezone-along-road.png"))
     k += 1
     play.select_tool("inspect")
     return k

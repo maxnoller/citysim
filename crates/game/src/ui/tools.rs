@@ -14,9 +14,13 @@
 //! * Road, upgrade: click a road for the stretch between junctions, or
 //!   drag along it for a part; it becomes the chosen kind.
 //! * Road, junctions: click a junction to switch its control.
-//! * Zone: paint (drag over cells), frontage (click a road side; drag along
-//!   it for a part), fill (click), marquee (drag a rectangle that follows
-//!   the lattice it starts on). De-zoning is the same with no zone.
+//! * Zone: paint (drag over cells of any lattice), frontage (click a road
+//!   side for the stretch between junctions; drag along the roads to follow
+//!   them through bends, pieces and junctions, keeping to that side; depth
+//!   1, 2, 4 rows or the full block), fill (click land enclosed by roads,
+//!   even its bare middle), marquee (drag a rectangle turned to the cell it
+//!   starts on; it takes the cells of every lattice inside). De-zoning is
+//!   the same with no zone.
 //! * Bulldoze: road (click a stretch or a building; drag along a road for a
 //!   part), area (marquee).
 //! * Tab cycles the current tool's modes, Ctrl+Z undoes (`plan::UndoRecord`).
