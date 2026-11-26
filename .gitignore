@@ -5,3 +5,4 @@
 __pycache__/
 !docs/*.png
 !crates/sim/tests/data/*.citysave
+/.cargo/config.toml
