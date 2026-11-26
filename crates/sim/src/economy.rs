@@ -10,8 +10,10 @@ use crate::{World, Zone, balance};
 /// `road_upkeep` and `services`; the day's net is `income() - expenses()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Budget {
-    /// Taxes paid by residents: residents * `RESIDENT_TAX_BASE_PER_DAY` *
-    /// tax rate.
+    /// Taxes paid by residents: the tax rate times the daily wages of the
+    /// employed (rounded per household), taken from each household's money
+    /// at payday (`people::residential_tax` projects today's). Pensions are
+    /// not taxed.
     pub residential_tax: i64,
     /// Taxes paid per filled commercial job: filled jobs *
     /// `COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY` * tax rate.
@@ -20,12 +22,16 @@ pub struct Budget {
     /// `INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY` * tax rate.
     pub industrial_tax: i64,
     /// Road upkeep: road cells (highway stub included) *
-    /// `ROAD_UPKEEP_PER_CELL_PER_DAY`.
+    /// `ROAD_UPKEEP_PER_CELL_PER_DAY`, avenue cells at
+    /// `AVENUE_UPKEEP_PER_CELL_PER_DAY`, and `SIGNAL_UPKEEP_PER_DAY` per
+    /// junction with traffic lights (by category: [`RunningCosts`]).
     pub road_upkeep: i64,
-    /// City services (police, fire, schools, rubbish... abstracted):
-    /// residents * `SERVICES_COST_PER_RESIDENT_PER_DAY`. Grows with the
-    /// city, so the margin per resident stays thin as it grows. (Saved in
-    /// the save file's extension block; 0 in days booked by older saves.)
+    /// City services (police, fire, schools, rubbish... abstracted): a base
+    /// cost per resident, more per resident in a bigger city and in denser
+    /// homes (by category: [`RunningCosts`]), all scaled by the service
+    /// level. Grows faster than the city, so the margin per resident gets
+    /// thinner as it grows. (Saved in the save file's extension block; 0 in
+    /// days booked by older saves.)
     #[serde(skip)]
     pub services: i64,
 }
@@ -186,6 +192,45 @@ pub struct Economy {
     pub history: Vec<DaySummary>,
     /// Debt and service health (see [`FiscalStatus`]).
     pub fiscal: FiscalStatus,
+    /// The previous day's running costs by category ([`RunningCosts`];
+    /// today's so far: [`running_costs`]).
+    pub last_day_costs: RunningCosts,
+    /// Shift hours scheduled and actually worked (commutes eat into them):
+    /// shops and works pay their tax on the hours worked.
+    pub attendance: Attendance,
+}
+
+/// Work time booked today and yesterday's share actually worked.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Attendance {
+    /// Ticks of shifts workers set off to today.
+    pub scheduled_ticks: u64,
+    /// Ticks of those shifts left when the workers got there.
+    pub worked_ticks: u64,
+    /// Yesterday's `worked / scheduled` (1 when nobody worked).
+    pub last_day_share: f32,
+}
+
+impl Default for Attendance {
+    fn default() -> Self {
+        Attendance {
+            scheduled_ticks: 0,
+            worked_ticks: 0,
+            last_day_share: 1.0,
+        }
+    }
+}
+
+impl Attendance {
+    /// Today's share of scheduled shift time worked so far (yesterday's
+    /// until enough shifts have begun).
+    pub fn share(&self) -> f32 {
+        if self.scheduled_ticks < 50 * balance::TICKS_PER_HOUR as u64 {
+            self.last_day_share
+        } else {
+            (self.worked_ticks as f64 / self.scheduled_ticks as f64).clamp(0.0, 1.0) as f32
+        }
+    }
 }
 
 impl Default for Economy {
@@ -198,42 +243,124 @@ impl Default for Economy {
             last_day: Budget::default(),
             history: Vec::new(),
             fiscal: FiscalStatus::default(),
+            last_day_costs: RunningCosts::default(),
+            attendance: Attendance::default(),
         }
+    }
+}
+
+/// A day's running costs by what they pay for (whole dollars, positive),
+/// for the budget panel. `streets + avenues + highway + signals` is
+/// [`Budget::road_upkeep`], `services_base + services_city_size +
+/// services_density` is [`Budget::services`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RunningCosts {
+    /// Street cells at `ROAD_UPKEEP_PER_CELL_PER_DAY`.
+    pub streets: i64,
+    /// Avenue cells at `AVENUE_UPKEEP_PER_CELL_PER_DAY`.
+    pub avenues: i64,
+    /// The highway stub's cells at `ROAD_UPKEEP_PER_CELL_PER_DAY`.
+    pub highway: i64,
+    /// Junctions with traffic lights at `SIGNAL_UPKEEP_PER_DAY`.
+    pub signals: i64,
+    /// How many junctions have traffic lights.
+    pub signal_count: u32,
+    /// Residents at `SERVICES_COST_PER_RESIDENT_PER_DAY`.
+    pub services_base: i64,
+    /// The extra cost of a big city's services
+    /// (`SERVICES_CITY_SIZE_PER_RESIDENT`, more per resident the bigger
+    /// the city).
+    pub services_city_size: i64,
+    /// The extra cost of residents in dense homes
+    /// (`SERVICES_DENSITY_PER_RESIDENT` by home level).
+    pub services_density: i64,
+}
+
+impl RunningCosts {
+    pub fn road_upkeep(&self) -> i64 {
+        self.streets + self.avenues + self.highway + self.signals
+    }
+
+    pub fn services(&self) -> i64 {
+        self.services_base + self.services_city_size + self.services_density
+    }
+}
+
+/// Running costs if the day ended now (`O(buildings + junctions)`).
+pub fn running_costs(world: &World) -> RunningCosts {
+    let mut res = 0u64;
+    let mut dense = 0.0f64;
+    for b in world.buildings.values() {
+        if b.kind == Zone::Residential {
+            res += b.occupied as u64;
+            let extra = balance::SERVICES_DENSITY_PER_RESIDENT[(b.level.clamp(1, 3) - 1) as usize];
+            dense += b.occupied as f64 * extra as f64;
+        }
+    }
+    let level = world.economy.fiscal.service_level as f64;
+    let p2 = (res as f64).powi(2);
+    let size =
+        balance::SERVICES_CITY_SIZE_PER_RESIDENT as f64 * p2 / (p2 + (balance::SERVICES_CITY_SIZE_POP as f64).powi(2));
+    let signal_count = world
+        .traffic
+        .junction_states
+        .values()
+        .filter(|j| j.control == crate::JunctionControl::Signal)
+        .count() as u32;
+    let s = &world.stats;
+    let highway_cells = (balance::HIGHWAY_STUB_CELLS as u32).min(s.road_cells);
+    let street_cells = s.road_cells.saturating_sub(s.avenue_cells + highway_cells);
+    RunningCosts {
+        streets: street_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY,
+        avenues: s.avenue_cells as i64 * balance::AVENUE_UPKEEP_PER_CELL_PER_DAY,
+        highway: highway_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY,
+        signals: signal_count as i64 * balance::SIGNAL_UPKEEP_PER_DAY,
+        signal_count,
+        services_base: (res as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64 * level).round() as i64,
+        services_city_size: (res as f64 * size * level).round() as i64,
+        services_density: (dense * level).round() as i64,
     }
 }
 
 /// What today's budget would be if the day ended now.
 pub fn budget_now(world: &World) -> Budget {
     let rate = world.economy.tax_rate;
-    let (mut res, mut com, mut ind) = (0u64, 0u64, 0u64);
+    let (mut com, mut ind) = (0u64, 0u64);
     for b in world.buildings.values() {
         match b.kind {
-            Zone::Residential => res += b.occupied as u64,
+            Zone::Residential => {}
             Zone::Commercial => com += b.occupied as u64,
             Zone::Industrial => ind += b.occupied as u64,
         }
     }
-    let tax = |n: u64, base: f32| (n as f64 * base as f64 * rate as f64).round() as i64;
-    let level = world.economy.fiscal.service_level as f64;
-    let services = (res as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64 * level).round() as i64;
+    // Business pays on the hours its workers were actually there.
+    let worked = world.economy.attendance.share() as f64;
+    let tax = |n: u64, base: f32| (n as f64 * base as f64 * rate as f64 * worked).round() as i64;
+    let costs = running_costs(world);
     Budget {
-        residential_tax: tax(res, balance::RESIDENT_TAX_BASE_PER_DAY),
+        residential_tax: crate::people::residential_tax(world),
         commercial_tax: tax(com, balance::COMMERCIAL_TAX_BASE_PER_JOB_PER_DAY),
         industrial_tax: tax(ind, balance::INDUSTRIAL_TAX_BASE_PER_JOB_PER_DAY),
-        road_upkeep: world.stats.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
-            + world.stats.avenue_cells as i64
-                * (balance::AVENUE_UPKEEP_PER_CELL_PER_DAY - balance::ROAD_UPKEEP_PER_CELL_PER_DAY),
-        services,
+        road_upkeep: costs.road_upkeep(),
+        services: costs.services(),
     }
 }
 
 /// Called once when a new day starts.
 pub(crate) fn end_of_day(world: &mut World) {
-    // Households that left at midnight are gone from both the bill and the
-    // summary.
     crate::stats::update(world);
-    let b = budget_now(world);
+    // Wages, pensions, rent; the residential tax comes out of the wages.
+    let tax = crate::life::payday(world);
+    let mut b = budget_now(world);
+    b.residential_tax = tax;
+    let costs = running_costs(world);
     let e = &mut world.economy;
+    e.last_day_costs = costs;
+    e.attendance = Attendance {
+        scheduled_ticks: 0,
+        worked_ticks: 0,
+        last_day_share: e.attendance.share(),
+    };
     e.money += b.income() - b.expenses();
     e.last_day = b;
     e.last_day_income = b.income();

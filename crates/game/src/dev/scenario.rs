@@ -6,6 +6,9 @@
 //! * `city` — `GridPlayer` until ~5,000 residents (streets only).
 //! * `hierarchy` — `GridPlayer::hierarchy` (avenues as arterials) until
 //!   ~10,000 residents (about 20 s of fast-forward in a release build).
+//! * `organic` — the sim's free-form town (`scenarios::organic`) until
+//!   ~3,800 residents.
+//! * `shapes` — gfx's road-shape test town (`shapes`) until ~3,000.
 //! * `jam`  — the deliberately bad `two_districts(grid = false)` layout
 //!   (every commuter through one junction) on its third day.
 //!
@@ -31,6 +34,8 @@ pub fn focus(kind: DemoKind) -> (Cell, f32) {
         DemoKind::Jam => (Cell::new(48, 128), 560.0),
         DemoKind::City => (Cell::new(62, 128), 900.0),
         DemoKind::Hierarchy => (Cell::new(70, 128), 1100.0),
+        DemoKind::Organic => (Cell::new(88, 118), 1000.0),
+        DemoKind::Shapes => (Cell::new(80, 125), 1000.0),
         _ => (Cell::new(45, 128), 560.0),
     }
 }
@@ -39,6 +44,8 @@ pub fn focus(kind: DemoKind) -> (Cell, f32) {
 pub fn street(kind: DemoKind) -> Cell {
     match kind {
         DemoKind::Jam => Cell::new(22, 126),
+        DemoKind::Organic => Cell::new(68, 119),
+        DemoKind::Shapes => Cell::new(52, 115),
         _ => Cell::new(30, 128),
     }
 }
@@ -68,6 +75,28 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
         DemoKind::Jam => {
             scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false));
             while w.time.day < 3 {
+                w.step();
+            }
+            run_to_hour(&mut w, hour, |_| {});
+        }
+        DemoKind::Organic | DemoKind::Shapes => {
+            let target =
+                env::<u32>("CITYSIM_DEMO_POP").unwrap_or(if kind == DemoKind::Organic { 3_800 } else { 3_000 });
+            let mut refused = Vec::new();
+            if kind == DemoKind::Organic {
+                scenarios::prebuilt(&mut w, |w| {
+                    refused = scenarios::organic(w)
+                        .into_iter()
+                        .map(|(c, e)| format!("{e}: {c:?}"))
+                        .collect()
+                });
+            } else {
+                scenarios::prebuilt(&mut w, |w| refused = super::shapes::shapes(w));
+            }
+            for r in refused {
+                warn!("{kind:?} demo: refused {r}");
+            }
+            while w.stats.population < target && w.time.day <= MAX_DAYS {
                 w.step();
             }
             run_to_hour(&mut w, hour, |_| {});
@@ -109,13 +138,11 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
 /// highway stub) to an avenue (paid for; dev aid for looking at avenues).
 fn upgrade_main_road(w: &mut World) {
     let mut x = 12;
-    while w
-        .grid
-        .get(Cell::new(x + 1, 128))
-        .is_some_and(|c| c.occupant == citysim_sim::Occupant::Road)
-    {
+    let view = w.grid_view();
+    while view.is_road(Cell::new(x + 1, 128)) {
         x += 1;
     }
+    drop(view);
     w.economy.money += 1_000_000;
     let r = w.apply(citysim_sim::Command::BuildRoad {
         from: Cell::new(12, 128),
@@ -143,8 +170,38 @@ impl Plugin for ScenarioPlugin {
 
 fn load_scenario(pending: Res<Pending>, mut sim: ResMut<SimWorld>, mut clock: ResMut<SimClock>) {
     let seed = sim.world.seed;
-    sim.replace(build(pending.0, seed));
+    sim.replace(cached_build(pending.0, seed));
     clock.paused = false;
+}
+
+/// `CITYSIM_DEMO_CACHE=dir`: keep each built demo world as a save in `dir`
+/// (keyed by kind, seed, population target and hour) and load it instead
+/// of building it again (dev aid: the 10,000-resident city takes ~50 s).
+fn cached_build(kind: DemoKind, seed: u64) -> World {
+    let Some(dir) = std::env::var_os("CITYSIM_DEMO_CACHE").filter(|d| !d.is_empty()) else {
+        return build(kind, seed);
+    };
+    let name = format!(
+        "{kind:?}-seed{seed}-pop{}-hour{}-avenues{}.citysave",
+        std::env::var("CITYSIM_DEMO_POP").unwrap_or_default(),
+        std::env::var("CITYSIM_DEMO_HOUR").unwrap_or_default(),
+        std::env::var("CITYSIM_DEMO_AVENUES").unwrap_or_default(),
+    );
+    let path = std::path::Path::new(&dir).join(name);
+    if let Ok(bytes) = std::fs::read(&path) {
+        match World::load(&bytes) {
+            Ok(w) => {
+                info!("dev scenario {kind:?}: loaded {}", path.display());
+                return w;
+            }
+            Err(e) => warn!("dev scenario: cannot load {}: {e:?}", path.display()),
+        }
+    }
+    let w = build(kind, seed);
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, w.save())) {
+        warn!("dev scenario: cannot write {}: {e}", path.display());
+    }
+    w
 }
 
 #[cfg(test)]

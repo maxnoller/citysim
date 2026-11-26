@@ -11,16 +11,16 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
+use super::v4::{DepartureV4, HouseholdV4};
+use super::v5::{BuildingV5, GridV5, upgrade_buildings};
 use crate::derived::Access;
 use crate::economy::{Budget, DaySummary, Economy};
 use crate::growth::{BuildingMeta, GrowthState};
 use crate::roads::{NodeId, RoadKind, RoadNetwork, RoadNode, RoadSegment, SegmentId};
 use crate::side::SideTable;
 use crate::stats::Stats;
-use crate::traffic::{Departure, TrafficState, Trip, Vehicle, VehicleId};
-use crate::{
-    Building, BuildingId, Demand, Grid, Household, HouseholdId, IdMap, Rng, SimTime, Versions, World, balance,
-};
+use crate::traffic::{TrafficState, Vehicle, VehicleId};
+use crate::{BuildingId, Demand, HouseholdId, IdMap, Rng, SimTime, Versions, World, balance};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorldV3 {
@@ -28,9 +28,9 @@ pub(crate) struct WorldV3 {
     rng: Rng,
     time: SimTime,
     roads: RoadNetworkV3,
-    grid: Grid,
-    buildings: IdMap<BuildingId, Building>,
-    households: IdMap<HouseholdId, Household>,
+    grid: GridV5,
+    buildings: IdMap<BuildingId, BuildingV5>,
+    households: IdMap<HouseholdId, HouseholdV4>,
     vehicles: IdMap<VehicleId, VehicleV3>,
     economy: EconomyV3,
     demand: Demand,
@@ -164,7 +164,7 @@ struct TripV3 {
 struct TrafficStateV3 {
     trips: SideTable<VehicleId, TripV3>,
     junctions: Vec<JunctionV3>,
-    pending: VecDeque<Departure>,
+    pending: VecDeque<DepartureV4>,
     replan: VecDeque<VehicleId>,
     roads_version: u64,
     avg_commute_s: f32,
@@ -215,13 +215,21 @@ impl WorldV3 {
             pos: n.pos,
             segments: n.segments,
         });
+        let mut serial = 0;
+        let nodes = &roads.nodes;
         roads.segments = self.roads.segments.map_values(|s| {
             let kind = match s.kind {
                 RoadKindV3::Street => RoadKind::Street,
                 RoadKindV3::Highway => RoadKind::Highway,
             };
-            RoadSegment::new(s.a, s.b, kind, s.length, s.load)
+            let (pa, pb) = (
+                nodes.get(s.a).map_or([0.0; 2], |n| n.pos),
+                nodes.get(s.b).map_or([0.0; 2], |n| n.pos),
+            );
+            serial += 1;
+            RoadSegment::with_curve(s.a, s.b, kind, crate::Curve::straight(pa, pb), serial - 1, s.load)
         });
+        roads.next_serial = serial;
         let vehicles = self.vehicles.map_values(|v| Vehicle {
             pos: v.pos,
             heading: v.heading,
@@ -291,25 +299,23 @@ impl WorldV3 {
         };
         let t = self.traffic;
         let mut trips = SideTable::default();
-        for (id, _) in vehicles.iter() {
+        for (id, v) in vehicles.iter() {
             if let Some(tr) = t.trips.get(id) {
-                trips.insert(
-                    id,
-                    Trip {
-                        purpose: tr.purpose,
-                        to: tr.to,
-                        dest: tr.dest,
-                        requested_tick: tr.requested_tick,
-                        wait_ticks: tr.wait_ticks,
-                        needs_route: tr.needs_route,
-                        queued: tr.queued,
-                    },
-                );
+                let tr = super::v4::TripV4 {
+                    purpose: tr.purpose,
+                    to: tr.to,
+                    dest: tr.dest,
+                    requested_tick: tr.requested_tick,
+                    wait_ticks: tr.wait_ticks,
+                    needs_route: tr.needs_route,
+                    queued: tr.queued,
+                };
+                trips.insert(id, super::v4::trip_from(tr, v.pos));
             }
         }
         let traffic = TrafficState {
             trips,
-            pending: t.pending,
+            pending: t.pending.into_iter().map(DepartureV4::upgrade).collect(),
             replan: t.replan,
             // Force a re-anchoring pass (lanes, junction plans) on the
             // first tick.
@@ -352,23 +358,23 @@ impl WorldV3 {
         versions.roads += 1;
         versions.grid += 1;
         versions.buildings += 1;
-        World {
-            seed: self.seed,
-            rng: self.rng,
-            time: self.time,
-            roads,
-            grid: self.grid,
-            buildings: self.buildings,
-            households: self.households,
-            vehicles,
-            economy,
-            demand: self.demand,
-            stats,
-            versions,
-            traffic,
-            growth,
-            cache: Default::default(),
-        }
+        let day = self.time.day;
+        let mut w = World::new(self.seed);
+        w.rng = self.rng;
+        w.time = super::v4::upgrade_time(self.time);
+        w.roads = roads;
+        w.buildings = upgrade_buildings(self.buildings);
+        w.households = self.households.map_values(|h| h.upgrade(day));
+        w.vehicles = vehicles;
+        w.economy = economy;
+        w.demand = self.demand;
+        w.stats = stats;
+        w.versions = versions;
+        w.traffic = traffic;
+        w.growth = growth;
+        w.cache = Default::default();
+        crate::zoning::adopt_grid(&mut w, &self.grid.zones());
+        w
     }
 }
 
@@ -491,7 +497,7 @@ pub fn save_as_v3(w: &World) -> Vec<u8> {
             };
             w.roads.nodes.slot_count()
         ],
-        pending: t.pending.clone(),
+        pending: t.pending.iter().map(DepartureV4::of).collect(),
         replan: t.replan.clone(),
         roads_version: t.roads_version,
         avg_commute_s: t.avg_commute_s,
@@ -522,9 +528,9 @@ pub fn save_as_v3(w: &World) -> Vec<u8> {
         rng: w.rng.clone(),
         time: w.time.clone(),
         roads,
-        grid: w.grid.clone(),
-        buildings: w.buildings.clone(),
-        households: w.households.clone(),
+        grid: GridV5::of_world(w),
+        buildings: super::v4::legacy_buildings(w),
+        households: w.households.clone().map_values(|h| HouseholdV4::of(&h)),
         vehicles,
         economy,
         demand: w.demand,

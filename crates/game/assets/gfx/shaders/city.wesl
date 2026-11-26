@@ -5,7 +5,7 @@
 
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
-    mesh_functions::get_world_from_local,
+    mesh_functions::{get_world_from_local, get_tag},
     mesh_view_bindings::{globals, view},
     forward_io::{VertexOutput, FragmentOutput},
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
@@ -14,21 +14,22 @@ import bevy_pbr::render::{
 @if(VISIBILITY_RANGE_DITHER)
 import bevy_pbr::render::pbr_functions::visibility_range_dither;
 
+// Shared by every city material (a storage buffer, so the time of day can
+// change without touching the materials; see `city_material.rs`).
 struct CityParams {
     // 0 by day .. 1 at night: lamps and headlights.
     night: f32,
     // Share of windows lit right now (time of day).
     windows: f32,
-    // 1 on the braking-car material: tail lights bright.
-    brake: f32,
     // Cloud shadow strength (0 = off).
     clouds: f32,
+    unused: f32,
     // Cloud drift speed, m/s (x, y), cloud size, m (z), unused (w).
     wind: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
-var<uniform> city: CityParams;
+var<storage, read> city: CityParams;
 
 fn hash21(p: vec2<f32>) -> f32 {
     var q = fract(p * vec2<f32>(123.34, 456.21));
@@ -157,7 +158,9 @@ fn fragment(
     } else if kind == 3u {
         glow = vec3<f32>(1.0, 0.95, 0.82) * (7.0 * city.night);
     } else if kind == 4u {
-        glow = vec3<f32>(1.0, 0.06, 0.03) * (2.2 * city.night + 6.0 * city.brake);
+        // Tail lights: bright when the car's `MeshTag` says it brakes.
+        let brake = f32(get_tag(in.instance_index) & 1u);
+        glow = vec3<f32>(1.0, 0.06, 0.03) * (2.2 * city.night + 6.0 * brake);
     } else if kind == 5u {
         glow = base * (2.2 * city.night);
     } else if kind == 6u {
@@ -165,16 +168,29 @@ fn fragment(
     } else if kind == 8u {
         pbr_input.material.base_color = vec4<f32>(ground_color(base, wp), 1.0);
     } else if kind == 9u {
-        // Distant building body: at night scattered warm specks (a stand-in
-        // for windows that are under a pixel from far away), only when far.
-        let far = smoothstep(450.0, 1100.0, distance(view.world_position, wp));
+        // Distant building body (the far model, past the LOD switch): at
+        // night the walls carry the average light of windows too small to
+        // draw, plus scattered warm specks, so a big city does not turn into
+        // dark blocks when zoomed out.
+        let far = smoothstep(400.0, 900.0, distance(view.world_position, wp));
         let wall = 1.0 - abs(in.world_normal.y);
+        let warm = vec3<f32>(1.0, 0.62, 0.3);
+        glow = warm * (0.32 * city.windows * city.night * wall * (0.5 + 0.5 * far));
         let h = hash21(floor(wp.xz / 2.6) + vec2<f32>(floor(wp.y / 2.6) * 7.3, 1.7));
-        if far > 0.0 && h < city.windows * (0.08 + 0.3 * wall) {
-            glow = vec3<f32>(1.0, 0.62, 0.3) * (2.0 * city.night * far);
+        if h < city.windows * (0.14 + 0.4 * wall) {
+            glow += warm * (2.4 * city.night * (0.4 + 0.6 * far));
         }
         } else if kind == 7u {
-        glow = vec3<f32>(1.0, 0.8, 0.55) * (2.0 * city.night);
+        // Shop fronts: a warm interior glow, kept low so a whole glazed
+        // ground floor does not bloom into a white panel.
+        // Panes along the facade (whichever way it faces) with mullions
+        // between them, each lit a little differently.
+        let along = (wp.x + wp.z) * select(1.0, -1.0, abs(in.world_normal.x - in.world_normal.z) < 0.2) + wp.x - wp.z;
+        let pane = along / 2.4;
+        let mullion = smoothstep(0.03, 0.09, fract(pane)) * (1.0 - smoothstep(0.91, 0.97, fract(pane)));
+        let h = hash21(vec2<f32>(floor(pane), floor(wp.y / 3.0) + 5.0));
+        let lit = select(0.12, 0.35 + 0.65 * h, h > 0.22);
+        glow = vec3<f32>(1.0, 0.72, 0.44) * (0.42 * city.night * lit * mullion);
         pbr_input.material.base_color = vec4<f32>(base * (1.0 - 0.6 * city.night), 1.0);
     }
 }

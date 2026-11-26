@@ -1,17 +1,12 @@
-//! `CITYSIM_UI_SHOTS=dir` (best with `CITYSIM_DEMO=town`): walks through
+//! `CITYSIM_UI_SHOTS=dir` (best with `CITYSIM_DEMO=organic`): walks through
 //! every interface state and saves `dir/NN-name.png` for each, then exits.
-//! States: idle HUD, inspect a home, a shop, an empty building and the
-//! busiest road, a tooltip, road preview (valid, blocked, and while broke),
-//! zone drag, bulldoze drag, round-2 tools (multi-point road path with
-//! snapping, T-junction snap, avenue upgrade, block tool, frontage and fill
-//! zoning, road bulldozer, junction tool), a pinned inspect card, the
-//! deficit and debt-crisis states, settings, traffic overlay with its
-//! legend, budget (with history and on day 1), toasts from real rejected
-//! commands, pause menu, first-run hint, and the HUD, a road path and the
-//! settings at 2560x1440.
-//! `CITYSIM_UI_SHOTS_ONLY=name,name` limits it to some states.
+//! `CITYSIM_UI_SHOTS_ONLY=name,name` limits it to some states (names in
+//! [`steps`]). `CITYSIM_UI_TOUR=1` plays a scripted walk through the tools
+//! for videos.
 //!
-//! Drives the real ui through synthetic cursor / mouse input and resources.
+//! Drives the real ui through a synthetic cursor and forced tool state
+//! (the points of a road being drawn, a held drag), so every state is
+//! reproducible on any town.
 
 use std::path::PathBuf;
 
@@ -19,15 +14,18 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::UiGlobalTransform;
 use bevy::window::PrimaryWindow;
-use citysim_sim::{Building, Cell, Command, Occupant, Zone};
+use citysim_sim::curve::right_of;
+use citysim_sim::{Building, BuildingId, Command, Curve, LatticeId, RoadKind, Zone};
 
-use super::UiState;
+use super::fsnap::{dist, rotate};
+use super::shapes::{Draft, Shape};
 use super::toasts::{Toast, ToastKind};
-use super::tools::{Action, ToolState};
+use super::tools::{Press, ToolState};
 use super::widgets::{UiAction, UiButton};
+use super::{InfoTray, UiState};
 use crate::shared::{
     ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, RoadChoice, RoadMode, SimClock,
-    SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, WorldTarget, ZoneMode, cell_center,
+    SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
 };
 
 /// The scenario's world while a step shows a modified copy (broke, day 1);
@@ -35,7 +33,6 @@ use crate::shared::{
 #[derive(Resource, Default)]
 struct SavedWorld(Option<citysim_sim::World>);
 
-/// Keep the current world for `reset` and return a mutable handle to it.
 fn stash_world(w: &mut World) {
     let copy = w.resource::<SimWorld>().world.clone();
     let mut saved = w.resource_mut::<SavedWorld>();
@@ -83,28 +80,28 @@ impl Plugin for ShotsPlugin {
     }
 }
 
-/// Where the synthetic pointer is and whether the left button is held.
+/// Where the synthetic pointer is, whether the left button is held, and
+/// tool state forced every frame.
 #[derive(Resource, Default, Clone)]
 struct Pointer {
-    /// Road path corners to force with `Action::Path`.
-    path: Vec<Cell>,
     target: PointerTarget,
     hold: bool,
     /// Glide towards the target instead of jumping (tour mode).
     smooth: bool,
-    /// Current smoothed position.
     current: Option<Vec2>,
-    /// Tool action to force (re-applied every frame: a tool change resets it).
-    action: Option<Action>,
+    /// A road being drawn (re-applied every frame: a tool change resets it).
+    draft: Option<Draft>,
+    /// A held press (drags).
+    press: Option<Press>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
 enum PointerTarget {
     #[default]
     None,
-    Cell(Cell),
+    Ground([f32; 2]),
     Button(UiAction),
-    /// A cell stored in `TourData`.
+    /// A point stored in `TourData`.
     Data(usize),
 }
 
@@ -128,12 +125,40 @@ struct Runner {
     frames: u32,
 }
 
-fn pose() -> CameraPose {
+fn sim(w: &World) -> &citysim_sim::World {
+    &w.resource::<SimWorld>().world
+}
+
+/// Middle of the town (mean of the buildings), or the highway's end.
+fn town_focus(w: &World) -> [f32; 2] {
+    let s = sim(w);
+    if s.buildings.is_empty() {
+        return [150.0, 1028.0];
+    }
+    let n = s.buildings.len() as f32;
+    let (x, y) = s
+        .buildings
+        .values()
+        .fold((0.0, 0.0), |a, b| (a.0 + b.center()[0], a.1 + b.center()[1]));
+    [x / n, y / n]
+}
+
+fn pose_at(p: [f32; 2], distance: f32) -> CameraPose {
     CameraPose {
-        focus: cell_center(Cell::new(48, 130), 0.0),
+        focus: sim_to_world(p, 0.0),
         yaw: 0.35,
         pitch: 0.92,
-        distance: 360.0,
+        distance,
+    }
+}
+
+fn look(w: &mut World, p: [f32; 2], distance: f32) {
+    w.resource_mut::<CameraOverride>().0 = Some(pose_at(p, distance));
+}
+
+fn point(w: &mut World, p: Option<[f32; 2]>) {
+    if let Some(p) = p {
+        w.resource_mut::<Pointer>().target = PointerTarget::Ground(p);
     }
 }
 
@@ -141,201 +166,205 @@ fn reset(world: &mut World) {
     if let Some(saved) = world.resource_mut::<SavedWorld>().0.take() {
         world.resource_mut::<SimWorld>().replace(saved);
     }
-    world.resource_mut::<CameraOverride>().0 = Some(pose());
+    let f = town_focus(world);
+    look(world, f, 380.0);
     *world.resource_mut::<ActiveTool>() = ActiveTool::Inspect;
     *world.resource_mut::<OverlayMode>() = OverlayMode::None;
-    world.resource_mut::<ToolState>().action = Action::Idle;
-    world.resource_mut::<ToolState>().path.clear();
+    world.resource_mut::<ToolState>().reset();
     *world.resource_mut::<ToolModes>() = ToolModes::default();
     *world.resource_mut::<RoadChoice>() = RoadChoice::Street;
     world.resource_mut::<WorldHighlight>().selected = None;
     let mut ui = world.resource_mut::<UiState>();
-    ui.budget_open = false;
+    ui.tray = None;
     ui.hint_visible = false;
     ui.menu_open = false;
     ui.settings_open = false;
+    ui.keys_open = false;
+    ui.following = false;
+    // Directly (a ClosePeople message would also drop a selection the
+    // step makes this frame).
+    world.resource_mut::<super::panel::PeopleView>().stack.clear();
     world.resource_mut::<SimClock>().paused = false;
+    world.resource_mut::<super::top::PinnedAlert>().0 = None;
+    world.resource_mut::<super::loading::HoldLoading>().0 = false;
     *world.resource_mut::<Pointer>() = Pointer::default();
 }
 
-/// A building cell (prefers one near the camera focus) and an empty cell
-/// a few cells west of it on the same row.
-fn find_building(world: &World) -> Option<Cell> {
-    find_building_near(world, Cell::new(48, 130))
+/// The building nearest to the town's middle that matches `pred`.
+fn building_where(w: &World, pred: impl Fn(&Building) -> bool) -> Option<BuildingId> {
+    let f = town_focus(w);
+    let s = sim(w);
+    s.buildings
+        .iter()
+        .filter(|(_, b)| pred(b))
+        .min_by(|a, b| dist(a.1.center(), f).total_cmp(&dist(b.1.center(), f)))
+        .map(|(id, _)| id)
 }
 
-fn find_building_near(world: &World, focus: Cell) -> Option<Cell> {
-    find_building_where(world, focus, |_| true)
+fn building_pos(w: &World, id: Option<BuildingId>) -> Option<[f32; 2]> {
+    Some(sim(w).buildings.get(id?)?.center())
 }
 
-/// Building nearest to `focus` that matches `pred`.
-fn find_building_where(world: &World, focus: Cell, pred: impl Fn(&Building) -> bool) -> Option<Cell> {
-    let sim = world.resource::<SimWorld>();
-    sim.world
-        .buildings
+/// Open land (no road within `half` metres, no buildings) near the town:
+/// its centre.
+fn open_land(w: &World, half: f32) -> Option<[f32; 2]> {
+    let s = sim(w);
+    let f = town_focus(w);
+    for k in 0..60 {
+        let r = 100.0 + k as f32 * 20.0;
+        for a in 0..24 {
+            let d = rotate([r, 0.0], a as f32 * 15.0);
+            let p = [f[0] + d[0], f[1] + d[1]];
+            let edge = citysim_sim::MAP_SIZE_M - half - 20.0;
+            if p[0] < half + 20.0 || p[1] < half + 20.0 || p[0] > edge || p[1] > edge {
+                continue;
+            }
+            if s.roads.nearest_segment(p, half).is_some() {
+                continue;
+            }
+            if !s.buildings.values().any(|b| dist(b.center(), p) < half) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// A point in the middle of a long street near the town's middle (curved
+/// when `curved`), and its direction.
+fn street_spot(w: &World, curved: bool) -> Option<([f32; 2], [f32; 2])> {
+    let s = sim(w);
+    let f = town_focus(w);
+    s.roads
+        .segments
         .values()
-        .filter(|b| pred(b))
-        .map(|b| b.footprint.min)
-        .min_by_key(|c| c.chebyshev(focus))
+        .filter(|g| g.kind != RoadKind::Highway && g.length > 60.0 && g.curve.is_straight() != curved)
+        .min_by(|a, b| {
+            let ma = a.curve.point_at(a.length * 0.5, 0.0);
+            let mb = b.curve.point_at(b.length * 0.5, 0.0);
+            dist(ma, f).total_cmp(&dist(mb, f))
+        })
+        .map(|g| {
+            let p = g.curve.pose_at(g.length * 0.5, 0.0);
+            (p.pos, p.dir)
+        })
 }
 
-/// Force a road path in progress with these placed corners.
-fn force_path(w: &mut World, corners: Vec<Cell>) {
-    let mut p = w.resource_mut::<Pointer>();
-    p.path = corners;
-    p.action = Some(Action::Path {
-        held: false,
-        dragged: false,
-    });
+fn add(a: [f32; 2], b: [f32; 2], k: f32) -> [f32; 2] {
+    [a[0] + b[0] * k, a[1] + b[1] * k]
 }
 
-fn point_at(w: &mut World, c: Option<Cell>) {
-    if let Some(c) = c {
-        w.resource_mut::<Pointer>().target = PointerTarget::Cell(c);
-    }
-}
-
-fn find_road(world: &World) -> Option<Cell> {
-    find_road_near(world, Cell::new(44, 128))
-}
-
-fn find_road_near(world: &World, focus: Cell) -> Option<Cell> {
-    let sim = &world.resource::<SimWorld>().world;
-    let mut best: Option<(i32, Cell)> = None;
-    for y in focus.y - 20..focus.y + 20 {
-        for x in focus.x - 20..focus.x + 20 {
-            let c = Cell::new(x, y);
-            if sim.grid.get(c).is_some_and(|cd| cd.occupant == Occupant::Road)
-                && sim.roads.segment_through(c.center()).is_some()
-            {
-                let d = c.chebyshev(focus);
-                if best.is_none_or(|(bd, _)| d < bd) {
-                    best = Some((d, c));
-                }
-            }
-        }
-    }
-    best.map(|(_, c)| c)
-}
-
-/// A buildable new road from an existing road cell across empty land.
-fn find_new_road(world: &World) -> Option<(Cell, Cell)> {
-    let sim = &world.resource::<SimWorld>().world;
-    let focus = Cell::new(46, 126);
-    let mut best: Option<(i32, Cell, Cell)> = None;
-    for y in focus.y - 60..focus.y + 60 {
-        for x in focus.x - 60..focus.x + 60 {
-            let start = Cell::new(x, y);
-            if !sim.grid.is_road(start) {
-                continue;
-            }
-            for (dx, dy) in [(1, 1), (1, -1), (0, 1), (1, 0)] {
-                let end = start.offset(dx * 9, dy * 9);
-                let cmd = citysim_sim::Command::BuildRoad {
-                    from: start,
-                    to: end,
-                    kind: citysim_sim::RoadKind::Street,
-                };
-                // Only across unzoned empty land, so the demo town never
-                // grows a building into it before the click.
-                let clear = start.straight_line_to(end).is_some_and(|cells| {
-                    cells[1..].iter().all(|&c| {
-                        sim.grid
-                            .get(c)
-                            .is_some_and(|cd| cd.zone.is_none() && cd.occupant == Occupant::Empty)
-                    })
-                });
-                if clear
-                    && let Ok(p) = sim.preview(&cmd)
-                    && p.cost >= 8 * citysim_sim::balance::ROAD_COST_PER_CELL
-                {
-                    let d = start.chebyshev(focus);
-                    if best.is_none_or(|(bd, ..)| d < bd) {
-                        best = Some((d, start, end));
-                    }
-                }
-            }
-        }
-    }
-    best.map(|(_, a, b)| (a, b))
-}
-
-/// Look at `c` from the default angle at `distance`.
-fn look_at(w: &mut World, c: Cell, distance: f32) {
-    let mut p = pose();
-    p.focus = cell_center(c, 0.0);
-    p.distance = distance;
-    w.resource_mut::<CameraOverride>().0 = Some(p);
-}
-
-/// Top-left cell of a `wdt` x `hgt` patch of empty, unzoned land (with a
-/// one-cell margin) near the town, if any.
-fn find_empty_area(world: &World, wdt: i32, hgt: i32) -> Option<Cell> {
-    let sim = &world.resource::<SimWorld>().world;
-    let focus = Cell::new(46, 126);
-    let free = |c: Cell| {
-        sim.grid
-            .get(c)
-            .is_some_and(|cd| cd.zone.is_none() && cd.occupant == Occupant::Empty)
-    };
-    let mut best: Option<(i32, Cell)> = None;
-    for y in (focus.y - 60..focus.y + 60).step_by(2) {
-        for x in (focus.x - 60..focus.x + 60).step_by(2) {
-            let min = Cell::new(x, y);
-            let d = min.chebyshev(focus);
-            if best.is_some_and(|(bd, _)| d >= bd) {
-                continue;
-            }
-            let ok = (-1..=hgt).all(|dy| (-1..=wdt).all(|dx| free(min.offset(dx, dy))));
-            if ok {
-                best = Some((d, min));
-            }
-        }
-    }
-    best.map(|(_, c)| c)
+/// A gently curved street built across open land (kept for `reset`).
+fn new_curve(w: &mut World) -> Option<Curve> {
+    let o = open_land(w, 130.0)?;
+    let c = Curve::through_corner(
+        add(o, [-1.0, 0.3], 120.0),
+        add(o, [0.2, -1.0], 30.0),
+        add(o, [1.0, 0.5], 120.0),
+    );
+    build_now(
+        w,
+        &[Command::BuildCurve {
+            curve: c,
+            kind: RoadKind::Street,
+        }],
+    );
+    Some(c)
 }
 
 /// Keep the scenario's world for `reset`, then apply `cmds` to the live
-/// one (with money to spare), for states that need a fresh road.
+/// one (with money to spare).
 fn build_now(w: &mut World, cmds: &[Command]) {
     stash_world(w);
     let mut sim = w.resource_mut::<SimWorld>();
     let money = sim.world.economy.money;
     sim.world.economy.money = money.max(0) + 1_000_000;
-    for &c in cmds {
-        let _ = sim.world.apply(c);
+    for c in cmds {
+        let _ = sim.world.apply(c.clone());
     }
     sim.world.economy.money = money;
 }
 
-fn street(from: Cell, to: Cell) -> Command {
-    Command::BuildRoad {
-        from,
-        to,
-        kind: citysim_sim::RoadKind::Street,
+/// Set the road tool and a mode, then force a road being drawn.
+fn drawing(w: &mut World, mode: RoadMode, shape: Shape, points: &[[f32; 2]], pieces: &[Curve]) {
+    *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+    w.resource_mut::<ToolModes>().road = mode;
+    let block_m = w.resource::<super::tools::ToolOptions>().block_m();
+    let mut d = Draft::new(shape, block_m);
+    d.pieces = pieces.to_vec();
+    d.points = points.to_vec();
+    if shape == Shape::Continuous {
+        d.start_dir = pieces.last().map(|c| c.end_dir());
     }
+    w.resource_mut::<Pointer>().draft = Some(d);
 }
 
-/// A signalled junction near the town centre (else any junction).
-fn find_junction(world: &World) -> Option<Cell> {
-    let sim = &world.resource::<SimWorld>().world;
-    let focus = Cell::new(46, 126);
-    citysim_sim::junction::junction_nodes(sim)
-        .map(|n| {
-            let c = Cell::from_pos(sim.roads.node_pos(n));
-            let signal = citysim_sim::junction::junction_control(sim, n) == Some(citysim_sim::JunctionControl::Signal);
-            (!signal, c.chebyshev(focus), c)
+/// Hold the button down from `at` (a drag in progress).
+fn press(w: &mut World, at: [f32; 2]) {
+    let lattice = sim(w).zoning.cell_at(at).map_or(LatticeId::WORLD, |c| c.lattice);
+    let mut p = w.resource_mut::<Pointer>();
+    p.press = Some(Press {
+        at,
+        time: 0.0,
+        moved: true,
+        lattice,
+    });
+    p.hold = true;
+}
+
+/// The owner's chosen mockup in the real game: a curved avenue being
+/// drawn while a driving resident is shown in the side panel.
+fn mockup(w: &mut World) {
+    reset(w);
+    // A driver near open land, so the road being drawn has room.
+    let spot = open_land(w, 45.0).unwrap_or_else(|| town_focus(w));
+    let s = sim(w);
+    let who = s
+        .citizens
+        .iter()
+        .filter_map(|(id, c)| match &c.location {
+            citysim_sim::citizens::Location::Travelling(j)
+                if c.job.is_some() && j.vehicle.is_some_and(|v| s.vehicles.contains_key(v)) =>
+            {
+                let at = super::people::person_position(s, id)?;
+                Some((dist(at, spot), id, at))
+            }
+            _ => None,
         })
-        .min_by_key(|&(ns, d, c)| (ns, d, c.x, c.y))
-        .map(|(.., c)| c)
-}
-
-/// The two ends of the straight street through road cell `c`.
-fn street_ends(world: &World, c: Cell) -> Option<(Cell, Cell)> {
-    let sim = &world.resource::<SimWorld>().world;
-    let s = sim.roads.segment_through(c.center())?;
-    let (a, b) = sim.roads.segment_ends(s);
-    Some((Cell::from_pos(a), Cell::from_pos(b)))
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    let focus = match who {
+        Some((_, id, at)) => {
+            w.write_message(UiAction::Person(id));
+            at
+        }
+        None => spot,
+    };
+    *w.resource_mut::<RoadChoice>() = RoadChoice::Avenue;
+    // Screen axes of the shot camera (yaw 0.35): right and down, sim metres.
+    let (s35, c35) = 0.35f32.sin_cos();
+    let right = [c35, -s35];
+    let down = [s35, c35];
+    let at = |x: f32, y: f32| add(add(focus, right, x), down, y);
+    // A curve across the open land, left of the side panel and above the
+    // tray, ending at the cursor.
+    let rel = |p: [f32; 2]| {
+        let d = [p[0] - focus[0], p[1] - focus[1]];
+        (d[0] * right[0] + d[1] * right[1], d[0] * down[0] + d[1] * down[1])
+    };
+    let (sx, sy) = rel(spot);
+    let a = at(sx - 40.0, sy - 10.0);
+    let corner = at(sx + 5.0, sy - 12.0);
+    drawing(w, RoadMode::Curve, Shape::Curve, &[a, corner], &[]);
+    point(w, Some(at(sx + 22.0, sy + 18.0)));
+    // The car right of the middle of the screen, held still; the ribbon
+    // says what the hour is like (the clock is paused for the picture).
+    look(w, at(sx - 22.0, sy - 16.0), 190.0);
+    w.resource_mut::<SimClock>().paused = true;
+    let rush = super::top::Alert {
+        kind: super::top::AlertKind::Warning,
+        text: "Evening rush is building on the avenue".into(),
+    };
+    w.resource_mut::<super::top::PinnedAlert>().0 = Some(rush);
 }
 
 fn steps() -> Vec<Step> {
@@ -346,14 +375,65 @@ fn steps() -> Vec<Step> {
             setup: reset,
         },
         Step {
+            name: "mockup",
+            wait: 2.0,
+            setup: mockup,
+        },
+        Step {
+            name: "maps",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<OverlayMode>() = OverlayMode::Traffic;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Maps);
+            },
+        },
+        Step {
+            name: "stats",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Stats);
+            },
+        },
+        Step {
+            name: "keys",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::OpenMenu);
+                w.write_message(UiAction::Keys);
+            },
+        },
+        Step {
+            name: "inspect-junction",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                let s = sim(w);
+                let f = town_focus(w);
+                let node = s
+                    .roads
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| n.segments.len() >= 3)
+                    .min_by(|a, b| dist(a.1.pos, f).total_cmp(&dist(b.1.pos, f)))
+                    .map(|(id, n)| (id, n.pos));
+                if let Some((node, pos)) = node {
+                    w.resource_mut::<WorldHighlight>().selected =
+                        Some(crate::shared::WorldTarget::Junction { node, pos });
+                    look(w, pos, 160.0);
+                }
+            },
+        },
+        Step {
             name: "inspect-home",
             wait: 1.0,
             setup: |w| {
                 reset(w);
-                let c = find_building_where(w, Cell::new(48, 130), |b| {
-                    b.kind == Zone::Residential && b.level > 1 && b.occupied > 0
-                });
-                point_at(w, c);
+                let b = building_where(w, |b| b.kind == Zone::Residential && b.level > 1 && b.occupied > 0);
+                let p = building_pos(w, b);
+                point(w, p);
             },
         },
         Step {
@@ -361,17 +441,8 @@ fn steps() -> Vec<Step> {
             wait: 1.0,
             setup: |w| {
                 reset(w);
-                let c = find_building_where(w, Cell::new(48, 130), |b| b.kind == Zone::Commercial);
-                point_at(w, c);
-            },
-        },
-        Step {
-            name: "inspect-empty",
-            wait: 1.0,
-            setup: |w| {
-                reset(w);
-                let c = find_building_where(w, Cell::new(48, 130), |b| b.occupied == 0).or_else(|| find_building(w));
-                point_at(w, c);
+                let p = building_pos(w, building_where(w, |b| b.kind == Zone::Commercial));
+                point(w, p);
             },
         },
         Step {
@@ -384,37 +455,15 @@ fn steps() -> Vec<Step> {
                 // network 7 in-game hours ago (paused, so the hourly check
                 // does not clear it again).
                 w.resource_mut::<SimClock>().paused = true;
-                let c = find_building_where(w, Cell::new(48, 130), |b| b.kind == Zone::Residential && b.occupied > 0);
+                let b = building_where(w, |b| b.kind == Zone::Residential && b.occupied > 0);
+                let p = building_pos(w, b);
                 let world = &mut w.resource_mut::<SimWorld>().into_inner().world;
-                if let Some(c) = c
-                    && let Some(Occupant::Building(id)) = world.grid.get(c).map(|cd| cd.occupant)
-                {
+                if let Some(id) = b {
                     let hour = citysim_sim::balance::TICKS_PER_HOUR as u64;
                     let since = (world.time.tick / hour).saturating_sub(7) * hour;
                     world.growth.meta.entry(id).unreachable_since = Some(since);
                 }
-                point_at(w, c);
-            },
-        },
-        Step {
-            name: "zone-hover-zoned",
-            wait: 1.0,
-            setup: |w| {
-                reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
-                // An empty lot that is already residential (the old bug said
-                // "needs a road" here).
-                let sim = &w.resource::<SimWorld>().world;
-                let focus = Cell::new(48, 130);
-                let lot = (0..sim.grid.cells.len() as i32)
-                    .map(|i| Cell::new(i % citysim_sim::MAP_CELLS, i / citysim_sim::MAP_CELLS))
-                    .filter(|&c| {
-                        sim.grid
-                            .get(c)
-                            .is_some_and(|cd| cd.zone == Some(Zone::Residential) && cd.occupant == Occupant::Empty)
-                    })
-                    .min_by_key(|c| c.chebyshev(focus));
-                point_at(w, lot);
+                point(w, p);
             },
         },
         Step {
@@ -422,35 +471,28 @@ fn steps() -> Vec<Step> {
             wait: 1.0,
             setup: |w| {
                 reset(w);
-                let c = busiest_road_near(w, Cell::new(46, 128)).or_else(|| find_road(w));
-                point_at(w, c);
+                let p = street_spot(w, true).map(|s| s.0);
+                point(w, p);
             },
         },
         Step {
-            name: "inspect-jam",
-            wait: 1.2,
+            name: "inspect-car",
+            wait: 1.0,
             setup: |w| {
                 reset(w);
-                // The most congested street of the whole map, centred.
-                let sim = &w.resource::<SimWorld>().world;
-                let worst = sim
-                    .roads
-                    .segments
+                w.resource_mut::<SimClock>().paused = true;
+                let f = town_focus(w);
+                let s = sim(w);
+                let car = s
+                    .vehicles
                     .values()
-                    .filter(|s| s.kind == citysim_sim::RoadKind::Street)
-                    .max_by(|a, b| a.congestion().total_cmp(&b.congestion()))
-                    .map(|s| {
-                        let (pa, pb) = (sim.roads.node_pos(s.a), sim.roads.node_pos(s.b));
-                        Cell::from_pos([(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5])
-                    });
-                if let Some(c) = worst {
-                    let mut p = pose();
-                    p.focus = cell_center(c, 0.0);
-                    p.distance = 220.0;
-                    w.resource_mut::<CameraOverride>().0 = Some(p);
-                    *w.resource_mut::<OverlayMode>() = OverlayMode::Traffic;
+                    .filter(|v| v.segment.is_some())
+                    .min_by(|a, b| dist(a.pos, f).total_cmp(&dist(b.pos, f)))
+                    .map(|v| citysim_sim::drive::vehicle_pose(s, v).0);
+                if let Some(c) = car {
+                    look(w, c, 120.0);
                 }
-                point_at(w, worst);
+                point(w, car);
             },
         },
         Step {
@@ -462,31 +504,93 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
-            name: "road-preview",
-            wait: 1.0,
+            name: "road-straight",
+            wait: 1.2,
             setup: |w| {
                 reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
-                let Some((start, end)) = find_new_road(w) else { return };
-                let mid = (cell_center(start, 0.0) + cell_center(end, 0.0)) * 0.5;
-                let mut p = pose();
-                p.focus = mid;
-                p.distance = 260.0;
-                w.resource_mut::<CameraOverride>().0 = Some(p);
-                force_path(w, vec![start]);
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(end);
+                let Some((p, d)) = street_spot(w, false) else { return };
+                let r = right_of(d);
+                let a = add(p, d, 12.0);
+                drawing(w, RoadMode::Straight, Shape::Straight, &[a], &[]);
+                // Nearly at right angles: the snap pulls it square.
+                point(w, Some(add(add(a, r, 92.0), d, 5.0)));
+                look(w, add(a, r, 45.0), 220.0);
             },
         },
         Step {
-            name: "road-blocked",
-            wait: 1.0,
+            name: "road-curve",
+            wait: 1.2,
             setup: |w| {
                 reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
-                let Some(b) = find_building(w) else { return };
-                let start = Cell::new(b.x, b.y - 8);
-                force_path(w, vec![start]);
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(Cell::new(b.x, b.y + 3));
+                let Some(o) = open_land(w, 150.0) else { return };
+                // Start, corner placed; the end near the right angle from
+                // the corner, so its guide shows.
+                let a = add(o, [-1.0, 0.0], 130.0);
+                let corner = add(o, [0.0, -1.0], 40.0);
+                let d = super::fsnap::rotate(citysim_sim::curve::unit([corner[0] - a[0], corner[1] - a[1]]), 90.0);
+                drawing(w, RoadMode::Curve, Shape::Curve, &[a, corner], &[]);
+                *w.resource_mut::<RoadChoice>() = RoadChoice::Avenue;
+                point(w, Some(add(add(corner, d, 110.0), [d[1], -d[0]], 3.0)));
+                look(w, add(o, [-1.0, 0.0], 30.0), 380.0);
+            },
+        },
+        Step {
+            name: "road-continuous",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some(o) = open_land(w, 140.0) else { return };
+                let a = add(o, [-1.0, 0.0], 120.0);
+                let c1 = Curve::continuing(a, [1.0, 0.3], add(o, [-0.3, -1.0], 30.0));
+                let c2 = Curve::continuing(c1.end(), c1.end_dir(), add(o, [1.0, -0.2], 70.0));
+                drawing(w, RoadMode::Continuous, Shape::Continuous, &[c2.end()], &[c1, c2]);
+                // Near straight on from the last piece: its guide shows.
+                let dir = c2.end_dir();
+                point(w, Some(add(add(c2.end(), dir, 72.0), right_of(dir), 3.0)));
+                look(w, add(o, dir, 30.0), 360.0);
+            },
+        },
+        Step {
+            name: "road-grid",
+            wait: 1.4,
+            setup: |w| {
+                reset(w);
+                let Some(o) = open_land(w, 150.0) else { return };
+                // A grid turned by 27°.
+                let u = rotate([1.0, 0.0], 27.0);
+                let a = add(add(o, u, -100.0), right_of(u), -60.0);
+                let b = add(a, u, 200.0);
+                drawing(w, RoadMode::Grid, Shape::Grid, &[a, b], &[]);
+                point(w, Some(add(b, right_of(u), 125.0)));
+                look(w, o, 380.0);
+            },
+        },
+        Step {
+            name: "road-refused-tight",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some(o) = open_land(w, 120.0) else { return };
+                *w.resource_mut::<RoadChoice>() = RoadChoice::Avenue;
+                let a = add(o, [-1.0, 0.0], 70.0);
+                let corner = add(o, [1.0, 0.0], 10.0);
+                drawing(w, RoadMode::Curve, Shape::Curve, &[a, corner], &[]);
+                point(w, Some(add(corner, [-0.6, 1.0], 26.0)));
+                look(w, o, 220.0);
+            },
+        },
+        Step {
+            name: "road-refused-close",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some((p, d)) = street_spot(w, false) else { return };
+                let r = right_of(d);
+                // Alongside the street, 5 m off its centre line.
+                let a = add(add(p, d, -50.0), r, 5.0);
+                drawing(w, RoadMode::Straight, Shape::Straight, &[a], &[]);
+                point(w, Some(add(add(p, d, 40.0), r, 5.0)));
+                look(w, p, 200.0);
             },
         },
         Step {
@@ -495,145 +599,27 @@ fn steps() -> Vec<Step> {
             setup: |w| {
                 reset(w);
                 stash_world(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
-                // Find a buildable road first, then go broke.
-                let found = find_new_road(w);
+                let Some((p, d)) = street_spot(w, false) else { return };
                 w.resource_mut::<SimWorld>().world.economy.money = -420;
-                let Some((start, end)) = found else { return };
-                let mid = (cell_center(start, 0.0) + cell_center(end, 0.0)) * 0.5;
-                let mut p = pose();
-                p.focus = mid;
-                p.distance = 260.0;
-                w.resource_mut::<CameraOverride>().0 = Some(p);
-                force_path(w, vec![start]);
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(end);
+                let r = right_of(d);
+                drawing(w, RoadMode::Straight, Shape::Straight, &[p], &[]);
+                point(w, Some(add(p, r, 80.0)));
+                look(w, add(p, r, 40.0), 220.0);
             },
         },
         Step {
-            name: "zone-drag",
+            name: "road-upgrade",
             wait: 1.2,
             setup: |w| {
                 reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Commercial));
-                w.resource_mut::<Pointer>().action = Some(Action::Rect {
-                    start: Cell::new(36, 112),
-                });
-                let mut p = w.resource_mut::<Pointer>();
-                p.target = PointerTarget::Cell(Cell::new(46, 118));
-                p.hold = true;
-            },
-        },
-        Step {
-            name: "bulldoze-drag",
-            wait: 1.2,
-            setup: |w| {
-                reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Bulldoze;
-                let b = find_building(w).unwrap_or(Cell::new(48, 130));
-                w.resource_mut::<Pointer>().action = Some(Action::Rect {
-                    start: b.offset(-3, -3),
-                });
-                let mut p = w.resource_mut::<Pointer>();
-                p.target = PointerTarget::Cell(b.offset(3, 2));
-                p.hold = true;
-            },
-        },
-        Step {
-            name: "road-path",
-            wait: 1.2,
-            setup: |w| {
-                reset(w);
+                let Some(c) = new_curve(w) else { return };
                 *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
-                let Some((a, b)) = find_new_road(w) else { return };
-                let (dx, dy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
-                let third = Cell::new(b.x - dy * 7, b.y + dx * 7);
-                force_path(w, vec![a, b]);
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(third);
-                look_at(w, b, 240.0);
-            },
-        },
-        Step {
-            name: "road-t-junction",
-            wait: 1.2,
-            setup: |w| {
-                reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
-                let Some((a, b)) = find_new_road(w) else { return };
-                force_path(w, vec![b]);
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(a);
-                look_at(w, b, 220.0);
-            },
-        },
-        Step {
-            name: "road-avenue-upgrade",
-            wait: 1.2,
-            setup: |w| {
-                reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                w.resource_mut::<ToolModes>().road = RoadMode::Upgrade;
                 *w.resource_mut::<RoadChoice>() = RoadChoice::Avenue;
-                let Some((a, b)) = find_road(w).and_then(|r| street_ends(w, r)) else {
-                    return;
-                };
-                force_path(w, vec![a]);
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(b);
-                look_at(w, Cell::new((a.x + b.x) / 2, (a.y + b.y) / 2), 240.0);
-            },
-        },
-        Step {
-            name: "block-tool",
-            wait: 1.4,
-            setup: |w| {
-                reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
-                w.resource_mut::<ToolModes>().road = RoadMode::Block;
-                let Some(min) = find_empty_area(w, 16, 12) else { return };
-                look_at(w, min.offset(8, 6), 280.0);
-                let mut p = w.resource_mut::<Pointer>();
-                p.action = Some(Action::Rect { start: min });
-                p.target = PointerTarget::Cell(min.offset(15, 10));
-                p.hold = true;
-            },
-        },
-        Step {
-            name: "zone-frontage",
-            wait: 1.2,
-            setup: |w| {
-                reset(w);
-                let Some(min) = find_empty_area(w, 16, 8) else { return };
-                build_now(w, &[street(min.offset(0, 4), min.offset(15, 4))]);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
-                w.resource_mut::<ToolModes>().zone = ZoneMode::Frontage;
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(min.offset(7, 3));
-                look_at(w, min.offset(8, 4), 220.0);
-            },
-        },
-        Step {
-            name: "zone-fill",
-            wait: 1.2,
-            setup: |w| {
-                reset(w);
-                let Some(min) = find_empty_area(w, 12, 12) else { return };
-                let cmds: Vec<Command> = super::plan::block_legs(min, min.offset(10, 10), None)
-                    .into_iter()
-                    .map(|(a, b)| street(a, b))
-                    .collect();
-                build_now(w, &cmds);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Commercial));
-                w.resource_mut::<ToolModes>().zone = ZoneMode::Fill;
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(min.offset(5, 6));
-                look_at(w, min.offset(5, 5), 230.0);
-            },
-        },
-        Step {
-            name: "bulldoze-road",
-            wait: 1.2,
-            setup: |w| {
-                reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Bulldoze;
-                w.resource_mut::<ToolModes>().bulldoze = BulldozeMode::Road;
-                let Some(r) = find_road(w) else { return };
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(r);
-                look_at(w, r, 240.0);
+                let len = c.length();
+                press(w, c.point_at(len * 0.25, 0.0));
+                point(w, Some(c.point_at(len * 0.8, 0.0)));
+                look(w, c.point_at(len * 0.5, 0.0), 300.0);
             },
         },
         Step {
@@ -643,9 +629,111 @@ fn steps() -> Vec<Step> {
                 reset(w);
                 *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
                 w.resource_mut::<ToolModes>().road = RoadMode::Junction;
-                let Some(j) = find_junction(w) else { return };
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(j);
-                look_at(w, j, 200.0);
+                let f = town_focus(w);
+                let j = super::tools::junction_near(sim(w), f, 2000.0).map(|j| j.1);
+                if let Some(j) = j {
+                    look(w, j, 160.0);
+                }
+                point(w, j);
+            },
+        },
+        Step {
+            name: "zone-paint",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some((p, d)) = street_spot(w, true) else { return };
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
+                w.resource_mut::<ToolModes>().zone = ZoneMode::Paint;
+                let r = right_of(d);
+                let cells: Vec<_> = (0..12)
+                    .filter_map(|k| sim(w).zoning.cell_at(add(add(p, d, -30.0 + k as f32 * 5.0), r, 10.0)))
+                    .collect();
+                press(w, add(p, r, 10.0));
+                w.resource_mut::<ToolState>().stroke = cells;
+                point(w, Some(add(add(p, d, 30.0), r, 10.0)));
+                look(w, p, 160.0);
+            },
+        },
+        Step {
+            name: "zone-frontage-curve",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some(c) = new_curve(w) else { return };
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
+                w.resource_mut::<ToolModes>().zone = ZoneMode::Frontage;
+                let mid = c.pose_at(c.length() * 0.5, 0.0);
+                point(w, Some(add(mid.pos, right_of(mid.dir), 10.0)));
+                look(w, mid.pos, 300.0);
+            },
+        },
+        Step {
+            name: "zone-fill",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some((p, d)) = street_spot(w, false) else { return };
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Industrial));
+                w.resource_mut::<ToolModes>().zone = ZoneMode::Fill;
+                point(w, Some(add(p, right_of(d), 12.0)));
+                look(w, p, 260.0);
+            },
+        },
+        Step {
+            name: "zone-marquee",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some(c) = new_curve(w) else { return };
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Commercial));
+                w.resource_mut::<ToolModes>().zone = ZoneMode::Marquee;
+                // Along the straight start of the new road, on its left.
+                let p0 = c.pose_at(6.0, 0.0);
+                let p1 = c.pose_at(60.0, 0.0);
+                press(w, add(p0.pos, right_of(p0.dir), -6.0));
+                point(w, Some(add(p1.pos, right_of(p1.dir), -18.0)));
+                look(w, p1.pos, 220.0);
+            },
+        },
+        Step {
+            name: "dezone-frontage",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let Some((p, d)) = street_spot(w, true) else { return };
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(None);
+                w.resource_mut::<ToolModes>().zone = ZoneMode::Frontage;
+                point(w, Some(add(p, right_of(d), -10.0)));
+                look(w, p, 260.0);
+            },
+        },
+        Step {
+            name: "bulldoze-road-part",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Bulldoze;
+                w.resource_mut::<ToolModes>().bulldoze = BulldozeMode::Road;
+                let Some((p, d)) = street_spot(w, false) else { return };
+                press(w, add(p, d, -25.0));
+                point(w, Some(add(p, d, 25.0)));
+                look(w, p, 200.0);
+            },
+        },
+        Step {
+            name: "bulldoze-area",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Bulldoze;
+                w.resource_mut::<ToolModes>().bulldoze = BulldozeMode::Area;
+                let Some(b) = building_pos(w, building_where(w, |_| true)) else {
+                    return;
+                };
+                press(w, add(b, [-1.0, -1.0], 18.0));
+                point(w, Some(add(b, [1.0, 1.0], 14.0)));
+                look(w, b, 180.0);
             },
         },
         Step {
@@ -653,13 +741,119 @@ fn steps() -> Vec<Step> {
             wait: 1.5,
             setup: |w| {
                 reset(w);
-                let Some(c) = find_building(w) else { return };
-                let id = match w.resource::<SimWorld>().world.grid.get(c).map(|cd| cd.occupant) {
-                    Some(Occupant::Building(id)) => id,
-                    _ => return,
+                let Some((p, _)) = street_spot(w, false) else { return };
+                let t = super::tools::target_at(sim(w), p, 6.0);
+                w.resource_mut::<WorldHighlight>().selected = t;
+                look(w, p, 220.0);
+            },
+        },
+        Step {
+            name: "people-home",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                let Some(id) = building_where(w, |b| b.kind == Zone::Residential && b.occupied >= 3) else {
+                    return;
                 };
-                w.resource_mut::<WorldHighlight>().selected = Some(WorldTarget::Building(id));
-                look_at(w, c, 200.0);
+                w.write_message(UiAction::Place(id));
+                let p = building_pos(w, Some(id)).unwrap_or_default();
+                look(w, p, 160.0);
+            },
+        },
+        Step {
+            name: "people-workplace",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                let Some(id) = building_where(w, |b| b.kind != Zone::Residential && b.occupied >= 4) else {
+                    return;
+                };
+                w.write_message(UiAction::Place(id));
+                let p = building_pos(w, Some(id)).unwrap_or_default();
+                look(w, p, 160.0);
+            },
+        },
+        Step {
+            name: "people-person",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                let s = sim(w);
+                let who = s
+                    .citizens
+                    .iter()
+                    .filter(|(_, c)| c.job.is_some() && c.journal.len() >= 2)
+                    .map(|(id, _)| id)
+                    .next();
+                if let Some(id) = who {
+                    w.write_message(UiAction::Person(id));
+                }
+            },
+        },
+        Step {
+            name: "people-follow-car",
+            wait: 2.0,
+            setup: |w| {
+                reset(w);
+                // Someone driving with the longest way still to go.
+                let s = sim(w);
+                let now = s.time.tick;
+                let who = s
+                    .citizens
+                    .iter()
+                    .filter_map(|(id, c)| match &c.location {
+                        citysim_sim::citizens::Location::Travelling(j)
+                            if j.vehicle.is_some_and(|v| s.vehicles.contains_key(v)) =>
+                        {
+                            Some((j.due_tick.saturating_sub(now), id))
+                        }
+                        _ => None,
+                    })
+                    .max_by_key(|x| x.0)
+                    .map(|x| x.1);
+                if let Some(id) = who {
+                    w.write_message(UiAction::Person(id));
+                    w.write_message(UiAction::Follow);
+                    let at = super::people::person_position(sim(w), id).unwrap_or_default();
+                    w.write_message(crate::shared::CameraGoTo {
+                        focus: at,
+                        distance: Some(110.0),
+                    });
+                }
+                w.resource_mut::<CameraOverride>().0 = None;
+                // Hold the moment: people get out on the calendar long
+                // before their car finishes its drive.
+                w.resource_mut::<SimClock>().paused = true;
+            },
+        },
+        Step {
+            name: "people-car",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                let s = sim(w);
+                let f = town_focus(w);
+                let car = s
+                    .vehicles
+                    .iter()
+                    .filter(|(id, v)| {
+                        v.segment.is_some() && citysim_sim::inspect::vehicle(s, *id).is_some_and(|x| x.occupants >= 2)
+                    })
+                    .min_by(|a, b| dist(a.1.pos, f).total_cmp(&dist(b.1.pos, f)))
+                    .map(|(id, v)| (id, citysim_sim::drive::vehicle_pose(s, v).0));
+                w.resource_mut::<SimClock>().paused = true;
+                if let Some((id, at)) = car {
+                    w.write_message(UiAction::Vehicle(id));
+                    look(w, add(at, [1.0, 0.0], 30.0), 140.0);
+                }
+            },
+        },
+        Step {
+            name: "people-city",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                w.write_message(UiAction::CityPeople);
             },
         },
         Step {
@@ -690,7 +884,7 @@ fn steps() -> Vec<Step> {
                 f.service_level = 0.55;
                 f.days_in_debt = 4;
                 f.left_last_night = 23;
-                w.resource_mut::<UiState>().budget_open = true;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
             },
         },
         Step {
@@ -717,7 +911,7 @@ fn steps() -> Vec<Step> {
             wait: 1.0,
             setup: |w| {
                 reset(w);
-                w.resource_mut::<UiState>().budget_open = true;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
             },
         },
         Step {
@@ -729,26 +923,23 @@ fn steps() -> Vec<Step> {
                 // A fresh city half a day into day 1: one street, homes and
                 // shops zoned beside it.
                 let mut fresh = citysim_sim::World::new(1);
-                let _ = fresh.apply(Command::BuildRoad {
-                    from: Cell::new(11, 128),
-                    to: Cell::new(40, 128),
-                    kind: citysim_sim::RoadKind::Street,
+                let _ = fresh.apply(Command::BuildCurve {
+                    curve: Curve::straight([92.0, 1028.0], [320.0, 1028.0]),
+                    kind: RoadKind::Street,
                 });
-                let _ = fresh.apply(Command::SetZone {
-                    min: Cell::new(14, 126),
-                    max: Cell::new(38, 127),
+                let _ = fresh.apply(Command::ZoneArea {
+                    quad: [[110.0, 1008.0], [310.0, 1008.0], [310.0, 1024.0], [110.0, 1024.0]],
                     zone: Some(Zone::Residential),
                 });
-                let _ = fresh.apply(Command::SetZone {
-                    min: Cell::new(14, 129),
-                    max: Cell::new(30, 130),
+                let _ = fresh.apply(Command::ZoneArea {
+                    quad: [[110.0, 1032.0], [250.0, 1032.0], [250.0, 1048.0], [110.0, 1048.0]],
                     zone: Some(Zone::Commercial),
                 });
                 for _ in 0..citysim_sim::balance::TICKS_PER_DAY / 2 {
                     fresh.step();
                 }
                 w.resource_mut::<SimWorld>().replace(fresh);
-                w.resource_mut::<UiState>().budget_open = true;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
             },
         },
         Step {
@@ -758,11 +949,10 @@ fn steps() -> Vec<Step> {
                 reset(w);
                 w.write_message(Toast::new(ToastKind::Success, "City saved"));
                 // A real rejected command: a road through a building.
-                if let Some(b) = find_building(w) {
-                    w.write_message(SimCommand(Command::BuildRoad {
-                        from: Cell::new(b.x, b.y - 6),
-                        to: Cell::new(b.x, b.y + 2),
-                        kind: citysim_sim::RoadKind::Street,
+                if let Some(b) = building_pos(w, building_where(w, |_| true)) {
+                    w.write_message(SimCommand(Command::BuildCurve {
+                        curve: Curve::straight(add(b, [0.0, -1.0], 30.0), add(b, [0.0, 1.0], 30.0)),
+                        kind: RoadKind::Street,
                     }));
                 }
             },
@@ -785,7 +975,17 @@ fn steps() -> Vec<Step> {
             setup: |w| {
                 reset(w);
                 w.write_message(UiAction::OpenMenu);
+                // Keyboard focus on "Load game", the pointer over "Save game".
+                w.resource_mut::<super::menu::MenuFocus>().0 = Some(2);
                 w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::Save);
+            },
+        },
+        Step {
+            name: "loading",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<super::loading::HoldLoading>().0 = true;
             },
         },
         Step {
@@ -804,9 +1004,8 @@ fn steps() -> Vec<Step> {
             wait: 3.0,
             setup: |w| {
                 reset(w);
-                w.resource_mut::<UiState>().budget_open = true;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
                 *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
-                // The X screen is 1920x1080: keep the pointer in its top-left part.
                 w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::ToggleBudget);
                 if let Ok(mut win) = w.query_filtered::<&mut Window, With<PrimaryWindow>>().single_mut(w) {
                     win.resolution.set(2560.0, 1440.0);
@@ -814,35 +1013,34 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
-            name: "1440p-menu",
-            wait: 1.2,
-            setup: |w| {
-                reset(w);
-                w.write_message(UiAction::OpenMenu);
-                w.write_message(Toast::new(ToastKind::Success, "City saved"));
-                w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::Load);
-            },
-        },
-        Step {
             name: "1440p-road",
             wait: 1.5,
             setup: |w| {
                 reset(w);
-                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
-                let Some((a, b)) = find_new_road(w) else { return };
-                let (dx, dy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
-                force_path(w, vec![a, b]);
-                w.resource_mut::<Pointer>().target = PointerTarget::Cell(Cell::new(b.x - dy * 6, b.y + dx * 6));
-                look_at(w, b, 240.0);
+                let Some((p, d)) = street_spot(w, false) else { return };
+                let r = right_of(d);
+                let a = add(p, d, 12.0);
+                let corner = add(a, r, 100.0);
+                drawing(w, RoadMode::Curve, Shape::Curve, &[a, corner], &[]);
+                point(w, Some(add(corner, d, 90.0)));
+                look(w, corner, 300.0);
             },
         },
         Step {
-            name: "1440p-settings",
-            wait: 1.2,
+            name: "1440p-person",
+            wait: 1.5,
             setup: |w| {
                 reset(w);
-                w.write_message(UiAction::OpenMenu);
-                w.write_message(UiAction::OpenSettings);
+                let s = sim(w);
+                let who = s
+                    .citizens
+                    .iter()
+                    .filter(|(_, c)| c.job.is_some())
+                    .map(|(id, _)| id)
+                    .nth(3);
+                if let Some(id) = who {
+                    w.write_message(UiAction::Person(id));
+                }
             },
         },
     ]
@@ -852,7 +1050,20 @@ fn run_shots(world: &mut World) {
     let dt = world.resource::<Time<Real>>().delta_secs().min(0.25);
     let mut r = world.remove_resource::<Runner>().expect("runner");
     r.frames += 1;
-    if r.frames > 3 {
+    if r.frames == 1
+        && let Some((x, y)) = std::env::var("CITYSIM_SHOT_SIZE").ok().and_then(|s| {
+            let (a, b) = s.split_once('x')?;
+            Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))
+        })
+        && let Ok(mut win) = world
+            .query_filtered::<&mut Window, With<PrimaryWindow>>()
+            .single_mut(world)
+    {
+        // `CITYSIM_SHOT_SIZE=1920x1080`: the window size for the shots.
+        win.resolution.set_physical_resolution(x, y);
+    }
+    // Count from the moment the scene really draws.
+    if r.frames > 3 && world.resource::<crate::shared::SceneReady>().0 {
         r.t += dt;
     }
     if r.index >= r.steps.len() {
@@ -893,26 +1104,29 @@ fn drive_pointer(
     cams: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     buttons: Query<(&UiButton, &UiGlobalTransform, &InheritedVisibility)>,
 ) {
-    if let Some(a) = pointer.action
-        && tools.action != a
+    if let Some(d) = &pointer.draft
+        && (tools.draft.points != d.points || tools.draft.pieces != d.pieces)
     {
-        tools.action = a;
-        if matches!(a, Action::Path { .. }) {
-            tools.path = pointer.path.clone();
-        }
+        tools.draft = d.clone();
+    }
+    let forced_press = pointer.press.is_some();
+    if let Some(p) = pointer.press
+        && tools.press != Some(p)
+    {
+        tools.press = Some(p);
     }
     let Ok(mut win) = window.single_mut() else { return };
-    let cell_pos = |c: Cell| {
+    let ground = |p: [f32; 2]| {
         cams.single()
             .ok()
-            .and_then(|(cam, tf)| cam.world_to_viewport(tf, cell_center(c, 0.0)).ok())
+            .and_then(|(cam, tf)| cam.world_to_viewport(tf, sim_to_world(p, 0.0)).ok())
     };
     let target = match pointer.target {
         // Park the pointer over open land at the right, away from every
         // panel (X ignores warps outside the window).
         PointerTarget::None => Some(Vec2::new(win.width() * 0.86, win.height() * 0.42)),
-        PointerTarget::Cell(c) => cell_pos(c),
-        PointerTarget::Data(i) => data.as_ref().and_then(|d| d.cells.get(i).copied()).and_then(cell_pos),
+        PointerTarget::Ground(p) => ground(p),
+        PointerTarget::Data(i) => data.as_ref().and_then(|d| d.points.get(i).copied()).and_then(ground),
         PointerTarget::Button(a) => buttons
             .iter()
             .find(|(b, _, v)| b.action == a && v.get())
@@ -934,6 +1148,10 @@ fn drive_pointer(
     if pointer.hold {
         if !mouse.pressed(MouseButton::Left) {
             mouse.press(MouseButton::Left);
+            if forced_press {
+                // The press is forced above, not a click at the cursor.
+                mouse.clear_just_pressed(MouseButton::Left);
+            }
         }
     } else if mouse.pressed(MouseButton::Left) {
         mouse.release(MouseButton::Left);
@@ -942,12 +1160,11 @@ fn drive_pointer(
 
 // ---------------------------------------------------------------- tour (video)
 
-/// Cells the tour computed from the live town: road start/end, zone rect,
-/// bulldoze rect, a building and a road to inspect.
+/// Points the tour computed from the live town.
 #[derive(Resource, Default)]
 struct TourData {
-    cells: Vec<Cell>,
-    focus: Option<Vec3>,
+    points: Vec<[f32; 2]>,
+    focus: Option<[f32; 2]>,
 }
 
 #[derive(Clone, Copy)]
@@ -955,9 +1172,7 @@ enum Op {
     /// Glide to a target over about this many seconds (waits for it).
     Go(PointerTarget, f32),
     Click,
-    Down,
     Up,
-    RightClick,
     Key(KeyCode),
     Wait(f32),
     Run(Setup),
@@ -970,7 +1185,6 @@ struct Tour {
     t: f32,
     total: f32,
     release_keys: Vec<KeyCode>,
-    release_right: bool,
 }
 
 pub struct TourPlugin;
@@ -983,7 +1197,6 @@ impl Plugin for TourPlugin {
             t: 0.0,
             total: 0.0,
             release_keys: Vec::new(),
-            release_right: false,
         })
         .init_resource::<TourData>()
         .init_resource::<SavedWorld>()
@@ -1005,65 +1218,22 @@ impl Plugin for TourPlugin {
     }
 }
 
+/// The tour's points: a curved road across open land (0 start, 1 corner,
+/// 2 end), a point beside it to zone (3), a building (4).
 fn tour_setup(w: &mut World) {
     reset(w);
     w.resource_mut::<Pointer>().smooth = true;
-    w.resource_mut::<Pointer>().target = PointerTarget::Cell(Cell::new(60, 120));
-    let mut cells = Vec::new();
-    let (a, b) = find_new_road(w).unwrap_or((Cell::new(40, 100), Cell::new(49, 100)));
-    cells.extend([a, b]);
-    let (dx, dy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
-    // Zone beside the new road (one side, two cells deep).
-    let (px, py) = (-dy, dx);
-    cells.push(Cell::new(a.x + px + dx, a.y + py + dy));
-    cells.push(Cell::new(b.x + 2 * px - dx, b.y + 2 * py - dy));
-    // Frame the new road with the town behind it.
-    let mid = Cell::new((a.x + b.x) / 2, (a.y + b.y) / 2);
-    let toward = Cell::new(mid.x + (46 - mid.x).signum() * 12, mid.y + (128 - mid.y).signum() * 12);
+    let o = open_land(w, 130.0).unwrap_or([600.0, 600.0]);
+    let a = add(o, [-1.0, 0.2], 110.0);
+    let corner = add(o, [0.3, -1.0], 40.0);
+    let end = add(o, [1.0, 0.4], 110.0);
+    let c = Curve::through_corner(a, corner, end);
+    let mid = c.pose_at(c.length() * 0.5, 0.0);
+    let beside = add(mid.pos, right_of(mid.dir), 12.0);
+    let house = building_pos(w, building_where(w, |b| b.kind == Zone::Residential)).unwrap_or(o);
     let mut data = w.resource_mut::<TourData>();
-    data.cells = cells;
-    data.focus = Some((cell_center(mid, 0.0) + cell_center(toward, 0.0)) * 0.5);
-}
-
-/// Bulldoze / inspect targets, chosen once the town has grown in.
-fn tour_targets(w: &mut World) {
-    let Some(focus) = w.resource::<TourData>().focus else {
-        return;
-    };
-    let fc = crate::shared::world_to_cell(focus);
-    let bld = find_building_near(w, fc).unwrap_or(fc);
-    let road = busiest_road_near(w, fc).unwrap_or(fc);
-    let junction = find_junction(w).unwrap_or(road);
-    let mut data = w.resource_mut::<TourData>();
-    data.cells.truncate(4);
-    data.cells.extend([bld.offset(-2, -3), bld.offset(3, 2), bld, road]);
-    // 8: third corner of the road path; 9: beside its last leg; 10: a junction.
-    let (a, b) = (data.cells[0], data.cells[1]);
-    let (dx, dy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
-    let third = Cell::new(b.x - dy * 7, b.y + dx * 7);
-    let beside = Cell::new(b.x - dy * 4 + dx, b.y + dx * 4 + dy);
-    data.cells.extend([third, beside, junction]);
-}
-
-fn busiest_road_near(world: &World, focus: Cell) -> Option<Cell> {
-    let sim = &world.resource::<SimWorld>().world;
-    let mut best: Option<(f32, Cell)> = None;
-    for y in focus.y - 12..focus.y + 12 {
-        for x in focus.x - 12..focus.x + 12 {
-            let c = Cell::new(x, y);
-            if let Some(s) = sim
-                .roads
-                .segment_through(c.center())
-                .and_then(|s| sim.roads.segments.get(s))
-            {
-                let score = s.congestion() - c.chebyshev(focus) as f32 * 0.01;
-                if best.is_none_or(|(b, _)| score > b) {
-                    best = Some((score, c));
-                }
-            }
-        }
-    }
-    best.map(|(_, c)| c)
+    data.points = vec![a, corner, end, beside, house];
+    data.focus = Some(o);
 }
 
 fn tour_ops() -> Vec<Op> {
@@ -1071,80 +1241,47 @@ fn tour_ops() -> Vec<Op> {
     use PointerTarget::{Button, Data};
     vec![
         Run(tour_setup),
-        Run(tour_targets),
-        Wait(1.5),
-        // A three-corner road, built with a double-click.
+        Wait(1.0),
+        // A curved avenue across open land.
         Go(Button(UiAction::Tool(ActiveTool::Road)), 0.65),
-        Wait(0.6),
-        Click,
-        Go(Data(0), 0.65),
-        Click,
-        Go(Data(1), 0.9),
-        Wait(0.4),
-        Click,
-        Go(Data(8), 0.9),
-        Wait(0.9),
-        Click,
-        Wait(0.15),
-        Click,
-        Wait(0.8),
-        // Zone along the new road.
-        Go(Button(UiAction::ZoneTool), 0.65),
         Click,
         Wait(0.3),
+        Go(Button(UiAction::RoadMode(RoadMode::Curve)), 0.65),
+        Click,
+        Go(Button(UiAction::RoadKind(RoadChoice::Avenue)), 0.65),
+        Click,
+        Go(Data(0), 0.9),
+        Click,
+        Go(Data(1), 0.9),
+        Click,
+        Go(Data(2), 1.2),
+        Wait(0.6),
+        Click,
+        Key(KeyCode::Enter),
+        Wait(1.0),
+        // Zone along it.
+        Go(Button(UiAction::ZoneTool), 0.65),
+        Click,
         Go(Button(UiAction::ZoneMode(ZoneMode::Frontage)), 0.65),
-        Wait(0.6),
         Click,
-        Go(Data(9), 0.9),
-        Wait(1.2),
+        Go(Data(3), 1.0),
+        Wait(1.0),
         Click,
-        Wait(0.6),
-        // Switch a junction's control.
-        Go(Button(UiAction::RoadMode(RoadMode::Junction)), 0.65),
-        Click,
-        Go(Data(10), 0.9),
-        Wait(1.6),
-        Click,
-        Wait(1.4),
-        // Bulldozer preview (cancelled with a right click).
-        Go(Button(UiAction::Tool(ActiveTool::Bulldoze)), 0.65),
-        Click,
-        Go(Data(4), 0.65),
-        Down,
-        Go(Data(5), 0.9),
-        Wait(0.7),
-        RightClick,
-        Up,
-        Wait(0.2),
-        // Inspect and pin a building, then a road.
+        Wait(0.8),
+        // A house and its people.
         Go(Button(UiAction::Tool(ActiveTool::Inspect)), 0.65),
         Click,
-        Go(Data(6), 0.65),
+        Go(Data(4), 0.9),
         Wait(0.6),
         Click,
-        Wait(1.0),
-        Go(Data(7), 0.65),
-        Wait(1.3),
-        Go(Button(UiAction::Overlay(OverlayMode::Traffic)), 0.65),
-        Click,
-        Wait(1.3),
-        Click,
-        Go(Button(UiAction::ToggleBudget), 0.65),
-        Click,
-        Wait(1.2),
-        Go(Button(UiAction::CloseBudget), 0.65),
-        Click,
+        Wait(2.0),
         Key(KeyCode::Escape),
-        Wait(0.6),
-        Go(Button(UiAction::OpenSettings), 0.65),
+        Wait(0.5),
+        Go(Button(UiAction::CityPeople), 0.65),
         Click,
-        Wait(1.6),
-        Go(Button(UiAction::CloseSettings), 0.65),
+        Wait(2.0),
         Click,
-        Wait(0.4),
-        Go(Button(UiAction::CloseMenu), 0.65),
-        Click,
-        Wait(1.0),
+        Wait(0.5),
     ]
 }
 
@@ -1153,23 +1290,16 @@ fn run_tour(world: &mut World) {
     let mut tour = world.remove_resource::<Tour>().expect("tour");
     tour.total += dt;
     // Slow orbit for some life in the picture.
-    let mut p = pose();
-    p.distance = 330.0;
     if let Some(f) = world.resource::<TourData>().focus {
-        p.focus = f;
+        let mut p = pose_at(f, 380.0);
+        p.yaw += tour.total * 0.012;
+        world.resource_mut::<CameraOverride>().0 = Some(p);
     }
-    p.yaw += tour.total * 0.012;
-    world.resource_mut::<CameraOverride>().0 = Some(p);
     {
         let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
         for k in tour.release_keys.drain(..) {
             keys.release(k);
         }
-    }
-    if std::mem::take(&mut tour.release_right) {
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .release(MouseButton::Right);
     }
     tour.t += dt;
     let mut guard = 0;
@@ -1185,28 +1315,18 @@ fn run_tour(world: &mut World) {
                 world.resource_mut::<Pointer>().target = target;
                 tour.t >= s
             }
-            Op::Down | Op::Click => {
-                let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
-                mouse.press(MouseButton::Left);
-                let mut p = world.resource_mut::<Pointer>();
-                p.hold = true;
-                if matches!(op, Op::Click) {
-                    // Release next frame.
-                    tour.ops[tour.index] = Op::Up;
-                    tour.t = 0.0;
-                    break;
-                }
-                true
+            Op::Click => {
+                world
+                    .resource_mut::<ButtonInput<MouseButton>>()
+                    .press(MouseButton::Left);
+                world.resource_mut::<Pointer>().hold = true;
+                // Release next frame.
+                tour.ops[tour.index] = Op::Up;
+                tour.t = 0.0;
+                break;
             }
             Op::Up => {
                 world.resource_mut::<Pointer>().hold = false;
-                true
-            }
-            Op::RightClick => {
-                world
-                    .resource_mut::<ButtonInput<MouseButton>>()
-                    .press(MouseButton::Right);
-                tour.release_right = true;
                 true
             }
             Op::Key(k) => {

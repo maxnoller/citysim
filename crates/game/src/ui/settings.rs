@@ -1,6 +1,6 @@
-//! Settings card (from the pause menu): graphics quality, interface scale,
-//! edge scrolling, lot markers for zoned-but-empty land, and a key
-//! reference. Display settings gfx honours live in `shared::DisplaySettings`.
+//! Settings plate (from the pause menu): graphics quality, interface
+//! scale, edge scrolling, lot markers for zoned-but-empty land; and the key
+//! reference plate. Display settings gfx honours live in `shared::DisplaySettings`.
 //!
 //! The choices persist between sessions in `settings.cfg` in the platform
 //! config directory (`$XDG_CONFIG_HOME/citysim`, default `~/.config/citysim`
@@ -9,12 +9,14 @@
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
+use bevy::ui::ComputedNode;
 
 use super::UiState;
-use super::budget::close_button;
+use super::menu::{MenuIndex, menu_row, modal_header};
+use super::plate::{PlateCache, PlateMaterial, PlateStyle};
 use super::theme::{self as t, UiFonts, icon};
 use super::widgets::{
-    ButtonFg, ButtonKind, UiAction, UiButton, approach, label, layout, panel, spawn_button, spawn_key_badge,
+    ButtonKind, UiAction, UiButton, approach, caps, label, layout, plate_node, plate_shadow, spawn_button, spawn_key,
 };
 use crate::shared::{DisplaySettings, GameSet, GraphicsQuality};
 
@@ -71,7 +73,7 @@ impl Saved {
             GraphicsQuality::High => "high",
         };
         format!(
-            "# CitySim settings\nquality={q}\ninterface_size={}\nedge_scroll={}\nlot_markers={}\n",
+            "# CitySim settings\nquality={q}\ninterface_size={}\nedge_scroll={}\nlot_markers_always={}\n",
             self.ui_scale, self.edge_scroll, self.lot_markers
         )
     }
@@ -99,7 +101,7 @@ impl Saved {
                     }
                 }
                 "edge_scroll" => self.edge_scroll = v.parse().unwrap_or(self.edge_scroll),
-                "lot_markers" => self.lot_markers = v.parse().unwrap_or(self.lot_markers),
+                "lot_markers_always" => self.lot_markers = v.parse().unwrap_or(self.lot_markers),
                 _ => {}
             }
         }
@@ -174,322 +176,337 @@ fn save_settings(
 /// Interface scale steps offered (multiplied with the automatic scale).
 pub const UI_SCALES: [(f32, &str); 4] = [(0.85, "85%"), (1.0, "100%"), (1.15, "115%"), (1.3, "130%")];
 
-#[derive(Component)]
-struct SettingsRoot;
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum Modal {
+    Settings,
+    Keys,
+}
 
 #[derive(Component)]
-struct SettingsCard;
+struct ModalCard;
 
 /// Key reference, grouped.
 const KEYS: [(&str, &[(&str, &str)]); 3] = [
     (
-        "CAMERA",
+        "Camera",
         &[
             ("WASD", "Pan (Shift: faster)"),
             ("Q  E", "Rotate"),
             ("Wheel", "Zoom"),
             ("Middle drag", "Orbit and tilt"),
+            ("F", "Follow the person or car shown"),
         ],
     ),
     (
-        "BUILDING",
+        "Building",
         &[
-            ("I", "Inspect (click pins the card)"),
-            ("R", "Road · again: street / avenue"),
+            ("I", "Inspect · click homes, shops, cars"),
+            ("R", "Roads · again: street / avenue"),
             ("J", "Junctions: lights or priority"),
-            ("Z", "Zone · again: next zone type"),
-            ("B", "Bulldoze"),
+            ("Z", "Zones · again: next zone type"),
+            ("B", "Clear (bulldoze)"),
             ("Tab", "Next mode of the tool"),
-            ("Enter", "Build the path (or double-click)"),
-            ("Backspace", "Remove the last corner"),
+            ("Enter", "Build the road (or double-click)"),
+            ("Backspace", "Remove the last point"),
             ("Alt", "Hold: place without snapping"),
-            ("[  ]", "Block size (block tool)"),
-            ("Ctrl+Z", "Undo the last road or zoning"),
-            ("Esc", "Cancel · back to Inspect · menu"),
+            ("[  ]", "Grid block size"),
+            ("Ctrl+Z", "Undo the last road, zoning or demolition"),
+            ("Esc", "Step back · Inspect · menu"),
         ],
     ),
     (
-        "GAME",
+        "Game",
         &[
             ("Space", "Pause"),
-            ("1  2  3", "Speed"),
-            ("T  O", "Traffic overlay · cycle overlays"),
+            ("1  2  3  4", "Speed"),
+            ("P", "People of the city"),
+            ("U", "Budget"),
+            ("O", "Maps · cycle"),
+            ("T", "Traffic map"),
             ("G", "Graphics quality"),
+            ("F6", "Keyboard into the drawer · arrows, Enter"),
             ("F5  F9", "Save · load"),
         ],
     ),
 ];
 
-fn heading(p: &mut ChildSpawnerCommands, fonts: &UiFonts, glyph: char, text: &str, key: Option<&str>) {
+/// A setting: caps caption above a row of joined segments.
+fn setting(p: &mut ChildSpawnerCommands, fonts: &UiFonts, glyph: char, text: &str, items: &[(UiAction, &'static str)]) {
     p.spawn(layout(Node {
-        align_items: AlignItems::Center,
-        column_gap: px(t::S3 + 2.0),
+        flex_direction: FlexDirection::Column,
+        row_gap: px(7),
+        margin: UiRect::bottom(px(14)),
         ..default()
     }))
-    .with_children(|r| {
-        r.spawn(super::widgets::icon(fonts, glyph, t::ICON_SM + 1.0, t::TEXT_MUTED));
-        r.spawn((
-            label(fonts, text, t::FONT_BODY, t::W_MEDIUM, t::TEXT),
-            Node {
-                flex_grow: 1.0,
-                ..default()
-            },
-        ));
-        if let Some(k) = key {
-            spawn_key_badge(r, fonts, k);
-        }
+    .with_children(|c| {
+        c.spawn(layout(Node {
+            align_items: AlignItems::Center,
+            column_gap: px(8),
+            ..default()
+        }))
+        .with_children(|r| {
+            r.spawn(super::widgets::icon(fonts, glyph, 14.0, t::TEXT_MUTED));
+            r.spawn(caps(fonts, text, t::FONT_CAP, t::TEXT_MUTED));
+        });
+        c.spawn(layout(Node::default())).with_children(|seg| {
+            for (i, &(action, name)) in items.iter().enumerate() {
+                spawn_button(
+                    seg,
+                    UiButton::new(action, ButtonKind::Segment),
+                    Node {
+                        flex_grow: 1.0,
+                        flex_basis: px(0),
+                        height: px(34),
+                        margin: UiRect::left(px(if i == 0 { 0.0 } else { -1.0 })),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    None,
+                    |b, id| super::widgets::button_face(b, fonts, id, None, name),
+                );
+            }
+        });
     });
 }
 
-fn segmented(p: &mut ChildSpawnerCommands, fonts: &UiFonts, items: &[(UiAction, &'static str)]) {
-    p.spawn(layout(Node {
-        padding: UiRect::all(px(3)),
-        column_gap: px(3),
-        margin: UiRect::bottom(px(t::S4)),
-        border_radius: BorderRadius::all(px(t::RADIUS_SM + 1.0)),
-        ..default()
-    }))
-    .insert(BackgroundColor(t::WELL))
-    .with_children(|seg| {
-        for &(action, name) in items {
-            spawn_button(
-                seg,
-                UiButton {
-                    action,
-                    kind: ButtonKind::Segment,
-                    accent: t::ACCENT,
-                },
-                Node {
-                    flex_grow: 1.0,
-                    flex_basis: px(0),
-                    height: px(28),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-                None,
-                |b, id| {
-                    b.spawn((
-                        label(fonts, name, t::FONT_SMALL + 0.5, t::W_MEDIUM, t::TEXT_MUTED),
-                        ButtonFg {
-                            owner: id,
-                            base: t::TEXT_MUTED,
-                        },
-                    ));
-                },
-            );
-        }
-    });
+fn modal_root(which: Modal, name: &'static str) -> impl Bundle {
+    (
+        Name::new(name),
+        which,
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            right: px(0),
+            top: px(0),
+            bottom: px(0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            display: Display::None,
+            ..default()
+        },
+        BackgroundColor(t::BACKDROP),
+        // Above toasts (300): modal.
+        GlobalZIndex(320),
+    )
 }
 
-fn spawn_settings(mut commands: Commands, fonts: Res<UiFonts>) {
+fn spawn_settings(
+    mut commands: Commands,
+    fonts: Res<UiFonts>,
+    mut cache: ResMut<PlateCache>,
+    mut mats: ResMut<Assets<PlateMaterial>>,
+) {
     let fonts = fonts.into_inner();
+    let mat = cache.get(&mut mats, PlateStyle::PANEL);
     commands
-        .spawn((
-            Name::new("Settings"),
-            SettingsRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(0),
-                right: px(0),
-                top: px(0),
-                bottom: px(0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                display: Display::None,
-                ..default()
-            },
-            BackgroundColor(t::BACKDROP),
-            // Above toasts (300): the settings are modal.
-            GlobalZIndex(320),
-        ))
+        .spawn(modal_root(Modal::Settings, "Settings"))
         .with_children(|root| {
             root.spawn((
-                SettingsCard,
-                panel(Node {
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::new(px(t::S5 + 4.0), px(t::S5 + 4.0), px(t::S4 + 2.0), px(t::S5 + 2.0)),
-                    ..default()
-                }),
+                ModalCard,
+                plate_node(
+                    Node {
+                        width: px(420),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::bottom(px(12)),
+                        ..default()
+                    },
+                    UiRect::all(px(t::LW)),
+                    [t::CUT, 0.0, t::CUT, 0.0],
+                ),
+                mat.clone(),
+                plate_shadow(),
                 UiTransform::default(),
             ))
-            .insert(BackgroundColor(t::PANEL_RAISED))
             .with_children(|c| {
+                modal_header(c, fonts, "Settings");
                 c.spawn(layout(Node {
-                    justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::Center,
-                    margin: UiRect::bottom(px(t::S4)),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::new(px(26), px(26), px(18), px(4)),
                     ..default()
                 }))
-                .with_children(|h| {
-                    h.spawn(label(fonts, "Settings", 22.0, t::W_BOLD, t::TEXT));
-                    close_button(h, fonts, UiAction::CloseSettings);
+                .with_children(|l| {
+                    setting(
+                        l,
+                        fonts,
+                        icon::MONITOR,
+                        "Graphics quality · G",
+                        &[
+                            (UiAction::Quality(GraphicsQuality::Low), "Low"),
+                            (UiAction::Quality(GraphicsQuality::Medium), "Medium"),
+                            (UiAction::Quality(GraphicsQuality::High), "High"),
+                        ],
+                    );
+                    let scales: Vec<(UiAction, &'static str)> = UI_SCALES
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(_, n))| (UiAction::UiScale(i), n))
+                        .collect();
+                    setting(l, fonts, icon::SCALING, "Interface size", &scales);
+                    setting(
+                        l,
+                        fonts,
+                        icon::MOVE,
+                        "Edge scrolling",
+                        &[(UiAction::EdgeScroll(true), "On"), (UiAction::EdgeScroll(false), "Off")],
+                    );
+                    setting(
+                        l,
+                        fonts,
+                        icon::ZONE,
+                        "Mark empty zoned lots",
+                        &[
+                            (UiAction::LotMarkers(false), "While zoning"),
+                            (UiAction::LotMarkers(true), "Always"),
+                        ],
+                    );
                 });
-                c.spawn(layout(Node {
-                    column_gap: px(t::S5 + 12.0),
+                menu_row(
+                    c,
+                    fonts,
+                    UiAction::CloseSettings,
+                    icon::CHEVRON_LEFT,
+                    "Back to the menu",
+                    Some("Esc"),
+                    ButtonKind::Row,
+                    0,
+                );
+            });
+        });
+    commands.spawn(modal_root(Modal::Keys, "Keys")).with_children(|root| {
+        root.spawn((
+            ModalCard,
+            plate_node(
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::bottom(px(12)),
                     ..default()
-                }))
-                .with_children(|cols| {
-                    // Left: settings.
+                },
+                UiRect::all(px(t::LW)),
+                [t::CUT, 0.0, t::CUT, 0.0],
+            ),
+            mat,
+            plate_shadow(),
+            UiTransform::default(),
+        ))
+        .with_children(|c| {
+            modal_header(c, fonts, "Keys");
+            c.spawn(layout(Node {
+                column_gap: px(34),
+                padding: UiRect::new(px(26), px(26), px(16), px(8)),
+                ..default()
+            }))
+            .with_children(|cols| {
+                for (group, keys) in KEYS.iter() {
                     cols.spawn(layout(Node {
                         flex_direction: FlexDirection::Column,
-                        width: px(268),
-                        row_gap: px(t::S3),
-                        ..default()
-                    }))
-                    .with_children(|l| {
-                        heading(l, fonts, icon::MONITOR, "Graphics quality", Some("G"));
-                        segmented(
-                            l,
-                            fonts,
-                            &[
-                                (UiAction::Quality(GraphicsQuality::Low), "Low"),
-                                (UiAction::Quality(GraphicsQuality::Medium), "Medium"),
-                                (UiAction::Quality(GraphicsQuality::High), "High"),
-                            ],
-                        );
-                        heading(l, fonts, icon::SCALING, "Interface size", None);
-                        let scales: Vec<(UiAction, &'static str)> = UI_SCALES
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &(_, n))| (UiAction::UiScale(i), n))
-                            .collect();
-                        segmented(l, fonts, &scales);
-                        heading(l, fonts, icon::MOVE, "Edge scrolling", None);
-                        segmented(
-                            l,
-                            fonts,
-                            &[(UiAction::EdgeScroll(true), "On"), (UiAction::EdgeScroll(false), "Off")],
-                        );
-                        heading(l, fonts, icon::ZONE, "Mark empty zoned lots", None);
-                        segmented(
-                            l,
-                            fonts,
-                            &[
-                                (UiAction::LotMarkers(true), "Always"),
-                                (UiAction::LotMarkers(false), "While zoning"),
-                            ],
-                        );
-                        l.spawn(layout(Node {
-                            flex_grow: 1.0,
-                            ..default()
-                        }));
-                        spawn_button(
-                            l,
-                            UiButton {
-                                action: UiAction::CloseSettings,
-                                kind: ButtonKind::Menu,
-                                accent: t::ACCENT,
-                            },
-                            Node {
-                                height: px(38),
-                                padding: UiRect::axes(px(t::S3), px(0)),
-                                align_items: AlignItems::Center,
-                                column_gap: px(t::S3 + 2.0),
-                                ..default()
-                            },
-                            None,
-                            |b, id| {
-                                b.spawn((
-                                    super::widgets::icon(fonts, icon::CHEVRON_LEFT, t::ICON_MD, t::TEXT_MUTED),
-                                    ButtonFg {
-                                        owner: id,
-                                        base: t::TEXT_MUTED,
-                                    },
-                                ));
-                                b.spawn((
-                                    label(fonts, "Back to the menu", t::FONT_LABEL, t::W_MEDIUM, t::TEXT),
-                                    ButtonFg {
-                                        owner: id,
-                                        base: t::TEXT,
-                                    },
-                                    Node {
-                                        flex_grow: 1.0,
-                                        ..default()
-                                    },
-                                ));
-                                spawn_key_badge(b, fonts, "Esc");
-                            },
-                        );
-                    });
-                    // Right: keys.
-                    cols.spawn(layout(Node {
-                        flex_direction: FlexDirection::Column,
-                        width: px(318),
-                        row_gap: px(5),
+                        row_gap: px(6),
                         ..default()
                     }))
                     .with_children(|r| {
-                        for (gi, (group, keys)) in KEYS.iter().enumerate() {
-                            r.spawn((
-                                label(fonts, *group, t::FONT_CAPTION + 0.5, t::W_SEMIBOLD, t::TEXT_FAINT),
-                                Node {
-                                    margin: UiRect::new(px(0), px(0), px(if gi == 0 { 0.0 } else { t::S3 }), px(1)),
+                        r.spawn(layout(Node {
+                            align_items: AlignItems::Center,
+                            column_gap: px(8),
+                            margin: UiRect::bottom(px(4)),
+                            ..default()
+                        }))
+                        .with_children(|h| {
+                            h.spawn((
+                                layout(Node {
+                                    width: px(3),
+                                    height: px(11),
                                     ..default()
-                                },
+                                }),
+                                BackgroundColor(t::ACCENT),
                             ));
-                            for (k, what) in keys.iter() {
-                                r.spawn(layout(Node {
-                                    align_items: AlignItems::Center,
-                                    column_gap: px(t::S3),
+                            h.spawn(caps(fonts, *group, t::FONT_CAP, t::TEXT));
+                        });
+                        for (k, what) in keys.iter() {
+                            r.spawn(layout(Node {
+                                align_items: AlignItems::Center,
+                                column_gap: px(10),
+                                ..default()
+                            }))
+                            .with_children(|row| {
+                                row.spawn(layout(Node {
+                                    width: px(84),
+                                    flex_shrink: 0.0,
                                     ..default()
                                 }))
-                                .with_children(|row| {
-                                    row.spawn(layout(Node {
-                                        width: px(92),
-                                        flex_shrink: 0.0,
-                                        ..default()
-                                    }))
-                                    .with_children(|kc| spawn_key_badge(kc, fonts, k));
-                                    row.spawn(label(fonts, *what, t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED));
+                                .with_children(|kc| {
+                                    spawn_key(kc, fonts, k, t::SLOT_INK);
                                 });
-                            }
+                                row.spawn(label(fonts, *what, t::FONT_BODY, t::W_MEDIUM, t::TEXT_MUTED));
+                            });
                         }
                     });
-                });
+                }
             });
+            menu_row(
+                c,
+                fonts,
+                UiAction::Keys,
+                icon::CHEVRON_LEFT,
+                "Back to the menu",
+                Some("Esc"),
+                ButtonKind::Row,
+                0,
+            );
         });
+    });
+    let _ = MenuIndex(0);
 }
 
+#[allow(clippy::type_complexity)]
 fn show_settings(
     time: Res<Time<Real>>,
     state: Res<UiState>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    mut root: Query<&mut Node, With<SettingsRoot>>,
-    mut card: Query<(&mut UiTransform, &ComputedNode), With<SettingsCard>>,
+    mut roots: Query<(&Modal, &mut Node, &Children)>,
+    mut cards: Query<(&mut UiTransform, &ComputedNode), With<ModalCard>>,
     mut anim: Local<f32>,
 ) {
-    let Ok(mut node) = root.single_mut() else { return };
-    let open = state.menu_open && state.settings_open;
-    let d = if open { Display::Flex } else { Display::None };
-    if node.display != d {
-        node.display = d;
-        *anim = 0.0;
-    }
-    if !open {
-        return;
-    }
-    if *anim < 1.0 {
-        *anim += (1.0 - *anim) * approach(time.delta_secs(), 0.07);
-        if *anim > 0.995 {
-            *anim = 1.0;
+    for (which, mut node, children) in &mut roots {
+        let open = state.menu_open
+            && match which {
+                Modal::Settings => state.settings_open,
+                Modal::Keys => state.keys_open,
+            };
+        let d = if open { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+            if open {
+                *anim = 0.0;
+            }
         }
-    }
-    if let Ok((mut tf, computed)) = card.single_mut() {
-        // Shrink to fit a small window at a large interface size.
-        let fit = match window.single() {
-            Ok(w) if computed.size.y > 0.0 => (w.physical_height() as f32 * 0.96 / computed.size.y)
-                .min(w.physical_width() as f32 * 0.96 / computed.size.x)
-                .min(1.0),
-            _ => 1.0,
-        };
-        let scale = Vec2::splat((0.96 + 0.04 * *anim) * fit);
-        if tf.scale != scale {
-            tf.scale = scale;
+        if !open {
+            continue;
         }
-        let shift = Val2::px(0.0, (1.0 - *anim) * 8.0);
-        if tf.translation != shift {
-            tf.translation = shift;
+        if *anim < 1.0 {
+            *anim += (1.0 - *anim) * approach(time.delta_secs(), 0.07);
+            if *anim > 0.995 {
+                *anim = 1.0;
+            }
+        }
+        for c in children.iter() {
+            let Ok((mut tf, computed)) = cards.get_mut(c) else {
+                continue;
+            };
+            // Shrink to fit a small window at a large interface size.
+            let fit = match window.single() {
+                Ok(w) if computed.size.y > 0.0 => (w.physical_height() as f32 * 0.96 / computed.size.y)
+                    .min(w.physical_width() as f32 * 0.96 / computed.size.x)
+                    .min(1.0),
+                _ => 1.0,
+            };
+            let scale = Vec2::splat(fit);
+            if tf.scale != scale {
+                tf.scale = scale;
+            }
+            let shift = Val2::px(0.0, (1.0 - *anim) * 14.0);
+            if tf.translation != shift {
+                tf.translation = shift;
+            }
         }
     }
 }

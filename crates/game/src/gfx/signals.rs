@@ -73,7 +73,12 @@ impl Plugin for SignalsPlugin {
     }
 }
 
-fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<CityMaterial>>) {
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<CityMaterial>>,
+    world_mats: Res<WorldMaterials>,
+) {
     let colors = [
         Color::srgb(1.0, 0.16, 0.1),
         Color::srgb(1.0, 0.62, 0.08),
@@ -81,11 +86,14 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: Res
     ];
     let lens = [0, 1, 2].map(|i| meshes.add(lens_mesh(i).build()));
     let mats = colors.map(|c| {
-        mats.add(city_material(StandardMaterial {
-            base_color: c,
-            perceptual_roughness: 0.4,
-            ..default()
-        }))
+        mats.add(city_material(
+            StandardMaterial {
+                base_color: c,
+                perceptual_roughness: 0.4,
+                ..default()
+            },
+            world_mats.day.clone(),
+        ))
     });
     commands.insert_resource(SignalAssets { lens, mats });
 }
@@ -186,16 +194,16 @@ fn furniture(
         // The sim's stop line, and the pole just behind it on the
         // sidewalk (beyond the kerb corner).
         let stop = if arm.stop > 0.0 { arm.stop } else { arm.setback };
-        let base = node.pos + arm.dir * (stop + 0.9).max(arm.setback + 0.4) + right * (st.h + 0.55);
+        let base = arm.center + arm.dir * ((stop + 0.9).max(arm.setback + 0.4) - arm.setback) + right * (st.h + 0.55);
         let white = lin(palette::MARKING);
         let lane_lo = st.median + 0.15;
         let lane_hi = st.h - 0.25;
         let across = |m: &mut MeshBuilder, t0: f32, t1: f32, o0: f32, o1: f32| {
             let q = [
-                node.pos + arm.dir * t0 + right * o0,
-                node.pos + arm.dir * t1 + right * o0,
-                node.pos + arm.dir * t1 + right * o1,
-                node.pos + arm.dir * t0 + right * o1,
+                arm.center + arm.dir * (t0 - arm.setback) + right * o0,
+                arm.center + arm.dir * (t1 - arm.setback) + right * o0,
+                arm.center + arm.dir * (t1 - arm.setback) + right * o1,
+                arm.center + arm.dir * (t0 - arm.setback) + right * o1,
             ];
             m.quad_up(q.map(|p| Vec3::new(p.x, MARK_Y + 0.004, p.y)), white);
         };
@@ -214,7 +222,9 @@ fn furniture(
                 heads.push((arm.seg, c, face, false));
                 if avenue {
                     // Mast arm over the approach lanes.
-                    let tip = node.pos + arm.dir * (stop + 0.9).max(arm.setback + 0.4) + right * (st.h * 0.42);
+                    let tip = arm.center
+                        + arm.dir * ((stop + 0.9).max(arm.setback + 0.4) - arm.setback)
+                        + right * (st.h * 0.42);
                     let mid = (base + tip) * 0.5;
                     let d = tip - base;
                     let yaw = -d.y.atan2(d.x);
@@ -244,7 +254,7 @@ fn furniture(
                 let (lo, hi) = (lane_lo + 0.1, lane_hi - 0.1);
                 let mut o = lo;
                 while o + 0.45 <= hi + 1e-3 {
-                    let a = node.pos + arm.dir * (stop + 0.6) + right * o;
+                    let a = arm.center + arm.dir * (stop + 0.6 - arm.setback) + right * o;
                     let b = a + right * 0.45;
                     let tip = (a + b) * 0.5 + arm.dir * 0.65;
                     // Point towards the arriving driver.
@@ -304,7 +314,7 @@ fn sync_junctions(
     let state = &mut *state;
     if roads_changed {
         state.roads_key = Some(key);
-        let layout = road_geom::layout(&world.roads);
+        let layout = road_geom::layout(world);
         state.layout = layout.nodes.into_iter().map(|n| (n.id, n)).collect();
     }
     let mut seen: Vec<NodeId> = Vec::new();

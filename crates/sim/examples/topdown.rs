@@ -6,7 +6,9 @@
 //! cargo run -p citysim_sim --release --example topdown -- signal out.png
 //! cargo run -p citysim_sim --release --example topdown -- lots out.png
 //! cargo run -p citysim_sim --release --example topdown -- video out.mp4 [seconds]
+//! cargo run -p citysim_sim --release --example topdown -- day out.mp4 [seconds]
 //! ```
+//! `day`: a town through one whole day, cars coloured by trip purpose.
 //! PNG and MP4 are written through `ffmpeg` (must be on the PATH).
 
 use std::io::Write;
@@ -258,93 +260,160 @@ fn draw_world(c: &mut Canvas, w: &World, v: &View, show_zones: bool) {
     draw_world_opts(c, w, v, show_zones, true);
 }
 
+/// Quads of a polyline strip `off - hw .. off + hw` to the right of a
+/// curve (pixels).
+fn curve_strip(v: &View, cv: &Curve, d0: f32, d1: f32, hw: f32, off: f32) -> Vec<[[f32; 2]; 4]> {
+    if d1 - d0 < 0.05 {
+        return Vec::new();
+    }
+    let sub = cv.sub(d0, d1);
+    let a = sub.flatten_offset(off - hw, 0.08);
+    let b = sub.flatten_offset(off + hw, 0.08);
+    let n = a.len().min(b.len());
+    let mut out = Vec::new();
+    if a.len() == b.len() {
+        for k in 0..n.saturating_sub(1) {
+            out.push([v.px(a[k].1), v.px(a[k + 1].1), v.px(b[k + 1].1), v.px(b[k].1)]);
+        }
+    } else {
+        // Different sampling: resample both by distance.
+        let m = ((d1 - d0) / 0.6).ceil().max(1.0) as usize;
+        let at = |t: f32, o: f32| sub.pose_at(t, o).pos;
+        let l = sub.length();
+        for k in 0..m {
+            let (t0, t1) = (l * k as f32 / m as f32, l * (k + 1) as f32 / m as f32);
+            out.push([
+                v.px(at(t0, off - hw)),
+                v.px(at(t1, off - hw)),
+                v.px(at(t1, off + hw)),
+                v.px(at(t0, off + hw)),
+            ]);
+        }
+    }
+    out
+}
+
+fn fill_strip(c: &mut Canvas, quads: Vec<[[f32; 2]; 4]>, col: Rgb) {
+    for q in quads {
+        c.poly(&q, col, 1.0);
+    }
+}
+
+/// Dashes along a curve, `dash` long every `every` metres.
+#[allow(clippy::too_many_arguments)]
+fn dashes(c: &mut Canvas, v: &View, cv: &Curve, lo: f32, hi: f32, off: f32, hw: f32, dash: f32, every: f32, col: Rgb) {
+    let mut t = lo;
+    while t < hi {
+        let e = (t + dash).min(hi);
+        fill_strip(c, curve_strip(v, cv, t, e, hw, off), col);
+        t += every;
+    }
+}
+
+fn in_view(v: &View, c: &Canvas, p: [f32; 2], margin: f32) -> bool {
+    let q = v.px(p);
+    q[0] > -margin && q[1] > -margin && q[0] < c.w as f32 + margin && q[1] < c.h as f32 + margin
+}
+
 fn draw_world_opts(c: &mut Canvas, w: &World, v: &View, show_zones: bool, cars: bool) {
-    // Zones and lots.
-    let cell = CELL_SIZE * v.k;
-    let (cx0, cy0) = ((v.x0 / CELL_SIZE).floor() as i32, (v.y0 / CELL_SIZE).floor() as i32);
-    let (cx1, cy1) = (
-        cx0 + (c.w as f32 / cell).ceil() as i32 + 1,
-        cy0 + (c.h as f32 / cell).ceil() as i32 + 1,
-    );
+    let margin = 40.0 * v.k;
+    // Zones (usable, free cells of every lattice).
     if show_zones {
-        for y in cy0..cy1 {
-            for x in cx0..cx1 {
-                let Some(cd) = w.grid.get(Cell::new(x, y)) else {
-                    continue;
-                };
-                if let (Some(z), Occupant::Empty) = (cd.zone, cd.occupant) {
-                    let p = v.px([x as f32 * CELL_SIZE, y as f32 * CELL_SIZE]);
-                    c.poly(
-                        &[
-                            [p[0] + 1.0, p[1] + 1.0],
-                            [p[0] + cell - 1.0, p[1] + 1.0],
-                            [p[0] + cell - 1.0, p[1] + cell - 1.0],
-                            [p[0] + 1.0, p[1] + cell - 1.0],
-                        ],
-                        zone_rgb(z),
-                        0.25,
-                    );
-                }
+        for (cr, cd) in w.zoning.cells() {
+            let (Some(z), true) = (cd.zone, cd.free()) else {
+                continue;
+            };
+            let Some(q) = w.zoning.cell_corners(cr) else { continue };
+            if !in_view(v, c, q[0], margin) {
+                continue;
             }
+            let ctr = [(q[0][0] + q[2][0]) * 0.5, (q[0][1] + q[2][1]) * 0.5];
+            let shrink = |p: [f32; 2]| v.px([p[0] + (ctr[0] - p[0]) * 0.12, p[1] + (ctr[1] - p[1]) * 0.12]);
+            c.poly(&q.map(shrink), zone_rgb(z), 0.3);
         }
     }
     for b in w.buildings.values() {
-        let r = b.footprint;
-        if r.max.x < cx0 || r.min.x > cx1 || r.max.y < cy0 || r.min.y > cy1 {
+        if !in_view(v, c, b.center(), margin) {
+            let _ = 0;
             continue;
         }
-        let inset = 0.9;
-        let a = v.px([r.min.x as f32 * CELL_SIZE + inset, r.min.y as f32 * CELL_SIZE + inset]);
-        let z = v.px([
-            (r.max.x + 1) as f32 * CELL_SIZE - inset,
-            (r.max.y + 1) as f32 * CELL_SIZE - inset,
-        ]);
+        let q = b.corners();
+        let ctr = b.center();
+        let inset = |p: [f32; 2], k: f32| {
+            let d = geom::sub(ctr, p);
+            let l = geom::dot(d, d).sqrt().max(1e-6);
+            [p[0] + d[0] / l * k, p[1] + d[1] / l * k]
+        };
+        let qi = q.map(|p| inset(p, 1.2));
         let base = zone_rgb(b.kind);
         let col = mix(base, [30, 30, 30], 0.35 - 0.12 * b.level as f32);
-        c.poly(&[[a[0], a[1]], [z[0], a[1]], [z[0], z[1]], [a[0], z[1]]], col, 1.0);
-        // Front side: a bright band along the facing edge.
-        let t = (1.6 * v.k).max(2.0);
-        let (fa, fz) = match b.facing {
-            Facing::PlusX => ([z[0] - t, a[1]], [z[0], z[1]]),
-            Facing::MinusX => ([a[0], a[1]], [a[0] + t, z[1]]),
-            Facing::PlusY => ([a[0], z[1] - t], [z[0], z[1]]),
-            Facing::MinusY => ([a[0], a[1]], [z[0], a[1] + t]),
-        };
+        c.poly(&qi.map(|p| v.px(p)), col, 1.0);
+        // Front side: a bright band along the front edge.
+        let f = b.front_dir();
+        let back = |p: [f32; 2]| [p[0] - f[0] * 1.6, p[1] - f[1] * 1.6];
         c.poly(
-            &[[fa[0], fa[1]], [fz[0], fa[1]], [fz[0], fz[1]], [fa[0], fz[1]]],
+            &[v.px(qi[0]), v.px(qi[1]), v.px(back(qi[1])), v.px(back(qi[0]))],
             [245, 240, 225],
             1.0,
         );
-        // Outline.
-        for (p, q) in [
-            ([a[0], a[1]], [z[0], a[1]]),
-            ([z[0], a[1]], [z[0], z[1]]),
-            ([z[0], z[1]], [a[0], z[1]]),
-            ([a[0], z[1]], [a[0], a[1]]),
-        ] {
-            line(c, p, q, [24, 26, 28]);
+        for k in 0..4 {
+            line(c, v.px(qi[k]), v.px(qi[(k + 1) % 4]), [24, 26, 28]);
         }
     }
-    // Road bodies: kerbs, then asphalt, then junction boxes.
-    for (s, seg) in w.roads.segments.iter() {
-        let (a, b) = w.roads.segment_ends(s);
-        let hw = seg.kind.half_width_m();
-        c.poly(&strip(v, a, b, hw + 0.6, 0.0), KERB, 1.0);
+    // Road bodies: kerbs, then asphalt, then junction surfaces.
+    let segs: Vec<(SegmentId, &RoadSegment)> = w
+        .roads
+        .segments
+        .iter()
+        .filter(|(_, s)| {
+            let (lo, hi) = s.curve.bounds();
+            in_view(v, c, lo, margin + (hi[0] - lo[0] + hi[1] - lo[1]) * v.k)
+        })
+        .collect();
+    let shapes: Vec<junction::JunctionShape> = w
+        .roads
+        .nodes
+        .iter()
+        .filter(|(_, n)| in_view(v, c, n.pos, margin))
+        .filter_map(|(id, _)| junction::junction_shape(w, id, 0.6))
+        .collect();
+    let fan = |c: &mut Canvas, sh: &junction::JunctionShape, shrink: f32, col: Rgb| {
+        let o = &sh.outline;
+        for k in 0..o.len() {
+            let (p, q) = (o[k], o[(k + 1) % o.len()]);
+            let pull = |x: [f32; 2]| {
+                let d = geom::sub(sh.pos, x);
+                let l = geom::dot(d, d).sqrt().max(1e-6);
+                [x[0] + d[0] / l * shrink.min(l), x[1] + d[1] / l * shrink.min(l)]
+            };
+            c.poly(&[v.px(sh.pos), v.px(pull(p)), v.px(pull(q))], col, 1.0);
+        }
+    };
+    for (_, seg) in &segs {
+        fill_strip(
+            c,
+            curve_strip(v, &seg.curve, 0.0, seg.length, seg.kind.half_width_m() + 0.6, 0.0),
+            KERB,
+        );
     }
-    for n in w.roads.nodes.values() {
-        let r = n
-            .segments
-            .iter()
-            .map(|&s| w.roads.segments[s].kind.half_width_m())
-            .fold(0.0, f32::max);
-        let p = v.px(n.pos);
-        c.disc(p[0], p[1], (r + 0.6) * v.k, KERB);
+    for sh in &shapes {
+        fan(c, sh, 0.0, KERB);
     }
-    for (s, seg) in w.roads.segments.iter() {
-        let (a, b) = w.roads.segment_ends(s);
-        c.poly(&strip(v, a, b, seg.kind.half_width_m(), 0.0), ASPHALT, 1.0);
+    for (_, seg) in &segs {
+        fill_strip(
+            c,
+            curve_strip(v, &seg.curve, 0.0, seg.length, seg.kind.half_width_m(), 0.0),
+            ASPHALT,
+        );
     }
-    for n in w.roads.nodes.values() {
+    for sh in &shapes {
+        fan(c, sh, 0.6, ASPHALT);
+    }
+    // Nodes without a box (smooth continuations, dead ends): round them off.
+    for (id, n) in w.roads.nodes.iter() {
+        if !in_view(v, c, n.pos, margin) || shapes.iter().any(|s| s.node == id) {
+            continue;
+        }
         let r = n
             .segments
             .iter()
@@ -354,41 +423,24 @@ fn draw_world_opts(c: &mut Canvas, w: &World, v: &View, show_zones: bool, cars: 
         c.disc(p[0], p[1], r * v.k, ASPHALT);
     }
     // Lane markings on the drivable stretch.
-    for (s, seg) in w.roads.segments.iter() {
-        let (a, b) = w.roads.segment_ends(s);
+    for &(s, seg) in &segs {
         let Some((lo, hi)) = drive::drivable_range(w, s, true) else {
             continue;
         };
-        let d = geom::sub(b, a);
-        let l = seg.length.max(1e-3);
-        let u = [d[0] / l, d[1] / l];
-        let at = |t: f32| [a[0] + u[0] * t, a[1] + u[1] * t];
-        let (pa, pb) = (at(lo), at(hi));
         if hi - lo < 1.0 {
             continue;
         }
-        // Centre line.
+        let cv = &seg.curve;
         if seg.kind == RoadKind::Avenue || seg.kind == RoadKind::Highway {
-            c.poly(&strip(v, pa, pb, 0.18, 0.35), YELLOW_MARK, 1.0);
-            c.poly(&strip(v, pa, pb, 0.18, -0.35), YELLOW_MARK, 1.0);
-            // Lane dividers, dashed.
+            fill_strip(c, curve_strip(v, cv, lo, hi, 0.18, 0.35), YELLOW_MARK);
+            fill_strip(c, curve_strip(v, cv, lo, hi, 0.18, -0.35), YELLOW_MARK);
             let k = seg.kind;
             let off = (k.lane_offset_m(0) + k.lane_offset_m(1)) * 0.5;
-            let mut t = lo;
-            while t < hi {
-                let e = (t + 3.0).min(hi);
-                for side in [1.0, -1.0] {
-                    c.poly(&strip(v, at(t), at(e), 0.12, side * off), MARK, 1.0);
-                }
-                t += 7.0;
+            for side in [1.0, -1.0] {
+                dashes(c, v, cv, lo, hi, side * off, 0.12, 3.0, 7.0, MARK);
             }
         } else {
-            let mut t = lo;
-            while t < hi {
-                let e = (t + 2.5).min(hi);
-                c.poly(&strip(v, at(t), at(e), 0.12, 0.0), MARK, 1.0);
-                t += 5.0;
-            }
+            dashes(c, v, cv, lo, hi, 0.0, 0.12, 2.5, 5.0, MARK);
         }
     }
     // Stop lines, coloured by signal aspect per lane.
@@ -397,9 +449,13 @@ fn draw_world_opts(c: &mut Canvas, w: &World, v: &View, show_zones: bool, cars: 
         let view = junction::junction_view(w, n);
         let npos = w.roads.nodes[n].pos;
         for (i, arm) in j.arms.iter().enumerate() {
-            let din = [-arm.dir[0], -arm.dir[1]];
+            let seg = &w.roads.segments[arm.segment];
+            let pose = seg.pose_dir(seg.a == n, arm.setback.min(seg.length), 0.0);
+            let _ = npos;
+            let arm_dir = pose.dir;
+            let din = [-arm_dir[0], -arm_dir[1]];
             let r = junction::right_of(din);
-            let base = [npos[0] + arm.dir[0] * arm.setback, npos[1] + arm.dir[1] * arm.setback];
+            let base = pose.pos;
             for lane in 0..arm.lanes_in {
                 let off = arm.kind.lane_offset_m(lane);
                 let lanew = if arm.kind == RoadKind::Street { 2.6 } else { 1.45 };
@@ -431,9 +487,9 @@ fn draw_world_opts(c: &mut Canvas, w: &World, v: &View, show_zones: bool, cars: 
                 c.poly(&strip(v, p0, p1, wide, 0.0), col, 1.0);
                 if j.control == JunctionControl::Priority && !arm.major {
                     // Give-way triangles.
-                    let q = [base[0] + arm.dir[0] * 2.2, base[1] + arm.dir[1] * 2.2];
+                    let q = [base[0] + arm_dir[0] * 2.2, base[1] + arm_dir[1] * 2.2];
                     let q = [q[0] + r[0] * off, q[1] + r[1] * off];
-                    let tip = v.px([q[0] - arm.dir[0] * 1.2, q[1] - arm.dir[1] * 1.2]);
+                    let tip = v.px([q[0] - arm_dir[0] * 1.2, q[1] - arm_dir[1] * 1.2]);
                     let l = v.px([q[0] + r[0] * 0.8, q[1] + r[1] * 0.8]);
                     let rr = v.px([q[0] - r[0] * 0.8, q[1] - r[1] * 0.8]);
                     c.poly(&[tip, l, rr], [250, 250, 250], 1.0);
@@ -687,13 +743,12 @@ fn lots(out: &str) {
     let without = w
         .buildings
         .values()
-        .filter(|b| !growth::has_frontage(&w, b.footprint, b.facing))
+        .filter(|b| !growth::has_frontage(&w, &b.footprint, b.facing))
         .count();
     let empty_zoned = w
-        .grid
-        .cells
-        .iter()
-        .filter(|cd| cd.zone.is_some() && cd.occupant == Occupant::Empty)
+        .zoning
+        .cells()
+        .filter(|(_, cd)| cd.zone.is_some() && cd.free())
         .count();
     cv.rect(0.0, 0.0, wpx as f32, 80.0, [22, 24, 28]);
     cv.text(
@@ -867,6 +922,161 @@ fn video(out: &str, seconds: u32) {
     assert!(child.wait().unwrap().success());
 }
 
+/// Trip purpose colours (the charts' categorical order).
+const PURPOSE_RGB: [Rgb; 7] = [
+    [0x2a, 0x78, 0xd6],
+    [0xeb, 0x68, 0x34],
+    [0x1b, 0xaf, 0x7a],
+    [0xed, 0xa1, 0x00],
+    [0xe8, 0x7b, 0xa4],
+    [0x00, 0xa3, 0x00],
+    [0x8a, 0x78, 0xf0],
+];
+const PURPOSE_LABEL: [&str; 7] = [
+    "TO WORK",
+    "HOME FROM WORK",
+    "MOVING IN",
+    "MOVING OUT",
+    "SHOPPING",
+    "GOODS",
+    "LEISURE",
+];
+
+/// Cars as small boxes coloured by trip purpose (trucks longer).
+fn draw_cars_by_purpose(c: &mut Canvas, w: &World, v: &View) {
+    for (id, car) in w.vehicles.iter() {
+        let Some(t) = w.traffic.trips.get(id) else { continue };
+        let (p, d) = drive::vehicle_pose(w, car);
+        let truck = t.purpose == TripPurpose::Goods;
+        let (len, wid) = if truck { (7.5, 2.8) } else { (5.0, 2.6) };
+        let r = junction::right_of(d);
+        let corner = |a: f32, b: f32| v.px([p[0] + d[0] * a + r[0] * b, p[1] + d[1] * a + r[1] * b]);
+        c.poly(
+            &[
+                corner(len / 2.0, -wid / 2.0),
+                corner(len / 2.0, wid / 2.0),
+                corner(-len / 2.0, wid / 2.0),
+                corner(-len / 2.0, -wid / 2.0),
+            ],
+            PURPOSE_RGB[t.purpose.index()],
+            1.0,
+        );
+    }
+}
+
+/// A town (the grid player, ~5,000 residents) through one whole day in
+/// `seconds` of video: cars coloured by trip purpose, the clock, and what
+/// the citizens are doing.
+fn day(out: &str, seconds: u32) {
+    let mut w = World::new(7);
+    let mut p = GridPlayer::new(&Zone::ALL);
+    let pop = std::env::var("CITYSIM_TOPDOWN_POP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5000u32);
+    while w.stats.population < pop && w.time.day < 60 {
+        p.act(&mut w);
+        w.step();
+    }
+    while w.time.tick_of_day != 0 {
+        p.act(&mut w);
+        w.step();
+    }
+    // Frame the built-up area.
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for b in w.buildings.values() {
+        let q = derived::rect_center(b.footprint);
+        for k in 0..2 {
+            lo[k] = lo[k].min(q[k]);
+            hi[k] = hi[k].max(q[k]);
+        }
+    }
+    let (mut wpx, hpx) = (1280usize, 720usize);
+    let mut centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0 + 10.0];
+    let mut k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
+    // `CITYSIM_TOPDOWN_VIEW="width,x,y,scale"`: a fixed frame (the same for
+    // two cities side by side).
+    if let Ok(v) = std::env::var("CITYSIM_TOPDOWN_VIEW") {
+        let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+        if n.len() == 4 {
+            wpx = n[0] as usize;
+            centre = [n[1], n[2]];
+            k = n[3];
+        }
+    }
+    let fps = 30;
+    let mut child = Proc::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s"])
+        .arg(format!("{wpx}x{hpx}"))
+        .args([
+            "-r",
+            &fps.to_string(),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "20",
+        ])
+        .arg(out)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("ffmpeg");
+    let mut pipe = child.stdin.take().unwrap();
+    let frames = seconds * fps;
+    let per_frame = balance::TICKS_PER_DAY as f32 / frames as f32;
+    let mut done = 0f32;
+    let view = View::centred(centre, wpx, hpx, k);
+    for f in 0..frames {
+        done += per_frame;
+        while (w.time.tick_of_day as f32) < done.min(balance::TICKS_PER_DAY as f32 - 1.0) && f + 1 < frames {
+            p.act(&mut w);
+            w.step();
+        }
+        let mut cv = Canvas::new(wpx, hpx, GRASS);
+        draw_world_opts(&mut cv, &w, &view, false, false);
+        draw_cars_by_purpose(&mut cv, &w, &view);
+        cv.rect(0.0, 0.0, wpx as f32, 34.0, [22, 24, 28]);
+        let a = inspect::activity_shares(&w);
+        cv.text(
+            10,
+            10,
+            &format!(
+                "DAY {}  {:02}:{:02}   POP {}   CARS {}   ASLEEP {:.0}%  HOME {:.0}%  WORK {:.0}%  SHOPS {:.0}%  OUT {:.0}%  TRAVEL {:.0}%",
+                w.time.day,
+                w.time.hour() as u32,
+                (w.time.hour().fract() * 60.0) as u32,
+                w.stats.population,
+                w.stats.vehicles_on_road,
+                a[0] * 100.0,
+                a[1] * 100.0,
+                a[2] * 100.0,
+                a[3] * 100.0,
+                a[4] * 100.0,
+                a[5] * 100.0,
+            ),
+            2,
+            [235, 235, 235],
+        );
+        // Legend.
+        cv.rect(0.0, hpx as f32 - 30.0, wpx as f32, 30.0, [22, 24, 28]);
+        let mut x = 12.0;
+        for (i, label) in PURPOSE_LABEL.iter().enumerate() {
+            if i == 3 {
+                continue;
+            }
+            cv.rect(x, hpx as f32 - 21.0, 14.0, 12.0, PURPOSE_RGB[i]);
+            cv.text(x as i32 + 20, hpx as i32 - 22, label, 2, [235, 235, 235]);
+            x += 30.0 + label.len() as f32 * 12.0;
+        }
+        pipe.write_all(&cv.px).unwrap();
+    }
+    drop(pipe);
+    assert!(child.wait().unwrap().success());
+}
+
 /// Frames of one spot of a scripted city, `every` ticks apart (debugging).
 fn watch(out: &str, args: &[String]) {
     let which = args.first().map(String::as_str).unwrap_or("hierarchy");
@@ -911,6 +1121,786 @@ fn watch(out: &str, args: &[String]) {
     ffmpeg_png(&sheet, out);
 }
 
+/// A polyline of `width` metres (pixels from the view).
+fn polyline(c: &mut Canvas, v: &View, pts: &[[f32; 2]], width: f32, col: Rgb) {
+    for w in pts.windows(2) {
+        c.poly(&strip(v, w[0], w[1], width * 0.5, 0.0), col, 1.0);
+    }
+}
+
+fn outline(c: &mut Canvas, v: &View, pts: &[[f32; 2]], width: f32, col: Rgb) {
+    let mut p: Vec<[f32; 2]> = pts.to_vec();
+    if let Some(&f) = pts.first() {
+        p.push(f);
+    }
+    polyline(c, v, &p, width, col);
+}
+
+fn turn_rgb(t: junction::Turn) -> Rgb {
+    match t {
+        junction::Turn::Straight => [120, 200, 255],
+        junction::Turn::Right => [120, 230, 120],
+        junction::Turn::Left => [250, 170, 60],
+        junction::Turn::UTurn => [200, 120, 220],
+    }
+}
+
+/// Lattice colours for cell plots.
+fn lattice_rgb(l: LatticeId) -> Rgb {
+    const P: [Rgb; 8] = [
+        [96, 176, 104],
+        [92, 140, 220],
+        [214, 170, 70],
+        [200, 110, 160],
+        [80, 190, 190],
+        [230, 120, 90],
+        [160, 160, 230],
+        [190, 200, 90],
+    ];
+    P[l.0 as usize % P.len()]
+}
+
+/// Cells of every lattice: usable ones in their lattice colour (bright
+/// edge on the road side), blocked ones by why.
+fn draw_cells(c: &mut Canvas, w: &World, v: &View, by_lattice: bool) {
+    for (cr, cd) in w.zoning.cells() {
+        let Some(q) = w.zoning.cell_corners(cr) else { continue };
+        if !in_view(v, c, q[0], 60.0) {
+            continue;
+        }
+        let ctr = [(q[0][0] + q[2][0]) * 0.5, (q[0][1] + q[2][1]) * 0.5];
+        let shrink = |p: [f32; 2], k: f32| v.px([p[0] + (ctr[0] - p[0]) * k, p[1] + (ctr[1] - p[1]) * k]);
+        let col = match cd.blocked {
+            Some(Blocked::Road) => [90, 90, 96],
+            Some(Blocked::Contested) => [235, 80, 60],
+            Some(Blocked::Building) => [140, 60, 140],
+            None if !cd.covered => [70, 70, 60],
+            None => {
+                if by_lattice {
+                    lattice_rgb(cr.lattice)
+                } else {
+                    cd.zone.map_or([120, 150, 110], zone_rgb)
+                }
+            }
+        };
+        let alpha = if cd.blocked.is_some() { 0.55 } else { 0.8 };
+        c.poly(&q.map(|p| shrink(p, 0.08)), col, alpha);
+        // Two fronts (a shared corner cell): a white dot.
+        if cd.fronts.count_ones() >= 2 && cd.usable() {
+            let p = v.px(ctr);
+            c.disc(p[0], p[1], 0.9 * v.k, [250, 250, 250]);
+        }
+    }
+}
+
+fn draw_blocks(c: &mut Canvas, w: &World, v: &View) {
+    for b in &w.zoning.blocks {
+        let Some(q) = w.zoning.block_corners(b) else { continue };
+        if !in_view(v, c, q[0], 200.0) {
+            continue;
+        }
+        outline(c, v, &q, 0.35, [250, 250, 250]);
+    }
+}
+
+/// A small world without the highway (for close-up sheets).
+fn sheet_world() -> World {
+    let mut w = World::new(3);
+    w.economy.money = i64::MAX / 4;
+    w
+}
+
+fn build(w: &mut World, c: Curve, k: RoadKind) {
+    if let Err(e) = w.apply(Command::BuildCurve { curve: c, kind: k }) {
+        panic!("refused {c:?}: {e} at {:?}", e.at());
+    }
+}
+
+/// A curved avenue meeting curved and straight streets, lanes drawn, cars
+/// driving.
+fn curve_sheet(out: &str) {
+    let mut w = World::new(11);
+    scenarios::prebuilt(&mut w, |w| {
+        scenarios::organic(w);
+    });
+    for _ in 0..(5 * balance::TICKS_PER_DAY + 8 * balance::TICKS_PER_HOUR - balance::START_TICK_OF_DAY) {
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([560.0, 948.0], wpx, hpx - 64, 5.0);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, true, true);
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    let curved = w.roads.segments.values().filter(|s| !s.curve.is_straight()).count();
+    let tightest = w
+        .roads
+        .segments
+        .values()
+        .map(|s| s.curve.min_radius().0)
+        .fold(f32::INFINITY, f32::min);
+    header(
+        &mut cv,
+        "CURVED AVENUE: LANES, KERBS AND CARS FOLLOW THE CURVE",
+        &format!(
+            "{} OF {} SEGMENTS CURVED, TIGHTEST RADIUS {:.0} M, {} CARS, 08:00",
+            curved,
+            w.roads.segments.len(),
+            tightest,
+            w.vehicles.len()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// Junctions at odd angles: outlines, arm cut lines and every turn path.
+fn junction_sheet(out: &str) {
+    let mut w = sheet_world();
+    let o = [600.0, 600.0];
+    let at = |dx: f32, dy: f32| [o[0] + dx, o[1] + dy];
+    // An avenue crossed by a street at 35 degrees, a curved street joining
+    // it at 60, and a five-arm junction of streets.
+    build(
+        &mut w,
+        Curve::straight(at(-160.0, 0.0), at(160.0, 0.0)),
+        RoadKind::Avenue,
+    );
+    let d35 = [libm::cosf(35f32.to_radians()), libm::sinf(35f32.to_radians())];
+    build(
+        &mut w,
+        Curve::straight(
+            at(-90.0 * d35[0] - 40.0, -90.0 * d35[1]),
+            at(90.0 * d35[0] - 40.0, 90.0 * d35[1]),
+        ),
+        RoadKind::Street,
+    );
+    build(
+        &mut w,
+        Curve::from_tangents(at(120.0, -110.0), [0.0, 1.0], at(80.0, 0.0), [-0.5, 0.866])
+            .unwrap_or_else(|| Curve::through_corner(at(120.0, -110.0), at(120.0, -50.0), at(80.0, 0.0))),
+        RoadKind::Street,
+    );
+    let hub = at(60.0, 120.0);
+    for deg in [0.0f32, 80.0, 150.0, 215.0, 290.0] {
+        let d = [libm::cosf(deg.to_radians()), libm::sinf(deg.to_radians())];
+        build(
+            &mut w,
+            Curve::straight(hub, [hub[0] + d[0] * 70.0, hub[1] + d[1] * 70.0]),
+            RoadKind::Street,
+        );
+    }
+    traffic_sync(&mut w);
+    let (wpx, hpx) = (1620usize, 760usize);
+    let mut shapes = 0;
+    let mut paths = 0;
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    let panels = [at(-40.0, 0.0), at(80.0, -6.0), hub];
+    for (k, &centre) in panels.iter().enumerate() {
+        let pw = wpx / 3;
+        let view = View::centred(centre, pw - 6, hpx - 64, 6.5);
+        let mut map = Canvas::new(pw - 6, hpx - 64, GRASS);
+        draw_world_opts(&mut map, &w, &view, false, false);
+        for (n, node) in w.roads.nodes.iter() {
+            if geom::dist(node.pos, centre) > 30.0 {
+                continue;
+            }
+            let Some(sh) = junction::junction_shape(&w, n, 0.0) else {
+                continue;
+            };
+            shapes += 1;
+            outline(&mut map, &view, &sh.outline, 0.2, [255, 255, 255]);
+            for a in &sh.arms {
+                polyline(&mut map, &view, &[a.left, a.right], 0.3, [255, 140, 40]);
+            }
+            if let Some(j) = w.traffic.junction_states.get(n).filter(|j| j.arms.len() >= 3) {
+                for m in &j.movements {
+                    if m.turn == junction::Turn::UTurn {
+                        continue;
+                    }
+                    paths += 1;
+                    polyline(&mut map, &view, &m.curve.flatten(0.03), 0.16, turn_rgb(m.turn));
+                }
+            }
+        }
+        cv.blit(&map, k * pw + 3, 64);
+    }
+    header(
+        &mut cv,
+        "JUNCTIONS AT ANY ANGLE: OUTLINE, ARM CUT LINES, TURN PATHS",
+        &format!(
+            "AVENUE X STREET AT 35 DEG, CURVED STREET T, 5 ARMS: {shapes} SURFACES, {paths} PATHS (BLUE STRAIGHT, GREEN RIGHT, ORANGE LEFT)"
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+fn traffic_sync(w: &mut World) {
+    // One step builds junction states for the new roads.
+    w.step();
+}
+
+/// Blocks along an S-curve: straight blocks along the kerbs, wedge gaps
+/// outside each bend, overlaps trimmed inside, cells under the road
+/// blocked.
+fn blocks_sheet(out: &str) {
+    let mut w = sheet_world();
+    let a = [300.0, 700.0];
+    let b = [560.0, 600.0];
+    let c2 = [820.0, 560.0];
+    build(
+        &mut w,
+        Curve::from_tangents(a, [1.0, 0.0], b, [0.894, -0.447]).expect("bend 1"),
+        RoadKind::Street,
+    );
+    build(
+        &mut w,
+        Curve::from_tangents(b, [0.894, -0.447], c2, [1.0, 0.0]).expect("bend 2"),
+        RoadKind::Street,
+    );
+    // A straight street crossing it (its blocks lose where they overlap).
+    build(
+        &mut w,
+        Curve::straight([600.0, 500.0], [560.0, 760.0]),
+        RoadKind::Street,
+    );
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([560.0, 630.0], wpx, hpx - 64, 2.6);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_cells(&mut map, &w, &view, true);
+    draw_world_opts(&mut map, &w, &view, false, false);
+    draw_blocks(&mut map, &w, &view);
+    let n = |f: &dyn Fn(&ZoneCell) -> bool| w.zoning.cells().filter(|(_, c)| f(c)).count();
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    header(
+        &mut cv,
+        "ZONE BLOCKS ALONG AN S-CURVE (WHITE: BLOCK OUTLINES, COLOUR: LATTICE)",
+        &format!(
+            "{} BLOCKS ON {} LATTICES. CELLS: {} USABLE, {} CONTESTED (RED), {} UNDER ROADS (GREY)",
+            w.zoning.blocks.len(),
+            w.zoning.lattices().count() - 1,
+            n(&|c| c.usable()),
+            n(&|c| c.blocked == Some(Blocked::Contested)),
+            n(&|c| c.blocked == Some(Blocked::Road)),
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// A right-angle grid on the world lattice (corner cells shared by two
+/// roads) next to a grid turned by 22 degrees that keeps its own lattice;
+/// where they meet the older grid keeps the cells.
+fn lattice_sheet(out: &str) {
+    let mut w = sheet_world();
+    let c = |x: i32, y: i32| Cell::new(x, y).center();
+    for y in [60, 65, 70] {
+        build(&mut w, Curve::straight(c(40, y), c(60, y)), RoadKind::Street);
+    }
+    for x in [40, 50, 60] {
+        build(&mut w, Curve::straight(c(x, 60), c(x, 70)), RoadKind::Street);
+    }
+    let th = 22f32.to_radians();
+    let (u, v2) = ([libm::cosf(th), libm::sinf(th)], [-libm::sinf(th), libm::cosf(th)]);
+    let o = c(67, 57);
+    let p = |i: f32, j: f32| [o[0] + u[0] * i + v2[0] * j, o[1] + u[1] * i + v2[1] * j];
+    for j in [0.0, 40.0, 80.0] {
+        build(&mut w, Curve::straight(p(0.0, j), p(160.0, j)), RoadKind::Street);
+    }
+    for i in [0.0, 80.0, 160.0] {
+        build(&mut w, Curve::straight(p(i, 0.0), p(i, 80.0)), RoadKind::Street);
+    }
+    // A link between them.
+    build(&mut w, Curve::straight(c(60, 65), p(0.0, 40.0)), RoadKind::Street);
+    let zone = |w: &mut World, q: [[f32; 2]; 4]| {
+        let _ = w.apply(Command::ZoneArea {
+            quad: q,
+            zone: Some(Zone::Residential),
+        });
+    };
+    zone(&mut w, [c(38, 58), c(62, 58), c(62, 72), c(38, 72)]);
+    zone(
+        &mut w,
+        [p(-10.0, -10.0), p(170.0, -10.0), p(170.0, 90.0), p(-10.0, 90.0)],
+    );
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([540.0, 540.0], wpx, hpx - 64, 3.4);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_cells(&mut map, &w, &view, true);
+    draw_world_opts(&mut map, &w, &view, false, false);
+    let shared = w
+        .zoning
+        .cells()
+        .filter(|(c, x)| c.lattice == LatticeId::WORLD && x.usable() && x.fronts.count_ones() >= 2)
+        .count();
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    header(
+        &mut cv,
+        "A RIGHT-ANGLE GRID SHARES ONE LATTICE; A GRID TURNED 22 DEG KEEPS ITS OWN",
+        &format!(
+            "LATTICES {}, SHARED CORNER CELLS (WHITE DOTS) {shared}, CONTESTED CELLS (RED) {}",
+            w.zoning.lattices().count(),
+            w.zoning
+                .cells()
+                .filter(|(_, x)| x.blocked == Some(Blocked::Contested))
+                .count()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// Cars queueing on a curved approach to a signalised junction.
+fn queue_sheet(out: &str) {
+    let mut w = sheet_world();
+    // A crossing of avenues whose south arm is a quarter circle.
+    build(
+        &mut w,
+        Curve::straight([440.0, 640.0], [840.0, 640.0]),
+        RoadKind::Avenue,
+    );
+    build(
+        &mut w,
+        Curve::straight([640.0, 440.0], [640.0, 640.0]),
+        RoadKind::Avenue,
+    );
+    build(
+        &mut w,
+        Curve::from_tangents([470.0, 800.0], [1.0, 0.0], [640.0, 640.0], [0.0, -1.0]).expect("curved arm"),
+        RoadKind::Avenue,
+    );
+    build(
+        &mut w,
+        Curve::straight([300.0, 800.0], [470.0, 800.0]),
+        RoadKind::Avenue,
+    );
+    let mut k = 0usize;
+    let ends = [[450.0, 640.0], [830.0, 640.0], [640.0, 450.0]];
+    for t in 0..(3 * 60 * TICKS_PER_SECOND) {
+        if t % 7 == 0 {
+            // Most traffic comes up the curve; some crosses it.
+            if k % 4 == 3 {
+                traffic::debug_request(&mut w, ends[k % 2], ends[(k + 1) % 2]);
+            } else {
+                traffic::debug_request(&mut w, [310.0, 800.0], ends[k % 3]);
+            }
+            k += 1;
+        }
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([590.0, 690.0], wpx, hpx - 64, 4.6);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, false, true);
+    let on_curve = w
+        .vehicles
+        .values()
+        .filter(|v| v.segment.is_some_and(|s| !w.roads.segments[s].curve.is_straight()) && v.stopped())
+        .count();
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    header(
+        &mut cv,
+        "A QUEUE ON A CURVED APPROACH TO A SIGNAL (RED CARS STAND)",
+        &format!(
+            "{} CARS ON THE ROADS, {on_curve} STANDING ON THE CURVE, IN BOTH LANES, BY ARC LENGTH",
+            w.vehicles.len()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// The organic town, zoomed in on the turned grid and the avenue.
+fn organic_zoom(out: &str, days: u32) {
+    let mut w = World::new(11);
+    scenarios::prebuilt(&mut w, |w| {
+        scenarios::organic(w);
+    });
+    for _ in 0..(days * balance::TICKS_PER_DAY + 8 * balance::TICKS_PER_HOUR - balance::START_TICK_OF_DAY) {
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([520.0, 800.0], wpx, hpx - 64, 2.4);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, true, true);
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    let turned = w
+        .buildings
+        .values()
+        .filter(|b| {
+            let r = b.rotation().to_degrees().rem_euclid(90.0);
+            r > 1.0 && r < 89.0
+        })
+        .count();
+    header(
+        &mut cv,
+        "ORGANIC TOWN: LOTS AND BUILDINGS AT THEIR ROAD'S ANGLE (BRIGHT EDGE = FRONT)",
+        &format!(
+            "DAY {} 08:00  POP {}  BUILDINGS {} ({} TURNED OFF THE AXES)  CARS {}",
+            w.time.day,
+            w.stats.population,
+            w.buildings.len(),
+            turned,
+            w.vehicles.len()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// The organic town through one day, top-down (20-30 s).
+fn organic_video(out: &str, seconds: u32) {
+    let mut w = World::new(11);
+    scenarios::prebuilt(&mut w, |w| {
+        scenarios::organic(w);
+    });
+    // Grow it first, to midnight of day 12.
+    while w.time.day < 12 || w.time.tick_of_day != 0 {
+        w.step();
+    }
+    let (wpx, hpx) = (1280usize, 800usize);
+    let fps = 25u32;
+    let frames = seconds * fps;
+    let per_frame = balance::TICKS_PER_DAY / frames;
+    let mut child = Proc::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s"])
+        .arg(format!("{wpx}x{hpx}"))
+        .args([
+            "-r",
+            &fps.to_string(),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "20",
+            out,
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("ffmpeg");
+    let stdin = child.stdin.as_mut().expect("stdin");
+    for f in 0..frames {
+        for _ in 0..per_frame {
+            w.step();
+        }
+        // Slow pan from the turned grid over the avenue to the ring.
+        let t = f as f32 / frames as f32;
+        let c = [430.0 + 260.0 * t, 820.0 + 220.0 * t];
+        let view = View::centred(c, wpx, hpx - 48, 1.45);
+        let mut map = Canvas::new(wpx, hpx - 48, GRASS);
+        draw_world_opts(&mut map, &w, &view, true, true);
+        let mut cv = Canvas::new(wpx, hpx, GRASS);
+        cv.blit(&map, 0, 48);
+        cv.rect(0.0, 0.0, wpx as f32, 48.0, [22, 24, 28]);
+        let h = w.time.hour();
+        cv.text(
+            12,
+            14,
+            &format!(
+                "ORGANIC TOWN  {:02}:{:02}  POP {}  CARS {}",
+                h as u32,
+                ((h - h.floor()) * 60.0) as u32,
+                w.stats.population,
+                w.vehicles.len()
+            ),
+            2,
+            [235, 235, 235],
+        );
+        stdin.write_all(&cv.px).expect("write frame");
+    }
+    drop(child.stdin.take());
+    child.wait().expect("ffmpeg");
+}
+
+/// Header bar with a title and a line of numbers.
+fn header(cv: &mut Canvas, title: &str, info: &str) {
+    cv.rect(0.0, 0.0, cv.w as f32, 64.0, [22, 24, 28]);
+    cv.text(12, 10, title, 3, [235, 235, 235]);
+    cv.text(12, 40, info, 2, [190, 190, 190]);
+}
+
+/// The organic town, grown for `days` days.
+fn organic(out: &str, days: u32) {
+    let mut w = World::new(11);
+    let mut refused = Vec::new();
+    scenarios::prebuilt(&mut w, |w| refused = scenarios::organic(w));
+    for (c, e) in &refused {
+        eprintln!("refused {:?} -> {:?}: {e} ({:?})", c.start(), c.end(), e.at());
+    }
+    for _ in 0..days * balance::TICKS_PER_DAY {
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1200usize);
+    let view = View::centred([700.0, 1000.0], wpx, hpx - 64, 0.95);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, true, true);
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    let lattices = w.zoning.lattices().count();
+    header(
+        &mut cv,
+        "ORGANIC TOWN: CURVED AVENUE, 17 DEG GRID, RING, CUL-DE-SACS",
+        &format!(
+            "DAY {}  POP {}  BUILDINGS {}  ROADS {}  LATTICES {}  CARS {}  REFUSED {}",
+            w.time.day,
+            w.stats.population,
+            w.buildings.len(),
+            w.roads.segments.len(),
+            lattices,
+            w.vehicles.len(),
+            refused.len()
+        ),
+    );
+    ffmpeg_png(&cv, out);
+    eprintln!(
+        "pop {} buildings {} refused {}",
+        w.stats.population,
+        w.buildings.len(),
+        refused.len()
+    );
+}
+
+/// A saved world run on to an hour of its next day, top-down:
+/// `save out.png <save> <hour> <x m> <y m> <px per m> [title]`.
+fn save_view(out: &str, args: &[String]) {
+    let bytes = std::fs::read(&args[0]).expect("save file");
+    let hour: f32 = args[1].parse().unwrap();
+    let cx: f32 = args[2].parse().unwrap();
+    let cy: f32 = args[3].parse().unwrap();
+    let k: f32 = args[4].parse().unwrap();
+    let title = args.get(5).cloned().unwrap_or_default();
+    let mut w = World::load(&bytes).expect("loads");
+    let target = (hour * balance::TICKS_PER_HOUR as f32) as u32;
+    let day = w.time.day;
+    while w.time.day == day && w.time.tick_of_day < target {
+        w.step();
+    }
+    let (wpx, hpx) = (1600usize, 1000usize);
+    let view = View::centred([cx, cy], wpx, hpx - 64, k);
+    let mut map = Canvas::new(wpx, hpx - 64, GRASS);
+    draw_world_opts(&mut map, &w, &view, false, true);
+    let mut cv = Canvas::new(wpx, hpx, GRASS);
+    cv.blit(&map, 0, 64);
+    let stopped = w.vehicles.values().filter(|v| v.stopped()).count();
+    header(
+        &mut cv,
+        &title,
+        &format!(
+            "DAY {} {:05.2}H  POP {}  CARS {} ({} STANDING)  GIVEN UP {}",
+            w.time.day,
+            w.time.hour(),
+            w.stats.population,
+            w.vehicles.len(),
+            stopped,
+            w.traffic.stuck_removed
+        ),
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// Twelve frames of a saved world from an hour of its next day:
+/// `savewatch out.png <save> <hour> <x m> <y m> <ticks between frames>`.
+fn save_watch(out: &str, args: &[String]) {
+    let bytes = std::fs::read(&args[0]).expect("save file");
+    let hour: f32 = args[1].parse().unwrap();
+    let cx: f32 = args[2].parse().unwrap();
+    let cy: f32 = args[3].parse().unwrap();
+    let every: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(40);
+    let mut w = World::load(&bytes).expect("loads");
+    w.traffic.junctions_version = u64::MAX;
+    let target = (hour * balance::TICKS_PER_HOUR as f32) as u32;
+    let day = w.time.day;
+    while w.time.day == day && w.time.tick_of_day < target {
+        w.step();
+    }
+    let (fw, fh, cols, rows) = (420usize, 420usize, 4usize, 3usize);
+    let mut sheet = Canvas::new(cols * fw + (cols + 1) * 6, rows * fh + (rows + 1) * 6, [22, 24, 28]);
+    for i in 0..cols * rows {
+        let mut f = Canvas::new(fw, fh, GRASS);
+        let view = View::centred(
+            [cx, cy],
+            fw,
+            fh,
+            std::env::var("TD_ZOOM")
+                .ok()
+                .and_then(|z| z.parse().ok())
+                .unwrap_or(5.0),
+        );
+        draw_world(&mut f, &w, &view, false);
+        f.text(
+            6,
+            6,
+            &format!(
+                "{:05.2}H T+{:.0}S",
+                w.time.hour(),
+                (i as u32 * every) as f32 / TICKS_PER_SECOND as f32
+            ),
+            2,
+            [255, 255, 255],
+        );
+        sheet.blit(&f, 6 + (i % cols) * (fw + 6), 6 + (i / cols) * (fh + 6));
+        for _ in 0..every {
+            w.step();
+        }
+    }
+    ffmpeg_png(&sheet, out);
+}
+
+/// The avenue city (`GridPlayer::hierarchy`, seed 7) at
+/// `CITYSIM_TOPDOWN_POP` residents (default 10,000) through its evening rush,
+/// 16:00 to 19:30, cars coloured by trip purpose.
+fn rush(out: &str, seconds: u32) {
+    let mut w = World::new(7);
+    // `CITYSIM_TOPDOWN_LAYOUT=streets`: the same blocks on streets only,
+    // standing cars red (for side-by-side comparisons).
+    let streets = std::env::var("CITYSIM_TOPDOWN_LAYOUT").is_ok_and(|v| v == "streets");
+    let red = std::env::var("CITYSIM_TOPDOWN_RED").is_ok();
+    let mut p = if streets {
+        GridPlayer::new(&Zone::ALL)
+    } else {
+        GridPlayer::hierarchy()
+    };
+    let pop = std::env::var("CITYSIM_TOPDOWN_POP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_000u32);
+    while w.stats.population < pop && w.time.day < 60 {
+        p.act(&mut w);
+        w.step();
+    }
+    let (start, end) = (
+        16 * balance::TICKS_PER_HOUR,
+        19 * balance::TICKS_PER_HOUR + balance::TICKS_PER_HOUR / 2,
+    );
+    while w.time.tick_of_day != start {
+        p.act(&mut w);
+        w.step();
+    }
+    // Frame the built-up area.
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for b in w.buildings.values() {
+        let q = derived::rect_center(b.footprint);
+        for k in 0..2 {
+            lo[k] = lo[k].min(q[k]);
+            hi[k] = hi[k].max(q[k]);
+        }
+    }
+    let (mut wpx, hpx) = (1280usize, 720usize);
+    let mut centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0 + 10.0];
+    let mut k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
+    // `CITYSIM_TOPDOWN_VIEW="width,x,y,scale"`: a fixed frame (the same for
+    // two cities side by side).
+    if let Ok(v) = std::env::var("CITYSIM_TOPDOWN_VIEW") {
+        let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+        if n.len() == 4 {
+            wpx = n[0] as usize;
+            centre = [n[1], n[2]];
+            k = n[3];
+        }
+    }
+    let fps = 30;
+    let mut child = Proc::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s"])
+        .arg(format!("{wpx}x{hpx}"))
+        .args([
+            "-r",
+            &fps.to_string(),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "20",
+        ])
+        .arg(out)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("ffmpeg");
+    let mut pipe = child.stdin.take().unwrap();
+    let frames = seconds * fps;
+    let per_frame = (end - start) as f32 / frames as f32;
+    let mut done = start as f32;
+    let view = View::centred(centre, wpx, hpx, k);
+    for f in 0..frames {
+        done += per_frame;
+        while (w.time.tick_of_day as f32) < done && f + 1 < frames {
+            p.act(&mut w);
+            w.step();
+        }
+        let mut cv = Canvas::new(wpx, hpx, GRASS);
+        draw_world_opts(&mut cv, &w, &view, false, red);
+        if !red {
+            draw_cars_by_purpose(&mut cv, &w, &view);
+        }
+        cv.rect(0.0, 0.0, wpx as f32, 34.0, [22, 24, 28]);
+        let a = inspect::activity_shares(&w);
+        let title = if streets { "STREETS ONLY" } else { "AVENUE HIERARCHY" };
+        cv.text(
+            10,
+            10,
+            &format!(
+                "{title} {:02}:{:02} POP {} CARS {} ({:.0}% STAND)",
+                w.time.hour() as u32,
+                (w.time.hour().fract() * 60.0) as u32,
+                w.stats.population,
+                w.stats.vehicles_on_road,
+                w.traffic.stopped_share * 100.0,
+            ),
+            2,
+            [235, 235, 235],
+        );
+        let _ = a;
+        // Legend.
+        cv.rect(0.0, hpx as f32 - 30.0, wpx as f32, 30.0, [22, 24, 28]);
+        let mut x = 12.0;
+        if red {
+            cv.text(
+                12,
+                hpx as i32 - 22,
+                &format!(
+                    "RED: STANDING  COMMUTE X{:.1} FREE FLOW  GIVEN UP {}",
+                    traffic::delay_factor(&w),
+                    w.traffic.stuck_removed
+                ),
+                2,
+                [235, 235, 235],
+            );
+            pipe.write_all(&cv.px).unwrap();
+            continue;
+        }
+        if red {
+            cv.text(
+                12,
+                hpx as i32 - 22,
+                &format!(
+                    "RED: STANDING  COMMUTE X{:.1} FREE FLOW  GIVEN UP {}",
+                    traffic::delay_factor(&w),
+                    w.traffic.stuck_removed
+                ),
+                2,
+                [235, 235, 235],
+            );
+            pipe.write_all(&cv.px).unwrap();
+            continue;
+        }
+        for (i, label) in PURPOSE_LABEL.iter().enumerate() {
+            if i == 3 {
+                continue;
+            }
+            cv.rect(x, hpx as f32 - 21.0, 14.0, 12.0, PURPOSE_RGB[i]);
+            cv.text(x as i32 + 20, hpx as i32 - 22, label, 2, [235, 235, 235]);
+            x += 30.0 + label.len() as f32 * 12.0;
+        }
+        pipe.write_all(&cv.px).unwrap();
+    }
+    drop(pipe);
+    assert!(child.wait().unwrap().success());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first().map(String::as_str).unwrap_or("signal");
@@ -922,7 +1912,19 @@ fn main() {
         "signal" => signal_sheet(&out),
         "lots" => lots(&out),
         "video" => video(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
+        "day" => day(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
         "watch" => watch(&out, &args[2..]),
-        _ => panic!("modes: signal, lots, video"),
+        "organic" => organic(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0)),
+        "curve" => curve_sheet(&out),
+        "junctions" => junction_sheet(&out),
+        "blocks" => blocks_sheet(&out),
+        "lattices" => lattice_sheet(&out),
+        "queue" => queue_sheet(&out),
+        "organic-zoom" => organic_zoom(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(12)),
+        "organic-video" => organic_video(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(25)),
+        "save" => save_view(&out, &args[2..]),
+        "savewatch" => save_watch(&out, &args[2..]),
+        "rush" => rush(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
+        _ => panic!("modes: signal, lots, video, day, watch, organic, curve, junctions, blocks, lattices, queue"),
     }
 }

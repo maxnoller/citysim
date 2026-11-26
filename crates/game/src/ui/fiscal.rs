@@ -43,7 +43,7 @@ pub fn fiscal_note(world: &World) -> Option<FiscalNote> {
             "Recovering",
             format!("{services}; back to full over the next days"),
             "Keep the budget in the black",
-            t::ACCENT,
+            t::ACCENT_TEXT,
         ),
         (FiscalState::Healthy, _) => return None,
         (FiscalState::Deficit, FiscalReason::TaxTooLow) => (

@@ -1,58 +1,57 @@
-//! Context card next to the cursor: what the next click does and what it
-//! costs (red with the sim's reason when it is not possible); with Inspect,
-//! the hovered building, road or zoned lot with live numbers from the sim.
+//! The cursor readout: a small tag beside the cursor with what the next
+//! click does, what it costs and the snap that applied (red with the sim's
+//! reason when it is refused); with Inspect, the hovered building, road or
+//! car with live numbers. Also the card builders the side panel and the
+//! junction tray use (`inspect_card`, `junction_card`).
 
 use bevy::prelude::*;
 use bevy::ui::ComputedNode;
 use bevy::window::PrimaryWindow;
 use citysim_sim::junction;
 use citysim_sim::{
-    Aspect, Building, BuildingId, Cell, CellRect, CommandError, JunctionControl, JunctionSetting, Occupant, RoadKind,
-    RoadSegment, SignalStage, World, Zone, balance,
+    Aspect, Building, BuildingId, CommandError, JunctionControl, JunctionSetting, RoadKind, RoadSegment, SignalStage,
+    World, Zone, balance,
 };
 
 use super::UiState;
 use super::format;
-use super::snap::Snap;
+use super::fsnap;
+use super::plate::{PlateAnim, PlateStyle};
+use super::readout::{self, Readout, Symbol, Tone};
 use super::theme::{self as t, UiFonts, icon};
-use super::tools::{Action, Pending, ToolState};
-use super::widgets::{approach, label, layout, number, zone_icon, zone_name};
+use super::tools::{ToolOptions, ToolState};
+use super::widgets::{approach, figure, label, layout, plate_node, zone_icon};
 use crate::shared::{
-    ActiveTool, BulldozeMode, CONGESTION_BUSY, CONGESTION_JAM, GameSet, HoveredCell, PointerOverUi, RoadChoice,
-    RoadMode, SimWorld, SnapTarget, ToolModes, ToolPreview, WorldHighlight, WorldTarget, ZoneMode,
+    ActiveTool, CONGESTION_BUSY, CONGESTION_JAM, GameSet, PointerOverUi, RoadChoice, RoadMode, SimWorld, ToolModes,
+    ToolPreview, WorldHighlight, WorldTarget,
 };
 
 pub struct ContextPlugin;
 
 impl Plugin for ContextPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_card)
-            .add_systems(Update, (update_card, update_pinned).chain().in_set(GameSet::Render));
+        app.add_systems(Startup, spawn_tag)
+            .add_systems(Update, update_tag.in_set(GameSet::Render));
     }
 }
 
-/// Root of a card: 0 follows the cursor, 1 is pinned to the inspected
-/// object (`WorldHighlight::selected`).
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-struct CardRoot(u8);
+#[derive(Component)]
+struct TagRoot;
 
-/// Which card a part belongs to.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-struct CardOwner(u8);
+#[derive(Component)]
+struct TagPlate;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
-enum CardPart {
-    IconBox,
-    Icon,
+enum TagPart {
     Title,
-    /// One label / value row.
-    Row(usize),
-    RowLabel(usize),
-    RowValue(usize),
+    Price,
+    /// One small line under the title.
+    Line(usize),
     Hint,
-    Bar,
-    BarFill,
 }
+
+/// Lines the tag shows under its title.
+const TAG_LINES: usize = 4;
 
 /// Rows a card can show.
 pub const MAX_ROWS: usize = 8;
@@ -127,143 +126,23 @@ pub fn error_text(e: &CommandError) -> String {
             "Tax rate must be between 0% and {}",
             format::percent(balance::MAX_TAX_RATE)
         ),
+        CommandError::TooShort { length, min, .. } => {
+            format!("Too short: {length:.0} m here, a road piece needs {min:.0} m")
+        }
+        CommandError::TooTight { radius, min, .. } => {
+            format!("Bend too tight: radius {radius:.0} m, this road needs {min:.0} m")
+        }
+        CommandError::SharpAngle { degrees, min, .. } => {
+            format!("Roads would meet at {degrees:.0}°: at least {min:.0}° needed")
+        }
+        CommandError::TooClose { .. } => "Too close to another road: keep at least a lot's width".into(),
+        CommandError::SelfCrossing { .. } => "The road crosses itself".into(),
+        CommandError::BuildingInTheWay { .. } => "A building is in the way. Bulldoze it first".into(),
+        CommandError::OffMap { .. } => "That's outside the map".into(),
+        CommandError::NoSuchRoad => "There's no road there".into(),
+        CommandError::NotANode => "Not a junction: point at a crossing of three or more roads".into(),
+        CommandError::TooManyArms { arms, .. } => format!("{arms} roads can't meet at one junction (6 at most)"),
     }
-}
-
-fn spawn_card(mut commands: Commands, fonts: Res<UiFonts>) {
-    let fonts = fonts.into_inner();
-    spawn_card_with(&mut commands, fonts, 0);
-    spawn_card_with(&mut commands, fonts, 1);
-}
-
-fn spawn_card_with(commands: &mut Commands, fonts: &UiFonts, which: u8) {
-    commands
-        .spawn((
-            Name::new("Context card"),
-            CardRoot(which),
-            layout(Node {
-                position_type: PositionType::Absolute,
-                min_width: px(190),
-                padding: UiRect::new(px(t::S3 + 2.0), px(t::S4 + 2.0), px(t::S3 + 1.0), px(t::S3 + 2.0)),
-                column_gap: px(t::S3 + 2.0),
-                align_items: AlignItems::Start,
-                border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(t::RADIUS_SM + 1.0)),
-                ..default()
-            }),
-            BackgroundColor(t::PANEL_RAISED),
-            BorderColor::all(t::PANEL_BORDER),
-            BoxShadow(vec![ShadowStyle {
-                color: t::alpha(Color::BLACK, 0.4),
-                x_offset: px(0),
-                y_offset: px(5),
-                spread_radius: px(0),
-                blur_radius: px(16),
-            }]),
-            // The cursor card draws over the pinned one.
-            GlobalZIndex(if which == 0 { 90 } else { 85 }),
-            UiTransform::default(),
-            Visibility::Hidden,
-        ))
-        .with_children(|card| {
-            card.spawn((
-                CardPart::IconBox,
-                CardOwner(which),
-                layout(Node {
-                    width: px(28),
-                    height: px(28),
-                    margin: UiRect::top(px(1)),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    border_radius: BorderRadius::all(px(t::RADIUS_SM)),
-                    flex_shrink: 0.0,
-                    ..default()
-                }),
-                BackgroundColor(t::alpha(t::ACCENT, 0.16)),
-            ))
-            .with_child((
-                super::widgets::icon(fonts, icon::ROAD, t::ICON_SM + 1.0, t::ACCENT),
-                CardPart::Icon,
-                CardOwner(which),
-            ));
-            card.spawn(layout(Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: px(1),
-                flex_grow: 1.0,
-                ..default()
-            }))
-            .with_children(|col| {
-                col.spawn((
-                    label(fonts, "", t::FONT_BODY, t::W_SEMIBOLD, t::TEXT),
-                    CardPart::Title,
-                    CardOwner(which),
-                    Node {
-                        margin: UiRect::bottom(px(1)),
-                        ..default()
-                    },
-                ));
-                for i in 0..MAX_ROWS {
-                    col.spawn((
-                        CardPart::Row(i),
-                        CardOwner(which),
-                        layout(Node {
-                            justify_content: JustifyContent::SpaceBetween,
-                            align_items: AlignItems::Baseline,
-                            column_gap: px(t::S5),
-                            display: Display::None,
-                            ..default()
-                        }),
-                    ))
-                    .with_children(|r| {
-                        r.spawn((
-                            label(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED),
-                            CardPart::RowLabel(i),
-                            CardOwner(which),
-                        ));
-                        r.spawn((
-                            number(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT),
-                            CardPart::RowValue(i),
-                            CardOwner(which),
-                        ));
-                    });
-                    if i == 0 {
-                        col.spawn((
-                            CardPart::Bar,
-                            CardOwner(which),
-                            layout(Node {
-                                height: px(4),
-                                width: percent(100),
-                                margin: UiRect::new(px(0), px(0), px(t::S2), px(t::S2 + 1.0)),
-                                border_radius: BorderRadius::all(px(2)),
-                                overflow: Overflow::clip(),
-                                ..default()
-                            }),
-                            BackgroundColor(t::WELL),
-                        ))
-                        .with_child((
-                            CardPart::BarFill,
-                            CardOwner(which),
-                            layout(Node {
-                                height: percent(100),
-                                width: percent(0),
-                                border_radius: BorderRadius::all(px(2)),
-                                ..default()
-                            }),
-                            BackgroundColor(t::ACCENT),
-                        ));
-                    }
-                }
-                col.spawn((
-                    label(fonts, "", t::FONT_CAPTION + 0.5, t::W_REGULAR, t::TEXT_MUTED),
-                    CardPart::Hint,
-                    CardOwner(which),
-                    Node {
-                        margin: UiRect::top(px(t::S1)),
-                        ..default()
-                    },
-                ));
-            });
-        });
 }
 
 /// Traffic band of a direction's `congestion_in`, as the overlay draws it.
@@ -302,10 +181,6 @@ impl Band {
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{} {}", format::group(n as u64), if n == 1 { one } else { many })
-}
-
 /// "Eastbound" etc. for travel from `from` to `to` (sim metres; -y is north,
 /// the top of the screen in the default view).
 pub fn heading_name(from: [f32; 2], to: [f32; 2]) -> &'static str {
@@ -336,32 +211,6 @@ pub fn kmh(mps: f32) -> String {
     format!("{} km/h", (mps * 3.6).round() as i64)
 }
 
-/// What the snap did, in the player's words (`None` for a plain point).
-pub fn snap_text(snap: &Snap, suspended: bool) -> Option<(String, Color)> {
-    if suspended {
-        return Some(("Snapping off (Alt)".into(), t::TEXT_FAINT));
-    }
-    let s = match snap.target {
-        SnapTarget::Node => "Joins the existing road".to_string(),
-        SnapTarget::Road => "Makes a junction on the road".into(),
-        SnapTarget::Extension => "Continues a road straight on".into(),
-        SnapTarget::Perpendicular => "Lined up with a junction".into(),
-        SnapTarget::Spacing => match snap.spacing {
-            Some(n) => format!("Same spacing as the next block · {n} cells"),
-            None => "Same spacing as the next block".into(),
-        },
-        SnapTarget::Parallel => match snap.spacing {
-            Some(n) => format!(
-                "Parallel · {} from the road",
-                plural(n.max(0) as usize, "cell", "cells")
-            ),
-            None => "Parallel to the road".into(),
-        },
-        SnapTarget::Angle | SnapTarget::Grid | SnapTarget::None => return None,
-    };
-    Some((s, t::ACCENT))
-}
-
 /// "Street" / "Avenue".
 pub fn road_kind_name(kind: RoadChoice) -> &'static str {
     match kind {
@@ -370,334 +219,120 @@ pub fn road_kind_name(kind: RoadChoice) -> &'static str {
     }
 }
 
-/// Price of one cell of road of `kind`.
+/// Price of 8 m of road of `kind`.
 pub fn road_price(kind: RoadChoice) -> i64 {
-    super::plan::road_kind(kind).cost_per_cell()
+    super::tools::road_kind(kind).cost_per_cell()
 }
 
-fn cost_text(cost: i64) -> String {
-    if cost > 0 { format::money(cost) } else { "free".into() }
+fn tone_color(t: Tone) -> Color {
+    match t {
+        Tone::Normal => t::TEXT,
+        Tone::Muted => t::TEXT_MUTED,
+        Tone::Accent => t::ACCENT_TEXT,
+        Tone::Good => t::POSITIVE,
+        Tone::Warn => t::WARNING,
+        Tone::Bad => t::NEGATIVE,
+    }
 }
 
-/// Card for the current tool and preview; `None` hides it.
+/// A card showing a readout.
+pub fn readout_card(r: &Readout) -> Card {
+    let (glyph, color) = match r.symbol {
+        Symbol::Road => (icon::ROAD, t::ACCENT),
+        Symbol::Curve => (icon::SPLINE, t::ACCENT),
+        Symbol::Grid => (icon::GRID, t::ACCENT),
+        Symbol::Upgrade => (icon::ROUTE, t::ACCENT),
+        Symbol::Zone(z) => (zone_icon(z), t::zone_color(z)),
+        Symbol::Bulldoze => (icon::BULLDOZE, t::NEGATIVE),
+    };
+    let mut card = Card::new(glyph, color);
+    card.title = r.title.clone();
+    if r.refused {
+        card.title_color = t::NEGATIVE;
+        card.color = t::NEGATIVE;
+    }
+    card.rows = r
+        .lines
+        .iter()
+        .map(|l| Row::new(l.label.clone(), l.value.clone(), tone_color(l.tone)))
+        .collect();
+    card.rows.truncate(MAX_ROWS);
+    card.hint = r.hint.clone();
+    card
+}
+
+/// Card for the current tool and what it points at; `None` hides it.
 pub fn tool_card(
     tool: ActiveTool,
     modes: ToolModes,
     kind: RoadChoice,
     state: &ToolState,
-    preview: &ToolPreview,
+    opts: &ToolOptions,
     world: &World,
-    hovered: Option<Cell>,
+    hovered: Option<&WorldTarget>,
 ) -> Option<Card> {
-    let mut card = Card::new(icon::INSPECT, t::ACCENT);
-    let money = world.economy.money;
     let plan = &state.plan;
-    let action = state.action;
+    let dragging = state.press.is_some_and(|p| p.moved);
     match tool {
-        ActiveTool::Inspect => return inspect_card(world, hovered?),
+        ActiveTool::Inspect => inspect_card(world, hovered?),
         ActiveTool::Road if modes.road == RoadMode::Junction => {
-            let c = hovered?;
-            let Some(n) = junction::junction_at(world, c) else {
-                card.glyph = icon::WAYPOINTS;
+            let Some(WorldTarget::Junction { node, .. }) = hovered else {
+                state.cursor.filter(|_| state.on_map)?;
+                let mut card = Card::new(icon::WAYPOINTS, t::ACCENT);
                 card.title = "Junctions".into();
                 card.rows
                     .push(Row::line("Point at a junction of three or more roads", t::TEXT_MUTED));
                 card.hint = "Lights or priority signs are chosen automatically".into();
                 return Some(card);
             };
-            let mut card = junction_card(world, n)?;
-            let setting = junction::junction(world, n).map(|j| j.setting).unwrap_or_default();
+            // The tray shows the phases and queues; the tag stays short.
+            let mut card = junction_card(world, *node)?;
+            card.rows.truncate(1);
+            let setting = junction::junction(world, *node).map(|j| j.setting).unwrap_or_default();
             card.hint = format!(
                 "Click: switch to {}",
                 setting_name(next_setting(setting)).to_lowercase()
             );
-            return Some(card);
+            Some(card)
+        }
+        ActiveTool::Road if modes.road == RoadMode::Upgrade => {
+            state.cursor.filter(|_| state.on_map || state.busy())?;
+            readout::upgrade(plan, dragging).map(|r| readout_card(&r))
         }
         ActiveTool::Road => {
-            card.glyph = icon::ROAD;
-            let name = road_kind_name(kind);
-            let snap_row = state
-                .snap
-                .as_ref()
-                .and_then(|s| snap_text(s, state.snap_off))
-                .map(|(s, c)| Row::line(s, c));
-            let Pending::Roads {
-                legs, placed, block, ..
-            } = &plan.pending
-            else {
-                hovered?;
-                card.title = if modes.road == RoadMode::Block {
-                    "Block of streets".into()
-                } else {
-                    name.into()
-                };
-                card.rows.push(Row::line(
-                    format!("{} per cell", format::money(road_price(kind))),
-                    t::TEXT_MUTED,
-                ));
-                if modes.road == RoadMode::Block {
+            let live = state.live.as_ref();
+            if state.draft.is_empty() {
+                state.cursor.filter(|_| state.on_map)?;
+                let k = super::tools::road_kind(kind);
+                let mut card = readout_card(&readout::road_idle(modes.road, k, live, opts.block_m()));
+                if world.economy.money < k.cost_per_cell() {
                     card.rows.push(Row::line(
-                        match state.block_spacing() {
-                            Some(s) => format!("Blocks of {s} cells"),
-                            None => "Outline only".into(),
-                        },
-                        t::TEXT,
+                        format!("You have {}", format::money(world.economy.money)),
+                        t::NEGATIVE,
                     ));
                 }
-                if money < road_price(kind) {
-                    card.rows
-                        .push(Row::line(format!("You have {}", format::money(money)), t::NEGATIVE));
-                }
-                card.rows.extend(snap_row);
-                card.hint = if modes.road == RoadMode::Block {
-                    "Drag a rectangle · [ ] block size · Tab mode".into()
-                } else {
-                    "Click corners, or drag one road · Tab mode".into()
-                };
                 return Some(card);
-            };
-            let cells: usize = plan.eval.cells.len();
-            if let Some(e) = plan.error() {
-                card.title = "Can't build here".into();
-                card.rows.push(Row::line(error_text(e), t::NEGATIVE));
-            } else if legs.is_empty() {
-                card.title = format!("Build {}", name.to_lowercase());
-                card.rows.push(Row::line("Move to the next corner", t::TEXT));
-            } else if plan.eval.new_pieces == 0 && plan.eval.upgraded > 0 {
-                card.title = format!("Upgrade to {}", name.to_lowercase());
-                card.rows.push(Row::line(
-                    format!(
-                        "{} · {} (the difference)",
-                        plural(plan.eval.upgraded as usize, "cell", "cells"),
-                        cost_text(plan.eval.cost)
-                    ),
-                    t::TEXT,
-                ));
-                card.rows.push(Row::line(
-                    format!(
-                        "Upkeep {}/day per cell",
-                        format::money(super::plan::road_kind(kind).upkeep_per_cell())
-                    ),
-                    t::TEXT_MUTED,
-                ));
-            } else if plan.eval.new_pieces == 0 && plan.eval.downgraded > 0 {
-                card.title = format!("Change to {}", name.to_lowercase());
-                card.rows.push(Row::line(
-                    format!(
-                        "{} · free, no refund",
-                        plural(plan.eval.downgraded as usize, "cell", "cells")
-                    ),
-                    t::TEXT,
-                ));
-            } else if plan.eval.cost == 0 {
-                card.title = "Road already built".into();
-                card.rows.push(Row::line(plural(cells, "cell", "cells"), t::TEXT_MUTED));
-            } else {
-                card.title = match block {
-                    Some(_) => format!("Build {}", plural(legs.len(), "street", "streets")),
-                    None if legs.len() > 1 => format!("Build {} · {} parts", name.to_lowercase(), legs.len()),
-                    None => format!("Build {}", name.to_lowercase()),
-                };
-                card.rows.push(Row::line(
-                    format!(
-                        "{} m · {}",
-                        format::group(plan.length_m.round() as u64),
-                        cost_text(plan.eval.cost)
-                    ),
-                    t::TEXT,
-                ));
-                if plan.eval.upgraded > 0 {
-                    card.rows.push(Row::line(
-                        format!(
-                            "Upgrades {} of street",
-                            plural(plan.eval.upgraded as usize, "cell", "cells")
-                        ),
-                        t::ACCENT,
-                    ));
-                }
-                if let Some(r) = block {
-                    card.rows.push(Row::line(
-                        match state.block_spacing() {
-                            Some(b) => format!("{} x {} cells · blocks of {b}", r.width(), r.height()),
-                            None => format!("{} x {} cells · outline only", r.width(), r.height()),
-                        },
-                        t::TEXT_MUTED,
-                    ));
-                }
             }
-            card.rows.extend(snap_row);
-            card.hint = match (action, block) {
-                (_, Some(_)) => "Release to build · [ ] block size · Esc cancels".into(),
-                (
-                    Action::Path {
-                        held: true,
-                        dragged: true,
-                    },
-                    _,
-                ) if *placed <= 1 => "Release to build · Esc cancels".into(),
-                (
-                    Action::Path {
-                        held: true,
-                        dragged: true,
-                    },
-                    _,
-                ) => "Release to add a corner".into(),
-                _ if *placed >= 2 => "Enter or double-click builds · Backspace · Esc".into(),
-                _ => "Click: corner · double-click ends · Alt: free".into(),
-            };
+            let start = state
+                .draft
+                .pieces
+                .first()
+                .map(|c| c.start())
+                .or(state.draft.points.first().copied());
+            let start_dir = start
+                .and_then(|p| fsnap::on_net(world, p, 0.5, 0.3))
+                .and_then(|on| fsnap::direction_at(world, on, None));
+            readout::road(modes.road, plan, live, start_dir, state.snap_off).map(|r| readout_card(&r))
         }
-        ActiveTool::Zone(zone) => {
-            hovered.or(preview.rect.map(|r| r.max)).or(state.last_cell)?;
-            card.glyph = zone_icon(zone);
-            card.color = t::zone_color(zone);
-            let zname = zone_name(zone).to_lowercase();
-            card.title = match (zone, modes.zone) {
-                (Some(_), ZoneMode::Rect) => format!("Zone {zname}"),
-                (Some(_), ZoneMode::Frontage) => format!("Zone {zname} along the road"),
-                (Some(_), ZoneMode::Fill) => format!("Fill the block: {zname}"),
-                (None, ZoneMode::Rect) => "Remove zoning".into(),
-                (None, ZoneMode::Frontage) => "Remove zoning along the road".into(),
-                (None, ZoneMode::Fill) => "Remove zoning in the block".into(),
-            };
-            let n = preview.cells.len();
-            let empty = match &plan.pending {
-                Pending::Zone { empty, .. } => *empty,
-                _ => None,
-            };
-            if let Some(e) = &preview.error {
-                card.rows.push(Row::line(error_text(e), t::NEGATIVE));
-            } else if let Some(e) = empty {
-                card.rows.push(Row::line(e, t::TEXT_MUTED));
-            } else if n == 0 {
-                let (s, c) = match preview.rect {
-                    Some(r) => zone_noop_reason(world, r, zone),
-                    None => (
-                        if zone.is_some() {
-                            "Nothing to zone: already zoned or built on".into()
-                        } else {
-                            "Nothing zoned here".into()
-                        },
-                        t::TEXT_MUTED,
-                    ),
-                };
-                card.rows.push(Row::line(s, c));
-            } else {
-                let what = if zone.is_some() { "free" } else { "unzoned, free" };
-                card.rows
-                    .push(Row::line(format!("{} · {what}", plural(n, "cell", "cells")), t::TEXT));
-            }
-            let dragging = matches!(action, Action::Rect { .. } | Action::Along { .. });
-            card.hint = match (modes.zone, dragging) {
-                (_, true) => "Release to apply · Right-click cancels".into(),
-                (ZoneMode::Rect, false) => "Drag a rectangle · Z type · Tab mode".into(),
-                (ZoneMode::Frontage, false) => "Click: whole side · drag along a road".into(),
-                (ZoneMode::Fill, false) => "Click to fill the block · Tab mode".into(),
-            };
+        ActiveTool::Zone(_) => {
+            state.cursor.filter(|_| state.on_map || state.busy())?;
+            readout::zone(plan, modes.zone, dragging).map(|r| readout_card(&r))
         }
         ActiveTool::Bulldoze => {
-            hovered.or(preview.rect.map(|r| r.max)).or(state.last_cell)?;
-            card.glyph = icon::BULLDOZE;
-            card.color = t::NEGATIVE;
-            card.title = match modes.bulldoze {
-                BulldozeMode::Rect => "Bulldoze".into(),
-                BulldozeMode::Road => "Remove road".into(),
-            };
-            let n = preview.cells.len();
-            let empty = match &plan.pending {
-                Pending::Bulldoze { empty, .. } => *empty,
-                _ => None,
-            };
-            if let Some(e) = &preview.error {
-                card.rows.push(Row::line(error_text(e), t::NEGATIVE));
-            } else if let Some(e) = empty {
-                card.rows.push(Row::line(e, t::TEXT_MUTED));
-            } else if n == 0 {
-                card.rows.push(Row::line("Nothing to remove", t::TEXT_MUTED));
-            } else {
-                card.rows.push(Row::line(
-                    format!("{} · {}", plural(n, "cell", "cells"), cost_text(preview.cost)),
-                    t::TEXT,
-                ));
-                let (b, r) = (plan.doomed_buildings.len(), plan.doomed_road.len());
-                if b > 0 {
-                    let mut s = format!("Removes {}", plural(b, "building", "buildings"));
-                    if r > 0 {
-                        s += &format!(" and {}", plural(r, "road cell", "road cells"));
-                    }
-                    card.rows.push(Row::line(s, t::NEGATIVE));
-                }
-            }
-            let dragging = matches!(action, Action::Rect { .. } | Action::Along { .. });
-            card.hint = match (modes.bulldoze, dragging) {
-                (_, true) => "Release to remove · Right-click cancels".into(),
-                (BulldozeMode::Rect, false) => "Drag over roads and buildings · Tab mode".into(),
-                (BulldozeMode::Road, false) => "Click: stretch · drag along: part".into(),
-            };
+            state.cursor.filter(|_| state.on_map || state.busy())?;
+            readout::bulldoze(plan).map(|r| readout_card(&r))
         }
     }
-    if plan.error().is_some() || preview.error.is_some() {
-        card.title_color = t::NEGATIVE;
-        card.color = t::NEGATIVE;
-        card.glyph = icon::ALERT;
-    }
-    card.rows.truncate(MAX_ROWS);
-    Some(card)
-}
-
-/// Why zoning `rect` with `zone` (or removing zoning, `None`) changes
-/// nothing. The sim only (un)zones empty cells that are not already that
-/// zone, and zones them only within `ZONE_ROAD_REACH` of a road; this names
-/// whichever of those rules stopped it, judged cell by cell.
-pub fn zone_noop_reason(world: &World, rect: CellRect, zone: Option<Zone>) -> (String, Color) {
-    let Some(rect) = rect.clamp_to_map() else {
-        return ("That's outside the map".into(), t::TEXT_MUTED);
-    };
-    let (mut road, mut built, mut same, mut far) = (0usize, 0usize, 0usize, 0usize);
-    for c in rect.cells() {
-        let Some(cd) = world.grid.get(c) else { continue };
-        match cd.occupant {
-            Occupant::Road => road += 1,
-            Occupant::Building(_) => built += 1,
-            Occupant::Empty if cd.zone == zone => same += 1,
-            Occupant::Empty => far += 1,
-        }
-    }
-    let total = road + built + same + far;
-    let one = rect.width() == 1 && rect.height() == 1;
-    if far > 0 {
-        // Only zoning can be refused for distance (unzoning never is).
-        return (
-            format!(
-                "Too far from a road (zones need one within {} cells)",
-                balance::ZONE_ROAD_REACH
-            ),
-            t::WARNING,
-        );
-    }
-    let already = match zone {
-        Some(z) => format!("Already {}", zone_name(Some(z)).to_lowercase()),
-        None => "Not zoned".into(),
-    };
-    let s = if road == total {
-        if one {
-            "Roads can't be zoned; zone the land beside them".into()
-        } else {
-            "Only road here; zone the land beside it".into()
-        }
-    } else if built == total {
-        if one {
-            "A building stands here; bulldoze it to rezone".into()
-        } else {
-            "Buildings stand here; bulldoze them to rezone".into()
-        }
-    } else if same == total {
-        already
-    } else if same > 0 {
-        format!("{already}; the rest is road or built on")
-    } else {
-        "Only roads and buildings here".into()
-    };
-    (s, t::TEXT_MUTED)
 }
 
 fn zone_slot(z: Zone) -> usize {
@@ -708,21 +343,34 @@ fn zone_slot(z: Zone) -> usize {
     }
 }
 
-/// Inspect card for whatever is on `cell`.
-pub fn inspect_card(world: &World, cell: Cell) -> Option<Card> {
-    let cd = world.grid.get(cell)?;
-    match cd.occupant {
-        Occupant::Building(id) => building_card(world, id, world.buildings.get(id)?),
-        Occupant::Road => road_card(world, cell),
-        Occupant::Empty => {
-            let zone = cd.zone?;
-            let mut card = Card::new(zone_icon(Some(zone)), t::zone_color(Some(zone)));
-            card.title = format!("{} zone", zone_name(Some(zone)));
-            card.rows.push(Row::line("Empty lot", t::TEXT_MUTED));
-            card.hint = "Buildings grow here while demand is positive".into();
-            Some(card)
-        }
+/// Inspect card for a thing in the world.
+pub fn inspect_card(world: &World, target: &WorldTarget) -> Option<Card> {
+    match target {
+        WorldTarget::Building(id) => building_card(world, *id, world.buildings.get(*id)?),
+        WorldTarget::Road(stretch) => road_card(world, &stretch.segments),
+        WorldTarget::Junction { node, .. } => junction_card(world, *node),
+        WorldTarget::Vehicle(v) => vehicle_card(world, *v),
     }
+}
+
+/// A car or truck: who is in it and where it goes.
+fn vehicle_card(world: &World, id: citysim_sim::VehicleId) -> Option<Card> {
+    let v = world.vehicles.get(id)?;
+    let (title, lines) = super::people::vehicle_lines(world, id)?;
+    let truck = world
+        .traffic
+        .trips
+        .get(id)
+        .is_some_and(|t| t.purpose == citysim_sim::TripPurpose::Goods);
+    let mut card = Card::new(if truck { icon::TRUCK } else { icon::CAR }, t::ACCENT);
+    card.title = title;
+    for l in lines.iter().take(MAX_ROWS - 1) {
+        card.rows
+            .push(Row::new(l.label.clone(), l.value.clone(), tone_color(l.tone)));
+    }
+    card.rows.push(Row::new("Speed", kmh(v.speed), t::TEXT_MUTED));
+    card.hint = "Click to see who is in it".into();
+    Some(card)
 }
 
 fn building_card(world: &World, id: BuildingId, b: &Building) -> Option<Card> {
@@ -786,7 +434,7 @@ fn building_card(world: &World, id: BuildingId, b: &Building) -> Option<Card> {
     }
     // Deep lots: the sim folds the second row into the lot of the building
     // that fronts the road.
-    let (w, h) = (b.footprint.width(), b.footprint.height());
+    let (w, h) = b.size();
     if w * h > 1 {
         let side = match b.facing {
             citysim_sim::Facing::PlusX => "east",
@@ -846,21 +494,9 @@ fn building_card(world: &World, id: BuildingId, b: &Building) -> Option<Card> {
     Some(card)
 }
 
-fn road_card(world: &World, cell: Cell) -> Option<Card> {
-    if let Some(n) = junction::junction_at(world, cell)
-        && let Some(card) = junction_card(world, n)
-    {
-        return Some(card);
-    }
+/// A stretch of road (its segments) with live traffic numbers.
+fn road_card(world: &World, ids: &[citysim_sim::SegmentId]) -> Option<Card> {
     let roads = &world.roads;
-    let pos = cell.center();
-    let ids: Vec<_> = if let Some(s) = roads.segment_through(pos) {
-        vec![s]
-    } else if let Some(n) = roads.node_at(pos) {
-        roads.nodes[n].segments.clone()
-    } else {
-        Vec::new()
-    };
     let segs: Vec<&RoadSegment> = ids.iter().filter_map(|&s| roads.segments.get(s)).collect();
     if segs.is_empty() {
         return None;
@@ -870,11 +506,11 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
     let band = Band::of(worst);
     let mut card = Card::new(icon::ROAD, band.color());
     let avenue = segs.iter().any(|s| s.kind == RoadKind::Avenue);
-    card.title = match (highway, avenue, segs.len()) {
-        (true, ..) => "Highway".into(),
-        (false, _, n) if n >= 3 => format!("Intersection · {n} ways"),
-        (false, true, _) => "Avenue · 2 lanes each way".into(),
-        _ => "Street · 1 lane each way".into(),
+    let length: f32 = segs.iter().map(|s| s.length).sum();
+    card.title = match (highway, avenue) {
+        (true, _) => "Highway".into(),
+        (false, true) => format!("Avenue · 2 lanes each way · {}", readout::metres(length)),
+        _ => format!("Street · 1 lane each way · {}", readout::metres(length)),
     };
     let verdict = match band {
         Band::Free => "Free flow",
@@ -894,12 +530,10 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
         let d = RoadSegment::dir(forward);
         let c = s.congestion_in(forward);
         let b = Band::of(c);
-        let mut value = format!(
-            "{} / {} · {}",
-            format::group(s.load[d].round() as u64),
-            plural(s.capacity[d].floor().max(1.0) as usize, "car", "cars"),
-            b.word()
-        );
+        // "30 cars, room for 26 · jammed"; on two lanes "(12 + 18)" after
+        // the count, kerb lane first.
+        let n = s.load[d].round() as u64;
+        let mut count = format!("{} {}", format::group(n), if n == 1 { "car" } else { "cars" });
         let lanes = s.lane_count() as usize;
         if lanes > 1 {
             let id = ids.iter().copied().find(|&i| roads.segments.get(i) == Some(s));
@@ -907,32 +541,26 @@ fn road_card(world: &World, cell: Cell) -> Option<Card> {
                 .and_then(|i| lane_cars.get(&(i, forward)).copied())
                 .unwrap_or_default();
             let parts: Vec<String> = (0..lanes.min(4)).map(|l| per[l].to_string()).collect();
-            value = format!("lanes {} · {value}", parts.join("|"));
+            count = format!("{count} ({})", parts.join(" + "));
         }
+        let value = format!(
+            "{count}, room for {} · {}",
+            format::group(s.capacity[d].floor().max(1.0) as u64),
+            b.word()
+        );
         Row::new(name, value, b.color())
     };
-    if let [s] = segs[..] {
+    // Both directions of the busiest piece of the stretch.
+    if let Some(s) = segs
+        .iter()
+        .copied()
+        .max_by(|a, b| a.congestion().total_cmp(&b.congestion()))
+    {
         let (pa, pb) = (roads.node_pos(s.a), roads.node_pos(s.b));
-        card.rows.push(dir_row(heading_name(pa, pb), s, true));
+        let busiest = if segs.len() > 1 { " (busiest part)" } else { "" };
+        card.rows
+            .push(dir_row(&format!("{}{busiest}", heading_name(pa, pb)), s, true));
         card.rows.push(dir_row(heading_name(pb, pa), s, false));
-    } else {
-        // At a node: the fullest approach direction among its roads.
-        let mut best: Option<(f32, usize, bool)> = None;
-        for (i, s) in segs.iter().enumerate() {
-            for forward in [true, false] {
-                let c = s.congestion_in(forward);
-                if best.is_none_or(|(b, ..)| c > b) {
-                    best = Some((c, i, forward));
-                }
-            }
-        }
-        if let Some((_, i, forward)) = best {
-            let s = segs[i];
-            let (pa, pb) = (roads.node_pos(s.a), roads.node_pos(s.b));
-            let (from, to) = if forward { (pa, pb) } else { (pb, pa) };
-            card.rows
-                .push(dir_row(&format!("Fullest: {}", heading_name(from, to)), s, forward));
-        }
     }
     // Cars on these segments right now (the sim's per-direction loads are
     // vehicle counts) and how fast they actually go.
@@ -1085,7 +713,7 @@ pub fn junction_card(world: &World, n: citysim_sim::NodeId) -> Option<Card> {
             format!("{now} {stage}"),
             t::TEXT,
         ));
-        card.rows.push(Row::new("Cycle", names.join(" → "), t::TEXT_MUTED));
+        card.rows.push(Row::new("Cycle", names.join(" › "), t::TEXT_MUTED));
     }
     for (i, a) in view.approaches.iter().enumerate() {
         let from = state.arms.get(i).map(|arm| compass(arm.dir)).unwrap_or("?");
@@ -1141,96 +769,274 @@ pub fn hours_text(ticks: u64) -> String {
 /// `CONGESTION_JAM`).
 pub const JAM_CRAWL_MPS: f32 = 12.0 / 3.6;
 
+fn tag_style(refused: bool) -> PlateStyle {
+    if refused {
+        PlateStyle::fill(t::NEGATIVE_FILL_TOP, t::NEGATIVE_FILL_BOTTOM, t::NEGATIVE)
+    } else {
+        PlateStyle::fill(t::PLATE_BOTTOM, t::PLATE_BOTTOM, t::ACCENT)
+    }
+}
+
+fn spawn_tag(mut commands: Commands, fonts: Res<UiFonts>) {
+    let fonts = fonts.into_inner();
+    commands
+        .spawn((
+            Name::new("Cursor readout"),
+            TagRoot,
+            layout(Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            }),
+            GlobalZIndex(90),
+            UiTransform::default(),
+            Visibility::Hidden,
+        ))
+        .with_children(|r| {
+            r.spawn((
+                TagPlate,
+                plate_node(
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::new(px(12), px(14), px(5), px(7)),
+                        row_gap: px(2),
+                        max_width: px(420),
+                        ..default()
+                    },
+                    UiRect::left(px(4)),
+                    [0.0, 0.0, 9.0, 0.0],
+                ),
+                PlateAnim::new(tag_style(false)),
+                Pickable::IGNORE,
+            ))
+            .with_children(|p| {
+                p.spawn(layout(Node {
+                    align_items: AlignItems::Center,
+                    column_gap: px(10),
+                    ..default()
+                }))
+                .with_children(|top| {
+                    top.spawn((
+                        Text::new(""),
+                        fonts.text(13.0, t::W_SEMIBOLD),
+                        t::caps_spacing(13.0, 0.04),
+                        TextColor(t::TEXT),
+                        TextLayout::no_wrap(),
+                        Pickable::IGNORE,
+                        TagPart::Title,
+                    ));
+                    top.spawn((figure(fonts, "", 16.0, t::ACCENT_TEXT), TagPart::Price));
+                });
+                for i in 0..TAG_LINES {
+                    p.spawn((
+                        label(fonts, "", 12.0, t::W_MEDIUM, t::TEXT_MUTED),
+                        TagPart::Line(i),
+                        Node {
+                            display: Display::None,
+                            ..default()
+                        },
+                    ));
+                }
+                p.spawn((
+                    label(fonts, "", 11.0, t::W_MEDIUM, t::TEXT_FAINT),
+                    TagPart::Hint,
+                    Node {
+                        display: Display::None,
+                        margin: UiRect::top(px(1)),
+                        ..default()
+                    },
+                ));
+            });
+        });
+}
+
+/// What the tag shows: title, price, lines (text, colour), hint, refused.
+#[derive(Debug, Clone, PartialEq)]
+struct Tag {
+    title: String,
+    price: String,
+    lines: Vec<(String, Color)>,
+    hint: String,
+    refused: bool,
+}
+
+/// A card as a tag: the price row moves next to the title, short rows
+/// read as "label value", the rest as sentences.
+fn tag_of(card: &Card) -> Tag {
+    let mut price = String::new();
+    let mut lines = Vec::new();
+    let mut title = card.title.clone();
+    let mut measured = false;
+    for r in &card.rows {
+        // The road's length and tightest bend join the title, as in
+        // "Avenue · curve · 212 m · radius 64 m".
+        if r.label == "Length" {
+            title = format!("{title} · {}", r.value.split(" · ").next().unwrap_or_default());
+            measured = true;
+            continue;
+        }
+        if r.label == "Tightest bend" {
+            let rad = r.value.split(" · ").next().unwrap_or_default();
+            title = format!("{title} · {rad}");
+            if r.color != t::TEXT {
+                lines.push((r.value.clone(), r.color));
+            }
+            continue;
+        }
+        if r.label == "Price" && price.is_empty() && r.color != t::TEXT_MUTED {
+            price = r.value.split(" · ").next().unwrap_or_default().to_string();
+            if let Some(rest) = r.value.split_once(" · ") {
+                lines.push((rest.1.to_string(), t::TEXT_MUTED));
+            }
+            continue;
+        }
+        let text = if r.label.is_empty() {
+            r.value.clone()
+        } else {
+            format!("{} · {}", r.label, r.value)
+        };
+        let color = if r.color == t::TEXT { t::SLOT_INK } else { r.color };
+        lines.push((text, color));
+    }
+    // Refusals and snaps first: they matter most at the cursor.
+    lines.sort_by_key(|(_, c)| {
+        if *c == t::NEGATIVE {
+            0
+        } else if *c == t::ACCENT_TEXT {
+            1
+        } else {
+            2
+        }
+    });
+    lines.truncate(TAG_LINES);
+    Tag {
+        title,
+        price,
+        lines,
+        // How to use the tool, until there is something to measure.
+        hint: if measured { String::new() } else { card.hint.clone() },
+        refused: card.title_color == t::NEGATIVE,
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn update_card(
+fn update_tag(
     time: Res<Time<Real>>,
     tool: Res<ActiveTool>,
     (modes, kind): (Res<ToolModes>, Res<RoadChoice>),
     state: Res<ToolState>,
-    preview: Res<ToolPreview>,
-    hovered: Res<HoveredCell>,
-    over_ui: Res<PointerOverUi>,
-    ui: Res<UiState>,
-    sim: Res<SimWorld>,
-    ui_scale: Res<UiScale>,
+    (preview, opts, over_ui, ui): (Res<ToolPreview>, Res<ToolOptions>, Res<PointerOverUi>, Res<UiState>),
+    (sim, ui_scale): (Res<SimWorld>, Res<UiScale>),
     window: Query<&Window, With<PrimaryWindow>>,
-    mut root: Query<
-        (
-            &mut Node,
-            &mut Visibility,
-            &ComputedNode,
-            &mut UiTransform,
-            &mut BorderColor,
-            &CardRoot,
-        ),
-        Without<CardPart>,
-    >,
-    mut parts: CardParts,
-    highlight: Res<WorldHighlight>,
+    mut root: Query<(&mut Node, &mut Visibility, &mut UiTransform), With<TagRoot>>,
+    plate: Query<&ComputedNode, With<TagPlate>>,
+    mut plate_anim: Query<&mut PlateAnim, With<TagPlate>>,
+    mut parts: Query<(&TagPart, &mut Text, &mut TextColor, &mut Node), Without<TagRoot>>,
+    (highlight, panel): (Res<WorldHighlight>, Res<super::panel::PanelArea>),
     mut slide: Local<f32>,
-    mut cache: Local<CardCache>,
+    mut cache: Local<TagCache>,
 ) {
-    let Some((mut node, mut vis, computed, mut tf, mut border, _)) = root.iter_mut().find(|r| *r.5 == CardRoot(0))
-    else {
+    let Ok((mut node, mut vis, mut tf)) = root.single_mut() else {
         return;
     };
     let cursor = window
         .single()
         .ok()
         .and_then(|w| w.cursor_position().map(|c| (c, Vec2::new(w.width(), w.height()))));
-    // Rebuild the card only when what it describes changed, and a few
-    // times a second for live numbers; texts are touched only on change.
-    // The pinned card already shows the inspected thing under the cursor.
-    let on_pinned = *tool == ActiveTool::Inspect
+    // The side panel already shows what is selected.
+    let on_selected = *tool == ActiveTool::Inspect
         && highlight.selected.is_some()
         && highlight.hovered.is_some()
         && highlight.selected == highlight.hovered;
-    // Over the interface the buttons' own tooltips speak (a path in
-    // progress keeps its corners; the card comes back over the map).
-    let hidden = ui.menu_open || over_ui.0 || on_pinned;
-    let key = (*tool, *modes, *kind, state.action, hovered.0, hidden, sim.generation);
+    let hidden = ui.menu_open || over_ui.0 || on_selected;
+    let key = (*tool, *modes, *kind, highlight.hovered.clone(), hidden, sim.generation);
     cache.age += time.delta_secs();
-    if cache.key != Some(key) || preview.is_changed() || state.is_changed() || cache.age >= CARD_REFRESH_S {
+    if cache.key.as_ref() != Some(&key) || preview.is_changed() || state.is_changed() || cache.age >= CARD_REFRESH_S {
         cache.key = Some(key);
         cache.age = 0.0;
-        cache.card = if hidden {
+        cache.tag = if hidden {
             None
         } else {
-            tool_card(*tool, *modes, *kind, &state, &preview, &sim.world, hovered.0)
+            tool_card(
+                *tool,
+                *modes,
+                *kind,
+                &state,
+                &opts,
+                &sim.world,
+                highlight.hovered.as_ref(),
+            )
+            .map(|c| tag_of(&c))
         };
     }
-    let (Some(card), Some((cursor, win))) = (cache.card.clone(), cursor) else {
+    let (Some(tag), Some((cursor, win))) = (cache.tag.clone(), cursor) else {
         vis.set_if_neq(Visibility::Hidden);
         cache.shown = None;
         *slide = 0.0;
         return;
     };
-    if cache.shown.as_ref() != Some(&card) {
-        apply_card(&card, &mut parts, 0);
-        cache.shown = Some(card.clone());
+    if cache.shown.as_ref() != Some(&tag) {
+        if let Ok(mut a) = plate_anim.single_mut() {
+            let st = tag_style(tag.refused);
+            if a.style != st {
+                a.style = st;
+            }
+        }
+        for (part, mut text, mut color, mut n) in &mut parts {
+            let (v, c, show) = match *part {
+                TagPart::Title => (tag.title.clone(), t::TEXT, true),
+                TagPart::Price => (
+                    tag.price.clone(),
+                    if tag.refused { t::NEGATIVE } else { t::ACCENT_TEXT },
+                    !tag.price.is_empty(),
+                ),
+                TagPart::Line(i) => match tag.lines.get(i) {
+                    Some((l, c)) => (
+                        l.clone(),
+                        if tag.refused && *c == t::NEGATIVE { t::TEXT } else { *c },
+                        true,
+                    ),
+                    None => (String::new(), t::TEXT_MUTED, false),
+                },
+                TagPart::Hint => (tag.hint.clone(), t::TEXT_FAINT, !tag.hint.is_empty()),
+            };
+            if text.0 != v {
+                text.0 = v;
+            }
+            color.set_if_neq(TextColor(c));
+            let d = if show { Display::Flex } else { Display::None };
+            if n.display != d {
+                n.display = d;
+            }
+        }
+        cache.shown = Some(tag.clone());
     }
-    let invalid = card.title_color == t::NEGATIVE;
-    border.set_if_neq(BorderColor::all(if invalid {
-        t::alpha(t::NEGATIVE, 0.55)
-    } else {
-        t::PANEL_BORDER
-    }));
-    // Place beside the cursor, flipping to stay inside the window.
+    // Beside the cursor, flipping to stay inside the window and clear of
+    // the bar and its tray.
     let scale = ui_scale.0.max(0.01);
     let cursor = cursor / scale;
     let screen = win / scale;
-    let size = computed.size * computed.inverse_scale_factor;
-    let off = Vec2::new(22.0, 22.0);
+    let size = plate
+        .single()
+        .map(|c| c.size * c.inverse_scale_factor)
+        .unwrap_or(Vec2::ZERO);
+    let off = Vec2::new(22.0, 20.0);
     let mut pos = cursor + off;
-    if pos.x + size.x > screen.x - t::EDGE {
+    if pos.x + size.x > screen.x - 8.0 {
         pos.x = cursor.x - off.x - size.x;
     }
-    // Keep clear of the toolbar and, for building tools, its options bar.
-    let options_bar = if *tool == ActiveTool::Inspect { 0.0 } else { 52.0 };
-    if pos.y + size.y > screen.y - t::EDGE - t::TOOL_BUTTON - 2.0 * t::EDGE - options_bar {
+    let tray = if *tool == ActiveTool::Inspect { 0.0 } else { t::TRAY_H };
+    if pos.y + size.y > screen.y - t::BAR_H - tray - 8.0 {
         pos.y = cursor.y - off.y * 0.6 - size.y;
     }
-    pos = pos.max(Vec2::splat(t::EDGE));
+    // Clear of the side panel.
+    if let Some(r) = panel.0
+        && pos.x + size.x > r.min.x - 8.0
+        && pos.y < r.max.y
+        && pos.y + size.y > r.min.y
+    {
+        pos.x = (cursor.x - off.x - size.x).min(r.min.x - 8.0 - size.x);
+    }
+    pos = pos.max(Vec2::new(8.0, 64.0));
     let (left, top) = (px(pos.x.round()), px(pos.y.round()));
     if node.left != left || node.top != top {
         node.left = left;
@@ -1248,197 +1054,25 @@ fn update_card(
     }
 }
 
-type CardKey = (ActiveTool, ToolModes, RoadChoice, Action, Option<Cell>, bool, u64);
+type CardKey = (ActiveTool, ToolModes, RoadChoice, Option<WorldTarget>, bool, u64);
 
-/// Card for a pinned target and the world point it hangs from (sim m).
-fn pinned_card(world: &World, target: &WorldTarget) -> Option<(Card, [f32; 2])> {
-    match target {
-        WorldTarget::Building(id) => {
-            let b = world.buildings.get(*id)?;
-            let (lo, hi) = (b.footprint.min.center(), b.footprint.max.center());
-            Some((
-                building_card(world, *id, b)?,
-                [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5],
-            ))
-        }
-        WorldTarget::Junction { node, pos } => Some((junction_card(world, *node)?, *pos)),
-        WorldTarget::Road(stretch) => {
-            let mid = *stretch.cells.get(stretch.cells.len() / 2)?;
-            Some((road_card(world, mid)?, mid.center()))
-        }
-    }
-}
-
-/// The inspected (clicked) building, road or junction keeps a card next to
-/// it, following it on screen, until Escape or a click elsewhere.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn update_pinned(
-    time: Res<Time<Real>>,
-    highlight: Res<WorldHighlight>,
-    tool: Res<ActiveTool>,
-    ui: Res<UiState>,
-    sim: Res<SimWorld>,
-    ui_scale: Res<UiScale>,
-    window: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform), With<crate::shared::WorldCamera>>,
-    mut root: Query<(&mut Node, &mut Visibility, &ComputedNode, &CardRoot), Without<CardPart>>,
-    mut parts: CardParts,
-    mut cache: Local<(f32, Option<Card>, Option<WorldTarget>)>,
-) {
-    let Some((mut node, mut vis, computed, _)) = root.iter_mut().find(|r| *r.3 == CardRoot(1)) else {
-        return;
-    };
-    let target = highlight
-        .selected
-        .clone()
-        .filter(|_| !ui.menu_open && *tool == ActiveTool::Inspect);
-    let Some(target) = target else {
-        vis.set_if_neq(Visibility::Hidden);
-        cache.1 = None;
-        return;
-    };
-    cache.0 += time.delta_secs();
-    let Some((mut card, at)) = pinned_card(&sim.world, &target) else {
-        vis.set_if_neq(Visibility::Hidden);
-        return;
-    };
-    card.hint = "Pinned · Esc or click elsewhere to let go".into();
-    if cache.2.as_ref() != Some(&target) || cache.0 >= CARD_REFRESH_S || cache.1.is_none() {
-        cache.0 = 0.0;
-        cache.2 = Some(target);
-        if cache.1.as_ref() != Some(&card) {
-            apply_card(&card, &mut parts, 1);
-            cache.1 = Some(card);
-        }
-    }
-    let (Ok(win), Ok((cam, cam_tf))) = (window.single(), cameras.single()) else {
-        return;
-    };
-    let Ok(screen_pt) = cam.world_to_viewport(cam_tf, crate::shared::sim_to_world(at, 3.0)) else {
-        vis.set_if_neq(Visibility::Hidden);
-        return;
-    };
-    let scale = ui_scale.0.max(0.01);
-    let p = screen_pt / scale;
-    let screen = Vec2::new(win.width(), win.height()) / scale;
-    let size = computed.size * computed.inverse_scale_factor;
-    let mut pos = Vec2::new(p.x + 18.0, p.y - size.y - 18.0);
-    if pos.x + size.x > screen.x - t::EDGE {
-        pos.x = p.x - 18.0 - size.x;
-    }
-    let top = t::BELOW_TOP_BAR;
-    let bottom = screen.y - t::EDGE - t::TOOL_BUTTON - 3.0 * t::EDGE;
-    pos.y = pos.y.clamp(top, (bottom - size.y).max(top));
-    pos.x = pos.x.clamp(t::EDGE, (screen.x - t::EDGE - size.x).max(t::EDGE));
-    let (left, topv) = (px(pos.x.round()), px(pos.y.round()));
-    if node.left != left || node.top != topv {
-        node.left = left;
-        node.top = topv;
-    }
-    if size.x > 0.0 {
-        vis.set_if_neq(Visibility::Inherited);
-    }
-}
-
-/// Last card built by `update_card` and what it was built from.
+/// Last tag built by `update_tag` and what it was built from.
 #[derive(Default)]
-struct CardCache {
+struct TagCache {
     key: Option<CardKey>,
     age: f32,
-    card: Option<Card>,
-    /// Card currently written into the entities.
-    shown: Option<Card>,
+    tag: Option<Tag>,
+    /// Tag currently written into the entities.
+    shown: Option<Tag>,
 }
 
-/// Seconds between refreshes of the live numbers on a card.
+/// Seconds between refreshes of the live numbers on the tag.
 const CARD_REFRESH_S: f32 = 0.25;
-
-type CardParts<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static CardPart,
-        &'static CardOwner,
-        Option<&'static mut Text>,
-        Option<&'static mut TextColor>,
-        Option<&'static mut BackgroundColor>,
-        Option<&'static mut Node>,
-    ),
-    Without<CardRoot>,
->;
-
-fn apply_card(card: &Card, parts: &mut CardParts, owner: u8) {
-    for (part, of, text, color, bg, pnode) in parts.iter_mut() {
-        if of.0 != owner {
-            continue;
-        }
-        match *part {
-            CardPart::IconBox => {
-                if let Some(mut bg) = bg {
-                    bg.set_if_neq(BackgroundColor(t::alpha(card.color, 0.16)));
-                }
-            }
-            CardPart::Icon => set_text(text, color, card.glyph.to_string(), card.color),
-            CardPart::Title => set_text(text, color, card.title.clone(), card.title_color),
-            CardPart::Row(i) => set_display(pnode, i < card.rows.len()),
-            CardPart::RowLabel(i) => {
-                if let Some(r) = card.rows.get(i) {
-                    set_display(pnode, !r.label.is_empty());
-                    set_text(text, color, r.label.clone(), t::TEXT_MUTED);
-                }
-            }
-            CardPart::RowValue(i) => {
-                if let Some(r) = card.rows.get(i) {
-                    set_text(text, color, r.value.clone(), r.color);
-                }
-            }
-            CardPart::Hint => {
-                let show = !card.hint.is_empty();
-                set_text(text, color, card.hint.clone(), t::TEXT_FAINT);
-                set_display(pnode, show);
-            }
-            CardPart::Bar => set_display(pnode, card.bar.is_some() && !card.rows.is_empty()),
-            CardPart::BarFill => {
-                if let Some((f, c)) = card.bar {
-                    if let Some(mut bg) = bg {
-                        bg.set_if_neq(BackgroundColor(c));
-                    }
-                    if let Some(mut n) = pnode {
-                        let w = percent((f.clamp(0.0, 1.0) * 100.0).max(2.0));
-                        if n.width != w {
-                            n.width = w;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn set_text(text: Option<Mut<Text>>, color: Option<Mut<TextColor>>, s: String, c: Color) {
-    if let Some(mut text) = text
-        && text.0 != s
-    {
-        text.0 = s;
-    }
-    if let Some(mut color) = color {
-        color.set_if_neq(TextColor(c));
-    }
-}
-
-fn set_display(node: Option<Mut<Node>>, show: bool) {
-    if let Some(mut n) = node {
-        let d = if show { Display::Flex } else { Display::None };
-        if n.display != d {
-            n.display = d;
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use citysim_sim::Command;
+    use citysim_sim::{Cell, Command};
 
     #[test]
     fn bands_follow_the_shared_thresholds() {
@@ -1474,96 +1108,12 @@ mod tests {
             kind: citysim_sim::RoadKind::Street,
         })
         .unwrap();
-        let card = inspect_card(&w, Cell::new(20, 128)).expect("road card");
-        assert_eq!(card.title, "Street · 1 lane each way");
+        let t = super::super::tools::target_at(&w, Cell::new(20, 128).center(), 4.0).expect("road");
+        let card = inspect_card(&w, &t).expect("road card");
+        assert_eq!(card.title, "Street · 1 lane each way · 152 m");
         assert_eq!(card.rows[0].value, "Free flow");
-        assert!(card.rows.iter().any(|r| r.label == "Eastbound"));
+        assert!(card.rows.iter().any(|r| r.label.starts_with("Eastbound")));
         assert!(card.rows.iter().any(|r| r.label == "Westbound"));
-    }
-
-    #[test]
-    fn broke_road_preview_shows_the_sims_reason() {
-        let mut w = World::new(1);
-        w.economy.money = -300;
-        let cmd = Command::BuildRoad {
-            from: Cell::new(11, 128),
-            to: Cell::new(20, 128),
-            kind: citysim_sim::RoadKind::Street,
-        };
-        let p = super::super::tools::compute_preview(&w, cmd);
-        let mut state = ToolState::default();
-        state.path = vec![Cell::new(11, 128)];
-        state.action = Action::Path {
-            held: false,
-            dragged: false,
-        };
-        let pending = Pending::Roads {
-            points: vec![Cell::new(11, 128), Cell::new(20, 128)],
-            placed: 1,
-            legs: vec![(Cell::new(11, 128), Cell::new(20, 128))],
-            block: None,
-        };
-        state.plan = super::super::tools::evaluate(&w, &pending, RoadChoice::Street);
-        let card = tool_card(
-            ActiveTool::Road,
-            ToolModes::default(),
-            RoadChoice::Street,
-            &state,
-            &p,
-            &w,
-            Some(Cell::new(20, 128)),
-        )
-        .expect("card");
-        let cost = format::money(9 * balance::ROAD_COST_PER_CELL);
-        let want = format!("Not enough money: costs {cost}, you have \u{2212}$300");
-        assert_eq!(card.rows[0].value, want, "{:?}", card.rows);
-    }
-
-    fn zone_card(w: &World, cell: Cell, zone: Option<Zone>) -> String {
-        let cmd = Command::SetZone {
-            min: cell,
-            max: cell,
-            zone,
-        };
-        let p = super::super::tools::compute_preview(w, cmd);
-        let state = ToolState::default();
-        let card = tool_card(
-            ActiveTool::Zone(zone),
-            ToolModes::default(),
-            RoadChoice::Street,
-            &state,
-            &p,
-            w,
-            Some(cell),
-        )
-        .expect("card");
-        card.rows[0].value.clone()
-    }
-
-    #[test]
-    fn zone_hover_says_why_nothing_changes() {
-        let mut w = World::new(1);
-        w.apply(Command::BuildRoad {
-            from: Cell::new(11, 128),
-            to: Cell::new(30, 128),
-            kind: citysim_sim::RoadKind::Street,
-        })
-        .unwrap();
-        let r = Some(Zone::Residential);
-        let lot = Cell::new(20, 129);
-        assert_eq!(zone_card(&w, lot, r), "1 cell · free");
-        w.apply(Command::SetZone {
-            min: lot,
-            max: lot,
-            zone: r,
-        })
-        .unwrap();
-        // The reported bug: an already zoned lot is not "needs a road".
-        assert_eq!(zone_card(&w, lot, r), "Already residential");
-        assert!(zone_card(&w, Cell::new(20, 128), r).starts_with("Roads can't be zoned"));
-        assert!(zone_card(&w, Cell::new(20, 140), r).starts_with("Too far from a road"));
-        assert_eq!(zone_card(&w, Cell::new(20, 130), None), "Not zoned");
-        assert_eq!(zone_card(&w, lot, None), "1 cell · unzoned, free");
     }
 
     #[test]

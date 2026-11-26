@@ -20,13 +20,16 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 
+use crate::citizens::{CitizenId, Location, TravelMode};
 use crate::derived::{Access, access_pos};
 use crate::idmap::key_index;
 use crate::junction::{self, JunctionState, Turn};
 use crate::path::{self, Target};
 use crate::roads::RoadSegment;
 use crate::side::SideTable;
-use crate::{HouseholdId, NodeId, RoadNetwork, SegmentId, TICKS_PER_SECOND, World, balance, geom, households};
+use crate::{
+    BuildingId, HouseholdId, NodeId, RoadNetwork, SegmentId, TICKS_PER_SECOND, World, balance, geom, households,
+};
 
 new_key_type! {
     /// Stable id of a [`Vehicle`].
@@ -115,11 +118,31 @@ pub enum TripPurpose {
     MoveIn,
     /// Household that left town driving out to the highway.
     MoveOut,
-    /// Shopping run between a home and a shop (no household attached).
+    /// Shopping run between a home (or workplace) and a shop, both ways.
     Shopping,
     /// Goods delivery: industry to shop, or to / from the highway. Renderers
     /// may draw these as trucks (look up `world.traffic.trips`).
     Goods,
+    /// A night out: to a leisure venue (any commercial building) and back.
+    Leisure,
+}
+
+impl TripPurpose {
+    pub const ALL: [TripPurpose; 7] = [
+        TripPurpose::ToWork,
+        TripPurpose::ToHome,
+        TripPurpose::MoveIn,
+        TripPurpose::MoveOut,
+        TripPurpose::Shopping,
+        TripPurpose::Goods,
+        TripPurpose::Leisure,
+    ];
+    pub const COUNT: usize = 7;
+
+    /// Index into per-purpose arrays (`ALL` order).
+    pub fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /// Where a trip starts or ends.
@@ -146,16 +169,63 @@ pub struct Trip {
     pub needs_route: bool,
     /// In the re-plan queue.
     pub queued: bool,
+    /// The citizen driving (none for trucks and for cars of households
+    /// leaving the city, see `party`). The people in a car stay in it from
+    /// departure to arrival. Passengers: `inspect::occupants`.
+    pub citizen: Option<CitizenId>,
+    /// The citizen whose trip this car draws (the driver; stays set if the
+    /// driver leaves the city mid-trip, for their commute statistics).
+    pub owner: Option<CitizenId>,
+    /// Where the trip started.
+    pub from: Place,
+    /// Buildings at the two ends (`None`: the highway entry, or a building
+    /// that has since been removed is still named here; check it exists).
+    pub from_building: Option<BuildingId>,
+    pub to_building: Option<BuildingId>,
+    /// People aboard who are no longer citizens (a household moving out of
+    /// the city drives away with this many). 0 for citizens' trips (count
+    /// them with `inspect::occupants`) and trucks.
+    pub party: u8,
+    /// Goods aboard a truck, units (0 for cars).
+    pub cargo: f32,
+    /// Tick the car pulled out onto the road.
+    pub started_tick: u64,
 }
 
 /// A trip waiting for its car to be put on the road.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Departure {
     pub household: Option<HouseholdId>,
+    /// The citizen who will drive.
+    pub citizen: Option<CitizenId>,
     pub purpose: TripPurpose,
     pub from: Place,
     pub to: Place,
     pub requested_tick: u64,
+    /// See [`Trip::from_building`], [`Trip::to_building`], [`Trip::party`],
+    /// [`Trip::cargo`].
+    pub from_building: Option<BuildingId>,
+    pub to_building: Option<BuildingId>,
+    pub party: u8,
+    pub cargo: f32,
+}
+
+impl Departure {
+    /// A trip of `purpose` between two places, requested now.
+    pub(crate) fn new(world: &World, purpose: TripPurpose, from: Place, to: Place) -> Departure {
+        Departure {
+            household: None,
+            citizen: None,
+            purpose,
+            from,
+            to,
+            requested_tick: world.time.tick,
+            from_building: None,
+            to_building: None,
+            party: 0,
+            cargo: 0.0,
+        }
+    }
 }
 
 /// How a trip ended, reported to the household.
@@ -173,7 +243,20 @@ pub(crate) enum TripEnd {
     Cancelled,
 }
 
-pub(crate) type Ended = (Option<HouseholdId>, TripPurpose, TripEnd);
+/// A finished trip, reported to the population model.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Ended {
+    pub household: Option<HouseholdId>,
+    pub citizen: Option<CitizenId>,
+    pub owner: Option<CitizenId>,
+    pub purpose: TripPurpose,
+    pub end: TripEnd,
+    pub to: Place,
+    pub to_building: Option<BuildingId>,
+    /// Where the car was when the trip ended (its people go on from there
+    /// when it was taken off the road).
+    pub at: Option<[f32; 2]>,
+}
 
 /// All traffic state that is not on the vehicles themselves.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -191,9 +274,12 @@ pub struct TrafficState {
     pub replan: VecDeque<VehicleId>,
     /// `versions.roads` the vehicles were last checked against.
     pub roads_version: u64,
-    /// Moving average of completed car commutes, vehicle seconds.
+    /// Moving average of completed car commutes (to and from work, on the
+    /// road), door to door, vehicle seconds.
     pub avg_commute_s: f32,
-    /// Mean speed of the cars on the road this tick, m/s.
+    /// Mean speed of the cars on the road that are moving this tick
+    /// (faster than `balance::WAIT_SPEED`), m/s. Cars standing at a red
+    /// light or in a queue are counted by `stopped_share` instead.
     pub avg_speed: f32,
     /// Most cars on the road at once today / yesterday.
     pub peak_today: u32,
@@ -213,6 +299,13 @@ pub struct TrafficState {
     pub deadlocks_resolved: u32,
     /// Bumped whenever a junction's control changes (routing costs follow).
     pub control_version: u64,
+    /// Share of the cars on the road standing (at a red light, in a queue,
+    /// giving way) this tick.
+    pub stopped_share: f32,
+    /// Moving average of car trips' door-to-door time over their free-flow
+    /// estimate (`day::estimate_s`), at least 1: what the roads do to every
+    /// trip, on screen or off.
+    pub delay_factor: f32,
 }
 
 pub(crate) const DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
@@ -231,20 +324,100 @@ pub fn shortest_path(roads: &RoadNetwork, from: NodeId, to: NodeId) -> Option<Ve
     let mut scratch = path::PathScratch::default();
     let mut budget = i64::MAX;
     scratch
-        .search(roads, &[], &[(from, 0.0)], Target::Node(to), &mut budget)
+        .search(roads, &[], &[], &[(from, 0.0)], Target::Node(to), &mut budget)
         .map(|f| f.segments)
 }
 
 /// Queue a trip. The car appears once a route is found and the driveway is
 /// clear.
 pub(crate) fn request(world: &mut World, household: Option<HouseholdId>, purpose: TripPurpose, from: Place, to: Place) {
-    world.traffic.pending.push_back(Departure {
-        household,
-        purpose,
-        from,
-        to,
-        requested_tick: world.time.tick,
-    });
+    let mut d = Departure::new(world, purpose, from, to);
+    d.household = household;
+    request_trip(world, d);
+}
+
+/// Queue a trip (see [`Departure`]).
+pub(crate) fn request_trip(world: &mut World, dep: Departure) {
+    world.traffic.pending.push_back(dep);
+}
+
+/// A household left the city while `party` of its members were in car
+/// `id`: the car takes them out to the highway instead.
+pub(crate) fn move_out(world: &mut World, id: VehicleId, party: u8) {
+    let Some(t) = world.traffic.trips.get_mut(id) else {
+        return;
+    };
+    t.purpose = TripPurpose::MoveOut;
+    t.to = Place::Entry;
+    t.to_building = None;
+    t.citizen = None;
+    t.party = party;
+    t.needs_route = true;
+    queue_replan(&mut world.traffic, id, true);
+    if let Some(v) = world.vehicles.get_mut(id) {
+        v.household = None;
+    }
+}
+
+/// The people in car `id` change their mind: it heads for `to` instead
+/// (they turn back home when the shop or venue they were driving to has
+/// closed).
+pub(crate) fn redirect(world: &mut World, id: VehicleId, to: Place, to_building: Option<BuildingId>) {
+    let Some(t) = world.traffic.trips.get_mut(id) else {
+        return;
+    };
+    t.to = to;
+    t.to_building = to_building;
+    t.needs_route = true;
+    queue_replan(&mut world.traffic, id, true);
+}
+
+/// Cars allowed on the road (and waiting to start) at once: 125 per 1,000
+/// residents, at least 150, at most `balance::MAX_VEHICLES`.
+pub fn vehicle_budget(world: &World) -> usize {
+    (world.citizens.len() * balance::VEHICLES_PER_1000 / 1000).clamp(balance::MIN_VEHICLE_BUDGET, balance::MAX_VEHICLES)
+}
+
+/// Is there room in the vehicle budget ([`vehicle_budget`]) for one more
+/// car?
+pub fn has_room(world: &World) -> bool {
+    world.vehicles.len() + world.traffic.pending.len() < vehicle_budget(world)
+}
+
+/// Share of citizens' car trips driven as real cars right now
+/// (`balance::CAR_SHARE_*`, by residents).
+pub fn car_share(world: &World) -> f32 {
+    let large = balance::CAR_SHARE_LARGE;
+    let pop = world.stats.population as f32;
+    let t = ((pop - balance::CAR_SHARE_FROM_POP) / (balance::CAR_SHARE_TO_POP - balance::CAR_SHARE_FROM_POP))
+        .clamp(0.0, 1.0);
+    1.0 + (large - 1.0) * t
+}
+
+/// Share of goods trips driven as real trucks (`balance::TRUCK_SHARE` of
+/// [`car_share`]); the others are delivered off screen.
+pub fn truck_share(world: &World) -> f32 {
+    car_share(world) * balance::TRUCK_SHARE
+}
+
+/// Is this citizen's car trip one of the drawn ones ([`car_share`])?
+pub(crate) fn drawn_driver(world: &World, citizen: CitizenId) -> bool {
+    world
+        .citizens
+        .get(citizen)
+        .is_some_and(|c| crate::people::habit(c.seed, 0xCA75_4A3E) < car_share(world))
+}
+
+/// [`TrafficState::delay_factor`], at least 1.
+pub fn delay_factor(world: &World) -> f32 {
+    world.traffic.delay_factor.max(1.0)
+}
+
+fn place_pos(world: &World, p: Place) -> Option<[f32; 2]> {
+    match p {
+        Place::At(p) => Some(p),
+        Place::Entry => world.roads.entry.and_then(|e| world.roads.nodes.get(e)).map(|n| n.pos),
+    }
 }
 
 fn resolve(world: &World, place: Place) -> Option<Access> {
@@ -265,15 +438,9 @@ fn resolve(world: &World, place: Place) -> Option<Access> {
 pub(crate) fn set_pose(roads: &RoadNetwork, v: &mut Vehicle) {
     let Some(s) = v.segment else { return };
     let Some(seg) = roads.segments.get(s) else { return };
-    let (pa, pb) = roads.segment_ends(s);
-    let (from, to) = if v.forward { (pa, pb) } else { (pb, pa) };
-    let f = if seg.length > 0.0 {
-        (v.progress / seg.length).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    v.pos = [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f];
-    v.heading = libm::atan2f(to[1] - from[1], to[0] - from[0]);
+    let p = seg.pose_dir(v.forward, v.progress.clamp(0.0, seg.length), 0.0);
+    v.pos = p.pos;
+    v.heading = p.heading();
 }
 
 fn route_valid(roads: &RoadNetwork, v: &Vehicle, dest: Option<Access>) -> bool {
@@ -312,7 +479,9 @@ fn queue_replan(traffic: &mut TrafficState, id: VehicleId, urgent: bool) {
 }
 
 pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, ended: &mut Vec<Ended>) {
-    let household = world.vehicles.remove(id).and_then(|v| v.household);
+    let car = world.vehicles.remove(id);
+    let at = car.as_ref().map(|v| v.pos);
+    let household = car.and_then(|v| v.household);
     if let Some(trip) = world.traffic.trips.remove(id) {
         if let TripEnd::Arrived(s) | TripEnd::GaveUp(s) = end {
             world.traffic.trips_today += 1;
@@ -324,8 +493,34 @@ pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, end
                     t.avg_commute_s + (s - t.avg_commute_s) * 0.02
                 };
             }
+            // Commutes only (errands are short and may turn back), each
+            // weighted by its length so a minute's drive counts more than
+            // a hop round the corner.
+            if let TripEnd::Arrived(s) = end
+                && matches!(trip.purpose, TripPurpose::ToWork | TripPurpose::ToHome)
+                && let (Some(a), Some(b)) = (place_pos(world, trip.from), place_pos(world, trip.to))
+            {
+                let est = crate::day::estimate_s(a, b);
+                let r = (s / est).clamp(0.5, balance::DELAY_FACTOR_MAX);
+                let k = 0.01 * (est / 60.0).min(3.0);
+                let t = &mut world.traffic;
+                t.delay_factor = if t.delay_factor == 0.0 {
+                    r.max(1.0)
+                } else {
+                    (t.delay_factor + (r - t.delay_factor) * k).max(1.0)
+                };
+            }
         }
-        ended.push((household, trip.purpose, end));
+        ended.push(Ended {
+            household,
+            citizen: trip.citizen,
+            owner: trip.owner,
+            purpose: trip.purpose,
+            end,
+            to: trip.to,
+            to_building: trip.to_building,
+            at,
+        });
     }
 }
 
@@ -334,6 +529,7 @@ pub(crate) fn remove_vehicle(world: &mut World, id: VehicleId, end: TripEnd, end
 /// nothing changed).
 pub(crate) fn sync_network(world: &mut World, ended: &mut Vec<Ended>) {
     world.cache.ensure_roads(&world.roads, world.versions.roads);
+    world.cache.ensure_zoning(&world.zoning);
     sync_junctions(world);
     if world.traffic.roads_version == world.versions.roads {
         return;
@@ -439,13 +635,9 @@ fn relocate(world: &mut World, id: VehicleId) -> bool {
                 let Some(seg) = world.roads.segments.get(s) else {
                     continue;
                 };
-                let (pa, pb) = world.roads.segment_ends(s);
-                let ab = geom::sub(pb, pa);
-                let t = (geom::dot(geom::sub(pos, pa), ab) / geom::dot(ab, ab)).clamp(0.0, 1.0);
-                let p = [pa[0] + ab[0] * t, pa[1] + ab[1] * t];
-                let d = geom::dist(p, pos);
+                let (from_a, d, _) = seg.nearest(pos);
                 if d < 1.0 && best.is_none_or(|b| d < b.0) {
-                    best = Some((d, s, t * seg.length));
+                    best = Some((d, s, from_a));
                 }
             }
         }
@@ -453,8 +645,7 @@ fn relocate(world: &mut World, id: VehicleId) -> bool {
     let Some((_, s, from_a)) = best else {
         return false;
     };
-    let (pa, pb) = world.roads.segment_ends(s);
-    let forward = geom::dot(geom::sub(pb, pa), dir) >= 0.0;
+    let forward = geom::dot(world.roads.segments[s].pose(from_a, 0.0).dir, dir) >= 0.0;
     let len = world.roads.segments[s].length;
     let v = &mut world.vehicles[id];
     v.segment = Some(s);
@@ -531,6 +722,7 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 match cache.path.search(
                     &world.roads,
                     &cache.route_delay,
+                    &cache.route_turns,
                     &[(end, remaining)],
                     Target::Access(dest),
                     budget,
@@ -553,7 +745,9 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
 
 fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
     let mut tries = world.traffic.pending.len().min(balance::DEPARTURES_PER_TICK);
-    let mut lanes: Option<Vec<(usize, f32)>> = None;
+    let mut lanes: Option<Vec<(usize, f32, bool)>> = None;
+    let mut marks = std::mem::take(&mut world.cache.depart_marks);
+    let mut marked: Vec<usize> = Vec::new();
     while tries > 0 && *budget > 0 {
         tries -= 1;
         let Some(dep) = world.traffic.pending.pop_front() else {
@@ -564,38 +758,98 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         {
             continue;
         }
+        let gone = |end| Ended {
+            household: dep.household,
+            citizen: dep.citizen,
+            owner: dep.citizen,
+            purpose: dep.purpose,
+            end,
+            to: dep.to,
+            to_building: dep.to_building,
+            at: None,
+        };
         let waited = world.time.tick.saturating_sub(dep.requested_tick);
         if waited > secs_to_ticks(balance::MAX_DEPARTURE_WAIT_S) {
-            ended.push((dep.household, dep.purpose, TripEnd::Cancelled));
+            ended.push(gone(TripEnd::Cancelled));
             continue;
         }
         let (Some(from), Some(to)) = (resolve(world, dep.from), resolve(world, dep.to)) else {
-            ended.push((dep.household, dep.purpose, TripEnd::NoRoute));
+            ended.push(gone(TripEnd::NoRoute));
             continue;
         };
         let from_seg = world.roads.segments[from.segment].clone();
         // Cars per lane, for the driveway check (built on first use).
         let lanes = lanes.get_or_insert_with(|| {
-            let mut l: Vec<(usize, f32)> = world
+            // Only the segments this tick's departures start on (the first
+            // `tries` in the queue; blocked ones go to its back).
+            marks.resize(world.roads.segments.slot_count(), false);
+            marked.push(key_index(from.segment));
+            for d in world.traffic.pending.iter().take(tries) {
+                if let Some(a) = resolve(world, d.from) {
+                    marked.push(key_index(a.segment));
+                }
+            }
+            for &i in &marked {
+                marks[i] = true;
+            }
+            let mut l: Vec<(usize, f32, bool)> = world
                 .vehicles
                 .values()
-                .filter_map(|v| v.segment.map(|s| (lane_of(s, v.forward), v.progress)))
+                .filter_map(|v| {
+                    let s = v.segment?;
+                    marks
+                        .get(key_index(s))
+                        .copied()
+                        .unwrap_or(false)
+                        .then(|| (lane_of(s, v.forward), v.progress, v.stopped()))
+                })
                 .collect();
             l.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
             l
         });
-        let blocked = |fwd: bool| {
-            let lane = lane_of(from.segment, fwd);
-            let progress = if fwd {
+        // Where the car would start in direction `fwd`: at its access point,
+        // but on the road, not inside a junction box.
+        let setbacks_ok = world.cache.setbacks_key == Some(world.traffic.junctions_version);
+        let setbacks = &world.cache.setbacks;
+        let start_at = |fwd: bool| {
+            let p = if fwd {
                 from.from_a
             } else {
                 from_seg.length - from.from_a
             };
-            let start = lanes.partition_point(|&(l, _)| l < lane);
+            if setbacks_ok {
+                let (lo, hi) = crate::drive::lane_range(setbacks, from.segment, fwd, from_seg.length);
+                // Not with its nose over the stop line either.
+                let hi = if hi < from_seg.length - 0.01 {
+                    (hi - crate::drive::stop_back_m(dep.purpose == TripPurpose::Goods)).max(lo.min(hi))
+                } else {
+                    hi
+                };
+                let lo = if lo > 0.0 {
+                    (lo + balance::NO_LANE_CHANGE_AFTER_BOX_M).min(hi)
+                } else {
+                    lo
+                };
+                p.clamp(lo, hi)
+            } else {
+                p
+            }
+        };
+        let (start_fwd, start_back) = (start_at(true), start_at(false));
+        // Blocked: a car right at the driveway, or a standing queue just
+        // ahead of it (nobody pulls out into a jam: the trip waits, and in
+        // the end goes without the car).
+        let blocked = |fwd: bool| {
+            let lane = lane_of(from.segment, fwd);
+            let progress = if fwd { start_fwd } else { start_back };
+            let start = lanes.partition_point(|&(l, _, _)| l < lane);
             lanes[start..]
                 .iter()
-                .take_while(|&&(l, _)| l == lane)
-                .any(|&(_, p)| (p - progress).abs() < balance::SPAWN_CLEARANCE_M)
+                .take_while(|&&(l, _, _)| l == lane)
+                .any(|&(_, p, stopped)| {
+                    (p - progress).abs() < balance::SPAWN_CLEARANCE_M
+                        || (stopped && p > progress && p - progress < balance::SPAWN_QUEUE_M)
+                })
         };
         if blocked(true) && blocked(false) {
             world.traffic.pending.push_back(dep);
@@ -620,13 +874,17 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 ],
             };
             let cache = &mut world.cache;
-            match cache
-                .path
-                .search(&world.roads, &cache.route_delay, &sources, Target::Access(to), budget)
-            {
+            match cache.path.search(
+                &world.roads,
+                &cache.route_delay,
+                &cache.route_turns,
+                &sources,
+                Target::Access(to),
+                budget,
+            ) {
                 Some(found) => (found.first == from_seg.b, found.segments, Some(found.last_node)),
                 None => {
-                    ended.push((dep.household, dep.purpose, TripEnd::NoRoute));
+                    ended.push(gone(TripEnd::NoRoute));
                     continue;
                 }
             }
@@ -636,20 +894,10 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         } else {
             from_seg.length - from.from_a
         };
-        // Start on the road, not inside a junction box.
-        let progress = if world.cache.setbacks_key == Some(world.traffic.junctions_version) {
-            let (lo, hi) = crate::drive::lane_range(&world.cache.setbacks, from.segment, forward, from_seg.length);
-            let lo = if lo > 0.0 {
-                (lo + balance::NO_LANE_CHANGE_AFTER_BOX_M).min(hi)
-            } else {
-                lo
-            };
-            progress.clamp(lo, hi)
-        } else {
-            progress
-        };
+        let _ = progress;
+        let progress = if forward { start_fwd } else { start_back };
         if from.segment == to.segment && (to.from_a - from.from_a).abs() < 2.0 {
-            ended.push((dep.household, dep.purpose, TripEnd::Arrived(0.0)));
+            ended.push(gone(TripEnd::Arrived(0.0)));
             continue;
         }
         // Driveway clear in the chosen direction?
@@ -658,8 +906,8 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
             continue;
         }
         let lane = lane_of(from.segment, forward);
-        let pos = lanes.partition_point(|&(l, p)| l < lane || (l == lane && p < progress));
-        lanes.insert(pos, (lane, progress));
+        let pos = lanes.partition_point(|&(l, p, _)| l < lane || (l == lane && p < progress));
+        lanes.insert(pos, (lane, progress, true));
         let seed = world.rng.next_u64() as u32;
         let mut v = Vehicle {
             pos: [0.0; 2],
@@ -686,12 +934,55 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 wait_ticks: 0,
                 needs_route: false,
                 queued: false,
+                citizen: dep.citizen,
+                owner: dep.citizen,
+                from: dep.from,
+                from_building: dep.from_building,
+                to_building: dep.to_building,
+                party: dep.party,
+                cargo: dep.cargo,
+                started_tick: world.time.tick,
             },
         );
-        if let Some(h) = dep.household.and_then(|h| world.households.get_mut(h)) {
+        if let Some(c) = dep.citizen {
+            board(world, c, id);
+        } else if let Some(h) = dep.household.and_then(|h| world.households.get_mut(h))
+            && h.citizens.is_empty()
+        {
             h.vehicle = Some(id);
         }
     }
+    for i in marked {
+        marks[i] = false;
+    }
+    world.cache.depart_marks = marks;
+}
+
+/// The car of `driver` started: they and their passengers are in it.
+fn board(world: &mut World, driver: CitizenId, v: VehicleId) {
+    let Some(c) = world.citizens.get_mut(driver) else {
+        return;
+    };
+    let Location::Travelling(j) = &mut c.location else {
+        return;
+    };
+    j.vehicle = Some(v);
+    let hid = c.household;
+    let members = world
+        .households
+        .get(hid)
+        .map(|h| h.citizens.clone())
+        .unwrap_or_default();
+    for m in members {
+        if let Some(mc) = world.citizens.get_mut(m)
+            && let Location::Travelling(j) = &mut mc.location
+            && j.mode == TravelMode::Passenger
+            && j.driver == Some(driver)
+        {
+            j.vehicle = Some(v);
+        }
+    }
+    crate::people::refresh_household(world, hid);
 }
 
 fn update_loads(world: &mut World) {
@@ -699,8 +990,12 @@ fn update_loads(world: &mut World) {
         seg.load = [0.0; 2];
     }
     let mut speed_sum = 0.0;
+    let mut moving = 0u32;
     for v in world.vehicles.values() {
-        speed_sum += v.speed;
+        if !v.stopped() {
+            speed_sum += v.speed;
+            moving += 1;
+        }
         if let Some(seg) = v.segment.and_then(|s| world.roads.segments.get_mut(s)) {
             seg.load[RoadSegment::dir(v.forward)] += 1.0;
         }
@@ -710,7 +1005,9 @@ fn update_loads(world: &mut World) {
         j.queue.iter_mut().for_each(|q| *q = 0);
     }
     for v in world.vehicles.values() {
-        if !v.stopped() || v.junction.is_some() {
+        // Cars on their last segment (parking, or about to) are not waiting
+        // for the junction ahead.
+        if !v.stopped() || v.junction.is_some() || v.route.is_empty() {
             continue;
         }
         let Some(seg) = v.segment.and_then(|s| world.roads.segments.get(s)) else {
@@ -726,19 +1023,29 @@ fn update_loads(world: &mut World) {
     let minute = 60 * TICKS_PER_SECOND as u64;
     if world.time.tick.is_multiple_of(minute) {
         for j in world.traffic.junction_states.values_mut() {
-            j.peak_minute_today = j.peak_minute_today.max(j.entered_minute);
+            // Demand, not just what got through: those let in plus those
+            // still queued (a jammed all-way stop lets in fewer cars than
+            // the signal threshold however long its queues).
+            let waiting: u16 = j.queue.iter().fold(0u16, |a, &q| a.saturating_add(q));
+            j.peak_minute_today = j.peak_minute_today.max(j.entered_minute.saturating_add(waiting));
             j.entered_minute = 0;
+            let minor_waiting: u16 = j
+                .queue
+                .iter()
+                .zip(&j.arms)
+                .filter(|(_, a)| !a.major)
+                .fold(0u16, |acc, (&q, _)| acc.saturating_add(q));
+            j.minor_peak_today = j.minor_peak_today.max(j.minor_minute.saturating_add(minor_waiting));
+            j.minor_minute = 0;
         }
     }
     if world.time.tick_of_day == 0 {
         for j in world.traffic.junction_states.values_mut() {
             j.peak_minute_yesterday = j.peak_minute_today.max(j.entered_minute);
             j.peak_minute_today = 0;
-            let busy = if j.busy {
-                j.peak_minute_yesterday >= balance::AUTO_PRIORITY_PER_MINUTE
-            } else {
-                j.peak_minute_yesterday >= balance::AUTO_SIGNAL_PER_MINUTE
-            };
+            j.minor_peak_yesterday = j.minor_peak_today.max(j.minor_minute);
+            j.minor_peak_today = 0;
+            let busy = junction::judge_busy(j, j.busy);
             if busy != j.busy {
                 j.busy = busy;
                 let setting = j.setting;
@@ -751,7 +1058,8 @@ fn update_loads(world: &mut World) {
     let nseg = world.roads.segments.len();
     let jammed = world.roads.segments.values().filter(|s| s.congestion() > 0.8).count();
     let t = &mut world.traffic;
-    t.avg_speed = if n > 0 { speed_sum / n as f32 } else { 0.0 };
+    t.avg_speed = if moving > 0 { speed_sum / moving as f32 } else { 0.0 };
+    t.stopped_share = if n > 0 { 1.0 - moving as f32 / n as f32 } else { 0.0 };
     t.peak_today = t.peak_today.max(n as u32);
     t.congestion_share = if nseg > 0 { jammed as f32 / nseg as f32 } else { 0.0 };
     t.peak_congestion_today = t.peak_congestion_today.max(t.congestion_share);
@@ -763,6 +1071,24 @@ pub fn debug_denials(world: &World) -> [u64; 4] {
     world.cache.denials
 }
 
+/// Debug: denials at the stop line of node `n` by reason `[conflict in box,
+/// no room beyond, signal, yielding]` (not saved).
+pub fn debug_node_denials(world: &World, n: NodeId) -> [u32; 4] {
+    world.cache.node_denials.get(key_index(n)).copied().unwrap_or([0; 4])
+}
+
+/// Debug: cars that gave up waiting, `(tick, segment, forward, metres
+/// before the stop line, lane)` (not saved).
+pub fn debug_gave_up(world: &World) -> &[(u64, SegmentId, bool, f32, u8)] {
+    &world.cache.gave_up
+}
+
+/// Debug: why the cars that gave up were last refused at a stop line
+/// `[conflict in box, no room beyond, signal, yielding, never refused]`.
+pub fn debug_gave_up_reasons(world: &World) -> [u32; 5] {
+    world.cache.gave_up_reasons
+}
+
 /// Debug counters: junction entries by turn `[straight, right, left,
 /// u-turn]` (not saved).
 pub fn debug_turns(world: &World) -> [u64; 4] {
@@ -771,6 +1097,7 @@ pub fn debug_turns(world: &World) -> [u64; 4] {
 
 /// Queue a household-less trip between two positions (tests, tools).
 pub fn debug_request(world: &mut World, from: [f32; 2], to: [f32; 2]) {
+    crate::people::count_trip(world, TripPurpose::ToWork);
     request(world, None, TripPurpose::ToWork, Place::At(from), Place::At(to));
 }
 
@@ -783,4 +1110,97 @@ pub fn trip_of(world: &World, id: VehicleId) -> Option<&Trip> {
 pub fn destination_pos(world: &World, id: VehicleId) -> Option<[f32; 2]> {
     let d = world.traffic.trips.get(id)?.dest?;
     access_pos(&world.roads, d)
+}
+
+/// Every car's body as an oriented rectangle at its exact drawing pose
+/// (`drive::vehicle_pose`), corners in order.
+pub fn car_bodies(world: &World) -> Vec<(VehicleId, [[f32; 2]; 4])> {
+    world
+        .vehicles
+        .iter()
+        .map(|(id, v)| {
+            let (p, d) = crate::drive::vehicle_pose(world, v);
+            let truck = world
+                .traffic
+                .trips
+                .get(id)
+                .is_some_and(|t| t.purpose == TripPurpose::Goods);
+            let [l, w] = if truck {
+                balance::TRUCK_BODY_M
+            } else {
+                balance::CAR_BODY_M
+            };
+            let r = [-d[1], d[0]];
+            let c = |a: f32, b: f32| [p[0] + d[0] * a + r[0] * b, p[1] + d[1] * a + r[1] * b];
+            (
+                id,
+                [
+                    c(l / 2.0, -w / 2.0),
+                    c(l / 2.0, w / 2.0),
+                    c(-l / 2.0, w / 2.0),
+                    c(-l / 2.0, -w / 2.0),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// Pairs of bodies (indices) overlapping by more than `tol` metres, with
+/// the depth of the overlap.
+pub fn overlapping_bodies(bodies: &[(VehicleId, [[f32; 2]; 4])], tol: f32) -> Vec<(usize, usize, f32)> {
+    let mut grid: std::collections::BTreeMap<(i32, i32), Vec<usize>> = Default::default();
+    let cell = 8.0;
+    for (k, (_, q)) in bodies.iter().enumerate() {
+        let c = [(q[0][0] + q[2][0]) * 0.5, (q[0][1] + q[2][1]) * 0.5];
+        grid.entry(((c[0] / cell).floor() as i32, (c[1] / cell).floor() as i32))
+            .or_default()
+            .push(k);
+    }
+    let depth = |a: &[[f32; 2]; 4], b: &[[f32; 2]; 4]| -> f32 {
+        let mut best = f32::INFINITY;
+        for poly in [a, b] {
+            for k in 0..4 {
+                let e = geom::sub(poly[(k + 1) % 4], poly[k]);
+                let l = geom::dot(e, e).sqrt().max(1e-6);
+                let n = [-e[1] / l, e[0] / l];
+                let proj = |q: &[[f32; 2]; 4]| {
+                    q.iter()
+                        .map(|p| geom::dot(*p, n))
+                        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)))
+                };
+                let (alo, ahi) = proj(a);
+                let (blo, bhi) = proj(b);
+                best = best.min(ahi.min(bhi) - alo.max(blo));
+            }
+        }
+        best
+    };
+    let mut out = Vec::new();
+    for (&(gx, gy), list) in &grid {
+        for &i in list {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let Some(other) = grid.get(&(gx + dx, gy + dy)) else {
+                        continue;
+                    };
+                    for &j in other {
+                        if j <= i {
+                            continue;
+                        }
+                        let d = depth(&bodies[i].1, &bodies[j].1);
+                        if d > tol {
+                            out.push((i, j, d));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Debug: wall-clock time the last zone-block regeneration took, ns (not
+/// saved; for benchmarks).
+pub fn debug_last_block_sync_ns(world: &World) -> u64 {
+    world.cache.last_block_sync_ns
 }

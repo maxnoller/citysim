@@ -1,22 +1,14 @@
-//! Non-commute traffic: shopping runs between homes and shops, and goods
-//! trips from industry to shops or to and from the highway. These cars
-//! belong to no household; they appear, drive and vanish, and keep the
-//! roads busy outside the rush hours (with a thin trickle at night).
+//! Goods traffic. Shops sell goods to households (`day`); a shop whose
+//! shelves run low orders a delivery, which a truck brings from a nearby
+//! factory with workers (or from outside the city through the highway,
+//! `balance::GOODS_IMPORT_SHARE`, and always when there is no industry).
+//! The stock arrives with the truck. Industry also ships part of its output
+//! out of the city (`balance::EXPORT_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY`).
+//! Trucks belong to no household.
 
 use crate::derived::rect_center;
-use crate::traffic::{self, Place, TripPurpose};
-use crate::{World, Zone, balance, geom, households};
-
-/// Relative shopping activity by hour of day.
-fn shop_profile(h: f32) -> f32 {
-    match h as u32 {
-        0..=5 => 0.05,
-        6..=9 => 0.4,
-        10..=19 => 1.0,
-        20..=21 => 0.5,
-        _ => 0.15,
-    }
-}
+use crate::traffic::{self, Departure, Place, TripPurpose};
+use crate::{Building, BuildingId, World, Zone, balance, geom, households, people};
 
 /// Relative goods traffic by hour of day.
 fn goods_profile(h: f32) -> f32 {
@@ -32,13 +24,86 @@ fn day_sum(f: fn(f32) -> f32) -> f32 {
     (0..24).map(|h| f(h as f32)).sum()
 }
 
+/// Shelf space of a shop, units.
+pub fn stock_cap(b: &Building) -> f32 {
+    if b.kind == Zone::Commercial {
+        b.capacity as f32 * balance::SHOP_STOCK_PER_JOB
+    } else {
+        0.0
+    }
+}
+
+/// A new (or newly loaded) shop starts with full shelves.
+pub(crate) fn stock_up(world: &mut World, b: BuildingId) {
+    let Some(cap) = world.buildings.get(b).map(stock_cap) else {
+        return;
+    };
+    if cap > 0.0 {
+        people::place(world, b).stock = cap;
+    }
+}
+
 pub(crate) fn tick(world: &mut World) {
     if !world.time.tick.is_multiple_of(balance::ERRAND_INTERVAL_TICKS) {
         return;
     }
+    deliveries(world);
+    exports(world);
+}
+
+/// Send trucks to shops waiting for goods.
+fn deliveries(world: &mut World) {
+    let mut n = world.people.restock.len().min(balance::DELIVERIES_PER_ROUND);
+    if n == 0 {
+        return;
+    }
+    world.cache.ensure_roads(&world.roads, world.versions.roads);
+    world.cache.ensure_places(&world.buildings, world.versions.buildings);
+    while n > 0 {
+        n -= 1;
+        let Some(shop) = world.people.restock.pop_front() else {
+            break;
+        };
+        let Some(sb) = world.buildings.get(shop) else { continue };
+        let to = rect_center(sb.footprint);
+        // Nearest of a few random factories with workers.
+        let f = world.cache.factories.len();
+        let mut best: Option<(f32, [f32; 2], BuildingId)> = None;
+        if f > 0 && world.rng.next_f32() >= balance::GOODS_IMPORT_SHARE {
+            for _ in 0..balance::DELIVERY_SAMPLES {
+                let b = world.cache.factories[world.rng.below(f as u32) as usize];
+                let Some(fb) = world.buildings.get(b) else { continue };
+                if fb.occupied == 0 || !households::connected(world, fb.footprint) {
+                    continue;
+                }
+                let p = rect_center(fb.footprint);
+                let d = geom::dist(p, to);
+                if best.is_none_or(|x| d < x.0) {
+                    best = Some((d, p, b));
+                }
+            }
+        }
+        // Most deliveries happen off screen (the truck share): the goods
+        // arrive at once.
+        if world.rng.next_f32() >= traffic::truck_share(world) {
+            people::count_trip(world, TripPurpose::Goods);
+            delivered(world, Place::At(to), Some(shop));
+            continue;
+        }
+        let from = best.map_or(Place::Entry, |b| Place::At(b.1));
+        let mut d = Departure::new(world, TripPurpose::Goods, from, Place::At(to));
+        d.from_building = best.map(|b| b.2);
+        d.to_building = Some(shop);
+        d.cargo = balance::TRUCK_LOAD;
+        traffic::request_trip(world, d);
+        people::count_trip(world, TripPurpose::Goods);
+    }
+}
+
+/// Industry ships out of the city through the highway.
+fn exports(world: &mut World) {
     let h = world.time.hour();
     let hours = balance::ERRAND_INTERVAL_TICKS as f32 / balance::TICKS_PER_HOUR as f32;
-    let households = world.households.len() as f32;
     let factory_jobs: u32 = world
         .buildings
         .values()
@@ -46,84 +111,65 @@ pub(crate) fn tick(world: &mut World) {
         .map(|b| b.occupied)
         .sum();
     let acc = &mut world.traffic.errand_acc;
-    acc[0] += households * balance::SHOP_TRIPS_PER_HOUSEHOLD_PER_DAY * shop_profile(h) / day_sum(shop_profile) * hours;
-    acc[1] += factory_jobs as f32 * balance::GOODS_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY * goods_profile(h)
+    acc[0] = 0.0;
+    acc[1] += factory_jobs as f32 * balance::EXPORT_TRIPS_PER_INDUSTRIAL_JOB_PER_DAY * goods_profile(h)
         / day_sum(goods_profile)
         * hours;
-    acc[0] = acc[0].min(20.0);
     acc[1] = acc[1].min(20.0);
-    if acc[0] < 1.0 && acc[1] < 1.0 {
+    if acc[1] < 1.0 {
         return;
     }
     world.cache.ensure_roads(&world.roads, world.versions.roads);
-    let mut homes = Vec::new();
-    let mut shops = Vec::new();
-    let mut factories = Vec::new();
-    for b in world.buildings.values() {
-        if !households::connected(world, b.footprint) {
-            continue;
-        }
-        let p = rect_center(b.footprint);
-        match b.kind {
-            Zone::Residential if b.occupied > 0 => homes.push(p),
-            Zone::Commercial => shops.push(p),
-            Zone::Industrial if b.occupied > 0 => factories.push(p),
-            _ => {}
-        }
-    }
-    // Nearest of a few random shops.
-    let pick_shop = |world: &mut World, from: [f32; 2]| -> Option<[f32; 2]> {
-        let mut best: Option<(f32, [f32; 2])> = None;
-        for _ in 0..balance::ERRAND_SAMPLES {
-            if shops.is_empty() {
-                return None;
-            }
-            let s = shops[world.rng.below(shops.len() as u32) as usize];
-            let d = geom::dist(from, s);
-            if best.is_none_or(|b| d < b.0) {
-                best = Some((d, s));
-            }
-        }
-        best.map(|b| b.1)
-    };
-    while world.traffic.errand_acc[0] >= 1.0 {
-        world.traffic.errand_acc[0] -= 1.0;
-        if homes.is_empty() {
-            world.traffic.errand_acc[0] = 0.0;
-            break;
-        }
-        let home = homes[world.rng.below(homes.len() as u32) as usize];
-        let Some(shop) = pick_shop(world, home) else {
-            world.traffic.errand_acc[0] = 0.0;
-            break;
-        };
-        // Half the runs are the way back.
-        let (from, to) = if world.rng.below(2) == 0 {
-            (home, shop)
-        } else {
-            (shop, home)
-        };
-        traffic::request(world, None, TripPurpose::Shopping, Place::At(from), Place::At(to));
-    }
+    world.cache.ensure_places(&world.buildings, world.versions.buildings);
+    let f = world.cache.factories.len();
     while world.traffic.errand_acc[1] >= 1.0 {
         world.traffic.errand_acc[1] -= 1.0;
-        if factories.is_empty() {
+        if f == 0 {
             world.traffic.errand_acc[1] = 0.0;
             break;
         }
-        let factory = factories[world.rng.below(factories.len() as u32) as usize];
-        let via_highway = world.rng.next_f32() < balance::GOODS_VIA_HIGHWAY_SHARE || shops.is_empty();
-        let (from, to) = if via_highway {
-            if world.rng.below(2) == 0 || shops.is_empty() {
-                (Place::At(factory), Place::Entry)
-            } else {
-                let shop = shops[world.rng.below(shops.len() as u32) as usize];
-                (Place::Entry, Place::At(shop))
-            }
-        } else {
-            let shop = pick_shop(world, factory).expect("shops not empty");
-            (Place::At(factory), Place::At(shop))
-        };
-        traffic::request(world, None, TripPurpose::Goods, from, to);
+        let b = world.cache.factories[world.rng.below(f as u32) as usize];
+        let Some(fb) = world.buildings.get(b) else { continue };
+        if fb.occupied == 0 || !households::connected(world, fb.footprint) {
+            continue;
+        }
+        if world.rng.next_f32() >= traffic::truck_share(world) {
+            people::count_trip(world, TripPurpose::Goods);
+            continue;
+        }
+        let from = Place::At(rect_center(fb.footprint));
+        let mut d = Departure::new(world, TripPurpose::Goods, from, Place::Entry);
+        d.from_building = Some(b);
+        d.cargo = balance::TRUCK_LOAD;
+        traffic::request_trip(world, d);
+        people::count_trip(world, TripPurpose::Goods);
+    }
+}
+
+/// A goods trip ended (arrived, or completed off screen): a shop at its
+/// destination gets a truckload.
+pub(crate) fn delivered(world: &mut World, to: Place, to_building: Option<BuildingId>) {
+    let b = match (to_building, to) {
+        (Some(b), _) => b,
+        // Trucks from saves before trips named their buildings.
+        (None, Place::At(p)) => match crate::zoning::building_at(world, p) {
+            Some(b) => b,
+            None => return,
+        },
+        (None, Place::Entry) => return,
+    };
+    let Some(cap) = world.buildings.get(b).map(stock_cap) else {
+        return;
+    };
+    if cap <= 0.0 {
+        return;
+    }
+    let pl = people::place(world, b);
+    pl.stock = (pl.stock + balance::TRUCK_LOAD).min(cap);
+    pl.delivery_pending = false;
+    if pl.stock < cap * balance::RESTOCK_BELOW {
+        // Still low: order another.
+        pl.delivery_pending = true;
+        world.people.restock.push_back(b);
     }
 }

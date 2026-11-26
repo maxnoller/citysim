@@ -7,6 +7,13 @@
 //!
 //! Prints one line per in-game day and writes hourly CSVs to
 //! `target/headless/<scenario>.csv` (override with `CITYSIM_HEADLESS_OUT`).
+//!
+//! Seed sweeps: `-- --seeds 10 hierarchy streets` runs each named scenario
+//! for seeds 1..=10 (four at a time, one summary line each) and writes
+//! `<scenario>_seed<k>_days.csv` (residents, money and the budget per day)
+//! and `<scenario>_seed<k>_hours.csv` (per in-game hour: mean and peak cars
+//! on the road, the share of cars with an identified driver, trucks, cars
+//! given up, departures waiting). `--days N` overrides the length.
 //! "min" is real minutes assuming the player runs at 2.5x on average.
 //! Money columns: `income` (taxes), `upkeep` (roads), `svc` (services),
 //! `net` (income - upkeep - services, before construction), `d/100c`
@@ -16,7 +23,7 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use citysim_sim::scenarios::{self, GridPlayer};
-use citysim_sim::{TICKS_PER_SECOND, World, Zone, balance};
+use citysim_sim::{TICKS_PER_SECOND, TripPurpose, World, Zone, balance};
 
 /// Blocks `[R, C, I]` the "upfront" player lays out on day one (~290 road
 /// cells, ~60 % of the start money).
@@ -35,82 +42,330 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "hierarchy",
         about: "round 2: avenues as arterials, streets inside the blocks, grows to 10,000",
-        days: 45,
+        days: 15,
     },
     Scenario {
         name: "streets",
         about: "round 2: the same blocks with streets only, grows to 10,000",
-        days: 45,
+        days: 15,
+    },
+    Scenario {
+        name: "rescue",
+        about: "the streets-only city, its main streets upgraded to avenues at the start of day 8",
+        days: 15,
+    },
+    Scenario {
+        name: "bypass",
+        about: "the streets-only city, relief roads around its worst junction (the gateway) at the start of day 8",
+        days: 15,
     },
     Scenario {
         name: "single_artery",
         about: "round 2: the same blocks hanging off one spine, grows to 10,000",
-        days: 45,
+        days: 15,
     },
     Scenario {
         name: "grid",
         about: "sensible player: grid blocks following demand, all zone types",
-        days: 20,
+        days: 6,
     },
     Scenario {
         name: "upfront",
         about: "lays out a district of 14 blocks on day one with its own money, then follows demand",
-        days: 20,
+        days: 6,
     },
     Scenario {
         name: "res_only",
         about: "player who zones only residential",
-        days: 10,
+        days: 3,
     },
     Scenario {
         name: "two_grid",
         about: "static two districts, grid streets (good layout)",
-        days: 8,
+        days: 3,
     },
     Scenario {
         name: "artery",
         about: "static two districts, everything off one junction (bad layout)",
-        days: 8,
+        days: 3,
     },
     Scenario {
         name: "artery_fixed",
-        about: "bad layout, second connections added at the start of day 4",
-        days: 8,
+        about: "bad layout, second connections added at the start of day 2",
+        days: 3,
+    },
+    Scenario {
+        name: "organic",
+        about: "free-form roads: curved avenue, turned grid, ring, cul-de-sacs (pre-built)",
+        days: 7,
     },
     Scenario {
         name: "overbuilt",
         about: "a road mesh far bigger than its town (pre-built), a little zoning",
-        days: 10,
+        days: 3,
     },
 ];
+
+/// Day the `rescue` city's main streets become avenues.
+const RESCUE_DAY: u32 = 8;
+
+/// The `rescue` scenario's upgrade, at the start of `RESCUE_DAY`; the player
+/// builds avenues from then on.
+fn rescue(sc: &Scenario, w: &mut World, player: &mut Option<GridPlayer>) {
+    if sc.name == "bypass" && w.time.day == RESCUE_DAY && w.time.tick_of_day == 0 {
+        let (built, cost) = scenarios::add_gateway_bypass(w, citysim_sim::RoadKind::Street);
+        eprintln!(
+            "bypass: day {} pop {}: {built} relief roads, ${cost}",
+            w.time.day, w.stats.population
+        );
+        return;
+    }
+    if sc.name != "rescue" || w.time.day != RESCUE_DAY || w.time.tick_of_day != 0 {
+        return;
+    }
+    let (ok, refused, cost) = scenarios::upgrade_to_hierarchy(w);
+    if let Some(p) = player.as_mut() {
+        p.layout = scenarios::Layout::Hierarchy;
+    }
+    eprintln!(
+        "rescue: day {} pop {}: {ok} pieces upgraded to avenues, {refused} refused, ${cost}",
+        w.time.day, w.stats.population
+    );
+}
 
 fn minutes(tick: u64) -> f64 {
     tick as f64 / TICKS_PER_SECOND as f64 / ASSUMED_SPEED / 60.0
 }
 
-fn run(sc: &Scenario, out_dir: &str) {
-    let mut w = World::new(7);
-    let mut player = None;
+/// Per-day traffic and people measurements, taken just before midnight.
+#[derive(Default, Clone, Copy)]
+struct DayExtra {
+    given_up: u32,
+    trips: u32,
+    happiness: f32,
+    avg_commute_s: f32,
+    step_mean_us: f64,
+    delay_factor: f32,
+    worked_share: f32,
+}
+
+/// Per-hour vehicle measurements.
+#[derive(Default)]
+struct HourAcc {
+    ticks: u64,
+    cars: u64,
+    peak: u32,
+    occupied: u64,
+    trucks: u64,
+    pending: u64,
+}
+
+/// One hourly row: `day,hour,population,money,cars_mean,cars_peak,occupied_share,trucks_mean,given_up,pending_mean`.
+fn hour_row(w: &World, a: &HourAcc, out: &mut String) {
+    let n = a.ticks.max(1) as f64;
+    let people_cars = a.cars.saturating_sub(a.trucks).max(1) as f64;
+    let _ = writeln!(
+        out,
+        "{},{},{},{},{:.2},{},{:.4},{:.2},{},{:.2}",
+        w.time.day,
+        w.time.hour().floor() as u32,
+        w.stats.population,
+        w.economy.money,
+        a.cars as f64 / n,
+        a.peak,
+        a.occupied as f64 / people_cars,
+        a.trucks as f64 / n,
+        w.traffic.stuck_removed,
+        a.pending as f64 / n
+    );
+}
+
+fn sample(w: &World, a: &mut HourAcc) {
+    a.ticks += 1;
+    let n = w.vehicles.len() as u32;
+    a.cars += n as u64;
+    a.peak = a.peak.max(n);
+    a.pending += w.traffic.pending.len() as u64;
+    for t in w.traffic.trips.values() {
+        if t.purpose == TripPurpose::Goods {
+            a.trucks += 1;
+        } else if t.citizen.is_some_and(|c| w.citizens.contains_key(c)) {
+            a.occupied += 1;
+        }
+    }
+}
+
+fn start(sc: &Scenario, w: &mut World) -> Option<GridPlayer> {
     match sc.name {
-        "grid" | "streets" => player = Some(GridPlayer::new(&Zone::ALL)),
-        "hierarchy" => player = Some(GridPlayer::hierarchy()),
-        "single_artery" => player = Some(GridPlayer::single_artery()),
+        "grid" | "streets" | "rescue" | "bypass" => Some(GridPlayer::new(&Zone::ALL)),
+        "hierarchy" => Some(GridPlayer::hierarchy()),
+        "single_artery" => Some(GridPlayer::single_artery()),
         "upfront" => {
             let mut p = GridPlayer::new(&Zone::ALL);
-            p.build_ahead(&mut w, UPFRONT_BLOCKS);
-            println!(
-                "upfront: built {} road cells, ${} left",
-                w.stats.road_cells, w.economy.money
-            );
-            player = Some(p);
+            p.build_ahead(w, UPFRONT_BLOCKS);
+            Some(p)
         }
-        "res_only" => player = Some(GridPlayer::new(&[Zone::Residential])),
-        // The static layouts lay every road on day one; they get that
-        // construction for free and then run on the normal economy.
-        "two_grid" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, true)),
-        "artery" | "artery_fixed" => scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, false)),
-        "overbuilt" => scenarios::prebuilt(&mut w, scenarios::overbuilt),
+        "res_only" => Some(GridPlayer::new(&[Zone::Residential])),
+        "two_grid" => {
+            scenarios::prebuilt(w, |w| scenarios::two_districts(w, true));
+            None
+        }
+        "artery" | "artery_fixed" => {
+            scenarios::prebuilt(w, |w| scenarios::two_districts(w, false));
+            None
+        }
+        "overbuilt" => {
+            scenarios::prebuilt(w, scenarios::overbuilt);
+            None
+        }
+        "organic" => {
+            scenarios::prebuilt(w, |w| {
+                let refused = scenarios::organic(w);
+                assert!(refused.is_empty(), "organic layout refused: {refused:?}");
+            });
+            None
+        }
         _ => unreachable!(),
+    }
+}
+
+/// One scenario with one seed, quietly: CSVs and a summary line.
+fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
+    let mut w = World::new(seed);
+    let mut player = start(sc, &mut w);
+    let mut hours = String::from(
+        "day,hour,population,money,cars_mean,cars_peak,occupied_share,trucks_mean,given_up,pending_mean\n",
+    );
+    let mut acc = HourAcc::default();
+    let total = days as u64 * balance::TICKS_PER_DAY as u64;
+    let (mut sum_ns, mut max_ns, mut n) = (0u128, 0u128, 0u64);
+    let mut reached = [None::<u64>; 3];
+    let mut costs: Vec<citysim_sim::RunningCosts> = Vec::new();
+    let mut extra: Vec<DayExtra> = Vec::new();
+    let (mut given_up_before, mut day_ns_before) = (0u32, 0u128);
+    while w.time.tick < total {
+        if let Some(p) = player.as_mut() {
+            p.act(&mut w);
+        }
+        if sc.name == "artery_fixed" && w.time.day == 2 && w.time.tick_of_day == 0 {
+            scenarios::add_connections(&mut w);
+        }
+        rescue(sc, &mut w, &mut player);
+        let t0 = Instant::now();
+        w.step();
+        let dt = t0.elapsed().as_nanos();
+        sum_ns += dt;
+        max_ns = max_ns.max(dt);
+        n += 1;
+        sample(&w, &mut acc);
+        if w.time.tick_of_day == 0 {
+            costs.push(w.economy.last_day_costs);
+        }
+        if w.time.tick_of_day == balance::TICKS_PER_DAY - 1 {
+            // Just before midnight: the day's trips and give-ups.
+            extra.push(DayExtra {
+                given_up: w.traffic.stuck_removed - given_up_before,
+                trips: w.traffic.trips_today,
+                happiness: w.people.stats.avg_happiness,
+                avg_commute_s: w.traffic.avg_commute_s,
+                step_mean_us: (sum_ns - day_ns_before) as f64 / balance::TICKS_PER_DAY as f64 / 1e3,
+                delay_factor: w.traffic.delay_factor,
+                worked_share: w.economy.attendance.share(),
+            });
+            given_up_before = w.traffic.stuck_removed;
+            day_ns_before = sum_ns;
+        }
+        if w.time.tick_of_day.is_multiple_of(balance::TICKS_PER_HOUR) {
+            hour_row(&w, &acc, &mut hours);
+            acc = HourAcc::default();
+        }
+        for (k, goal) in [5_000, 10_000, 20_000].into_iter().enumerate() {
+            if reached[k].is_none() && w.stats.population >= goal {
+                reached[k] = Some(w.time.tick);
+            }
+        }
+    }
+    let mut daily = String::from(
+        "day,minutes,population,peak_vehicles,money,income,expenses,residential_tax,commercial_tax,industrial_tax,road_upkeep,services,road_cells,\
+         streets,avenues,highway,signals,signal_count,services_base,services_city_size,services_density,\
+         given_up,trips,happiness,avg_commute_s,step_mean_us,delay_factor,worked_share\n",
+    );
+    for (i, h) in w.economy.history.iter().enumerate() {
+        let b = h.budget;
+        let c = costs.get(i).copied().unwrap_or_default();
+        let _ = writeln!(
+            daily,
+            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            h.day,
+            minutes(h.day as u64 * balance::TICKS_PER_DAY as u64),
+            h.population,
+            h.peak_vehicles,
+            h.money,
+            h.income,
+            h.expenses,
+            b.residential_tax,
+            b.commercial_tax,
+            b.industrial_tax,
+            b.road_upkeep,
+            b.services,
+            h.road_cells,
+            c.streets,
+            c.avenues,
+            c.highway,
+            c.signals,
+            c.signal_count,
+            c.services_base,
+            c.services_city_size,
+            c.services_density
+        );
+        daily.pop();
+        let e = extra.get(i).copied().unwrap_or_default();
+        let _ = writeln!(
+            daily,
+            ",{},{},{:.4},{:.1},{:.1},{:.3},{:.3}",
+            e.given_up, e.trips, e.happiness, e.avg_commute_s, e.step_mean_us, e.delay_factor, e.worked_share
+        );
+    }
+    std::fs::write(format!("{out_dir}/{}_seed{seed}_days.csv", sc.name), daily).expect("write csv");
+    std::fs::write(format!("{out_dir}/{}_seed{seed}_hours.csv", sc.name), hours).expect("write csv");
+    let day_of = |t: Option<u64>| {
+        t.map_or("-".to_string(), |t| {
+            format!("{}", t / balance::TICKS_PER_DAY as u64 + 1)
+        })
+    };
+    let money_max = w.economy.history.iter().map(|h| h.money).max().unwrap_or(0);
+    let wait = player.as_ref().map_or(String::new(), |p| {
+        format!(
+            " waited {:.0} s (longest {:.0} s)",
+            minutes(p.money_wait_ticks) * 60.0,
+            minutes(p.longest_money_wait_ticks) * 60.0
+        )
+    });
+    format!(
+        "{:<14} seed {seed:>2}: pop {:>6} on day {}, 5k day {} 10k day {} 20k day {}, money final ${} max ${money_max}, given up {}{wait}; step mean {:.0} us max {:.1} ms",
+        sc.name,
+        w.stats.population,
+        w.time.day,
+        day_of(reached[0]),
+        day_of(reached[1]),
+        day_of(reached[2]),
+        w.economy.money,
+        w.traffic.stuck_removed,
+        sum_ns as f64 / n.max(1) as f64 / 1e3,
+        max_ns as f64 / 1e6
+    )
+}
+
+fn run(sc: &Scenario, out_dir: &str) {
+    let mut w = World::new(7);
+    // The static layouts lay every road on day one; they get that
+    // construction for free and then run on the normal economy.
+    let mut player = start(sc, &mut w);
+    if sc.name == "upfront" {
+        println!(
+            "upfront: built {} road cells, ${} left",
+            w.stats.road_cells, w.economy.money
+        );
     }
     println!("\n=== {} — {}", sc.name, sc.about);
     println!(
@@ -134,7 +389,9 @@ fn run(sc: &Scenario, out_dir: &str) {
         "d/100c"
     );
     let mut csv = String::from(
-        "tick,day,hour,minutes,population,households,jobs,employed,unemployment,buildings,vehicles,avg_commute_s,avg_speed,congested,money,dem_r,dem_c,dem_i,waiting\n",
+        "tick,day,hour,minutes,population,households,jobs,employed,unemployment,buildings,vehicles,avg_commute_s,avg_speed,congested,money,dem_r,dem_c,dem_i,waiting,\
+         v_towork,v_tohome,v_movein,v_moveout,v_shopping,v_goods,v_leisure,\
+         a_sleeping,a_home,a_working,a_shopping,a_leisure,a_travelling,happiness\n",
     );
     let total = sc.days as u64 * balance::TICKS_PER_DAY as u64;
     let (mut sum_ns, mut max_ns, mut n, mut max_at) = (0u128, 0u128, 0u64, 0u64);
@@ -146,9 +403,10 @@ fn run(sc: &Scenario, out_dir: &str) {
         if let Some(p) = player.as_mut() {
             p.act(&mut w);
         }
-        if sc.name == "artery_fixed" && w.time.day == 4 && w.time.tick_of_day == 0 {
+        if sc.name == "artery_fixed" && w.time.day == 2 && w.time.tick_of_day == 0 {
             scenarios::add_connections(&mut w);
         }
+        rescue(sc, &mut w, &mut player);
         let t0 = Instant::now();
         w.step();
         let dt = t0.elapsed().as_nanos();
@@ -158,7 +416,7 @@ fn run(sc: &Scenario, out_dir: &str) {
             max_at = w.time.tick;
         }
         n += 1;
-        if sc.days > 30 && w.stats.population >= 10_500 {
+        if sc.days > 10 && w.stats.population >= 10_500 {
             // The 10,000 runs stop a little past the goal.
             break;
         }
@@ -201,6 +459,30 @@ fn run(sc: &Scenario, out_dir: &str) {
                 d.industrial,
                 s.waiting_departures
             );
+            let mut vp = [0u32; TripPurpose::COUNT];
+            for t in w.traffic.trips.values() {
+                vp[t.purpose.index()] += 1;
+            }
+            let a = citysim_sim::inspect::activity_shares(&w);
+            csv.pop();
+            let _ = writeln!(
+                csv,
+                ",{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.3}",
+                vp[0],
+                vp[1],
+                vp[2],
+                vp[3],
+                vp[4],
+                vp[5],
+                vp[6],
+                a[0],
+                a[1],
+                a[2],
+                a[3],
+                a[4],
+                a[5],
+                w.people.stats.avg_happiness
+            );
         }
         if w.time.tick_of_day == 0 {
             let h = w.economy.history.last().copied().unwrap_or_default();
@@ -238,15 +520,35 @@ fn run(sc: &Scenario, out_dir: &str) {
                 h.demand[1],
                 h.demand[2],
             );
-            let dn = citysim_sim::traffic::debug_denials(&w);
+            let ps = &w.people.stats;
+            let ev = &w.people.events_yesterday;
+            let rc = w.economy.last_day_costs;
+            print!(
+                "  costs streets {} avenues {} signals {} ({}) | svc base {} size {} density {} |",
+                rc.streets,
+                rc.avenues,
+                rc.signals,
+                rc.signal_count,
+                rc.services_base,
+                rc.services_city_size,
+                rc.services_density
+            );
             println!(
-                "  stuck {} dl {} deny c{}k r{}k s{}k y{}k {:?}",
-                w.traffic.stuck_removed,
-                w.traffic.deadlocks_resolved,
-                dn[0] / 1000,
-                dn[1] / 1000,
-                dn[2] / 1000,
-                dn[3] / 1000,
+                "  wf {} hap {:.2} kids/ad/sen {}/{}/{} hhk {:?} $hh {:.0} burd {:.2} broke {} left {} +{} b{} d{} trips {:?} {:?}",
+                w.stats.workforce,
+                ps.avg_happiness,
+                ps.by_stage[0] + ps.by_stage[1],
+                ps.by_stage[2],
+                ps.by_stage[3],
+                ps.by_kind,
+                ps.avg_money,
+                ps.avg_rent_burden,
+                ps.broke,
+                ev.households_left,
+                ev.households_arrived,
+                ev.births,
+                ev.deaths,
+                w.people.trips_yesterday,
                 w.economy.fiscal.state
             );
             speed_acc = (0.0, 0);
@@ -321,9 +623,41 @@ fn run(sc: &Scenario, out_dir: &str) {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
     let out_dir = std::env::var("CITYSIM_HEADLESS_OUT").unwrap_or_else(|_| "target/headless".into());
     std::fs::create_dir_all(&out_dir).expect("output dir");
+    let mut flag = |name: &str| -> Option<u32> {
+        let i = args.iter().position(|a| a == name)?;
+        let v = args.get(i + 1).and_then(|v| v.parse().ok());
+        args.drain(i..(i + 2).min(args.len()));
+        v
+    };
+    let seeds = flag("--seeds");
+    let days = flag("--days");
+    if let Some(seeds) = seeds {
+        let jobs: Vec<(&Scenario, u64)> = SCENARIOS
+            .iter()
+            .filter(|sc| args.is_empty() || args.iter().any(|a| a == sc.name))
+            .flat_map(|sc| (1..=seeds as u64).map(move |k| (sc, k)))
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let threads: usize = std::env::var("CITYSIM_HEADLESS_THREADS")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(4);
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(sc, seed)) = jobs.get(i) else { break };
+                        println!("{}", run_seed(sc, seed, days.unwrap_or(sc.days), &out_dir));
+                    }
+                });
+            }
+        });
+        return;
+    }
     for sc in SCENARIOS {
         if args.is_empty() || args.iter().any(|a| a == sc.name) {
             run(sc, &out_dir);

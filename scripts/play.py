@@ -15,6 +15,9 @@ Usage (python3 stdlib only):
     python3 scripts/play.py road X1 Y1 X2 Y2    # one road through the Road tool
     python3 scripts/play.py zone r|c|i|none X1 Y1 X2 Y2
     python3 scripts/play.py bulldoze X1 Y1 X2 Y2
+    python3 scripts/play.py curve X1 Y1 X2 Y2 X3 Y3  # start, corner, end (cells)
+    python3 scripts/play.py follow                 # click a house, follow a resident
+    python3 scripts/play.py checks [--shots DIR]   # awkward-input checks, PASS / FAIL
     python3 scripts/play.py look CX CY [YAW PITCH DIST] | camera-off
     python3 scripts/play.py shot PATH | stats | counts | fps | key NAME...
     python3 scripts/play.py cmd 'until-day 5'   # raw control command
@@ -265,16 +268,75 @@ def build_road(a, b):
     return after
 
 
+def set_mode(which, name):
+    """Press Tab until the current tool's mode is `name` (which: road_mode,
+    zone_mode, bulldoze_mode; names as the control channel prints them)."""
+    for _ in range(8):
+        if stats()[which] == name:
+            return
+        key("Tab")
+    raise RuntimeError(f"could not set {which} to {name} (have {stats()[which]})")
+
+
 def zone_rect(a, b, zone):
     select_tool({"r": "zone-r", "c": "zone-c", "i": "zone-i", "none": "dezone"}[zone])
+    set_mode("zone_mode", "Marquee")
     drag_rect(a, b)
     log(f"zone {zone} {a}..{b}")
 
 
 def bulldoze_rect(a, b):
     select_tool("bulldoze")
+    set_mode("bulldoze_mode", "Area")
     drag_rect(a, b)
     log(f"bulldoze {a}..{b}")
+
+
+def road_mode(name):
+    select_tool("road")
+    set_mode("road_mode", name)
+
+
+def curve(a, corner, b, avenue=False):
+    """A curved road through the Curve tool: three clicks."""
+    road_mode("Curve")
+    if (stats()["road_kind"] == "Avenue") != avenue:
+        key("r")
+    before = stats()["segments"]
+    for c in (a, corner, b):
+        move_to(*c)
+        click()
+    key("Return")
+    wait_frames(2)
+    after = stats()["segments"]
+    log(f"curve {a} {corner} {b}: segments {before} -> {after}")
+    return after - before
+
+
+def follow_resident():
+    """Click a house with Inspect, open a resident, follow them."""
+    select_tool("inspect")
+    pos = cmd("find-home").split()
+    if pos[0] != "ok":
+        raise RuntimeError("no home found")
+    x, y = int(pos[1]), int(pos[2])
+    look(x, y, 0.4, 0.9, 160.0)
+    move_to(x, y)
+    click()
+    wait_frames(4)
+    # The first person link of the home's panel, then Follow.
+    px_, py_ = map(float, cmd("node Person link").split())
+    move_px(px_, py_)
+    wait_frames(2)
+    click()
+    wait_frames(4)
+    fx, fy = map(float, cmd("node Follow").split())
+    move_px(fx, fy)
+    wait_frames(2)
+    click()
+    wait_frames(2)
+    log(f"following: {stats()['following']}")
+    return x, y
 
 
 def look(cx, cy, yaw=0.0, pitch=1.15, dist=260.0):
@@ -420,6 +482,158 @@ def grow(until_pop, max_blocks, turbo, shots_every=None, shot_dir=None):
         cmd("turbo 0")
 
 
+# -------------------------------------------------------------- input checks
+
+
+def _segs():
+    s = stats()
+    return s["segments"], s["nodes"], s["money"]
+
+
+def checks(shot_dir):
+    """Awkward real-input cases for the road tools on a new game (run right
+    after `launch`); prints PASS / FAIL for each."""
+    global FRAME
+    results = []
+
+    def report(name, ok, detail=""):
+        results.append((name, ok))
+        log(("PASS " if ok else "FAIL ") + name + (f" ({detail})" if detail else ""))
+        if shot_dir:
+            shot(os.path.join(shot_dir, name + ".png"))
+
+    def area(cx, cy, mode="Straight"):
+        # The focus a little below the action: points from 10 cells north
+        # to 5 south of (cx, cy) stay clear of the bars at the bottom.
+        look(cx + 4, cy + 3, 0.0, 1.1, 320)
+        road_mode(mode)
+        return cx, cy
+
+    focus()
+    if stats()["paused"] != "true":
+        key("space")
+    select_tool("road")
+    road_mode("Straight")
+
+    # 1. Very fast clicks: press / release with no wait, then Enter.
+    cx, cy = area(40, 104)
+    seg0 = _segs()[0]
+    old = FRAME
+    FRAME = 0.02
+    move_to(cx - 10, cy)
+    click()
+    move_to(cx + 4, cy)
+    click()
+    key("Return")
+    FRAME = old
+    wait_frames(3)
+    report("fast-clicks", _segs()[0] > seg0, f"segments {seg0} -> {_segs()[0]}")
+
+    # 2. Drag off the window: press on the map, leave the window, release
+    #    outside; nothing is built, the start point stays, Esc clears it.
+    cx, cy = area(62, 104)
+    seg0 = _segs()[0]
+    move_to(cx - 8, cy)
+    press()
+    xdo("mousemove", 1700, 400)  # beyond the window's right edge
+    wait_frames(2)
+    xdo("mousemove", 1900, 1070)
+    release()
+    wait_frames(2)
+    # One Esc drops the start point; a second would leave the tool.
+    key("Escape")
+    move_to(cx, cy + 4)
+    wait_frames(2)
+    report("drag-off-window", _segs()[0] == seg0, f"segments {seg0} -> {_segs()[0]}")
+
+    # 3. Press on the interface, release on the map, then Enter: no point
+    #    was placed, nothing is built, the tool is still the road tool.
+    cx, cy = area(84, 104)
+    seg0 = _segs()[0]
+    ww, wh = map(float, cmd("window").split())
+    move_px(ww / 2, wh - 30)  # the toolbar
+    press()
+    move_to(cx - 6, cy)
+    release()
+    move_to(cx + 6, cy)
+    key("Return")
+    wait_frames(2)
+    report("ui-to-map", _segs()[0] == seg0 and stats()["tool"] == "road", f"segments {seg0} -> {_segs()[0]}")
+
+    # 4. Two snap candidates at once: a road from the south-west towards the
+    #    dead end of road 1, aimed a little past it: the end snaps to the
+    #    dead end, where the node, the 45-degree step and the whole-cell
+    #    length agree.
+    cx, cy = area(40, 104)
+    seg0, nodes0, _ = _segs()
+    move_to(cx - 4, cy - 8)
+    click()
+    move_to(cx + 4, cy)
+    click()
+    key("Return")
+    wait_frames(2)
+    seg1, nodes1, _ = _segs()
+    # One new node (its own start): the end joined the existing dead end.
+    report("two-snaps", seg1 > seg0 and nodes1 == nodes0 + 1, f"segments {seg0} -> {seg1}, nodes {nodes0} -> {nodes1}")
+
+    # 5. A continuous road that loops back over itself: the crossing becomes
+    #    a junction and the road is built.
+    cx, cy = area(62, 84, "Continuous")
+    seg0, nodes0, _ = _segs()
+    for c in [(cx - 12, cy + 3), (cx, cy + 3), (cx + 5, cy - 2), (cx, cy - 8), (cx - 5, cy - 3), (cx - 3, cy + 5)]:
+        move_to(*c)
+        click()
+    key("Return")
+    wait_frames(3)
+    seg1, nodes1, _ = _segs()
+    report("self-crossing-loop", seg1 >= seg0 + 3, f"segments {seg0} -> {seg1}, nodes {nodes0} -> {nodes1}")
+
+    # 6. Zoom and rotate mid-draw: the start point stays put in the world.
+    cx, cy = area(84, 84)
+    seg0 = _segs()[0]
+    move_to(cx - 8, cy)
+    click()
+    cmd("camera off")
+    xdo("click", "--repeat", "3", "5")  # wheel out
+    xdo("keydown", "q")
+    time.sleep(0.25)
+    xdo("keyup", "q")
+    xdo("click", "--repeat", "2", "4")  # wheel in
+    wait_frames(4)
+    move_to(cx + 6, cy)
+    click()
+    key("Return")
+    wait_frames(3)
+    report("zoom-rotate-mid-draw", _segs()[0] > seg0, f"segments {seg0} -> {_segs()[0]}")
+
+    # 7. Curve tool, three clicks, then undo with Ctrl+Z.
+    cx, cy = area(40, 80)
+    seg0, _, money0 = _segs()
+    made = curve((cx - 6, cy + 4), (cx + 6, cy + 4), (cx + 6, cy - 8))
+    after = _segs()[0]
+    key("ctrl+z")
+    wait_frames(3)
+    report("curve-and-undo", made > 0 and _segs()[0] == seg0, f"segments {seg0} -> {after} -> {_segs()[0]}")
+
+    # 8. Backspace and right-click step back without building.
+    cx, cy = area(84, 64)
+    seg0 = _segs()[0]
+    for c in [(cx - 8, cy), (cx, cy), (cx, cy - 8)]:
+        move_to(*c)
+        click()
+    # Two Backspaces leave the start point; a right-click drops it (a
+    # second one would leave the tool).
+    key("BackSpace", "BackSpace")
+    right_click()
+    key("Return")
+    wait_frames(2)
+    report("step-back", _segs()[0] == seg0 and stats()["tool"] == "road", f"segments {seg0} -> {_segs()[0]}")
+
+    failed = [n for n, ok in results if not ok]
+    log(f"{len(results) - len(failed)} of {len(results)} checks passed" + (f"; failed: {failed}" if failed else ""))
+    return not failed
+
+
 # ------------------------------------------------------------------- phases
 
 
@@ -433,6 +647,9 @@ def launch(release, quality, demo, extra_env):
     profile = "release" if release else "debug"
     exe = os.path.join(ROOT, "target", profile, "citysim")
     env = dict(os.environ, DISPLAY=DISPLAY, CITYSIM_CONTROL=CTL, CITYSIM_GFX_QUALITY=quality)
+    # Never let winit pick a Wayland session: the game must open on DISPLAY.
+    for k in ("WAYLAND_DISPLAY", "XDG_SESSION_TYPE"):
+        env.pop(k, None)
     if demo:
         env["CITYSIM_DEMO"] = demo
     for kv in extra_env:
@@ -487,6 +704,7 @@ def main():
     ap.add_argument("--until-pop", type=int, default=500)
     ap.add_argument("--max-blocks", type=int)
     ap.add_argument("--turbo", type=int, default=30)
+    ap.add_argument("--shots", help="checks: save a picture after each case here")
     ap.add_argument("--frame", type=float, default=FRAME, help="seconds per input step (default 0.35)")
     a = ap.parse_args()
     CTL, DISPLAY, FRAME = a.ctl, a.display, a.frame
@@ -507,6 +725,16 @@ def main():
     elif a.phase == "bulldoze":
         x1, y1, x2, y2 = ints()
         bulldoze_rect((x1, y1), (x2, y2))
+    elif a.phase == "curve":
+        v = [int(x) for x in a.args[:6]]
+        focus()
+        curve((v[0], v[1]), (v[2], v[3]), (v[4], v[5]))
+    elif a.phase == "follow":
+        focus()
+        follow_resident()
+    elif a.phase == "checks":
+        ok = checks(a.shots)
+        sys.exit(0 if ok else 1)
     elif a.phase == "look":
         look(*[float(x) for x in a.args])
     elif a.phase == "camera-off":

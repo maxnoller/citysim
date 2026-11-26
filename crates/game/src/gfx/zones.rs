@@ -4,8 +4,10 @@
 //! a zoning tool is active (a 40 % fill and a bright outline on every zoned
 //! cell). The rest of the time the ground carries no zone colour at all.
 //!
-//! Chunked; a chunk is re-meshed only when its cells change while the
-//! overlay is showing. Hiding it just hides the chunk entities.
+//! Drawn per zoning cell on whatever lattice it belongs to (rotated quads
+//! along curved and rotated roads), each cell fitted clear of the drawn
+//! roads. Chunked; a chunk is re-meshed only when its cells change while
+//! the overlay is showing. Hiding it just hides the chunk entities.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -13,14 +15,16 @@ use std::hash::{Hash, Hasher};
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use citysim_sim::{CELL_SIZE, Cell, Grid, MAP_CELLS, Zone};
+use citysim_sim::{CellRef, Zone};
 
 use super::heights;
+use super::land::{self, CellView, RoadEdges};
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin};
 use crate::shared::{ActiveTool, GameSet, OverlayMode, SimWorld};
 
-const CHUNK: i32 = 32;
+/// Chunk size, metres.
+const CHUNK_M: f32 = 256.0;
 
 pub fn zone_color(zone: Zone) -> Color {
     match zone {
@@ -40,8 +44,9 @@ struct ZoneMaterial(Handle<StandardMaterial>);
 
 #[derive(Default)]
 struct ZoneChunks {
-    /// Grid key the chunks were last built for.
-    key: Option<(u64, u64)>,
+    /// Grid and roads keys the chunks were last built for.
+    key: Option<((u64, u64), (u64, u64))>,
+    fits: land::FitCache,
     shown: bool,
     chunks: HashMap<IVec2, (u64, Entity, bool)>,
 }
@@ -51,7 +56,7 @@ pub struct ZonesPlugin;
 impl Plugin for ZonesPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup)
-            .add_systems(Update, rebuild_zones.in_set(GameSet::Render));
+            .add_systems(Update, rebuild_zones.in_set(GameSet::Render).after(land::LandUpdate));
     }
 }
 
@@ -65,69 +70,53 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     })));
 }
 
-fn shown(grid: &Grid, c: Cell) -> Option<Zone> {
-    grid.get(c)?.zone
-}
-
-fn chunk_hash(grid: &Grid, cx: i32, cy: i32) -> u64 {
+/// Hash of a chunk's cells (their place and zone).
+fn chunk_hash(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> u64 {
     let mut h = DefaultHasher::new();
-    // Include a one-cell border: outlines depend on neighbours.
-    for y in cy * CHUNK - 1..=(cy + 1) * CHUNK {
-        for x in cx * CHUNK - 1..=(cx + 1) * CHUNK {
-            shown(grid, Cell::new(x, y)).hash(&mut h);
+    for c in cells {
+        c.cell.hash(&mut h);
+        c.zone.hash(&mut h);
+        for p in c.quad {
+            p.x.to_bits().hash(&mut h);
+            p.y.to_bits().hash(&mut h);
+        }
+        // Outlines depend on the neighbours.
+        for n in neighbours(c.cell) {
+            zones.get(&n).hash(&mut h);
         }
     }
     h.finish()
 }
 
-fn chunk_mesh(grid: &Grid, cx: i32, cy: i32) -> Option<Mesh> {
+/// The four same-lattice neighbours, in the order of the quad's edges:
+/// `-j` (corners 0-1), `+i` (1-2), `+j` (2-3), `-i` (3-0).
+pub fn neighbours(c: CellRef) -> [CellRef; 4] {
+    [c.offset(0, -1), c.offset(1, 0), c.offset(0, 1), c.offset(-1, 0)]
+}
+
+fn chunk_mesh(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> Option<Mesh> {
     let mut m = MeshBuilder::new();
     let y = heights::ZONE;
     let (fill_a, line_a) = (0.4, 1.0);
-    let inset = 0.0;
     let line_w = 0.6;
-    for cyy in cy * CHUNK..(cy + 1) * CHUNK {
-        for cxx in cx * CHUNK..(cx + 1) * CHUNK {
-            let c = Cell::new(cxx, cyy);
-            let Some(z) = shown(grid, c) else { continue };
-            let base = zone_color(z);
-            let fill = lin(base.with_alpha(fill_a));
-            let line = lin(palette::mix(base, Color::WHITE, 0.45).with_alpha(line_a));
-            let (x0, z0) = (cxx as f32 * CELL_SIZE + inset, cyy as f32 * CELL_SIZE + inset);
-            let (x1, z1) = (
-                (cxx + 1) as f32 * CELL_SIZE - inset,
-                (cyy + 1) as f32 * CELL_SIZE - inset,
-            );
-            m.quad_up(
-                [
-                    Vec3::new(x0, y, z0),
-                    Vec3::new(x1, y, z0),
-                    Vec3::new(x1, y, z1),
-                    Vec3::new(x0, y, z1),
-                ],
-                fill,
-            );
-            // Outline on edges where the neighbour shows a different zone.
-            let yl = y + 0.01;
-            let w = line_w;
-            for (dx, dy, r) in [
-                (1, 0, [x1 - w, z0, x1, z1]),
-                (-1, 0, [x0, z0, x0 + w, z1]),
-                (0, 1, [x0, z1 - w, x1, z1]),
-                (0, -1, [x0, z0, x1, z0 + w]),
-            ] {
-                if shown(grid, c.offset(dx, dy)) != Some(z) {
-                    m.quad_up(
-                        [
-                            Vec3::new(r[0], yl, r[1]),
-                            Vec3::new(r[2], yl, r[1]),
-                            Vec3::new(r[2], yl, r[3]),
-                            Vec3::new(r[0], yl, r[3]),
-                        ],
-                        line,
-                    );
-                }
+    for c in cells {
+        let Some(z) = c.zone else { continue };
+        let base = zone_color(z);
+        let fill = lin(base.with_alpha(fill_a));
+        let line = lin(palette::mix(base, Color::WHITE, 0.45).with_alpha(line_a));
+        m.quad_up(c.quad.map(|p| Vec3::new(p.x, y, p.y)), fill);
+        // Outline on edges where the neighbour shows a different zone.
+        let centre = c.center();
+        for (k, n) in neighbours(c.cell).into_iter().enumerate() {
+            if zones.get(&n) == Some(&z) {
+                continue;
             }
+            let (a, b) = (c.quad[k], c.quad[(k + 1) % 4]);
+            let inward = ((a + b) * 0.5 - centre).normalize_or_zero() * -line_w;
+            m.quad_up(
+                [a, b, b + inward, a + inward].map(|p| Vec3::new(p.x, y + 0.01, p.y)),
+                line,
+            );
         }
     }
     (!m.is_empty()).then(|| m.build())
@@ -143,6 +132,7 @@ fn rebuild_zones(
     mut state: Local<ZoneChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut vis: Query<&mut Visibility>,
+    edges: Res<RoadEdges>,
 ) {
     let show = full_overlay(*mode, *tool);
     if show != state.shown {
@@ -159,21 +149,31 @@ fn rebuild_zones(
         }
     }
     // Re-mesh only while showing; a hidden overlay catches up when shown.
-    let key = sim.key(sim.world.versions.grid);
+    let key = (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads));
     if !show || state.key == Some(key) {
         return;
     }
     state.key = Some(key);
-    let grid = &sim.world.grid;
-    let n = MAP_CELLS / CHUNK;
-    for cy in 0..n {
-        for cx in 0..n {
-            let c = IVec2::new(cx, cy);
-            let hash = chunk_hash(grid, cx, cy);
+    let world = &sim.world;
+    let by_chunk = land::cells_by_chunk(world, &edges, &mut state.fits, CHUNK_M, |z| z.zone.is_some());
+    let zones: HashMap<CellRef, Zone> = by_chunk
+        .values()
+        .flatten()
+        .filter_map(|c| Some((c.cell, c.zone?)))
+        .collect();
+    // Chunks that lost all their zones too.
+    let mut keys: Vec<IVec2> = by_chunk.keys().copied().collect();
+    keys.extend(state.chunks.keys().copied());
+    keys.sort_by_key(|c| (c.x, c.y));
+    keys.dedup();
+    for c in keys {
+        let cells = by_chunk.get(&c).map(Vec::as_slice).unwrap_or(&[]);
+        {
+            let hash = chunk_hash(cells, &zones);
             if state.chunks.get(&c).is_some_and(|(h, _, _)| *h == hash) {
                 continue;
             }
-            let mesh = chunk_mesh(grid, cx, cy);
+            let mesh = chunk_mesh(cells, &zones);
             match (mesh, state.chunks.get_mut(&c)) {
                 (Some(mesh), Some((h, e, has_mesh))) => {
                     *h = hash;

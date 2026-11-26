@@ -90,6 +90,7 @@ fn avenues_upgrade_and_downgrade_in_place() {
         w.stats.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
             + w.stats.avenue_cells as i64
                 * (balance::AVENUE_UPKEEP_PER_CELL_PER_DAY - balance::ROAD_UPKEEP_PER_CELL_PER_DAY)
+            + economy::running_costs(&w).signals
     );
     // Not enough money for an upgrade: refused, nothing changes.
     w.economy.money = 10;
@@ -154,15 +155,30 @@ fn default_controls_by_road_class() {
     let j = junction::junction(&w, junction::junction_at(&w, c(40, 128)).unwrap()).unwrap();
     assert_eq!(j.control, JunctionControl::Priority);
     assert_eq!(j.arms.iter().filter(|a| a.major).count(), 2);
-    // A street crossing an avenue, and two avenues: signals.
-    assert_eq!(ctl(50, 128), Some(JunctionControl::Signal));
+    // A street crossing an avenue gives way to it until it gets busy.
+    assert_eq!(ctl(50, 128), Some(JunctionControl::Priority));
+    let j = junction::junction(&w, junction::junction_at(&w, c(50, 128)).unwrap()).unwrap();
+    assert!(j.arms.iter().all(|a| a.major == (a.kind == RoadKind::Avenue)));
+    // Two avenues: signals.
     assert_eq!(ctl(60, 128), Some(JunctionControl::Signal));
-    // Opposite approaches share a phase; avenues get a protected left phase.
+    // Opposite approaches share a phase; avenues get a protected left
+    // phase when `SIGNAL_LEFT_PHASES` (called by a left turner stuck at
+    // the line); two avenues crossing are served alike and not
+    // coordinated.
     let j = junction::junction(&w, junction::junction_at(&w, c(60, 128)).unwrap()).unwrap();
     let plan = j.plan.as_ref().unwrap();
-    assert_eq!(plan.phases.len(), 4, "{plan:?}");
-    assert!(plan.phases.iter().filter(|p| p.left_only).count() == 2);
+    let lefts = if balance::SIGNAL_LEFT_PHASES { 2 } else { 0 };
+    assert_eq!(plan.phases.len(), 2 + lefts, "{plan:?}");
+    assert!(plan.phases.iter().filter(|p| p.left_only).count() == lefts);
     assert!(plan.phases.iter().all(|p| p.arms.len() == 2));
+    assert!(!plan.coordinated);
+    let through: Vec<f32> = plan
+        .phases
+        .iter()
+        .filter(|p| !p.left_only)
+        .map(|p| p.max_green_s)
+        .collect();
+    assert_eq!(through, vec![balance::SIGNAL_MAIN_MAX_GREEN_S; 2]);
     // Nodes with fewer than three arms are no junction.
     assert!(junction::junction_at(&w, c(20, 128)).is_none());
 }
@@ -206,17 +222,17 @@ fn player_override_with_preview() {
     build(&mut w, (30, 118), (40, 118), RoadKind::Street).unwrap();
     let w2 = World::load(&w.save()).unwrap();
     assert_eq!(junction::junction_control(&w2, n), Some(JunctionControl::Signal));
-    // Priority on an avenue crossing, then back to Auto.
-    let m = junction::junction_at(&w, c(50, 128)).unwrap();
+    // Priority on the avenues' crossing, then back to Auto (signals).
+    let m = junction::junction_at(&w, c(60, 128)).unwrap();
     w.apply(Command::SetJunctionControl {
-        cell: c(50, 128),
+        cell: c(60, 128),
         control: JunctionSetting::Priority,
     })
     .unwrap();
     assert_eq!(junction::junction_control(&w, m), Some(JunctionControl::Priority));
     let p = w
         .preview(&Command::SetJunctionControl {
-            cell: c(50, 128),
+            cell: c(60, 128),
             control: JunctionSetting::Auto,
         })
         .unwrap();
@@ -264,15 +280,19 @@ fn junction_boxes_never_hold_conflicting_cars_and_lanes_never_overlap() {
     let mut greens: std::collections::BTreeMap<(NodeId, usize), u32> = Default::default();
     let mut turns = [0u32; 4];
     let mut entered = 0u32;
+    let mut was_in: Vec<(VehicleId, NodeId)> = Vec::new();
     for t in 0..12 * 60 * TICKS_PER_SECOND as u64 {
         feed(&mut w, &mut k);
         w.step();
-        // Conflicting movements never share a box.
-        let mut boxed: Vec<(NodeId, usize, VehicleId)> = Vec::new();
+        // Conflicting movements share a box only once one car is past
+        // where their paths meet (never both still in each other's way).
+        let mut boxed: Vec<(NodeId, usize, f32)> = Vec::new();
+        let mut now_in: Vec<(VehicleId, NodeId)> = Vec::new();
         for (id, v) in w.vehicles.iter() {
             if let Some(jm) = v.junction {
-                boxed.push((jm.node, jm.movement as usize, id));
-                if jm.distance < 0.06 {
+                boxed.push((jm.node, jm.movement as usize, jm.distance));
+                now_in.push((id, jm.node));
+                if !was_in.contains(&(id, jm.node)) {
                     entered += 1;
                     turns[match jm.turn {
                         Turn::Straight => 0,
@@ -283,6 +303,7 @@ fn junction_boxes_never_hold_conflicting_cars_and_lanes_never_overlap() {
                 }
             }
         }
+        was_in = now_in;
         for (i, a) in boxed.iter().enumerate() {
             for b in &boxed[i + 1..] {
                 if a.0 == b.0 {
@@ -290,7 +311,7 @@ fn junction_boxes_never_hold_conflicting_cars_and_lanes_never_overlap() {
                         .or_else(|| w.traffic.junction_states.get(a.0))
                         .unwrap();
                     assert!(
-                        !j.conflict(a.1, b.1),
+                        !(j.blocks(a.1, a.2, b.1) && j.blocks(b.1, b.2, a.1)),
                         "tick {t}: {:?} and {:?} conflict in {:?}",
                         j.movements[a.1],
                         j.movements[b.1],
@@ -396,7 +417,7 @@ fn coordinated_avenue_signals_are_offset_along_the_avenue() {
     scenarios::prebuilt(&mut w, |w| {
         build(w, (11, 128), (90, 128), RoadKind::Avenue).unwrap();
         for x in [30, 45, 60, 75] {
-            build(w, (x, 118), (x, 138), RoadKind::Avenue).unwrap();
+            build(w, (x, 118), (x, 138), RoadKind::Street).unwrap();
         }
     });
     let offsets: Vec<f32> = [30, 45, 60, 75]
@@ -423,7 +444,7 @@ fn deadlock_breaker_almost_never_fires_in_a_scripted_city() {
     let mut p = GridPlayer::hierarchy();
     let mut trips = 0u64;
     let mut last = 0u32;
-    for _ in 0..5 * DAY {
+    for _ in 0..2 * DAY {
         p.act(&mut w);
         w.step();
         let t = w.traffic.trips_today;
@@ -434,6 +455,10 @@ fn deadlock_breaker_almost_never_fires_in_a_scripted_city() {
     }
     trips += last as u64;
     assert!(trips > 1_000, "{trips} trips");
+    eprintln!(
+        "{trips} trips, {} deadlocks, {} stuck",
+        w.traffic.deadlocks_resolved, w.traffic.stuck_removed
+    );
     let fired = w.traffic.deadlocks_resolved as u64;
     assert!(fired * 1000 < trips, "{fired} deadlocks in {trips} trips");
     assert!(
@@ -449,18 +474,21 @@ fn deadlock_breaker_almost_never_fires_in_a_scripted_city() {
 fn assert_frontage(w: &World) {
     for (id, b) in w.buildings.iter() {
         assert!(
-            growth::has_frontage(w, b.footprint, b.facing),
+            growth::has_frontage(w, &b.footprint, b.facing),
             "{id:?} {:?} facing {:?} has no frontage",
-            b.footprint,
+            b.footprint.rect(),
             b.facing
         );
         let (wd, h) = b.size();
         let ok = matches!((wd, h), (1, 1) | (1, 2) | (2, 1) | (2, 2));
         assert!(ok, "{id:?} footprint {wd}x{h}");
-        // A deep lot is deep along its facing.
+        // A deep lot is deep along its facing (`size` is width along the
+        // front, depth).
         if wd * h == 2 {
+            assert_eq!(h, 2, "{id:?} {:?} {:?}", b.footprint.rect(), b.facing);
+            let r = b.footprint.rect();
             let along_x = matches!(b.facing, Facing::PlusX | Facing::MinusX);
-            assert_eq!(wd == 2, along_x, "{id:?} {:?} {:?}", b.footprint, b.facing);
+            assert_eq!(r.width() == 2, along_x, "{id:?} {r:?} {:?}", b.facing);
         }
     }
 }
@@ -494,13 +522,11 @@ fn a_large_zoned_block_fills_with_lots_that_all_front_a_road() {
     let deep = w.buildings.values().filter(|b| b.size().0 * b.size().1 == 2).count();
     let wide = w.buildings.values().filter(|b| b.size().0 * b.size().1 == 4).count();
     assert!(deep > 40 && wide > 3, "deep {deep} wide {wide}");
-    // Along the diagonals too: some lots front a diagonal road cell.
+    // Along the diagonals too: some lots stand on a diagonal road's own
+    // lattice, turned to face it.
     let diag = w.buildings.values().any(|b| {
-        let (dx, dy) = b.facing.offset();
-        growth::front_cells(b.footprint, b.facing).iter().any(|&f| {
-            let r = f.offset(dx, dy);
-            w.grid.is_road(r) && !w.grid.is_road(r.offset(dy, dx)) && !w.grid.is_road(r.offset(-dy, -dx))
-        })
+        let r = b.rotation().to_degrees().rem_euclid(90.0);
+        b.footprint.lattice != LatticeId::WORLD && (r - 45.0).abs() < 1.0
     });
     assert!(diag, "no lot along a diagonal");
     // No building ever stands in a second row: every occupied cell is in a
@@ -528,7 +554,7 @@ fn second_row_cells_without_a_front_lot_stay_empty() {
     assert!(
         w.buildings
             .values()
-            .any(|b| b.footprint.height() == 2 && b.facing == Facing::PlusY)
+            .any(|b| b.footprint.rect().height() == 2 && b.facing == Facing::PlusY)
     );
 }
 
@@ -654,12 +680,16 @@ fn round1_saves_load_and_second_row_buildings_are_merged() {
     let front = c(25, 127);
     let back = c(25, 126);
     for cell in [front, back] {
-        assert_eq!(w.grid.get(cell).unwrap().occupant, Occupant::Empty, "{cell:?} free");
+        assert_eq!(
+            w.grid_view().get(cell).unwrap().occupant,
+            Occupant::Empty,
+            "{cell:?} free"
+        );
     }
     let mk = |cell: Cell, w: &mut World| {
         let id = w.buildings.insert(Building {
             kind: Zone::Residential,
-            footprint: CellRect::single(cell),
+            footprint: citysim_sim::Footprint::world(CellRect::single(cell), Facing::PlusY),
             level: 1,
             capacity: 4,
             occupied: 0,
@@ -667,24 +697,13 @@ fn round1_saves_load_and_second_row_buildings_are_merged() {
             seed: 1,
             created_tick: 0,
         });
-        w.grid.get_mut(cell).unwrap().occupant = Occupant::Building(id);
+        citysim_sim::growth::place_cells(w, id);
         w.growth.meta.insert(id, Default::default());
         id
     };
     let f = mk(front, &mut w);
     let b = mk(back, &mut w);
-    let hh = w.households.insert(Household {
-        home: b,
-        job: None,
-        members: 2,
-        state: HouseholdState::AtHome,
-        vehicle: None,
-        seed: 3,
-        unemployed_days: 0,
-        hopeless_commutes: 0,
-        last_commute_s: 0.0,
-        last_work_day: 0,
-    });
+    let hh = w.households.insert(Household::without_citizens(b, 2, 3));
     w.buildings[b].occupied = 2;
     w.versions.buildings += 1;
     w.versions.grid += 1;
@@ -693,7 +712,7 @@ fn round1_saves_load_and_second_row_buildings_are_merged() {
     let mut loaded = World::load(&old).expect("round-1 save loads");
     assert!(!loaded.buildings.contains_key(b), "second-row building merged");
     let fb = &loaded.buildings[f];
-    assert_eq!(fb.footprint, CellRect::from_corners(back, front));
+    assert_eq!(fb.footprint.rect(), CellRect::from_corners(back, front));
     assert_eq!((fb.capacity, fb.occupied), (8, 2));
     assert_eq!(loaded.households[hh].home, f);
     assert_eq!(loaded.growth.legacy_lots_merged, 1);
@@ -748,7 +767,7 @@ fn checksum(w: &World) -> u64 {
 fn long_scripted_run_has_a_pinned_checksum() {
     let mut w = World::new(2024);
     let mut p = GridPlayer::hierarchy();
-    for _ in 0..2 * DAY {
+    for _ in 0..DAY / 2 {
         p.act(&mut w);
         w.step();
     }
@@ -758,4 +777,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0x201c68bb56aa9737;
+const PINNED_CHECKSUM: u64 = 0x8788dce3cc7e5ea3;

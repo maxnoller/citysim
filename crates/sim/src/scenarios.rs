@@ -102,6 +102,67 @@ pub fn add_connections(w: &mut World) {
     road(w, (50, NORTH_RIBS[4]), (50, SOUTH_RIBS[4]));
 }
 
+/// Rescue a streets-only grid city: upgrade the built streets on the lines
+/// the [`Layout::Hierarchy`] player makes avenues (the trunk `y = 128` and
+/// every third block row, every second block column) to avenues, piece by
+/// piece, as far as the money goes. Pieces a building stands in the way of
+/// stay streets. Returns `(pieces upgraded, pieces refused, money spent)`.
+pub fn upgrade_to_hierarchy(w: &mut World) -> (u32, u32, i64) {
+    let before = w.economy.money;
+    let mut pieces: Vec<(Cell, Cell)> = Vec::new();
+    for (_, seg) in w.roads.segments.iter() {
+        if seg.kind != RoadKind::Street || !seg.curve.is_straight() {
+            continue;
+        }
+        let (a, b) = (Cell::from_pos(seg.curve.start()), Cell::from_pos(seg.curve.end()));
+        let row = a.y == b.y && (a.y - 128).rem_euclid(15) == 0 && a.x >= 11;
+        let col = a.x == b.x && (a.x - 20).rem_euclid(20) == 0 && a.x >= 20;
+        if row || col {
+            pieces.push(if a <= b { (a, b) } else { (b, a) });
+        }
+    }
+    pieces.sort();
+    let (mut ok, mut refused) = (0, 0);
+    for (a, b) in pieces {
+        if a == b {
+            continue;
+        }
+        match w.apply(Command::BuildRoad {
+            from: a,
+            to: b,
+            kind: RoadKind::Avenue,
+        }) {
+            Ok(_) => ok += 1,
+            Err(_) => refused += 1,
+        }
+    }
+    (ok, refused, before - w.economy.money)
+}
+
+/// A second fix a player would try for a jammed [`GridPlayer`] city: a
+/// parallel route around its worst junction, the first crossing behind the
+/// highway gateway (`(20, 128)`), where every car from the highway queues
+/// today. Two relief roads of `kind` leave the highway stub at `(5, 128)`
+/// and run diagonally into the grid's west edge at `(20, 118)` and
+/// `(20, 138)`, so traffic from the highway reaches the north and the south
+/// of the city without that junction. Returns `(roads built, money spent)`.
+pub fn add_gateway_bypass(w: &mut World, kind: RoadKind) -> (u32, i64) {
+    let before = w.economy.money;
+    let start = c(5, 128).center();
+    let mut built = 0;
+    for y in [118, 138] {
+        if curve_road(w, crate::Curve::straight(start, c(20, y).center()), kind) {
+            built += 1;
+        }
+    }
+    (built, before - w.economy.money)
+}
+
+/// Money a [`GridPlayer`] keeps in hand beyond the price of its next block:
+/// it builds only with more (a sensible player keeps about a hundred road
+/// cells' worth for repairs and the night's bills).
+const PLAYER_RESERVE: i64 = 5_000;
+
 /// How a [`GridPlayer`] lays out its roads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
@@ -264,8 +325,8 @@ impl GridPlayer {
     /// Free zoned, empty cells per zone.
     fn free_cells(w: &World) -> [u32; 3] {
         let mut n = [0; 3];
-        for cd in &w.grid.cells {
-            if cd.occupant == crate::Occupant::Empty
+        for (_, cd) in w.zoning.cells() {
+            if cd.free()
                 && let Some(z) = cd.zone
             {
                 n[crate::derived::zone_index(z)] += 1;
@@ -293,7 +354,7 @@ impl GridPlayer {
             if !want || free[zi] >= 24 {
                 continue;
             }
-            if w.economy.money <= Block::max_cost(self.layout) + 1_000 {
+            if w.economy.money <= Block::max_cost(self.layout) + PLAYER_RESERVE {
                 short_of_money = true;
             } else if b.build(w, z, self.layout) {
                 self.next[zi] += 1;
@@ -365,4 +426,248 @@ pub fn overbuilt(w: &mut World) {
     zone(w, (20, 118), (60, 138), Zone::Residential);
     zone(w, (61, 118), (80, 138), Zone::Commercial);
     zone(w, (81, 118), (100, 138), Zone::Industrial);
+}
+
+// ---------------------------------------------------------------- organic ----
+
+/// Build a road along `c`; returns false if it was refused.
+pub fn curve_road(w: &mut World, c: crate::Curve, kind: RoadKind) -> bool {
+    w.apply(Command::BuildCurve { curve: c, kind }).is_ok()
+}
+
+/// Zone the eligible cells inside a convex quad.
+pub fn zone_quad(w: &mut World, quad: [[f32; 2]; 4], z: Zone) {
+    let _ = w.apply(Command::ZoneArea { quad, zone: Some(z) });
+}
+
+fn add(a: [f32; 2], b: [f32; 2], k: f32) -> [f32; 2] {
+    [a[0] + b[0] * k, a[1] + b[1] * k]
+}
+
+fn dir_deg(deg: f32) -> [f32; 2] {
+    let r = deg.to_radians();
+    [libm::cosf(r), libm::sinf(r)]
+}
+
+/// Where a straight probe from `p` along `d` first meets an existing road
+/// (within `reach` metres), if anywhere.
+pub fn first_hit(w: &World, p: [f32; 2], d: [f32; 2], reach: f32) -> Option<[f32; 2]> {
+    let probe = crate::Curve::straight(add(p, d, 0.5), add(p, d, reach));
+    let mut best: Option<(f32, [f32; 2])> = None;
+    for seg in w.roads.segments.values() {
+        for (dp, _, q) in probe.intersections(&seg.curve) {
+            if best.is_none_or(|b| dp < b.0) {
+                best = Some((dp, q));
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// A town laid out only with world-space commands: a curved main avenue
+/// from the highway, a district on a street grid turned by 17° hanging off
+/// it, a ring road with streets across it, a cul-de-sac estate on curved
+/// streets, and an industrial quarter by the highway. Zoned for about
+/// 4,000 residents with their jobs. The roads cost more than a new game's
+/// money: build it inside [`prebuilt`]. Returns the road commands that
+/// were refused, with why (empty when the layout is sound).
+pub fn organic(w: &mut World) -> Vec<(crate::Curve, crate::CommandError)> {
+    use crate::Curve;
+    let mut refused = Vec::new();
+    let mut road = |w: &mut World, c: Curve, k: RoadKind| {
+        if let Err(e) = w.apply(Command::BuildCurve { curve: c, kind: k }) {
+            refused.push((c, e));
+        }
+    };
+    let av = RoadKind::Avenue;
+    let st = RoadKind::Street;
+    let start = World::highway_entry_cell()
+        .offset(crate::balance::HIGHWAY_STUB_CELLS - 1, 0)
+        .center();
+    let y0 = start[1];
+    // The main avenue: straight off the highway, then a long S.
+    let p1 = [236.0, y0];
+    road(w, Curve::straight(start, p1), av);
+    let p2 = [540.0, y0 - 76.0];
+    let d2 = dir_deg(-20.0);
+    road(w, Curve::from_tangents(p1, [1.0, 0.0], p2, d2).expect("S part 1"), av);
+    let p3 = [860.0, y0 - 76.0];
+    let d3 = dir_deg(20.0);
+    road(w, Curve::from_tangents(p2, d2, p3, d3).expect("S part 2"), av);
+    let p4 = [1160.0, y0 + 6.0];
+    road(w, Curve::from_tangents(p3, d3, p4, [1.0, 0.0]).expect("S part 3"), av);
+    road(w, Curve::straight(p4, [1400.0, y0 + 6.0]), av);
+
+    // The turned grid north of the avenue: rows along u, columns along v.
+    let th = 17.0f32;
+    let (u, v) = (dir_deg(th), dir_deg(th + 90.0));
+    let o = [380.0, 560.0];
+    let (cols, rows) = (5, 6);
+    let (bw, bh) = (80.0, 40.0);
+    for m in 0..rows {
+        let a = add(o, v, m as f32 * bh);
+        road(w, Curve::straight(a, add(a, u, (cols - 1) as f32 * bw)), st);
+    }
+    for k in 0..cols {
+        let a = add(o, u, k as f32 * bw);
+        let b = add(a, v, (rows - 1) as f32 * bh);
+        road(w, Curve::straight(a, b), st);
+        // On down to the avenue (a T at an odd angle).
+        if let Some(q) = first_hit(w, b, v, 400.0) {
+            road(w, Curve::straight(b, q), st);
+        }
+    }
+
+    // The ring south-east of the avenue, with streets across it.
+    let rc = [660.0, 1170.0];
+    let r = 110.0;
+    let ring_pt = |deg: f32| add(rc, dir_deg(deg), r);
+    for q in 0..4 {
+        let (a0, a1) = (q as f32 * 90.0, (q + 1) as f32 * 90.0);
+        let c = Curve::from_tangents(ring_pt(a0), dir_deg(a0 + 90.0), ring_pt(a1), dir_deg(a1 + 90.0))
+            .expect("ring quarter");
+        road(w, c, st);
+    }
+    road(w, Curve::straight(ring_pt(270.0), ring_pt(90.0)), st);
+    road(w, Curve::straight(ring_pt(180.0), ring_pt(0.0)), st);
+    // Up from the ring to the avenue, and out to the east.
+    if let Some(q) = first_hit(w, ring_pt(270.0), [0.0, -1.0], 600.0) {
+        road(w, Curve::straight(ring_pt(270.0), q), av);
+    }
+    // East of the ring: a works quarter on two streets off the avenue.
+    let e0 = [ring_pt(0.0)[0] + 150.0, rc[1]];
+    road(w, Curve::straight(ring_pt(0.0), e0), st);
+    for x in [e0[0], e0[0] + 110.0] {
+        let b = [x, rc[1] + 60.0];
+        if let Some(q) = first_hit(w, b, [0.0, -1.0], 600.0) {
+            road(w, Curve::straight(b, q), st);
+        }
+    }
+    road(
+        w,
+        Curve::straight([e0[0], rc[1] + 60.0], [e0[0] + 110.0, rc[1] + 60.0]),
+        st,
+    );
+
+    // The cul-de-sac estate: a curved collector south off the avenue, with
+    // curved dead-end closes either side.
+    let c0 = [180.0, y0];
+    let c1 = [380.0, y0 + 230.0];
+    let collector = Curve::from_tangents(c0, [0.0, 1.0], c1, [1.0, 0.0]).expect("collector");
+    road(w, collector, st);
+    road(w, Curve::continuing(c1, [1.0, 0.0], [520.0, y0 + 300.0]), st);
+    let len = collector.length();
+    for (k, &d) in [50.0f32, 130.0, 210.0].iter().enumerate() {
+        let pose = collector.pose_at(d.min(len - 10.0), 0.0);
+        let right = [-pose.dir[1], pose.dir[0]];
+        for side in [1.0f32, -1.0] {
+            // A close: out sideways, bending gently, ending in a dead end.
+            let lean = if (k % 2 == 0) == (side > 0.0) { 20.0 } else { -20.0 };
+            let end = add(add(pose.pos, right, side * 64.0), pose.dir, lean);
+            road(
+                w,
+                Curve::continuing(pose.pos, [right[0] * side, right[1] * side], end),
+                st,
+            );
+        }
+    }
+
+    // The estate's end runs on to the ring: both get a second way out.
+    let est_end = [520.0, y0 + 300.0];
+    road(w, Curve::straight(est_end, ring_pt(135.0)), st);
+
+    // Industry by the highway: straight streets on the world grid north of
+    // the avenue.
+    let n0 = [140.0, y0 - 200.0];
+    road(w, Curve::straight([140.0, y0], n0), st);
+    road(w, Curve::straight(n0, [268.0, y0 - 200.0]), st);
+    road(w, Curve::straight([140.0, y0 - 100.0], [244.0, y0 - 100.0]), st);
+
+    // Zoning.
+    let quad = |a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]| [a, b, c, d];
+    let g = |k: f32, m: f32| add(add(o, u, k * bw), v, m * bh);
+    // The turned grid: rows of housing with rows of shops and workshops
+    // between them, so most people work a few streets from home.
+    let rows_zone = [
+        Zone::Residential,
+        Zone::Commercial,
+        Zone::Residential,
+        Zone::Industrial,
+        Zone::Residential,
+    ];
+    for (m, &z) in rows_zone.iter().enumerate() {
+        let (m0, m1) = (m as f32 - if m == 0 { 0.5 } else { 0.0 }, m as f32 + 1.0);
+        zone_quad(w, quad(g(-0.5, m0), g(4.5, m0), g(4.5, m1), g(-0.5, m1)), z);
+    }
+    // Housing on the long streets down to the avenue.
+    zone_quad(
+        w,
+        quad(g(-0.5, 5.0), g(4.5, 5.0), g(4.5, 12.0), g(-0.5, 12.0)),
+        Zone::Residential,
+    );
+    // Shops along the avenue (both sides).
+    zone_quad(
+        w,
+        quad(
+            [236.0, y0 - 120.0],
+            [1400.0, y0 - 120.0],
+            [1400.0, y0 + 30.0],
+            [236.0, y0 + 30.0],
+        ),
+        Zone::Commercial,
+    );
+    // The ring: shops inside, housing outside.
+    zone_quad(
+        w,
+        quad(
+            add(rc, [-1.0, -1.0], 80.0),
+            add(rc, [1.0, -1.0], 80.0),
+            add(rc, [1.0, 1.0], 80.0),
+            add(rc, [-1.0, 1.0], 80.0),
+        ),
+        Zone::Commercial,
+    );
+    zone_quad(
+        w,
+        quad(
+            add(rc, [-1.0, -1.0], 150.0),
+            add(rc, [1.0, -1.0], 150.0),
+            add(rc, [1.0, 1.0], 150.0),
+            add(rc, [-1.0, 1.0], 150.0),
+        ),
+        Zone::Residential,
+    );
+    // The estate.
+    zone_quad(
+        w,
+        quad(
+            [60.0, y0 + 20.0],
+            [560.0, y0 + 20.0],
+            [560.0, y0 + 360.0],
+            [60.0, y0 + 360.0],
+        ),
+        Zone::Residential,
+    );
+    // Industry, and a strip of it east of the ring.
+    zone_quad(
+        w,
+        quad(
+            [100.0, y0 - 240.0],
+            [330.0, y0 - 240.0],
+            [330.0, y0 - 8.0],
+            [100.0, y0 - 8.0],
+        ),
+        Zone::Industrial,
+    );
+    zone_quad(
+        w,
+        quad(
+            [1000.0, y0 + 60.0],
+            [1120.0, y0 + 60.0],
+            [1120.0, 1300.0],
+            [1000.0, 1300.0],
+        ),
+        Zone::Industrial,
+    );
+    refused
 }

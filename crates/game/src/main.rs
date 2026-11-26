@@ -33,23 +33,39 @@ fn asset_root() -> String {
 fn main() {
     let dev = dev::DevConfig::from_env();
     let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "CitySim".into(),
-                    resolution: WindowResolution::new(1280, 720),
-                    present_mode: PresentMode::AutoVsync,
+    let plugins = DefaultPlugins.set(AssetPlugin {
+        file_path: asset_root(),
+        ..default()
+    });
+    // `CITYSIM_BENCH` / `CITYSIM_RECORD`: no window at all (gfx renders
+    // off-screen); the app loop runs as fast as frames are drawn.
+    let windowless = ["CITYSIM_BENCH", "CITYSIM_RECORD"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|v| !v.is_empty()));
+    if windowless {
+        app.add_plugins(
+            plugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    close_when_requested: false,
                     ..default()
-                }),
-                ..default()
-            })
-            .set(AssetPlugin {
-                file_path: asset_root(),
+                })
+                .disable::<bevy::winit::WinitPlugin>(),
+        )
+        .add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(std::time::Duration::ZERO));
+    } else {
+        app.add_plugins(plugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "CitySim".into(),
+                resolution: WindowResolution::new(1280, 720),
+                present_mode: PresentMode::AutoVsync,
                 ..default()
             }),
-    )
-    .add_plugins(shared::SharedPlugin);
+            ..default()
+        }));
+    }
+    app.add_plugins(shared::SharedPlugin);
     #[cfg(feature = "gfx")]
     app.add_plugins(gfx::GfxPlugin);
     #[cfg(feature = "ui")]

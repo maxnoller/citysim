@@ -615,6 +615,7 @@ fn detached(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
             mix(palette::PAVING, palette::ASPHALT, 0.25),
         );
         drive_rect = Some((dx0, dx1));
+        m.driveways.push((dx0, dx1));
         if rng.chance(0.8) {
             let len = 4.2;
             let cz = (lot.z1 - 0.4 - len * 0.5).min(body.z1 + 0.5);

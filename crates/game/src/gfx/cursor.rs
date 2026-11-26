@@ -1,7 +1,10 @@
-//! In-world tool feedback, driven only by `HoveredCell`, `ActiveTool` and
-//! `ToolPreview` (written by ui):
-//! * a hovered-cell frame that glides to the cursor, tinted by the tool;
-//! * a faint cell grid around the cursor while a tool is active;
+//! In-world tool feedback, driven only by `HoveredCell` / `HoveredPoint`,
+//! `ActiveTool` and `ToolPreview` (written by ui):
+//! * a hovered-cell frame that glides to the cursor, tinted by the tool,
+//!   turned to the zoning lattice under the cursor (cells along a rotated
+//!   or curved road are rotated with it);
+//! * a faint cell grid around the cursor while a tool is active, on the
+//!   same lattice;
 //! * the tool ghost: a translucent road (red and hatched when invalid), or
 //!   the zone / bulldoze rectangle with its affected cells.
 
@@ -16,8 +19,8 @@ use super::road_geom;
 use super::road_ghost::{GhostLeg, ghost_meshes};
 use super::zones::zone_color;
 use crate::shared::{
-    ActiveTool, GameSet, HoveredCell, PathPreview, PreviewKind, RoadChoice, SimWorld, ToolPreview, cell_center,
-    cell_corners,
+    ActiveTool, GameSet, HoveredCell, HoveredPoint, PathPreview, PreviewKind, RoadChoice, SimWorld, ToolPreview,
+    cell_center, cell_corners, zone_cell_corners,
 };
 
 /// Grid radius around the cursor, cells.
@@ -197,9 +200,29 @@ fn tool_color(tool: ActiveTool) -> Color {
     }
 }
 
+/// Placement of a cell's local frame (corner `(i, j)` at the origin, `+x`
+/// along the lattice's `+i`, `+z` along `+j`): the hovered zoning cell on
+/// its own lattice, else the map cell.
+fn cell_frame(sim: &SimWorld, hovered: &HoveredCell, point: &HoveredPoint) -> Option<(Vec3, Quat)> {
+    if let Some(c) = point.zone_cell
+        && let Some(l) = sim.world.zoning.lattice(c.lattice)
+    {
+        let p = l.world_at(c.i as f32, c.j as f32);
+        return Some((Vec3::new(p[0], 0.0, p[1]), Quat::from_rotation_y(-l.angle())));
+    }
+    let c = hovered.0?;
+    Some((
+        Vec3::new(c.x as f32 * CELL_SIZE, 0.0, c.y as f32 * CELL_SIZE),
+        Quat::IDENTITY,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn move_frame(
     time: Res<Time<Real>>,
     hovered: Res<HoveredCell>,
+    point: Res<HoveredPoint>,
+    sim: Res<SimWorld>,
     tool: Res<ActiveTool>,
     mats: Res<CursorMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -208,17 +231,22 @@ fn move_frame(
     let Ok((mut frame, mut t, mut vis)) = q.single_mut() else {
         return;
     };
-    let Some(c) = hovered.0 else {
+    // Inspect highlights what it points at (buildings, roads, cars); a
+    // cell frame on bare ground would only look like a stray tile.
+    let frame_at = cell_frame(&sim, &hovered, &point).filter(|_| *tool != ActiveTool::Inspect);
+    let Some((corner, rot)) = frame_at else {
         vis.set_if_neq(Visibility::Hidden);
         return;
     };
-    let target = Vec3::new(c.x as f32 * CELL_SIZE, heights::HIGHLIGHT, c.y as f32 * CELL_SIZE);
+    let target = corner + Vec3::Y * heights::HIGHLIGHT;
     if *vis == Visibility::Hidden || frame.pos.distance(target) > 80.0 {
         frame.pos = target;
+        t.rotation = rot;
     }
     let a = 1.0 - (-time.delta_secs() * 28.0).exp();
     frame.pos = frame.pos.lerp(target, a);
     t.translation = frame.pos;
+    t.rotation = t.rotation.slerp(rot, a);
     vis.set_if_neq(Visibility::Inherited);
     if tool.is_changed()
         && let Some(mut m) = materials.get_mut(&mats.frame)
@@ -230,13 +258,16 @@ fn move_frame(
 
 fn move_grid(
     hovered: Res<HoveredCell>,
+    point: Res<HoveredPoint>,
+    sim: Res<SimWorld>,
     tool: Res<ActiveTool>,
     mut q: Query<(&mut Transform, &mut Visibility), With<CellGrid>>,
 ) {
     let Ok((mut t, mut vis)) = q.single_mut() else { return };
-    match hovered.0 {
-        Some(c) if *tool != ActiveTool::Inspect => {
-            t.translation = Vec3::new(c.x as f32 * CELL_SIZE, 0.05, c.y as f32 * CELL_SIZE);
+    match cell_frame(&sim, &hovered, &point) {
+        Some((corner, rot)) if *tool != ActiveTool::Inspect => {
+            t.translation = corner + Vec3::Y * 0.05;
+            t.rotation = rot;
             vis.set_if_neq(Visibility::Inherited);
         }
         _ => {
@@ -259,6 +290,20 @@ fn rect_ring(m: &mut MeshBuilder, x0: f32, z0: f32, x1: f32, z1: f32, y: f32, w:
     m.quad_up(q(x0, z1 - w, x1, z1), c);
     m.quad_up(q(x0, z0 + w, x0 + w, z1 - w), c);
     m.quad_up(q(x1 - w, z0 + w, x1, z1 - w), c);
+}
+
+/// Outline of a quad (any rotation), `w` wide inside its edges.
+fn quad_ring(m: &mut MeshBuilder, q: &[[f32; 2]; 4], y: f32, w: f32, c: [f32; 4]) {
+    let p = q.map(Vec2::from);
+    let center = (p[0] + p[1] + p[2] + p[3]) * 0.25;
+    for i in 0..4 {
+        let (a, b) = (p[i], p[(i + 1) % 4]);
+        let (ai, bi) = (
+            a + (center - a).normalize_or_zero() * w * std::f32::consts::SQRT_2,
+            b + (center - b).normalize_or_zero() * w * std::f32::consts::SQRT_2,
+        );
+        m.quad_up([a, b, bi, ai].map(|v| Vec3::new(v.x, y, v.y)), c);
+    }
 }
 
 fn cell_quad(m: &mut MeshBuilder, c: Cell, inset: f32, y: f32, col: [f32; 4]) {
@@ -379,9 +424,21 @@ fn draw_ghost(
             let y = heights::GHOST;
             let fill = lin(base.with_alpha(if valid { 0.5 } else { 0.25 }));
             if valid {
-                for &c in &preview.cells {
-                    cell_quad(&mut m, c, 0.3, y, fill);
+                if preview.zone_cells.is_empty() {
+                    for &c in &preview.cells {
+                        cell_quad(&mut m, c, 0.3, y, fill);
+                    }
+                } else {
+                    for &c in &preview.zone_cells {
+                        if let Some(q) = zone_cell_corners(&sim.world, c, 0.3, y) {
+                            m.quad_up(q, fill);
+                        }
+                    }
                 }
+            }
+            if let Some(q) = preview.area {
+                let edge = lin(mix(base, Color::WHITE, 0.3).with_alpha(0.95));
+                quad_ring(&mut m, &q, y + 0.01, 0.5, edge);
             }
             if let Some(r) = preview.rect {
                 let (x0, z0) = (r.min.x as f32 * CELL_SIZE, r.min.y as f32 * CELL_SIZE);

@@ -12,6 +12,8 @@
 //!   rests at a window edge (only while the window has focus and no mouse
 //!   button is held).
 //! * While `CameraInputBlocked` (pause menu) all camera input is ignored.
+//! * `CameraFollow` keeps the focus on a moving point (panning ignored);
+//!   `CameraGoTo` moves the focus (and zoom) once.
 
 use bevy::camera::PerspectiveProjection;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
@@ -21,7 +23,8 @@ use citysim_sim::{MAP_SIZE_M, World};
 
 use super::scene::camera_look;
 use crate::shared::{
-    CameraInputBlocked, CameraOverride, CameraPose, DisplaySettings, GameSet, PointerOverUi, WorldCamera, cell_center,
+    CameraFollow, CameraGoTo, CameraInputBlocked, CameraOverride, CameraPose, DisplaySettings, GameSet, PointerOverUi,
+    WorldCamera, cell_center,
 };
 
 pub const MIN_DISTANCE: f32 = 22.0;
@@ -194,12 +197,14 @@ fn camera_controls(
     blocked: Res<CameraInputBlocked>,
     display: Res<DisplaySettings>,
     overridden: Res<CameraOverride>,
+    (follow, mut goto): (Res<CameraFollow>, MessageReader<CameraGoTo>),
     gfx_pose: Res<GfxPose>,
     tour: Res<GfxTour>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut rigs: Query<(&mut CameraRig, &Camera, &GlobalTransform)>,
 ) {
     let dt = time.delta_secs().min(0.1);
+    let jump = goto.read().last().copied();
     for (mut rig, camera, cam_tf) in &mut rigs {
         let toured = tour.0.then(|| tour_pose(time.elapsed_secs() / tour.1 - 1.0));
         if let Some(pose) = toured.or(gfx_pose.0).or(overridden.0) {
@@ -238,6 +243,16 @@ fn camera_controls(
         } else {
             1.0
         };
+        if let Some(j) = jump {
+            rig.target.focus = Vec3::new(j.focus[0], 0.0, j.focus[1]);
+            if let Some(d) = j.distance {
+                rig.target.distance = d;
+            }
+        }
+        if let Some(f) = follow.focus {
+            rig.target.focus = Vec3::new(f[0], 0.0, f[1]);
+            pan = Vec2::ZERO;
+        }
         if input && pan != Vec2::ZERO {
             let yaw = rig.target.yaw;
             let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());

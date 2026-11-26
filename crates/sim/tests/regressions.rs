@@ -48,6 +48,21 @@ fn mesh(w: &mut World, x0: i32, x1: i32, y0: i32, y1: i32, step: usize) {
 /// piled up and were all cancelled (counting as hopeless commutes).
 #[test]
 fn road_edits_do_not_starve_departures() {
+    // The same busy mesh with and without the edits: the departures still
+    // waiting at the end may only be those whose kerb is full (the control
+    // run has them too), not ones starved of route searches.
+    let edited = waiting_after(true);
+    let control = waiting_after(false);
+    assert!(
+        edited <= control + 3,
+        "{edited} trips still waiting for a car after 12 s of edits ({control} without)"
+    );
+    assert!(control < 20, "{control} trips waiting without edits");
+}
+
+/// Departures still waiting after 12 s on a busy mesh, with a road edit
+/// every other tick or without.
+fn waiting_after(edits: bool) -> usize {
     let mut w = World::new(3);
     mesh(&mut w, 12, 87, 98, 158, 3);
     let mut r = Rng::new(5);
@@ -71,9 +86,9 @@ fn road_edits_do_not_starve_departures() {
     // The player keeps editing a spur far away: every other tick a road
     // edit (build, then bulldoze it again).
     for t in 0..240 {
-        if t % 2 == 0 {
+        if edits && t % 2 == 0 {
             road(&mut w, (200, 20), (200, 21));
-        } else {
+        } else if edits {
             w.apply(Command::Bulldoze {
                 min: c(200, 20),
                 max: c(200, 21),
@@ -82,11 +97,7 @@ fn road_edits_do_not_starve_departures() {
         }
         w.step();
     }
-    assert!(
-        w.traffic.pending.len() < 10,
-        "{} trips still waiting for a car after 12 s of edits",
-        w.traffic.pending.len()
-    );
+    w.traffic.pending.len()
 }
 
 /// `avg_commute_s` only moves when a car commute finishes. When a city
@@ -217,11 +228,8 @@ fn bulldoze_handles_a_segment_off_the_cell_centres() {
     let a = w.roads.add_node([20.0 * CELL_SIZE + 1.0, (y as f32 + 0.5) * CELL_SIZE]);
     let b = w.roads.add_node([31.0 * CELL_SIZE - 1.0, (y as f32 + 0.5) * CELL_SIZE]);
     w.roads.add_segment(a, b, RoadKind::Street);
-    for x in 20..=30 {
-        w.grid.get_mut(c(x, y)).unwrap().occupant = Occupant::Road;
-    }
     w.versions.roads += 1;
-    w.versions.grid += 1;
+    w.step();
     w.check_invariants().unwrap();
     let out = w
         .apply(Command::Bulldoze {
@@ -232,7 +240,7 @@ fn bulldoze_handles_a_segment_off_the_cell_centres() {
     assert_eq!(out.cells, vec![c(24, y), c(25, y), c(26, y)]);
     w.check_invariants().unwrap();
     for x in 20..=30 {
-        assert_eq!(w.grid.is_road(c(x, y)), !(24..=26).contains(&x), "{x}");
+        assert_eq!(w.grid_view().is_road(c(x, y)), !(24..=26).contains(&x), "{x}");
     }
     assert_eq!(w.roads.segments.len(), 3, "highway and the two remaining ends");
 }
@@ -301,8 +309,8 @@ fn load_rejects_inconsistent_saves() {
     assert!(corrupt(&|b| b.roads.segments[street].speed_limit = f32::NAN));
     assert!(corrupt(&|b| b.roads.segments[street].capacity = [f32::INFINITY; 2]));
     assert!(corrupt(&|b| b.roads.segments[street].length *= 2.0));
-    assert!(corrupt(&|b| b.grid.cells.truncate(100)));
-    assert!(corrupt(&|b| b.grid.size = 300));
+    assert!(corrupt(&|b| b.zoning.lattices.clear()));
+    assert!(corrupt(&|b| b.zoning.blocks[0].lattice = citysim_sim::LatticeId(999)));
     assert!(corrupt(&|b| {
         let n = b.roads.add_node([3.0, 3.0]);
         b.roads.segments[street].b = n;

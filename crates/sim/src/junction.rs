@@ -31,13 +31,15 @@
 //!   pair) has right of way; the others give way and enter on a gap.
 //!
 //! `JunctionSetting::Auto` picks signals where avenues (or an avenue and
-//! the highway) meet, where a street crosses an avenue, and where a
-//! junction was busy yesterday; elsewhere priority, so a side street
-//! joining an avenue (a T) gives way to it until it gets busy.
+//! the highway) meet and where a junction was busy yesterday (vehicles let
+//! in plus vehicles still queued in its busiest minute); elsewhere
+//! priority, so streets joining or crossing an avenue give way to it until
+//! the junction gets busy.
 //! The player overrides it per junction with `Command::SetJunctionControl`.
 
 use serde::{Deserialize, Serialize};
 
+use crate::curve::{ArcTable, Curve};
 use crate::roads::{NodeId, RoadKind, RoadNetwork, SegmentId};
 use crate::{Cell, TICKS_PER_SECOND, World, balance, geom};
 
@@ -101,7 +103,7 @@ pub struct Arm {
 }
 
 /// A path through a junction box.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Movement {
     /// Arm indices (into the node's `segments`).
     pub from_arm: u8,
@@ -109,46 +111,80 @@ pub struct Movement {
     pub from_lane: u8,
     pub to_lane: u8,
     pub turn: Turn,
-    /// Start (stop line, on the in-lane), control point and end (box edge
-    /// on the out-lane) of the quadratic curve, sim metres.
-    pub p0: [f32; 2],
-    pub p1: [f32; 2],
-    pub p2: [f32; 2],
+    /// Made from the lane drivers should use for this turn (the kerb lane
+    /// for right turns, the inner lane for left turns, any lane straight
+    /// on). The others exist so a car that could not reach that lane in
+    /// time turns from where it is.
+    pub preferred: bool,
+    /// The path, from the stop line on the in-lane to the box edge on the
+    /// out-lane, sim metres (lane offsets included).
+    pub curve: Curve,
     /// Curve length, metres.
     pub length: f32,
+    #[serde(skip)]
+    arc: ArcTable,
 }
 
-impl Movement {
-    /// Point and unit direction `d` metres along the curve (clamped).
-    pub fn pose_at(&self, d: f32) -> ([f32; 2], [f32; 2]) {
-        let t = if self.length > 0.0 {
-            (d / self.length).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        bezier_pose(self.p0, self.p1, self.p2, t)
+impl PartialEq for Movement {
+    fn eq(&self, o: &Self) -> bool {
+        (
+            self.from_arm,
+            self.to_arm,
+            self.from_lane,
+            self.to_lane,
+            self.turn,
+            self.preferred,
+        ) == (o.from_arm, o.to_arm, o.from_lane, o.to_lane, o.turn, o.preferred)
+            && self.curve == o.curve
+            && self.length == o.length
     }
 }
 
-fn bezier_pose(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], t: f32) -> ([f32; 2], [f32; 2]) {
-    let u = 1.0 - t;
-    let p = [
-        u * u * p0[0] + 2.0 * u * t * p1[0] + t * t * p2[0],
-        u * u * p0[1] + 2.0 * u * t * p1[1] + t * t * p2[1],
-    ];
-    let d = [
-        2.0 * u * (p1[0] - p0[0]) + 2.0 * t * (p2[0] - p1[0]),
-        2.0 * u * (p1[1] - p0[1]) + 2.0 * t * (p2[1] - p1[1]),
-    ];
-    let l = geom::dot(d, d).sqrt();
-    let dir = if l > 1e-6 {
-        [d[0] / l, d[1] / l]
-    } else {
-        let e = geom::sub(p2, p0);
-        let l = geom::dot(e, e).sqrt().max(1e-6);
-        [e[0] / l, e[1] / l]
-    };
-    (p, dir)
+impl Movement {
+    /// A movement along the quadratic `p0`, `p1`, `p2` (as a cubic).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn quadratic(
+        from_arm: u8,
+        to_arm: u8,
+        from_lane: u8,
+        to_lane: u8,
+        turn: Turn,
+        p0: [f32; 2],
+        p1: [f32; 2],
+        p2: [f32; 2],
+    ) -> Movement {
+        let curve = Curve::new(
+            p0,
+            [
+                p0[0] + (p1[0] - p0[0]) * (2.0 / 3.0),
+                p0[1] + (p1[1] - p0[1]) * (2.0 / 3.0),
+            ],
+            [
+                p2[0] + (p1[0] - p2[0]) * (2.0 / 3.0),
+                p2[1] + (p1[1] - p2[1]) * (2.0 / 3.0),
+            ],
+            p2,
+        );
+        let arc = curve.arc_table();
+        let length = curve.length_with(&arc).max(0.5);
+        Movement {
+            from_arm,
+            to_arm,
+            from_lane,
+            to_lane,
+            turn,
+            preferred: true,
+            curve,
+            length,
+            arc,
+        }
+    }
+
+    /// Point and unit direction `d` metres along the curve (clamped).
+    pub fn pose_at(&self, d: f32) -> ([f32; 2], [f32; 2]) {
+        let p = self.curve.pose_at_with(&self.arc, d, 0.0);
+        (p.pos, p.dir)
+    }
 }
 
 /// Stage of the current signal phase.
@@ -212,17 +248,35 @@ pub struct JunctionState {
     pub movements: Vec<Movement>,
     /// Bit `j` of `conflicts[i]`: movements `i` and `j` cross or merge.
     pub conflicts: Vec<u128>,
+    /// For conflicting movements `i`, `j`: how far along `i` (metres, the
+    /// car's centre) a car must be before it no longer blocks `j` (it is
+    /// past where their paths meet). Derived from the movements; rebuilt
+    /// when empty (not saved).
+    #[serde(skip)]
+    pub clear_after: ClearTable,
     pub plan: Option<SignalPlan>,
     pub signal: SignalState,
     /// Vehicles stopped or crawling on each approach (by arm).
     pub queue: Vec<u16>,
     /// Vehicles that entered the box in the current minute of vehicle
-    /// time, and the busiest minute today / yesterday (auto control).
+    /// time, and the busiest minute today / yesterday (auto control: the
+    /// vehicles let in during a minute plus those still queued at its end).
     pub entered_minute: u16,
     pub peak_minute_today: u16,
     pub peak_minute_yesterday: u16,
     /// Auto control decided at the last midnight: was it busy?
     pub busy: bool,
+    /// Junctions with a major road: the minor approaches' demand, counted
+    /// like `entered_minute` / `peak_minute_*` (vehicles from minor arms let
+    /// in during a minute plus those still queued on them at its end). Auto
+    /// control signalises such a junction on this, not on the major road's
+    /// own traffic. Saved in the extension block (`save`).
+    #[serde(skip)]
+    pub minor_minute: u16,
+    #[serde(skip)]
+    pub minor_peak_today: u16,
+    #[serde(skip)]
+    pub minor_peak_yesterday: u16,
     /// Tick from which the box is clear of the last vehicle let in.
     pub clear_at: u64,
     /// Arm whose straight line was served last, and vehicles let through
@@ -231,7 +285,39 @@ pub struct JunctionState {
     pub phase_count: u16,
 }
 
+/// [`JunctionState::clear_after`]: a cache of the movements' geometry
+/// (always equal for comparisons; empty until first used after a load).
+#[derive(Debug, Clone, Default)]
+pub struct ClearTable(pub(crate) Vec<f32>);
+
+impl PartialEq for ClearTable {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 impl JunctionState {
+    /// Fill [`JunctionState::clear_after`] if it is empty.
+    pub(crate) fn ensure_clear(&mut self) {
+        if self.clear_after.0.is_empty() && !self.movements.is_empty() {
+            self.clear_after = ClearTable(build_clear(&self.movements, &self.conflicts));
+        }
+    }
+
+    /// Does a car on movement `o`, `dist` metres along it, block a car
+    /// that wants to enter on movement `m`? (They conflict and it has not
+    /// passed where their paths meet.)
+    pub fn blocks(&self, o: usize, dist: f32, m: usize) -> bool {
+        if !self.conflict(o, m) {
+            return false;
+        }
+        let n = self.movements.len().min(128);
+        match self.clear_after.0.get(o * n + m) {
+            Some(&c) => dist < c,
+            None => true,
+        }
+    }
+
     /// Index of the arm for segment `s`.
     pub fn arm_of(&self, s: SegmentId) -> Option<usize> {
         self.arms.iter().position(|a| a.segment == s)
@@ -333,10 +419,14 @@ pub struct JunctionView {
 
 /// Unit direction from `n` along segment `s`.
 pub(crate) fn arm_dir(roads: &RoadNetwork, n: NodeId, s: SegmentId) -> [f32; 2] {
-    let other = roads.nodes[roads.segments[s].other(n)].pos;
-    let d = geom::sub(other, roads.nodes[n].pos);
-    let l = geom::dot(d, d).sqrt().max(1e-6);
-    [d[0] / l, d[1] / l]
+    roads.segments[s].dir_from(n)
+}
+
+/// Pose `d` metres from node `n` along segment `s`, direction away from
+/// the node.
+fn arm_pose(roads: &RoadNetwork, n: NodeId, s: SegmentId, d: f32) -> crate::curve::Pose {
+    let seg = &roads.segments[s];
+    seg.pose_dir(seg.a == n, d, 0.0)
 }
 
 /// Right of travel direction `d`.
@@ -389,21 +479,9 @@ fn intersect(p: [f32; 2], d: [f32; 2], q: [f32; 2], e: [f32; 2]) -> Option<[f32;
     Some([p[0] + d[0] * t, p[1] + d[1] * t])
 }
 
-fn curve_length(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2]) -> f32 {
-    let mut len = 0.0;
-    let mut prev = p0;
-    for k in 1..=8 {
-        let (p, _) = bezier_pose(p0, p1, p2, k as f32 / 8.0);
-        len += geom::dist(prev, p);
-        prev = p;
-    }
-    len.max(0.5)
-}
-
 /// Build arms and movements of node `n` (any degree).
 pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<Movement>) {
     let node = &roads.nodes[n];
-    let pos = node.pos;
     let deg = node.segments.len();
     let mut arms: Vec<Arm> = node
         .segments
@@ -463,11 +541,44 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
         let cap = 3.0 * arms.iter().map(|a| a.kind.half_width_m()).fold(0.0, f32::max) + 2.0;
         arms[i].setback = sb.min(cap).min(len * 0.4);
     }
-    // A road that changes width without a junction (a lane ends, e.g. the
-    // highway or an avenue continuing as a street): a short merge box, so
+    // Curved arms: the formula above uses the directions at the node. Push
+    // each stop line out until it clears the other arms' carriageways
+    // along their real curves.
+    if deg >= 2 && node.segments.iter().any(|&s| !roads.segments[s].curve.is_straight()) {
+        for i in 0..deg {
+            let len = roads.segments[arms[i].segment].length;
+            let cap = (len * 0.4).max(arms[i].setback);
+            let hw = arms[i].kind.half_width_m();
+            let clear = |sb: f32| {
+                let p = arm_pose(roads, n, arms[i].segment, sb);
+                let r = right_of(p.dir);
+                let probes = [
+                    p.pos,
+                    [p.pos[0] + r[0] * hw, p.pos[1] + r[1] * hw],
+                    [p.pos[0] - r[0] * hw, p.pos[1] - r[1] * hw],
+                ];
+                (0..deg).all(|j| {
+                    if j == i || arms[i].opposite == Some(j as u8) {
+                        return true;
+                    }
+                    let seg = &roads.segments[arms[j].segment];
+                    let need = arms[j].kind.half_width_m() + 0.3;
+                    probes.iter().all(|&q| seg.nearest(q).1 >= need)
+                })
+            };
+            let mut sb = arms[i].setback;
+            while sb < cap && !clear(sb) {
+                sb = (sb + 0.5).min(cap);
+            }
+            arms[i].setback = sb;
+        }
+    }
+    // A road that changes width or kind without a junction (a lane ends,
+    // or the lanes move sideways: the highway becoming an avenue, an avenue
+    // continuing as a street): a short merge box, so
     // cars waiting to merge stop clear of the stream they join and the
     // merge runs along a curve instead of a sideways jump.
-    if deg == 2 && arms[0].lanes_in != arms[1].lanes_in {
+    if deg == 2 && (arms[0].lanes_in != arms[1].lanes_in || arms[0].kind != arms[1].kind) {
         for a in arms.iter_mut() {
             let len = roads.segments[a.segment].length;
             a.setback = (balance::LANE_MERGE_TAPER_M * 0.5).min(len * 0.4);
@@ -482,20 +593,28 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             let dout = b.dir;
             let turn = if i == j { Turn::UTurn } else { classify(din, dout) };
             let (ni, no) = (a.lanes_in, b.lanes_out);
-            let lanes: Vec<(u8, u8)> = match turn {
-                Turn::Right => vec![(0, 0)],
-                Turn::Left | Turn::UTurn => vec![(ni - 1, no - 1)],
-                Turn::Straight => (0..ni).map(|l| (l, l.min(no - 1))).collect(),
+            // (from lane, to lane, preferred)
+            // Turning lanes keep their order (a double turn: kerb lane to
+            // kerb lane, inner to inner), so neighbouring lanes turning
+            // together do not cut across each other; lefts line up from
+            // the inner side, rights from the kerb.
+            let lanes: Vec<(u8, u8, bool)> = match turn {
+                Turn::Right => (0..ni).map(|l| (l, l.min(no - 1), l == 0)).collect(),
+                Turn::Left => (0..ni)
+                    .map(|l| (l, (l + no).saturating_sub(ni).min(no - 1), l == ni - 1))
+                    .collect(),
+                Turn::UTurn => (0..ni).map(|l| (l, no - 1, l == ni - 1)).collect(),
+                Turn::Straight => (0..ni).map(|l| (l, l.min(no - 1), true)).collect(),
             };
-            for (fl, tl) in lanes {
-                let p0 = geom_add(
-                    geom_add(pos, scale(a.dir, a.setback)),
-                    scale(right_of(din), a.kind.lane_offset_m(fl)),
-                );
-                let p2 = geom_add(
-                    geom_add(pos, scale(b.dir, b.setback)),
-                    scale(right_of(dout), b.kind.lane_offset_m(tl)),
-                );
+            // Stop line and box edge on the arms' centre lines, and the
+            // travel directions there (the arms may be curved).
+            let line_a = arm_pose(roads, n, a.segment, a.setback);
+            let line_b = arm_pose(roads, n, b.segment, b.setback);
+            let din = [-line_a.dir[0], -line_a.dir[1]];
+            let dout = line_b.dir;
+            for (fl, tl, preferred) in lanes {
+                let p0 = geom_add(line_a.pos, scale(right_of(din), a.kind.lane_offset_m(fl)));
+                let p2 = geom_add(line_b.pos, scale(right_of(dout), b.kind.lane_offset_m(tl)));
                 let p1 = match turn {
                     Turn::UTurn => {
                         // Loop around the node.
@@ -504,18 +623,10 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
                     }
                     _ => intersect(p0, din, p2, dout).unwrap_or([(p0[0] + p2[0]) * 0.5, (p0[1] + p2[1]) * 0.5]),
                 };
-                let length = curve_length(p0, p1, p2);
-                movements.push(Movement {
-                    from_arm: i as u8,
-                    to_arm: j as u8,
-                    from_lane: fl,
-                    to_lane: tl,
-                    turn,
-                    p0,
-                    p1,
-                    p2,
-                    length,
-                });
+                // The quadratic through the lane lines' meeting point.
+                let mut m = Movement::quadratic(i as u8, j as u8, fl, tl, turn, p0, p1, p2);
+                m.preferred = preferred;
+                movements.push(m);
             }
         }
     }
@@ -534,14 +645,27 @@ fn scale(a: [f32; 2], k: f32) -> [f32; 2] {
 pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec<u128> {
     let n = movements.len().min(128);
     let ang = |p: [f32; 2]| pseudo_angle(geom::sub(p, node_pos));
-    let ends: Vec<(f32, f32)> = movements.iter().take(n).map(|m| (ang(m.p0), ang(m.p2))).collect();
+    let ends: Vec<(f32, f32)> = movements
+        .iter()
+        .take(n)
+        .map(|m| (ang(m.curve.start()), ang(m.curve.end())))
+        .collect();
     let mut out = vec![0u128; n];
     for i in 0..n {
         for j in i + 1..n {
             let (a, b) = (&movements[i], &movements[j]);
             let same_in = a.from_arm == b.from_arm && a.from_lane == b.from_lane;
             let same_out = a.to_arm == b.to_arm && a.to_lane == b.to_lane;
-            let c = if same_in {
+            // Side by side from one arm to another in their own lanes, in
+            // the same order (two lanes going straight on, a double turn):
+            // neighbours, as on the road itself, however close the lanes.
+            let parallel = a.from_arm == b.from_arm
+                && a.to_arm == b.to_arm
+                && a.from_lane != b.from_lane
+                && a.to_lane != b.to_lane
+                && (a.from_lane < b.from_lane) == (a.to_lane < b.to_lane)
+                && a.turn != Turn::UTurn;
+            let c = if same_in || parallel {
                 false
             } else if same_out || a.turn == Turn::UTurn || b.turn == Turn::UTurn {
                 true
@@ -559,6 +683,55 @@ pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec
     out
 }
 
+/// [`JunctionState::clear_after`] for `movements` with `conflicts`: per
+/// ordered conflicting pair `(i, j)` the distance along `i` beyond which
+/// the rear of a car (half the longest body plus a sample step and a
+/// metre) has left the stretch of `i` that comes within
+/// `MOVEMENT_CLEARANCE_M` of `j`'s path. Infinite when that stretch runs to
+/// the end (merging into the same lane: the car blocks until it is out).
+pub(crate) fn build_clear(movements: &[Movement], conflicts: &[u128]) -> Vec<f32> {
+    const K: usize = 16;
+    let n = movements.len().min(128);
+    let pts: Vec<[[f32; 2]; K + 1]> = movements
+        .iter()
+        .take(n)
+        .map(|m| {
+            let mut out = [[0.0; 2]; K + 1];
+            for (k, p) in out.iter_mut().enumerate() {
+                *p = m.pose_at(m.length * k as f32 / K as f32).0;
+            }
+            out
+        })
+        .collect();
+    let clear2 = balance::MOVEMENT_CLEARANCE_M * balance::MOVEMENT_CLEARANCE_M;
+    let half = balance::TRUCK_BODY_M[0] * 0.5;
+    let mut out = vec![f32::INFINITY; n * n];
+    for i in 0..n {
+        let c = conflicts.get(i).copied().unwrap_or(0);
+        for j in 0..n {
+            if i == j || c >> j & 1 == 0 {
+                continue;
+            }
+            let last = (0..=K).rev().find(|&k| {
+                pts[j].iter().any(|q| {
+                    let d = geom::sub(pts[i][k], *q);
+                    geom::dot(d, d) < clear2
+                })
+            });
+            let len = movements[i].length;
+            let step = len / K as f32;
+            out[i * n + j] = match last {
+                Some(k) if k < K => {
+                    let d = len * k as f32 / K as f32 + step + half + 1.0;
+                    if d < len { d } else { f32::INFINITY }
+                }
+                _ => f32::INFINITY,
+            };
+        }
+    }
+    out
+}
+
 /// Do the paths of two movements come closer than a car's width (plus a
 /// margin) anywhere, so two cars on them would touch? Catches movements
 /// that do not cross topologically but pass side by side in a small box
@@ -570,7 +743,7 @@ fn paths_brush(a: &Movement, b: &Movement) -> bool {
     let pts = |m: &Movement| -> [[f32; 2]; SAMPLES + 1] {
         let mut out = [[0.0; 2]; SAMPLES + 1];
         for (k, p) in out.iter_mut().enumerate() {
-            *p = bezier_pose(m.p0, m.p1, m.p2, k as f32 / SAMPLES as f32).0;
+            *p = m.curve.point_t(k as f32 / SAMPLES as f32);
         }
         out
     };
@@ -651,8 +824,11 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
     groups.insert(0, main_group);
     let mut phases = Vec::new();
     let mut main = 0u8;
+    // Two through roads of the same class (avenues crossing): both are
+    // main roads, served alike.
+    let equal = groups.len() >= 2 && score(&groups[0]) == score(&groups[1]);
     for (k, g) in groups.iter().enumerate() {
-        let wide = g.len() == 2 && g.iter().any(|&a| arms[a as usize].lanes_in >= 2);
+        let wide = balance::SIGNAL_LEFT_PHASES && g.len() == 2 && g.iter().any(|&a| arms[a as usize].lanes_in >= 2);
         if wide {
             phases.push(SignalPhase {
                 arms: g.clone(),
@@ -668,19 +844,21 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
             arms: g.clone(),
             left_only: false,
             min_green_s: balance::SIGNAL_MIN_GREEN_S,
-            max_green_s: if k == 0 {
+            max_green_s: if k == 0 || (equal && k == 1) {
                 balance::SIGNAL_MAIN_MAX_GREEN_S
             } else {
                 balance::SIGNAL_SIDE_MAX_GREEN_S
             },
         });
     }
-    // Coordination along avenues: the main group is an avenue pair.
+    // Coordination along avenues: wherever the main group is an avenue
+    // pair crossing or met by lesser roads, the avenue's green starts at a
+    // fixed point of a common cycle shifted by the distance along it: a
+    // green wave for its platoons. Two avenues crossing are served alike,
+    // on demand (holding one for its platoons would starve the other), and
+    // so is a crossing of streets.
     let g0 = &groups[0];
-    // Only where arterials meet: a street crossing is served on demand.
-    let coordinated = g0.len() == 2
-        && g0.iter().all(|&a| arms[a as usize].kind == RoadKind::Avenue)
-        && arms.iter().all(|a| a.kind.rank() >= RoadKind::Avenue.rank());
+    let coordinated = g0.len() == 2 && g0.iter().all(|&a| arms[a as usize].kind == RoadKind::Avenue) && !equal;
     let cycle_s = balance::SIGNAL_COORD_CYCLE_S;
     let offset_s = if coordinated {
         // Canonical axis direction (pointing to +x, or +y when vertical).
@@ -703,11 +881,32 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
     }
 }
 
+/// Was a junction busy yesterday (auto control signalises it)? Junctions
+/// with a major road judge by their minor approaches' busiest minute (the
+/// major road flows regardless); all-way junctions by all of them.
+/// `was`: busy the day before (a lower bar to stay busy).
+pub(crate) fn judge_busy(j: &JunctionState, was: bool) -> bool {
+    if j.arms.iter().any(|a| a.major) {
+        let bar = if was {
+            balance::AUTO_PRIORITY_MINOR_PER_MINUTE
+        } else {
+            balance::AUTO_SIGNAL_MINOR_PER_MINUTE
+        };
+        j.minor_peak_yesterday >= bar
+    } else {
+        let bar = if was {
+            balance::AUTO_PRIORITY_PER_MINUTE
+        } else {
+            balance::AUTO_SIGNAL_PER_MINUTE
+        };
+        j.peak_minute_yesterday >= bar
+    }
+}
+
 /// Control `Auto` resolves to.
 pub(crate) fn auto_control(arms: &[Arm], busy: bool) -> JunctionControl {
-    // Arterials meeting (avenues, the highway), or a street crossing an
-    // avenue: signals. A side street joining an avenue (a T) gives way
-    // until it gets busy.
+    // Arterials meeting (avenues, the highway): signals. Streets joining
+    // or crossing an avenue give way to it until the junction gets busy.
     let arterial = arms.iter().filter(|a| a.kind.rank() >= RoadKind::Avenue.rank()).count();
     let through_pair = arterial == 2
         && arms.iter().enumerate().any(|(i, a)| {
@@ -715,7 +914,8 @@ pub(crate) fn auto_control(arms: &[Arm], busy: bool) -> JunctionControl {
                 && a.opposite
                     .is_some_and(|o| arms[o as usize].kind.rank() >= RoadKind::Avenue.rank() && o as usize != i)
         });
-    let crossing = arterial >= 1 && arms.len() >= 4;
+    // An avenue ending at a crossing of streets has no through road: lights.
+    let crossing = arterial == 1 && arms.len() >= 4;
     if busy || arterial >= 3 || (arterial == 2 && !through_pair) || crossing {
         JunctionControl::Signal
     } else {
@@ -724,6 +924,11 @@ pub(crate) fn auto_control(arms: &[Arm], busy: bool) -> JunctionControl {
 }
 
 fn resolve(setting: JunctionSetting, arms: &[Arm], busy: bool) -> JunctionControl {
+    // Nodes with fewer than three arms (bends, curve joins, lane changes)
+    // have no signal plan: they are never signalled, however busy.
+    if arms.len() < 3 {
+        return JunctionControl::Priority;
+    }
     match setting {
         JunctionSetting::Auto => auto_control(arms, busy),
         JunctionSetting::Signal => JunctionControl::Signal,
@@ -757,6 +962,7 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
         control,
         queue: vec![0; deg],
         arms,
+        clear_after: ClearTable(build_clear(&movements, &conflicts)),
         movements,
         conflicts,
         plan,
@@ -765,6 +971,9 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
         peak_minute_today: old.map_or(0, |o| o.peak_minute_today),
         peak_minute_yesterday: old.map_or(0, |o| o.peak_minute_yesterday),
         busy,
+        minor_minute: old.map_or(0, |o| o.minor_minute),
+        minor_peak_today: old.map_or(0, |o| o.minor_peak_today),
+        minor_peak_yesterday: old.map_or(0, |o| o.minor_peak_yesterday),
         clear_at: old.map_or(0, |o| o.clear_at),
         last_served: old.filter(|_| same_shape).map_or(0, |o| o.last_served),
         phase_count: old.filter(|_| same_shape).map_or(0, |o| o.phase_count),
@@ -807,14 +1016,28 @@ fn ticks(s: f32) -> u32 {
 pub(crate) struct ArmDemand {
     /// A vehicle within detection range wants a non-left movement.
     pub through: bool,
-    /// ... wants a left turn (or U-turn).
+    /// ... a left turn (or U-turn), stuck at the line (calls the protected
+    /// left phase).
     pub left: bool,
+    /// ... a left turn, anywhere within detection (the through phase
+    /// serves it permissively).
+    pub through_left: bool,
+    /// A vehicle that would reach the line within the passage time
+    /// (`SIGNAL_PASSAGE_S`): keeps its phase green (any other movement /
+    /// a left turn). Vehicles further back call a phase but do not hold it,
+    /// so a green ends in the gap between platoons.
+    pub hold_through: bool,
+    pub hold_left: bool,
 }
 
 fn phase_demand(phase: &SignalPhase, demand: &[ArmDemand]) -> bool {
     phase.arms.iter().any(|&a| {
         let d = demand.get(a as usize).copied().unwrap_or_default();
-        if phase.left_only { d.left } else { d.through || d.left }
+        if phase.left_only {
+            d.left
+        } else {
+            d.through || d.left || d.through_left
+        }
     })
 }
 
@@ -847,7 +1070,16 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
                 // Nobody else waits: rest in this phase.
                 return;
             };
-            let mine = phase_demand(phase, demand);
+            // A running phase holds for cars about to reach the line that
+            // it serves (a left phase for left turners, moving or not).
+            let mine = phase.arms.iter().any(|&a| {
+                let d = demand.get(a as usize).copied().unwrap_or_default();
+                if phase.left_only {
+                    d.hold_left
+                } else {
+                    d.hold_through || d.hold_left
+                }
+            });
             let mut end = !mine || elapsed >= ticks(phase.max_green_s);
             if plan.coordinated {
                 let c = ticks(plan.cycle_s).max(1) as u64;
@@ -1060,4 +1292,102 @@ pub fn setback(world: &World, n: NodeId, s: SegmentId) -> f32 {
         .get(n)
         .and_then(|j| j.arm_of(s).map(|a| j.arms[a].setback))
         .unwrap_or(0.0)
+}
+
+// ---------------------------------------------------------------- shape ----
+
+/// Where an arm's road surface meets the junction surface: the line across
+/// the road `setback` metres from the node.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ArmCut {
+    pub segment: SegmentId,
+    /// Metres along the segment's centre line from the node.
+    pub setback: f32,
+    /// Centre-line point of the cut.
+    pub center: [f32; 2],
+    /// Unit direction along the road away from the node at the cut.
+    pub dir: [f32; 2],
+    /// Kerb ends of the cut: left and right seen looking away from the node
+    /// (`right` = `center + right_of(dir) * half_width`).
+    pub left: [f32; 2],
+    pub right: [f32; 2],
+    /// Half the width of the cut (carriageway plus the requested extra).
+    pub half_width: f32,
+}
+
+/// A junction's surface for renderers: the outline polygon and the cut
+/// line of every arm, built from the same geometry vehicles use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JunctionShape {
+    pub node: NodeId,
+    pub pos: [f32; 2],
+    /// Arms in counter-clockwise order (sim axes: from `+x` towards `+y`).
+    pub arms: Vec<ArmCut>,
+    /// Closed polygon, counter-clockwise, no repeated first point: for each
+    /// arm its `left` then `right` cut point, then kerb-fillet points round
+    /// to the next arm's `left`.
+    pub outline: Vec<[f32; 2]>,
+}
+
+/// The surface of node `n` with its kerbs `extra` metres outside the
+/// carriageway (0 for the asphalt, the sidewalk width for the pavement).
+/// `None` for dead ends and for nodes without a box (straight or smooth
+/// continuations).
+pub fn junction_shape(world: &World, n: NodeId, extra: f32) -> Option<JunctionShape> {
+    let roads = &world.roads;
+    let node = roads.nodes.get(n)?;
+    if node.segments.len() < 2 {
+        return None;
+    }
+    let mut arms: Vec<(f32, ArmCut)> = Vec::new();
+    for &s in &node.segments {
+        let seg = roads.segments.get(s)?;
+        let sb = setback(world, n, s).min(seg.length);
+        let forward = seg.a == n;
+        let pose = seg.pose_dir(forward, sb, 0.0);
+        let hw = seg.kind.half_width_m() + extra;
+        let r = right_of(pose.dir);
+        let cut = ArmCut {
+            segment: s,
+            setback: sb,
+            center: pose.pos,
+            dir: pose.dir,
+            left: [pose.pos[0] - r[0] * hw, pose.pos[1] - r[1] * hw],
+            right: [pose.pos[0] + r[0] * hw, pose.pos[1] + r[1] * hw],
+            half_width: hw,
+        };
+        arms.push((pseudo_angle(seg.dir_from(n)), cut));
+    }
+    if arms.iter().all(|(_, a)| a.setback <= 1e-3) {
+        return None;
+    }
+    arms.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let arms: Vec<ArmCut> = arms.into_iter().map(|(_, a)| a).collect();
+    let mut outline = Vec::new();
+    let k = arms.len();
+    for i in 0..k {
+        let (a, b) = (&arms[i], &arms[(i + 1) % k]);
+        outline.push(a.left);
+        outline.push(a.right);
+        // Kerb fillet from this arm's right kerb to the next arm's left one:
+        // a quadratic whose control point is where the two kerb lines meet
+        // (towards the node), else a straight edge.
+        let ctrl = intersect(a.right, a.dir, b.left, b.dir)
+            .filter(|c| geom::dist(*c, node.pos) < 3.0 * (a.half_width + b.half_width) + a.setback + b.setback);
+        if let Some(c) = ctrl {
+            for t in [0.25f32, 0.5, 0.75] {
+                let u = 1.0 - t;
+                outline.push([
+                    u * u * a.right[0] + 2.0 * u * t * c[0] + t * t * b.left[0],
+                    u * u * a.right[1] + 2.0 * u * t * c[1] + t * t * b.left[1],
+                ]);
+            }
+        }
+    }
+    Some(JunctionShape {
+        node: n,
+        pos: node.pos,
+        arms,
+        outline,
+    })
 }

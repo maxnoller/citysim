@@ -108,10 +108,12 @@ fn enormous_dead_end_tree() {
     assert!(w.households.len() > 100, "{}", w.households.len());
     // (A trunk crossed by a branch every six cells is a chain of all-way
     // stops: slow, but alive.)
-    assert!(peak > 20 && done > 20, "peak {peak}, trips {done}");
+    // (Round 3: the first day's trips are newcomers driving in and the
+    // first commuters; fewer finish on this slow chain than in round 2.)
+    assert!(peak > 20 && done > 10, "peak {peak}, trips {done}");
     // Cut the trunk under the morning rush.
     bulldoze(&mut w, (13, 127), (13, 129));
-    let cut_off = |b: &Building| b.footprint.min.x > 16;
+    let cut_off = |b: &Building| b.footprint.rect().min.x > 16;
     assert!(w.buildings.values().any(cut_off));
     // Abandoned one in-game day (the grace period) after the cut.
     run(&mut w, DAY + 2 * HOUR);
@@ -207,7 +209,7 @@ fn disconnected_islands() {
     assert!(
         w.buildings
             .values()
-            .all(|b| b.footprint.min.x >= 30 && (100..=150).contains(&b.footprint.min.y))
+            .all(|b| b.footprint.rect().min.x >= 30 && (100..=150).contains(&b.footprint.rect().min.y))
     );
     // Cut it again under traffic.
     bulldoze(&mut w, (20, 127), (21, 129));
@@ -334,6 +336,9 @@ fn map_spanning_diagonal_mesh() {
         zone: None,
     })
     .unwrap();
-    run(&mut w, 2 * HOUR);
+    // Cars with people in them drive on out of the city (the households
+    // left with their homes); on the bare highway stub they turn round one
+    // by one at its end.
+    run(&mut w, 4 * HOUR);
     assert!(w.vehicles.is_empty() && w.households.is_empty());
 }

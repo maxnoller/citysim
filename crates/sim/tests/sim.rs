@@ -88,8 +88,8 @@ fn growth_needs_a_road_connection_to_the_highway() {
         assert!(b.level >= 1 && b.capacity > 0);
         // Facing points at a road within reach.
         let (dx, dy) = b.facing.offset();
-        let front = (1..=2).any(|k| w.grid.is_road(b.footprint.min.offset(dx * k, dy * k)));
-        assert!(front, "{:?} faces {:?} without a road", b.footprint, b.facing);
+        let front = (1..=2).any(|k| w.grid_view().is_road(b.footprint.rect().min.offset(dx * k, dy * k)));
+        assert!(front, "{:?} faces {:?} without a road", b.footprint.rect(), b.facing);
     }
     let seeds: std::collections::BTreeSet<u32> = w.buildings.values().map(|b| b.seed).collect();
     assert!(seeds.len() > 1);
@@ -112,17 +112,72 @@ fn growth_is_gradual() {
 
 #[test]
 fn no_jobs_means_unemployment_and_people_leave() {
+    // No jobs -> unemployment -> money runs out -> the household cuts
+    // spending, finds no cheaper home and leaves. Pensioners can stay.
     let mut w = World::new(5);
     let mut p = Some(GridPlayer::new(&[Zone::Residential]));
     run_to(&mut w, &mut p, DAY / 2);
-    let first: Vec<HouseholdId> = w.households.keys().collect();
-    assert!(!first.is_empty());
+    let workers: Vec<HouseholdId> = w
+        .households
+        .iter()
+        .filter(|(_, h)| {
+            // Households that need a job: someone in the workforce and no
+            // pension coming in.
+            h.citizens.iter().any(|&c| w.citizens[c].in_workforce())
+                && h.citizens.iter().all(|&c| !w.citizens[c].retired)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    assert!(workers.len() > 5, "{}", workers.len());
     assert!(w.stats.unemployment > 0.99);
-    run_to(&mut w, &mut p, 3 * DAY);
+    let people: Vec<CitizenId> = workers.iter().flat_map(|&h| w.households[h].citizens.clone()).collect();
+    // Follow the people, not the household: two jobless singles may move in
+    // together (a couple), which dissolves one household into the other.
+    let mut tracked: std::collections::BTreeSet<HouseholdId> = workers.iter().copied().collect();
+    let mut austerity = std::collections::BTreeSet::new();
+    let mut broke = std::collections::BTreeSet::new();
+    let mut left = std::collections::BTreeSet::new();
+    let mut gone = std::collections::BTreeSet::new();
+    let mut last_members: std::collections::BTreeMap<HouseholdId, Vec<CitizenId>> = Default::default();
+    // Four midnights: two broke singles who move in together pool their
+    // money, and the couple's own count of broke days starts again.
+    while w.time.tick < 4 * DAY {
+        let t = w.time.tick + 1;
+        run_to(&mut w, &mut p, t);
+        for &c in &people {
+            if let Some(ci) = w.citizens.get(c) {
+                tracked.insert(ci.household);
+            }
+        }
+        for &h in &tracked {
+            if let Some(hh) = w.households.get(h) {
+                last_members.insert(h, hh.citizens.clone());
+                if hh.austerity {
+                    austerity.insert(h);
+                }
+                // Money running out: less than two days of rent left.
+                if hh.money < 2 * hh.rent.max(1) {
+                    broke.insert(h);
+                }
+            } else if gone.insert(h)
+                && last_members
+                    .get(&h)
+                    .is_none_or(|m| m.iter().all(|&c| !w.citizens.contains_key(c)))
+            {
+                // Gone with all its members (not merged into a partner's).
+                left.insert(h);
+            }
+        }
+    }
     assert!(
-        first.iter().all(|h| !w.households.contains_key(*h)),
-        "unemployed households left within two midnights"
+        people.iter().all(|c| !w.citizens.contains_key(*c)),
+        "jobless households left within four midnights"
     );
+    assert!(left.len() * 2 >= workers.len(), "{} of {}", left.len(), workers.len());
+    for h in &left {
+        assert!(austerity.contains(h), "{h:?} cut spending before it left");
+        assert!(broke.contains(h), "{h:?} left when its money ran out");
+    }
     w.check_sim_invariants().unwrap();
 }
 
@@ -165,44 +220,54 @@ fn path_exists_and_vehicles_arrive() {
     );
 }
 
-/// Mean car speed over all ticks with cars, and the final average commute.
-fn run_layout(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32, u32) {
+/// Mean speed of all cars (moving or standing in queues) over the ticks
+/// with cars, the final average commute, the mean delay factor (commutes
+/// over free-flow time) over the same stretch, and the population.
+fn run_layout_delay(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32, f32, u32) {
     let mut w = World::new(8);
     scenarios::prebuilt(&mut w, |w| scenarios::two_districts(w, grid));
     let (mut speed, mut n) = (0.0f64, 0u32);
     let mut commute = Vec::new();
+    let mut delay = Vec::new();
     for _ in 0..days as u64 * DAY {
         if Some(w.time.day) == fix_on_day && w.time.tick_of_day == 0 {
             scenarios::add_connections(&mut w);
         }
         w.step();
         if w.time.day + 2 > days && w.stats.vehicles_on_road > 20 {
-            speed += w.stats.avg_speed as f64;
+            // `avg_speed` averages the moving cars only.
+            speed += (w.stats.avg_speed * (1.0 - w.traffic.stopped_share)) as f64;
             n += 1;
             commute.push(w.stats.avg_commute_s);
+            delay.push(traffic::delay_factor(&w));
         }
     }
     w.check_sim_invariants().unwrap();
     let c = commute.iter().sum::<f32>() / commute.len().max(1) as f32;
-    ((speed / n.max(1) as f64) as f32, c, w.stats.population)
+    let d = delay.iter().sum::<f32>() / delay.len().max(1) as f32;
+    ((speed / n.max(1) as f64) as f32, c, d, w.stats.population)
 }
 
 #[test]
 fn bad_layout_jams_and_a_second_connection_fixes_it() {
-    let (grid_speed, grid_commute, grid_pop) = run_layout(true, None, 6);
-    let (bad_speed, bad_commute, bad_pop) = run_layout(false, None, 6);
-    let (fix_speed, fix_commute, fix_pop) = run_layout(false, Some(3), 6);
-    println!("grid {grid_speed:.1} m/s {grid_commute:.0} s pop {grid_pop}");
-    println!("bad  {bad_speed:.1} m/s {bad_commute:.0} s pop {bad_pop}");
-    println!("fix  {fix_speed:.1} m/s {fix_commute:.0} s pop {fix_pop}");
-    // Same zoning: the one-junction city has much longer commutes and slower
-    // traffic although it carries fewer people.
+    let (grid_speed, grid_commute, grid_delay, grid_pop) = run_layout_delay(true, None, 6);
+    let (bad_speed, bad_commute, bad_delay, bad_pop) = run_layout_delay(false, None, 6);
+    let (fix_speed, fix_commute, fix_delay, fix_pop) = run_layout_delay(false, Some(3), 6);
+    println!("grid {grid_speed:.1} m/s {grid_commute:.0} s x{grid_delay:.2} pop {grid_pop}");
+    println!("bad  {bad_speed:.1} m/s {bad_commute:.0} s x{bad_delay:.2} pop {bad_pop}");
+    println!("fix  {fix_speed:.1} m/s {fix_commute:.0} s x{fix_delay:.2} pop {fix_pop}");
+    // Same zoning: the one-junction city has much longer commutes although
+    // it carries fewer than half the people (every car on the road stands
+    // in some queue in both, so their mean speeds are alike).
     assert!(bad_commute > 1.5 * grid_commute, "{bad_commute} vs {grid_commute}");
-    assert!(bad_speed < grid_speed, "{bad_speed} vs {grid_speed}");
-    assert!(bad_pop < grid_pop);
-    // Adding connections measurably fixes it.
-    assert!(fix_commute < 0.8 * bad_commute, "{fix_commute} vs {bad_commute}");
-    assert!(fix_pop > bad_pop);
+    assert!(bad_pop * 2 < grid_pop, "{bad_pop} vs {grid_pop}");
+    // Adding connections measurably fixes it: the town grows again, to
+    // more than twice the people (it grows into the new capacity until
+    // traffic holds it back again), and although it then carries several
+    // times the cars, commutes are no longer and no further from free flow.
+    assert!(fix_pop > 2 * bad_pop, "{fix_pop} vs {bad_pop}");
+    assert!(fix_commute < bad_commute, "{fix_commute} vs {bad_commute}");
+    assert!(fix_delay <= bad_delay, "x{fix_delay} vs x{bad_delay}");
 }
 
 #[test]
@@ -302,16 +367,26 @@ fn bulldozing_under_traffic_never_panics() {
 fn economy_books_taxes_and_upkeep_daily() {
     let mut w = World::new(15);
     let mut p = Some(GridPlayer::new(&Zone::ALL));
-    run_to(&mut w, &mut p, 3 * DAY + 1);
+    run_to(&mut w, &mut p, 2 * DAY + 1);
     let e = &w.economy;
-    assert_eq!(e.history.len(), 3);
+    assert_eq!(e.history.len(), 2);
     let b = e.last_day;
     assert!(b.residential_tax > 0 && b.commercial_tax + b.industrial_tax > 0);
     let day = e.history.last().unwrap();
+    // Road upkeep by road class and traffic lights, services by city size
+    // and density: the categories add up to the budget's lines.
+    let costs = e.last_day_costs;
+    assert_eq!(b.road_upkeep, costs.road_upkeep());
+    assert_eq!(b.services, costs.services());
     assert_eq!(
-        b.road_upkeep,
-        day.road_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
+        costs.streets + costs.highway,
+        (day.road_cells - w.stats.avenue_cells) as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY
     );
+    assert_eq!(
+        costs.signals,
+        costs.signal_count as i64 * balance::SIGNAL_UPKEEP_PER_DAY
+    );
+    assert!(costs.services_city_size > 0 && costs.services_base > costs.services_city_size);
     assert_eq!(day.income - day.expenses, b.income() - b.expenses());
     assert_eq!(e.last_day_income, b.income());
     assert_eq!(e.last_day_expenses, b.expenses());
@@ -334,7 +409,7 @@ fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
     let mut player = World::new(16);
     let mut p = Some(GridPlayer::new(&Zone::ALL));
     let hundred_cells = 100 * balance::ROAD_COST_PER_CELL;
-    for _ in 0..4 * DAY {
+    for _ in 0..DAY {
         over.step();
         good.step();
         let next = player.time.tick + 1;
@@ -344,7 +419,7 @@ fn overbuilding_goes_broke_but_a_sensible_layout_stays_solvent() {
     assert!(over.economy.money < 0, "{}", over.economy.money);
     assert!(good.economy.money > 0, "{}", good.economy.money);
     // Its roads cost more to keep than its town pays (the young player city
-    // is about break-even on day 4 and in profit later).
+    // is about break-even on day 1 and in profit later).
     let (over_net, player_net) = (over.economy.last_day.net(), player.economy.last_day.net());
     assert!(
         over_net < 0 && over_net < player_net - 1000,

@@ -12,12 +12,16 @@
 //! * `CameraOverride`: written by dev tooling (scripted demo / autoshot).
 //! * Round 2, written by ui, drawn by gfx: `RoadChoice`, `ToolModes`,
 //!   `SnapFeedback`, `PathPreview`, `WorldHighlight`, `DisplaySettings`.
+//! * Round 4, written by ui, drawn / honoured by gfx: `CurveToolView` (the
+//!   free-form road tool), `ToolPreview::area`, `WorldHighlight::doomed_roads`,
+//!   `WorldTarget::Vehicle`, `CameraFollow`, `CameraGoTo`.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use citysim_sim::command::{NodeChange, PieceChange};
 use citysim_sim::{
-    BuildingId, CELL_SIZE, Cell, CellRect, Command, CommandError, NodeId, Outcome, SegmentId, TICKS_PER_SECOND, World,
-    Zone,
+    BuildingId, CELL_SIZE, Cell, CellRect, CellRef, Command, CommandError, Curve, NodeId, Outcome, RoadKind, SegmentId,
+    TICKS_PER_SECOND, VehicleId, World, Zone,
 };
 
 // ---------------------------------------------------------------- ordering
@@ -67,11 +71,19 @@ impl SimWorld {
     }
 }
 
-/// Steps per fixed update for speed levels 1, 2, 3.
-pub const SPEEDS: [u32; 3] = [1, 3, 6];
+/// Steps per fixed update for speed levels 1 to 4 (a day is 16 minutes at
+/// 1x, 80 seconds at 12x).
+pub const SPEEDS: [u32; 4] = [1, 3, 6, 12];
 
-/// Pause and speed. The fixed timestep runs at `TICKS_PER_SECOND`; each
-/// fixed update performs `steps_per_tick()` sim steps.
+/// Most fixed updates a second: the steps of a fast speed are spread over
+/// several smaller fixed updates (so no single frame carries all of a
+/// tick's steps), up to this rate.
+pub const MAX_FIXED_HZ: u32 = 120;
+
+/// Pause and speed. The fixed timestep runs at `TICKS_PER_SECOND` times
+/// `fixed_per_tick()`; each fixed update performs `steps_per_tick()` sim
+/// steps, so a second of real time is always `TICKS_PER_SECOND` times the
+/// speed in steps.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SimClock {
     pub paused: bool,
@@ -80,17 +92,43 @@ pub struct SimClock {
 }
 
 impl SimClock {
+    /// Sim steps per real-time tick (`1/TICKS_PER_SECOND` s) at this speed.
+    pub fn speed_steps(&self) -> u32 {
+        SPEEDS[self.speed.min(SPEEDS.len() - 1)]
+    }
+
+    /// Fixed updates per real-time tick: the largest divisor of the speed
+    /// that keeps the fixed rate at most [`MAX_FIXED_HZ`].
+    pub fn fixed_per_tick(&self) -> u32 {
+        let s = self.speed_steps();
+        (1..=s)
+            .rev()
+            .find(|k| s.is_multiple_of(*k) && k * TICKS_PER_SECOND <= MAX_FIXED_HZ)
+            .unwrap_or(1)
+    }
+
+    /// Sim steps per fixed update (0 while paused).
     pub fn steps_per_tick(&self) -> u32 {
         if self.paused {
             0
         } else {
-            SPEEDS[self.speed.min(SPEEDS.len() - 1)]
+            self.speed_steps() / self.fixed_per_tick()
+        }
+    }
+}
+
+/// Keep the fixed timestep at the rate the speed asks for.
+fn fixed_rate(clock: Res<SimClock>, mut fixed: ResMut<Time<Fixed>>) {
+    if clock.is_changed() {
+        let hz = (TICKS_PER_SECOND * clock.fixed_per_tick()) as f64;
+        if (fixed.timestep().as_secs_f64() - 1.0 / hz).abs() > 1e-9 {
+            fixed.set_timestep_hz(hz);
         }
     }
 }
 
 /// A command for the sim; applied in `GameSet::Sim`, result in `LastCommand`.
-#[derive(Message, Debug, Clone, Copy)]
+#[derive(Message, Debug, Clone)]
 pub struct SimCommand(pub Command);
 
 /// Result of the most recently applied `SimCommand`.
@@ -119,6 +157,16 @@ pub enum ActiveTool {
 /// over UI (`PointerOverUi`). Computed by shared from the `WorldCamera` ray.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HoveredCell(pub Option<Cell>);
+
+/// The ground point under the mouse (sim metres) and the zoning cell there
+/// (on whatever lattice owns that spot; `None` where there is no zoning
+/// cell). `None` under the same conditions as [`HoveredCell`]. Computed by
+/// shared together with it.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct HoveredPoint {
+    pub pos: Option<[f32; 2]>,
+    pub zone_cell: Option<CellRef>,
+}
 
 /// True while the mouse is over a UI element (written by ui).
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -156,9 +204,17 @@ pub struct ToolPreview {
     pub line: Option<(Cell, Cell)>,
     /// Rectangle tools: the dragged rectangle.
     pub rect: Option<CellRect>,
+    /// Marquee tools (zoning, bulldozer area): the dragged area, a
+    /// rectangle along the lattice it started on, sim metres (corners in
+    /// order). gfx draws its outline.
+    pub area: Option<[[f32; 2]; 4]>,
     /// Affected cells (valid: from the preview; invalid road: the straight
     /// line's cells if it is straight, else empty).
     pub cells: Vec<Cell>,
+    /// Zoning tools: the zoning cells that would change, on any lattice
+    /// (`Preview::zone_cells`). When not empty gfx draws these (rotated
+    /// along their roads) instead of `cells`.
+    pub zone_cells: Vec<CellRef>,
     /// `None` when the command would succeed.
     pub error: Option<CommandError>,
     /// Money it would cost.
@@ -217,45 +273,66 @@ pub enum RoadChoice {
     Avenue,
 }
 
-/// What a road-tool drag does (sub-mode of `ActiveTool::Road`).
-#[allow(dead_code)] // variants constructed by ui tools as they land
+/// What the road tool draws (sub-mode of `ActiveTool::Road`). Every
+/// drawing mode shows its road in [`CurveToolView`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RoadMode {
-    /// Click/drag corners of a multi-segment path (`PathPreview`).
+    /// Straight pieces: click (or drag) from point to point.
     #[default]
-    Path,
-    /// Drag a rectangle: a street loop, optionally subdivided into a grid
-    /// (`PathPreview::legs` holds every street of it).
-    Block,
+    Straight,
+    /// Three clicks per piece: start, the corner where the two directions
+    /// meet, end.
+    Curve,
+    /// Each piece leaves the last one smoothly: click along the way.
+    Continuous,
+    /// Three clicks: a corner, the width, the length: a street grid at any
+    /// angle.
+    Grid,
+    /// Draw along a road to change it to the chosen kind (upgrade or
+    /// downgrade); click for the whole stretch between junctions.
+    Upgrade,
     /// Hover a junction to see its control, click to switch it (no ghost;
     /// `WorldHighlight::hovered` is the junction).
     Junction,
 }
 
-/// What a zoning drag does (sub-mode of `ActiveTool::Zone(_)`).
-#[allow(dead_code)] // variants constructed by ui tools as they land
+impl RoadMode {
+    /// Modes that draw new road.
+    pub fn draws(self) -> bool {
+        matches!(
+            self,
+            RoadMode::Straight | RoadMode::Curve | RoadMode::Continuous | RoadMode::Grid
+        )
+    }
+}
+
+/// What a zoning drag does (sub-mode of `ActiveTool::Zone(_)`). Every mode
+/// previews exactly the cells it changes in `ToolPreview::zone_cells`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ZoneMode {
-    /// Drag a rectangle (round-1 behaviour).
+    /// Paint cells under the cursor while the button is held.
     #[default]
-    Rect,
+    Paint,
     /// Click a road side: that whole frontage between two junctions, to the
-    /// lot depth. Drag along a road: paint the frontage passed over.
+    /// chosen depth. Drag along a road: the frontage passed over.
     Frontage,
-    /// Click: every eligible cell of the enclosed block under the cursor.
+    /// Click: the connected zoneable area under the cursor.
     Fill,
+    /// Drag a rectangle that follows the lattice of the block it starts on
+    /// (`ToolPreview::area`).
+    Marquee,
 }
 
 /// What a bulldozer drag does (sub-mode of `ActiveTool::Bulldoze`).
-#[allow(dead_code)] // variants constructed by ui tools as they land
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BulldozeMode {
-    /// Drag a rectangle (round-1 behaviour).
-    #[default]
-    Rect,
     /// Click a road: the stretch between two junctions. Drag along a road:
-    /// just the part passed over.
+    /// just the part passed over. Click a building: that building.
+    #[default]
     Road,
+    /// Drag a rectangle along the lattice it starts on: roads and buildings
+    /// inside (`ToolPreview::area`).
+    Area,
 }
 
 /// Sub-mode of every tool (written by ui; the active one is the field for
@@ -290,6 +367,8 @@ pub enum SnapTarget {
     Extension,
     /// Same spacing as the neighbouring block.
     Spacing,
+    /// A length in whole cells (8 m) from the previous point.
+    Length,
 }
 
 /// Why a guide line is shown.
@@ -370,6 +449,34 @@ pub struct PathPreview {
     pub error: Option<CommandError>,
 }
 
+/// What the free-form road tool shows right now (sim metres). Written by ui
+/// while a road is being drawn (also the upgrade mode: pieces marked
+/// `PieceChange::Upgrade` / `Downgrade`), drawn by gfx. The snap marker and
+/// guide lines of the live point are in [`SnapFeedback`]; `snap` / `guides`
+/// here are only filled by gfx's own sample states.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct CurveToolView {
+    pub active: bool,
+    pub kind: Option<RoadKind>,
+    /// The road as it would be, split at its nodes, with the kind of change.
+    pub pieces: Vec<(Curve, PieceChange)>,
+    /// Curves the sim refuses (the whole piece in error).
+    pub refused: Vec<Curve>,
+    /// Where the sim says the problem is.
+    pub error_at: Option<[f32; 2]>,
+    /// Control points: start, corners, live end.
+    pub points: Vec<[f32; 2]>,
+    /// Tangent handles: (anchor, handle tip).
+    pub handles: Vec<([f32; 2], [f32; 2])>,
+    /// Tightest bend: (point, its centre of curvature, radius, too tight).
+    pub tightest: Option<([f32; 2], [f32; 2], f32, bool)>,
+    /// The snapped point and what it snapped to.
+    pub snap: Option<([f32; 2], SnapTarget)>,
+    pub guides: Vec<Guide>,
+    /// Junctions it would make or use.
+    pub nodes: Vec<([f32; 2], NodeChange)>,
+}
+
 /// A stretch of road between two junctions (or dead ends).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RoadStretch {
@@ -392,6 +499,8 @@ pub enum WorldTarget {
         node: NodeId,
         pos: [f32; 2],
     },
+    /// A car or truck (follows it as it drives).
+    Vehicle(VehicleId),
 }
 
 /// What gfx should highlight in the world (issue 6): the hovered and the
@@ -406,28 +515,22 @@ pub struct WorldHighlight {
     pub doomed_buildings: Vec<BuildingId>,
     /// Bulldozer preview: road cells that would be removed (tint red).
     pub doomed_road_cells: Vec<Cell>,
+    /// Bulldozer preview: the parts of roads that would be removed (centre
+    /// lines and kinds; tint red over the road's width).
+    pub doomed_roads: Vec<(Curve, RoadKind)>,
 }
 
 /// Player display settings that gfx honours (written by ui from the
-/// settings panel).
-#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+/// settings panel). Both off by default: in a window the cursor crosses
+/// the border whenever it leaves the game.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct DisplaySettings {
     /// Move the camera when the cursor touches a window edge.
     pub edge_scroll: bool,
-    /// Always mark zoned-but-empty lots, even without the zoning tool or
-    /// zones overlay (issue 9).
+    /// Mark zoned-but-empty lots always; when false (the default) gfx marks
+    /// them only while a zoning tool is active (the zones overlay shows them
+    /// anyway).
     pub lot_markers: bool,
-}
-
-impl Default for DisplaySettings {
-    fn default() -> Self {
-        DisplaySettings {
-            // Off by default: in a window the cursor crosses the border
-            // whenever it leaves the game.
-            edge_scroll: false,
-            lot_markers: true,
-        }
-    }
 }
 
 // ---------------------------------------------------------------- camera contract
@@ -463,6 +566,23 @@ impl CameraPose {
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct CameraOverride(pub Option<CameraPose>);
 
+/// While `focus` is `Some`, gfx's camera keeps its focus on that ground
+/// point (sim metres), easing after it as it moves; zoom and rotation stay
+/// with the player, panning keys are ignored (ui stops following on them).
+/// Written by ui every frame while following a person or car.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CameraFollow {
+    pub focus: Option<[f32; 2]>,
+}
+
+/// Move the camera's focus to a ground point (sim metres), and zoom to
+/// `distance` metres when given (sent by ui: links between views).
+#[derive(Message, Debug, Clone, Copy, PartialEq)]
+pub struct CameraGoTo {
+    pub focus: [f32; 2],
+    pub distance: Option<f32>,
+}
+
 // ---------------------------------------------------------------- coordinates
 
 /// Sim `(x, y)` metres -> Bevy `(x, height, y)`.
@@ -483,6 +603,18 @@ pub fn cell_center(c: Cell, height: f32) -> Vec3 {
 /// The cell containing a Bevy-space point (may be out of bounds).
 pub fn world_to_cell(v: Vec3) -> Cell {
     Cell::from_pos(world_to_sim(v))
+}
+
+/// Corners of a zoning cell on any lattice (inset by `inset` metres) at
+/// `height`, in order around the edge; `None` for an unknown lattice.
+pub fn zone_cell_corners(world: &World, c: CellRef, inset: f32, height: f32) -> Option<[Vec3; 4]> {
+    let q = world.zoning.cell_corners(c)?;
+    let center = q.iter().fold(Vec2::ZERO, |a, p| a + Vec2::from(*p)) * 0.25;
+    Some(q.map(|p| {
+        let p = Vec2::from(p);
+        let p = p + (center - p).normalize_or_zero() * inset * std::f32::consts::SQRT_2;
+        Vec3::new(p.x, height, p.y)
+    }))
 }
 
 /// Corners of a cell (inset by `inset` metres) at `height`, in order around
@@ -525,6 +657,7 @@ impl Plugin for SharedPlugin {
         .init_resource::<LastCommand>()
         .init_resource::<ActiveTool>()
         .init_resource::<HoveredCell>()
+        .init_resource::<HoveredPoint>()
         .init_resource::<PointerOverUi>()
         .init_resource::<CameraInputBlocked>()
         .init_resource::<ToolPreview>()
@@ -537,6 +670,9 @@ impl Plugin for SharedPlugin {
         .init_resource::<PathPreview>()
         .init_resource::<WorldHighlight>()
         .init_resource::<DisplaySettings>()
+        .init_resource::<CurveToolView>()
+        .init_resource::<CameraFollow>()
+        .add_message::<CameraGoTo>()
         // Without gfx there is nothing to wait for.
         .insert_resource(SceneReady(!cfg!(feature = "gfx")))
         .add_message::<SimCommand>()
@@ -552,6 +688,7 @@ impl Plugin for SharedPlugin {
                 .chain(),
         )
         .add_systems(FixedUpdate, step_sim.in_set(SimStep))
+        .add_systems(First, fixed_rate)
         .add_systems(Update, compute_hover.in_set(GameSet::Hover))
         .add_systems(Update, apply_commands.in_set(GameSet::Sim));
     }
@@ -570,11 +707,11 @@ fn apply_commands(
     time: Res<Time<Real>>,
 ) {
     for SimCommand(cmd) in cmds.read() {
-        let res = sim.world.apply(*cmd);
+        let res = sim.world.apply(cmd.clone());
         if let Err(e) = &res {
             debug!("command {cmd:?} rejected: {e}");
         }
-        last.result = Some((*cmd, res));
+        last.result = Some((cmd.clone(), res));
         last.at = time.elapsed_secs();
     }
 }
@@ -583,9 +720,12 @@ fn compute_hover(
     window: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     over_ui: Res<PointerOverUi>,
+    sim: Res<SimWorld>,
     mut hovered: ResMut<HoveredCell>,
+    mut point: ResMut<HoveredPoint>,
 ) {
     let mut cell = None;
+    let mut ground = None;
     if !over_ui.0
         && let Ok(window) = window.single()
         && let Some(pos) = window.cursor_position()
@@ -595,6 +735,11 @@ fn compute_hover(
     {
         let c = world_to_cell(hit);
         cell = c.in_bounds().then_some(c);
+        ground = cell.map(|_| world_to_sim(hit));
     }
     hovered.set_if_neq(HoveredCell(cell));
+    point.set_if_neq(HoveredPoint {
+        pos: ground,
+        zone_cell: ground.and_then(|p| sim.world.zoning.cell_at(p)),
+    });
 }

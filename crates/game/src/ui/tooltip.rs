@@ -7,8 +7,11 @@ use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 
 use super::UiState;
+use super::plate::{PlateCache, PlateMaterial, PlateStyle};
 use super::theme::{self as t, UiFonts};
-use super::widgets::{Tooltip, UiAction, UiButton, approach, label, layout, paragraph};
+use super::widgets::{
+    Tooltip, UiAction, UiButton, approach, figure, label, layout, paragraph, plate_node, plate_shadow,
+};
 use crate::shared::GameSet;
 
 pub struct TooltipPlugin;
@@ -50,36 +53,37 @@ struct TipState {
 const DELAY: f32 = 0.45;
 const DELAY_WARM: f32 = 0.05;
 /// Width of the tooltip's description column.
-const TIP_TEXT_W: f32 = 228.0;
+const TIP_TEXT_W: f32 = 250.0;
 
-fn spawn_tooltip(mut commands: Commands, fonts: Res<UiFonts>) {
+fn spawn_tooltip(
+    mut commands: Commands,
+    fonts: Res<UiFonts>,
+    mut cache: ResMut<PlateCache>,
+    mut mats: ResMut<Assets<PlateMaterial>>,
+) {
     let fonts = fonts.into_inner();
+    let mat = cache.get(&mut mats, PlateStyle::fill(t::PLATE_TOP, t::PLATE_BOTTOM, t::LINE));
     commands
         .spawn((
             Name::new("Tooltip"),
             TooltipRoot,
-            layout(Node {
-                position_type: PositionType::Absolute,
-
-                padding: UiRect::new(px(t::S4), px(t::S4), px(t::S3 + 1.0), px(t::S3 + 2.0)),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(t::S2),
-                border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(t::RADIUS_SM + 1.0)),
-                ..default()
-            }),
-            BackgroundColor(t::PANEL_RAISED),
-            BorderColor::all(t::alpha(Color::WHITE, 0.10)),
-            BoxShadow(vec![ShadowStyle {
-                color: t::alpha(Color::BLACK, 0.45),
-                x_offset: px(0),
-                y_offset: px(6),
-                spread_radius: px(0),
-                blur_radius: px(18),
-            }]),
+            plate_node(
+                Node {
+                    position_type: PositionType::Absolute,
+                    padding: UiRect::new(px(14), px(14), px(9), px(11)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(t::S2),
+                    ..default()
+                },
+                UiRect::new(px(3), px(1), px(1), px(1)),
+                [0.0, 0.0, 10.0, 0.0],
+            ),
+            mat,
+            plate_shadow(),
             GlobalZIndex(100),
             UiTransform::default(),
             Visibility::Hidden,
+            Pickable::IGNORE,
         ))
         .with_children(|tip| {
             tip.spawn(layout(Node {
@@ -89,41 +93,42 @@ fn spawn_tooltip(mut commands: Commands, fonts: Res<UiFonts>) {
                 ..default()
             }))
             .with_children(|row| {
-                row.spawn((label(fonts, "", t::FONT_LABEL, t::W_SEMIBOLD, t::TEXT), TipPart::Title));
+                row.spawn((
+                    Text::new(""),
+                    fonts.text(t::FONT_ROW, t::W_BOLD),
+                    t::caps_spacing(t::FONT_ROW, 0.05),
+                    TextColor(t::TEXT),
+                    TextLayout::no_wrap(),
+                    Pickable::IGNORE,
+                    TipPart::Title,
+                ));
                 row.spawn((
                     TipPart::KeyBadge,
                     layout(Node {
-                        padding: UiRect::axes(px(5), px(1)),
+                        padding: UiRect::axes(px(5), px(0)),
                         min_width: px(17),
                         height: px(17),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::all(px(t::RADIUS_XS)),
                         ..default()
                     }),
+                    BorderColor::all(t::LINE),
                     BackgroundColor(t::WELL),
-                    BorderColor::all(t::PANEL_BORDER),
                 ))
-                .with_child((
-                    label(fonts, "", t::FONT_CAPTION, t::W_SEMIBOLD, t::TEXT_MUTED),
-                    TipPart::Key,
-                ));
+                .with_child((label(fonts, "", t::FONT_KEY, t::W_BOLD, t::TEXT_MUTED), TipPart::Key));
             });
             // Fixed width: wrapped text inside an auto-width box is measured
             // as one line by the layout, which clipped the price row.
             tip.spawn((
-                paragraph(fonts, "", t::FONT_SMALL, t::W_REGULAR, t::TEXT_MUTED),
+                paragraph(fonts, "", t::FONT_BODY, t::W_REGULAR, t::TEXT_MUTED),
                 TipPart::Desc,
                 Node {
                     width: px(TIP_TEXT_W),
                     ..default()
                 },
             ));
-            tip.spawn((
-                label(fonts, "", t::FONT_SMALL, t::W_SEMIBOLD, t::ACCENT),
-                TipPart::Price,
-            ));
+            tip.spawn((figure(fonts, "", 16.0, t::ACCENT_TEXT), TipPart::Price));
         });
 }
 
@@ -158,7 +163,7 @@ fn update_tooltip(
         .iter()
         .find(|(_, _, h, _, _, v, b)| {
             // No help for a toggle whose panel is already open (it would cover it).
-            let redundant = b.is_some_and(|b| b.action == UiAction::ToggleBudget && ui.budget_open);
+            let redundant = b.is_some_and(|b| b.action == UiAction::ToggleBudget && ui.budget_open());
             h.get() && v.get() && !redundant
         })
         .map(|(e, ..)| e);
@@ -189,8 +194,8 @@ fn update_tooltip(
         state.slide = 0.0;
         for (part, text, pnode) in &mut parts {
             let (value, shown) = match part {
-                TipPart::Title => (tip.title.to_string(), true),
-                TipPart::Desc => (tip.desc.to_string(), true),
+                TipPart::Title => (tip.title.to_uppercase(), true),
+                TipPart::Desc => (tip.desc.to_string(), !tip.desc.is_empty()),
                 TipPart::Price => (tip.price.clone().unwrap_or_default(), tip.price.is_some()),
                 TipPart::Key => (tip.key.unwrap_or("").to_string(), tip.key.is_some()),
                 TipPart::KeyBadge => (String::new(), tip.key.is_some()),
@@ -223,7 +228,7 @@ fn update_tooltip(
     } else {
         center.y - size.y * 0.5 - gap - tip_size.y
     };
-    let left = (center.x - tip_size.x * 0.5).clamp(t::EDGE, (screen.x - t::EDGE - tip_size.x).max(t::EDGE));
+    let left = (center.x - tip_size.x * 0.5).clamp(8.0, (screen.x - 8.0 - tip_size.x).max(8.0));
     let (left, top) = (px(left.round()), px(top.round()));
     if node.left != left || node.top != top {
         node.left = left;

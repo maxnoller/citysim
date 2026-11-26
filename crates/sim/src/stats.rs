@@ -6,13 +6,12 @@ use crate::{World, Zone};
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Stats {
-    /// Residents (sum of household members).
+    /// Residents (citizens; sum of household members).
     pub population: u32,
     /// Job places (capacity of commercial + industrial buildings).
     pub jobs: u32,
-    /// Workers with a job. Every household has exactly one worker (the
-    /// other members are dependants), so this is also the number of
-    /// households with a job, and the number of filled job places.
+    /// Citizens with a job (adults, and teens with a part-time job): the
+    /// number of filled job places.
     pub employed: u32,
     /// Households living in the city (including those still driving in).
     pub households: u32,
@@ -58,9 +57,9 @@ pub struct Stats {
     pub congestion_share: f32,
     /// Avenue cells (pieces), included in `road_cells`.
     pub avenue_cells: u32,
-    /// The workforce: people who want a job. One worker per household
-    /// (children, retirees and partners are not modelled as workers), so
-    /// this equals `households`. `employed + unemployed == workforce`.
+    /// The workforce: citizens who want a job (adults 18-64 except
+    /// stay-at-home parents, and teens with a part-time job; children and
+    /// retirees are not in it). `employed + unemployed == workforce`.
     /// (Not stored in saves; restored on load.)
     #[serde(skip)]
     pub workforce: u32,
@@ -73,9 +72,27 @@ pub struct Stats {
 /// The float fields are never NaN.
 impl Eq for Stats {}
 
+/// `(population, employed, workforce)` from the citizens (and, the way
+/// round 2 counted them, from legacy households that have no citizens yet).
+pub(crate) fn labour(world: &World) -> (u32, u32, u32) {
+    let (mut pop, mut jobs, mut wf) = (0, 0, 0);
+    if world.people.known_households != world.households.len() || world.citizens.is_empty() {
+        for h in world.households.values().filter(|h| h.citizens.is_empty()) {
+            pop += h.members as u32;
+            wf += 1;
+            jobs += u32::from(h.job.is_some());
+        }
+    }
+    (
+        world.citizens.len() as u32 + pop,
+        world.people.wage_counts.iter().map(|&(_, n)| n).sum::<u32>() + jobs,
+        world.people.workforce + wf,
+    )
+}
+
 /// Recompute what can be derived cheaply from state.
 pub(crate) fn update(world: &mut World) {
-    let road_cells = world.cache.road_cells(&world.grid, world.versions.grid);
+    let road_cells = world.cache.road_cells(&world.roads, world.versions.roads);
     let avenue_cells = world.cache.avenue_cells(&world.roads, world.versions.roads);
     let mut s = Stats {
         road_cells,
@@ -105,14 +122,8 @@ pub(crate) fn update(world: &mut World) {
         }
     }
     s.jobs = s.commercial_jobs + s.industrial_jobs;
-    for h in world.households.values() {
-        s.population += h.members as u32;
-        if h.job.is_some() {
-            s.employed += 1;
-        }
-    }
-    s.workforce = s.households;
-    s.unemployed = s.workforce - s.employed;
+    (s.population, s.employed, s.workforce) = labour(world);
+    s.unemployed = s.workforce.saturating_sub(s.employed);
     s.vacant_jobs = s.jobs.saturating_sub(s.employed);
     s.unemployment = if s.workforce > 0 {
         s.unemployed as f32 / s.workforce as f32

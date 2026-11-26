@@ -24,7 +24,14 @@
 //!   then reply and stop.
 //! * `ready` — ok once the scene draws (shaders built), else err.
 //! * `fps`, `counts` (entities, meshes, materials, vehicles, step time).
-//! * `window W H` — resize the window. `quit` — exit.
+//! * `window W H` — resize the window; `window` alone: its size `W H`.
+//! * `find-home` — the cell under a home near the camera's focus whose
+//!   first resident is at home, leaves for work within 1.5 in-game hours
+//!   and last drove there in 20-90 s: `ok X Y`.
+//! * `node PREFIX` — window position (logical px) of the first visible UI
+//!   node whose `Name` starts with PREFIX: `X Y` (people-panel links are
+//!   named "Person link", "Place link", "Vehicle link", "Follow").
+//! * `quit` — exit.
 
 use std::collections::VecDeque;
 use std::io::Write as _;
@@ -37,8 +44,8 @@ use bevy::window::PrimaryWindow;
 use citysim_sim::Cell;
 
 use crate::shared::{
-    ActiveTool, CameraOverride, CameraPose, HoveredCell, OverlayMode, PointerOverUi, SceneReady, SimClock, SimStep,
-    SimWorld, WorldCamera, cell_center,
+    ActiveTool, CameraFollow, CameraOverride, CameraPose, HoveredCell, OverlayMode, PointerOverUi, RoadChoice,
+    SceneReady, SimClock, SimStep, SimWorld, ToolModes, WorldCamera, cell_center,
 };
 
 const POLL_SECS: f32 = 0.1;
@@ -52,8 +59,10 @@ pub struct ControlPlugin {
 enum Goal {
     Pop(u32),
     Day(u32),
-    /// Tick of day.
-    Hour(u32),
+    /// The next time of day asked for, as an absolute tick (normal sim
+    /// steps run between the checks, so an exact tick of day could be
+    /// stepped over).
+    Hour(u64),
 }
 
 #[derive(Resource)]
@@ -122,7 +131,7 @@ fn reached(world: &citysim_sim::World, goal: Goal) -> bool {
     match goal {
         Goal::Pop(n) => world.stats.population >= n,
         Goal::Day(d) => world.time.day >= d,
-        Goal::Hour(t) => world.time.tick_of_day == t,
+        Goal::Hour(t) => world.time.tick >= t,
     }
 }
 
@@ -132,6 +141,10 @@ fn turbo_steps(mut ctl: ResMut<Control>, mut sim: ResMut<SimWorld>, clock: Res<S
             Some((_, _, n)) => n,
             None => ctl.turbo,
         };
+        // Turbo is per real-time tick; fast speeds split a tick into
+        // several fixed updates.
+        let k = clock.fixed_per_tick();
+        let n = n.div_ceil(k);
         for _ in 0..n {
             if let Some((seq, goal, _)) = ctl.until
                 && reached(&sim.world, goal)
@@ -165,15 +178,15 @@ fn turbo_steps(mut ctl: ResMut<Control>, mut sim: ResMut<SimWorld>, clock: Res<S
     }
 }
 
-fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: OverlayMode) -> String {
+fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: OverlayMode, extra: &str) -> String {
     let w = &sim.world;
     let s = &w.stats;
     let e = &w.economy;
     // Zoned, still empty cells per zone (what a player sees as free land).
     let mut free = [0u32; 3];
-    for cd in &w.grid.cells {
-        if cd.occupant == citysim_sim::Occupant::Empty
-            && let Some(z) = cd.zone
+    for (_, zc) in w.zoning.cells() {
+        if zc.free()
+            && let Some(z) = zc.zone
         {
             free[z as usize] += 1;
         }
@@ -182,7 +195,7 @@ fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: Overl
         "day={} hour={:.2} tick={} pop={} households={} unemployment={:.3} jobs={} buildings={} res={} com={} ind={} \
          cars={} money={} income={} expenses={} tax={:.3} commute_s={:.1} speed={:.2} congestion={:.3} \
          demand_r={:.3} demand_c={:.3} demand_i={:.3} paused={} speed_idx={} segments={} nodes={} road_cells={} \
-         tool={} overlay={:?} days_logged={} free_r={} free_c={} free_i={}",
+         tool={} overlay={:?} days_logged={} free_r={} free_c={} free_i={} {}",
         w.time.day,
         w.time.hour(),
         w.time.tick,
@@ -216,6 +229,7 @@ fn stats_line(sim: &SimWorld, clock: &SimClock, tool: ActiveTool, overlay: Overl
         free[0],
         free[1],
         free[2],
+        extra,
     )
 }
 
@@ -248,6 +262,18 @@ struct Ctx<'w, 's> {
     materials: Res<'w, Assets<StandardMaterial>>,
     exit: MessageWriter<'w, AppExit>,
     ready: Res<'w, SceneReady>,
+    modes: Res<'w, ToolModes>,
+    nodes: Query<
+        'w,
+        's,
+        (
+            &'static Name,
+            &'static bevy::ui::UiGlobalTransform,
+            &'static InheritedVisibility,
+        ),
+    >,
+    kind: Res<'w, RoadChoice>,
+    follow: Res<'w, CameraFollow>,
 }
 
 fn poll_commands(mut commands: Commands, time: Res<Time<Real>>, mut ctl: ResMut<Control>, mut cx: Ctx) {
@@ -364,7 +390,23 @@ fn run(
                 .observe(save_to_disk(path))
                 .observe(move |_: On<ScreenshotCaptured>| reply_to(&dir, seq, true, &p2));
         }
-        "stats" => ctl.reply(seq, true, &stats_line(&cx.sim, &cx.clock, *cx.tool, *cx.overlay)),
+        "stats" => {
+            // Tool modes, road kind and camera follow, for scripts that switch
+            // them with real keys.
+            let extra = format!(
+                "road_mode={:?} zone_mode={:?} bulldoze_mode={:?} road_kind={:?} following={}",
+                cx.modes.road,
+                cx.modes.zone,
+                cx.modes.bulldoze,
+                *cx.kind,
+                cx.follow.focus.is_some()
+            );
+            ctl.reply(
+                seq,
+                true,
+                &stats_line(&cx.sim, &cx.clock, *cx.tool, *cx.overlay, &extra),
+            )
+        }
         "turbo" => {
             ctl.turbo = num(args, 0)?;
             ctl.reply(seq, true, &format!("turbo={}", ctl.turbo));
@@ -375,8 +417,11 @@ fn run(
                 "until-day" => Goal::Day(num(args, 0)?),
                 _ => {
                     let h: f32 = num(args, 0)?;
-                    let t = (h.rem_euclid(24.0) / 24.0 * citysim_sim::balance::TICKS_PER_DAY as f32) as u32;
-                    Goal::Hour(t)
+                    let day = citysim_sim::balance::TICKS_PER_DAY as u64;
+                    let t = (h.rem_euclid(24.0) / 24.0 * day as f32) as u64;
+                    let w = &cx.sim.world;
+                    let ahead = (t + day - w.time.tick_of_day as u64 % day) % day;
+                    Goal::Hour(w.time.tick + if ahead == 0 { day } else { ahead })
                 }
             };
             if let Some((old, _, _)) = ctl.until.take() {
@@ -434,6 +479,66 @@ fn run(
                     max * 1e3,
                 ),
             );
+        }
+        "window" if args.is_empty() => {
+            let win = cx.window.single().map_err(|_| "no window".to_string())?;
+            ctl.reply(seq, true, &format!("{:.0} {:.0}", win.width(), win.height()));
+        }
+        "find-home" => {
+            let w = &cx.sim.world;
+            let focus = cx
+                .cams
+                .single()
+                .ok()
+                .and_then(|(cam, tf)| {
+                    let win = cx.window.single().ok()?;
+                    let ray = cam
+                        .viewport_to_world(tf, Vec2::new(win.width(), win.height()) * 0.5)
+                        .ok()?;
+                    ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+                })
+                .map_or([1024.0, 1024.0], |p| [p.x, p.z]);
+            // The first resident (the first one its people panel lists) is
+            // at home and leaves for work within two in-game hours.
+            let now = w.time.tick;
+            let hours = 3 * citysim_sim::balance::TICKS_PER_HOUR as u64 / 2;
+            // ... and whose last commute was short (an interesting drive to
+            // follow, not a jam at the door).
+            let worker_at_home = |b: citysim_sim::BuildingId| {
+                citysim_sim::inspect::residents(w, b).next().is_some_and(|c| {
+                    w.citizens.get(c).is_some_and(|ct| {
+                        ct.job.is_some()
+                            && ct.location.building() == Some(b)
+                            && (20.0..240.0).contains(&ct.last_commute_s)
+                    }) && citysim_sim::inspect::plan(w, c).and_then(|p| p.next).is_some_and(|n| {
+                        n.purpose == Some(citysim_sim::TripPurpose::ToWork)
+                            && n.at_tick.is_some_and(|t| t >= now && t < now + hours)
+                    })
+                })
+            };
+            let best = w
+                .buildings
+                .iter()
+                .filter(|(id, b)| b.kind == citysim_sim::Zone::Residential && b.occupied > 0 && worker_at_home(*id))
+                .map(|(_, b)| b.center())
+                .min_by(|a, b| {
+                    let d = |p: [f32; 2]| (p[0] - focus[0]).powi(2) + (p[1] - focus[1]).powi(2);
+                    d(*a).total_cmp(&d(*b))
+                })
+                .ok_or("no lived-in home")?;
+            let c = Cell::from_pos(best);
+            ctl.reply(seq, true, &format!("ok {} {}", c.x, c.y));
+        }
+        "node" => {
+            let prefix = args.join(" ");
+            let win = cx.window.single().map_err(|_| "no window".to_string())?;
+            let hit = cx
+                .nodes
+                .iter()
+                .find(|(n, _, v)| v.get() && n.as_str().starts_with(&prefix))
+                .map(|(_, tf, _)| tf.translation / win.scale_factor())
+                .ok_or_else(|| format!("no node named {prefix}"))?;
+            ctl.reply(seq, true, &format!("{:.0} {:.0}", hit.x, hit.y));
         }
         "window" => {
             let (w, h): (u32, u32) = (num(args, 0)?, num(args, 1)?);

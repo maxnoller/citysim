@@ -2,15 +2,17 @@
 //!
 //! # Lots
 //!
-//! A building always fronts a road: the cells along its front side
-//! (`facing`) each touch a road cell. Zoning reaches two cells from a road,
-//! so a zoned block has a front row and a second row. Growth only starts
-//! buildings on front-row cells; the free second-row cell of the same zone
-//! right behind is absorbed into a deep 1x2 lot, and at level 2+ a lot may
-//! widen to 2x2 into free cells beside it (commercial and industrial lots
-//! may start 2x2). Second-row cells that no front lot can absorb (the cell
-//! in front is unzoned, of another zone, or already holds a shallow
-//! building that never upgrades) stay empty.
+//! A building stands on cells of one zoning lattice and always fronts a
+//! road: the cells along its front side (`facing`, in lattice axes) are in
+//! the front row of a block of that road. Blocks are two cells deep, so a
+//! zoned block has a front row and a second row. Growth only starts
+//! buildings on front-row cells whose road is connected to the highway; the
+//! free second-row cell of the same zone right behind is absorbed into a
+//! deep 1x2 lot, and at level 2+ a lot may widen to 2x2 into free cells
+//! beside it (commercial and industrial lots may start 2x2). Second-row
+//! cells that no front lot can absorb stay empty. Corner cells of a shared
+//! lattice front two roads; the lot picks one (preferring a deep lot, then
+//! a random rotation).
 //!
 //! Every `GROWTH_INTERVAL_TICKS` each zone accumulates `demand *
 //! GROWTH_PER_HOUR` growth events; each event builds one building on a
@@ -22,11 +24,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::blocks::opposite;
 use crate::derived::zone_index;
-use crate::geom::{Cell, CellRect};
-use crate::grid::Occupant;
 use crate::side::SideTable;
-use crate::{Building, BuildingId, Facing, World, Zone, balance, households};
+use crate::zoning::CellRef;
+use crate::{Building, BuildingId, Facing, Footprint, World, Zone, balance, households};
 
 /// Per-building bookkeeping not needed by renderers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -83,6 +85,7 @@ pub(crate) fn tick(world: &mut World) {
         return;
     }
     world.cache.ensure_roads(&world.roads, world.versions.roads);
+    world.cache.ensure_zoning(&world.zoning);
     let per_tick = balance::GROWTH_INTERVAL_TICKS as f32 / balance::TICKS_PER_HOUR as f32;
     for z in Zone::ALL {
         let zi = zone_index(z);
@@ -114,85 +117,77 @@ fn capacity(z: Zone, level: u8, area: u32) -> u32 {
     balance::CAPACITY_PER_CELL[zone_index(z)][(level.clamp(1, 3) - 1) as usize] * area
 }
 
-fn free_for(world: &World, c: Cell, z: Zone) -> bool {
-    world
-        .grid
-        .get(c)
-        .is_some_and(|cd| cd.zone == Some(z) && cd.occupant == Occupant::Empty)
+fn free_for(world: &World, c: CellRef, z: Zone) -> bool {
+    world.zoning.cell(c).is_some_and(|x| x.free() && x.zone == Some(z))
 }
 
-const DIRS4: [Facing; 4] = [Facing::PlusX, Facing::PlusY, Facing::MinusX, Facing::MinusY];
-
-/// Does `c` touch a connected road cell on its `f` side?
-fn fronts(world: &World, c: Cell, f: Facing) -> bool {
-    let (dx, dy) = f.offset();
-    world.cache.connected_road_cell(&world.grid, c.offset(dx, dy))
+/// Is `c` in the front row of a block on side `f` whose road is connected
+/// to the highway?
+fn fronts(world: &World, c: CellRef, f: Facing) -> bool {
+    world.cache.front_connected(c, f)
 }
 
-/// Does `c` touch any road cell on one of its four sides?
-fn touches_road(world: &World, c: Cell) -> bool {
-    DIRS4.iter().any(|f| {
-        let (dx, dy) = f.offset();
-        world.grid.is_road(c.offset(dx, dy))
-    })
+/// Does `c` have a road in front on any side?
+fn touches_road(world: &World, c: CellRef) -> bool {
+    world.zoning.cell(c).is_some_and(|x| x.fronts != 0)
 }
 
-/// A free second-row cell of zone `z`: zoned, empty, no road beside it.
-fn second_row(world: &World, c: Cell, z: Zone) -> bool {
+/// A free second-row cell of zone `z`: zoned, empty, no road in front.
+fn second_row(world: &World, c: CellRef, z: Zone) -> bool {
     free_for(world, c, z) && !touches_road(world, c)
 }
 
-fn behind(c: Cell, f: Facing) -> Cell {
-    let (dx, dy) = f.offset();
-    c.offset(-dx, -dy)
+fn behind(c: CellRef, f: Facing) -> CellRef {
+    c.step(opposite(f))
 }
 
 /// The two sideways directions of a facing.
-fn sideways(f: Facing) -> [(i32, i32); 2] {
-    let (dx, dy) = f.offset();
-    [(-dy, dx), (dy, -dx)]
+fn sideways(f: Facing) -> [Facing; 2] {
+    match f {
+        Facing::PlusX | Facing::MinusX => [Facing::PlusY, Facing::MinusY],
+        Facing::PlusY | Facing::MinusY => [Facing::MinusX, Facing::PlusX],
+    }
 }
 
-fn rect_of(cells: &[Cell]) -> CellRect {
-    let mut r = CellRect::single(cells[0]);
-    for &c in &cells[1..] {
-        r = CellRect::from_corners(
-            Cell::new(r.min.x.min(c.x), r.min.y.min(c.y)),
-            Cell::new(r.max.x.max(c.x), r.max.y.max(c.y)),
-        );
+fn rect_of(cells: &[CellRef]) -> ([i32; 2], [i32; 2]) {
+    let mut lo = [cells[0].i, cells[0].j];
+    let mut hi = lo;
+    for c in &cells[1..] {
+        lo = [lo[0].min(c.i), lo[1].min(c.j)];
+        hi = [hi[0].max(c.i), hi[1].max(c.j)];
     }
-    r
+    (lo, hi)
 }
 
 /// Front-row cells of a footprint facing `f`.
-pub fn front_cells(r: CellRect, f: Facing) -> Vec<Cell> {
-    r.cells()
-        .filter(|&c| {
-            let (dx, dy) = f.offset();
-            !r.contains(c.offset(dx, dy))
-        })
-        .collect()
+pub fn front_cells(fp: &Footprint, f: Facing) -> Vec<CellRef> {
+    fp.cells().filter(|&c| !fp.contains(c.step(f))).collect()
 }
 
-/// Does a footprint have road frontage on its `facing` side (every front
-/// cell touches a road cell)?
-pub fn has_frontage(world: &World, r: CellRect, f: Facing) -> bool {
-    front_cells(r, f).into_iter().all(|c| {
-        let (dx, dy) = f.offset();
-        world.grid.is_road(c.offset(dx, dy))
-    })
+/// Does a building have road frontage on its `facing` side (every front
+/// cell is in the front row of a block on that side)?
+pub fn has_frontage(world: &World, fp: &Footprint, f: Facing) -> bool {
+    front_cells(fp, f)
+        .into_iter()
+        .all(|c| world.zoning.cell(c).is_some_and(|x| x.fronts_on(f)))
+}
+
+fn footprint_of(world: &World, cells: &[CellRef], f: Facing) -> Footprint {
+    let (lo, hi) = rect_of(cells);
+    let l = world.zoning.lattice(cells[0].lattice).expect("cell lattice");
+    Footprint::new(cells[0].lattice, l, lo, hi, f)
 }
 
 /// Lot for a new building of zone `z` on front-row cell `c`: facing, then
-/// the footprint (deep when the cell behind is free second row; 2x2 when
+/// the cells (deep when the cell behind is free second row; 2x2 when
 /// `wide` and the neighbours allow).
-fn plan_lot(world: &mut World, c: Cell, z: Zone, wide: bool) -> Option<(Facing, CellRect)> {
+fn plan_lot(world: &mut World, c: CellRef, z: Zone, wide: bool) -> Option<(Facing, Vec<CellRef>)> {
     // Facings with a connected road in front; prefer one with a deep lot
     // behind, then the first in a per-cell rotation (corner lots vary).
     let start = world.rng.below(4) as usize;
     let mut best: Option<(u8, Facing)> = None;
     for k in 0..4 {
-        let f = DIRS4[(start + k) % 4];
+        let f = Facing::ALL[(start + k) % 4];
         if !fronts(world, c, f) {
             continue;
         }
@@ -211,8 +206,7 @@ fn plan_lot(world: &mut World, c: Cell, z: Zone, wide: bool) -> Option<(Facing, 
         let side = sideways(f);
         let pick = world.rng.below(2) as usize;
         for k in 0..2 {
-            let (sx, sy) = side[(pick + k) % 2];
-            let s = c.offset(sx, sy);
+            let s = c.step(side[(pick + k) % 2]);
             if free_for(world, s, z) && fronts(world, s, f) && second_row(world, behind(s, f), z) {
                 cells.push(s);
                 cells.push(behind(s, f));
@@ -220,73 +214,131 @@ fn plan_lot(world: &mut World, c: Cell, z: Zone, wide: bool) -> Option<(Facing, 
             }
         }
     }
-    Some((f, rect_of(&cells)))
+    Some((f, cells))
+}
+
+/// Mark cells as held by a building (or freed, with `None`).
+pub(crate) fn claim(world: &mut World, cells: impl Iterator<Item = CellRef>, b: Option<BuildingId>) {
+    for c in cells {
+        let Some(l) = world.zoning.lattice_mut(c.lattice) else {
+            continue;
+        };
+        let e = l.cells.entry((c.i, c.j)).or_default();
+        e.building = b;
+        if b.is_none() && !e.covered && e.zone.is_none() {
+            l.cells.remove(&(c.i, c.j));
+        }
+    }
+}
+
+/// Mark the cells of building `id` (for tests and tools that insert
+/// buildings by hand), and block other lattices' cells under it.
+pub fn place_cells(world: &mut World, id: BuildingId) {
+    let Some(b) = world.buildings.get(id) else { return };
+    let fp = b.footprint;
+    claim(world, fp.cells(), Some(id));
+    refresh_around(world, &[fp]);
+}
+
+/// Recompute the cells around footprints (other lattices' cells under a
+/// building are blocked, and free again when it goes).
+fn refresh_around(world: &mut World, fps: &[Footprint]) {
+    let boxes: Vec<([f32; 2], [f32; 2])> = fps
+        .iter()
+        .map(|f| {
+            let c = f.corners();
+            let lo = c
+                .iter()
+                .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+            let hi = c
+                .iter()
+                .fold([f32::NEG_INFINITY; 2], |a, p| [a[0].max(p[0]), a[1].max(p[1])]);
+            (lo, hi)
+        })
+        .collect();
+    if boxes.is_empty() {
+        return;
+    }
+    // Only cells of other lattices can change; a building on lattice 0 next
+    // to lattice-0 cells only needs the version bump.
+    let multi = world.zoning.lattices().nth(1).is_some();
+    if multi {
+        let doomed = crate::blocks::refresh_boxes(world, &boxes);
+        debug_assert!(doomed.is_empty(), "a building over a road");
+    } else {
+        world.versions.grid += 1;
+    }
 }
 
 fn spawn(world: &mut World, z: Zone) -> bool {
-    let n = world.cache.candidates(&world.grid, world.versions.grid, z).len();
+    let n = world.cache.candidates(&world.zoning, z).len();
     if n == 0 {
         return false;
     }
-    let c = world.cache.candidates(&world.grid, world.versions.grid, z)[world.rng.below(n as u32) as usize];
-    if !free_for(world, c, z) {
-        return false;
+    // A random free candidate: a few random tries (the list also holds
+    // built-up cells), then the next free one after the last try.
+    let mut pick = None;
+    let mut at = 0;
+    for _ in 0..24 {
+        at = world.rng.below(n as u32) as usize;
+        let c = world.cache.candidates_built(z)[at];
+        if free_for(world, c, z) {
+            pick = Some(c);
+            break;
+        }
     }
-    let zi = zone_index(z);
-    let wide = world.rng.below(100) < balance::BIG_FOOTPRINT_PERCENT[zi];
-    let Some((facing, footprint)) = plan_lot(world, c, z, wide) else {
+    let list = world.cache.candidates_built(z);
+    let Some(c) = pick.or_else(|| (0..n).map(|k| list[(at + k) % n]).find(|&c| free_for(world, c, z))) else {
         return false;
     };
-    let area = (footprint.width() * footprint.height()) as u32;
+    let zi = zone_index(z);
+    let wide = world.rng.below(100) < balance::BIG_FOOTPRINT_PERCENT[zi];
+    let Some((facing, cells)) = plan_lot(world, c, z, wide) else {
+        return false;
+    };
+    let footprint = footprint_of(world, &cells, facing);
     let b = Building {
         kind: z,
         footprint,
         level: 1,
-        capacity: capacity(z, 1, area),
+        capacity: capacity(z, 1, footprint.area()),
         occupied: 0,
         facing,
         seed: world.rng.next_u64() as u32,
         created_tick: world.time.tick,
     };
     debug_assert!(
-        has_frontage(world, footprint, facing),
+        has_frontage(world, &footprint, facing),
         "{footprint:?} {facing:?} has no frontage"
     );
     let id = world.buildings.insert(b);
-    for x in footprint.cells() {
-        world.grid.get_mut(x).expect("free cell in bounds").occupant = Occupant::Building(id);
-    }
+    claim(world, cells.into_iter(), Some(id));
     world.growth.meta.insert(id, BuildingMeta::default());
     world.versions.buildings += 1;
-    world.versions.grid += 1;
+    refresh_around(world, &[footprint]);
+    crate::errands::stock_up(world, id);
     true
 }
 
 /// Grow a building's lot on upgrade: a shallow lot absorbs the free second
 /// row behind it; a deep lot at level 2+ widens to 2x2 where free cells
 /// beside it allow. Returns the new footprint, if it changed.
-fn grow_lot(world: &mut World, id: BuildingId) -> Option<CellRect> {
+fn grow_lot(world: &mut World, id: BuildingId) -> Option<Footprint> {
     let b = &world.buildings[id];
-    let (r, f, z) = (b.footprint, b.facing, b.kind);
-    let (w, h) = (r.width(), r.height());
-    let depth = match f {
-        Facing::PlusX | Facing::MinusX => w,
-        Facing::PlusY | Facing::MinusY => h,
-    };
-    let breadth = (w * h) / depth;
-    let mut add: Vec<Cell> = Vec::new();
+    let (fp, f, z) = (b.footprint, b.facing, b.kind);
+    let (breadth, depth) = (fp.size[0], fp.size[1]);
+    let mut add: Vec<CellRef> = Vec::new();
     if depth == 1 && breadth == 1 {
-        let c = r.min;
+        let c = fp.cells().next().expect("one cell");
         if second_row(world, behind(c, f), z) {
             add.push(behind(c, f));
         }
     } else if depth == 2 && breadth == 1 && b.level >= 2 {
-        let front = front_cells(r, f)[0];
+        let front = front_cells(&fp, f)[0];
         let side = sideways(f);
         let pick = world.rng.below(2) as usize;
         for k in 0..2 {
-            let (sx, sy) = side[(pick + k) % 2];
-            let s = front.offset(sx, sy);
+            let s = front.step(side[(pick + k) % 2]);
             if free_for(world, s, z) && fronts(world, s, f) && second_row(world, behind(s, f), z) {
                 add.push(s);
                 add.push(behind(s, f));
@@ -297,15 +349,13 @@ fn grow_lot(world: &mut World, id: BuildingId) -> Option<CellRect> {
     if add.is_empty() {
         return None;
     }
-    let mut cells: Vec<Cell> = r.cells().collect();
+    let mut cells: Vec<CellRef> = fp.cells().collect();
     cells.extend(add.iter().copied());
-    let nr = rect_of(&cells);
-    for c in add {
-        world.grid.get_mut(c).expect("in bounds").occupant = Occupant::Building(id);
-    }
-    world.buildings[id].footprint = nr;
-    world.versions.grid += 1;
-    Some(nr)
+    let nf = footprint_of(world, &cells, f);
+    claim(world, add.into_iter(), Some(id));
+    world.buildings[id].footprint = nf;
+    refresh_around(world, &[nf]);
+    Some(nf)
 }
 
 /// Round-1 saves may hold buildings in a second row (no road in front).
@@ -320,27 +370,22 @@ pub(crate) fn convert_legacy_lots(world: &mut World) -> u32 {
         let Some(back) = world.buildings.get(back_id) else {
             continue;
         };
-        if back.footprint.cells().any(|c| touches_road(world, c)) {
+        let fp = back.footprint;
+        if fp.cells().any(|c| touches_road(world, c)) || fp.area() != 1 {
             continue;
         }
-        if back.footprint.width() != 1 || back.footprint.height() != 1 {
-            continue;
-        }
-        let c = back.footprint.min;
+        let c = fp.cells().next().expect("one cell");
         let kind = back.kind;
         let mut front: Option<BuildingId> = None;
-        for f in DIRS4 {
-            let (dx, dy) = f.offset();
-            let n = c.offset(dx, dy);
-            if let Some(crate::grid::CellData {
-                occupant: Occupant::Building(fid),
-                ..
-            }) = world.grid.get(n).copied()
+        for f in Facing::ALL {
+            let n = c.step(f);
+            if let Some(fid) = world.zoning.cell(n).and_then(|x| x.building)
                 && let Some(fb) = world.buildings.get(fid)
                 && fb.kind == kind
                 && fb.facing == f
-                && fb.footprint == CellRect::single(n)
-                && has_frontage(world, fb.footprint, f)
+                && fb.footprint.area() == 1
+                && fb.footprint.contains(n)
+                && has_frontage(world, &fb.footprint, f)
             {
                 front = Some(fid);
                 break;
@@ -349,12 +394,15 @@ pub(crate) fn convert_legacy_lots(world: &mut World) -> u32 {
         let Some(fid) = front else { continue };
         let back = world.buildings.remove(back_id).expect("exists");
         world.growth.meta.remove(back_id);
+        let fcell = world.buildings[fid].footprint.cells().next().expect("one cell");
+        let facing = world.buildings[fid].facing;
+        let nf = footprint_of(world, &[fcell, c], facing);
         let fb = &mut world.buildings[fid];
-        fb.footprint = rect_of(&[fb.footprint.min, c]);
+        fb.footprint = nf;
         fb.capacity += back.capacity;
         fb.occupied += back.occupied;
         fb.level = fb.level.max(back.level);
-        world.grid.get_mut(c).expect("in bounds").occupant = Occupant::Building(fid);
+        claim(world, std::iter::once(c), Some(fid));
         for h in world.households.values_mut() {
             if h.home == back_id {
                 h.home = fid;
@@ -394,9 +442,10 @@ fn upgrade(world: &mut World, z: Zone) -> bool {
     world.buildings[id].level += 1;
     grow_lot(world, id);
     let b = &mut world.buildings[id];
-    let area = (b.footprint.width() * b.footprint.height()) as u32;
-    b.capacity = capacity(z, b.level, area).max(b.capacity);
+    b.capacity = capacity(z, b.level, b.footprint.area()).max(b.capacity);
     world.versions.buildings += 1;
+    // Better jobs pay better.
+    crate::people::retier(world, id);
     true
 }
 
@@ -405,6 +454,7 @@ fn upgrade(world: &mut World, z: Zone) -> bool {
 /// and abandon buildings that stayed empty too long.
 fn abandon(world: &mut World) {
     world.cache.ensure_roads(&world.roads, world.versions.roads);
+    world.cache.ensure_zoning(&world.zoning);
     let now = world.time.tick;
     let midnight = world.time.tick_of_day == 0;
     let mut doomed = Vec::new();
@@ -439,24 +489,32 @@ fn abandon(world: &mut World) {
     world.growth.abandoned_total += doomed.len() as u32;
 }
 
+/// Is there a road connected to the highway next to a footprint (its own
+/// road, or any within reach)?
+pub(crate) fn footprint_connected(world: &World, f: crate::Footprint) -> bool {
+    f.cells().any(|c| world.cache.cell_connected(c))
+}
+
 /// Remove buildings (keeping zoning) and let their households react.
 pub(crate) fn remove_buildings(world: &mut World, ids: &[BuildingId]) {
     if ids.is_empty() {
         return;
     }
+    let mut fps = Vec::new();
     for &id in ids {
         if let Some(b) = world.buildings.remove(id) {
-            for c in b.footprint.cells() {
-                if let Some(cd) = world.grid.get_mut(c)
-                    && cd.occupant == Occupant::Building(id)
-                {
-                    cd.occupant = Occupant::Empty;
-                }
-            }
+            let held: Vec<CellRef> = b
+                .footprint
+                .cells()
+                .filter(|&c| world.zoning.cell(c).is_some_and(|x| x.building == Some(id)))
+                .collect();
+            claim(world, held.into_iter(), None);
+            fps.push(b.footprint);
         }
         world.growth.meta.remove(id);
     }
     world.versions.buildings += 1;
+    refresh_around(world, &fps);
     world.versions.grid += 1;
     households::buildings_removed(world, ids);
 }

@@ -1,6 +1,7 @@
 //! RCI demand, each in `-1.0..=1.0`, from the state of the city.
 //!
-//! * Residential: a base pull, plus free jobs beyond the unemployed, minus
+//! * Residential: a base pull, plus free jobs beyond the unemployed (per
+//!   member of the workforce), plus how happy the citizens are, minus
 //!   empty housing, taxes above default and long average commutes.
 //! * Commercial: shops wanted per resident vs. shop jobs that exist, plus
 //!   unemployment, minus unfilled shop jobs and taxes.
@@ -45,9 +46,16 @@ pub fn target(world: &World) -> (Demand, f32) {
             }
         }
     }
-    let households = world.households.len() as f32;
-    let employed = world.households.values().filter(|h| h.job.is_some()).count() as f32;
-    let unemployed = households - employed;
+    let (population, employed, workforce) = crate::stats::labour(world);
+    let households = workforce as f32;
+    let employed = employed as f32;
+    let unemployed = (households - employed).max(0.0);
+    // Happy citizens draw newcomers, unhappy ones put them off.
+    let mood = if population > 0 {
+        balance::HAPPINESS_DEMAND_WEIGHT * (world.people.stats.avg_happiness - balance::HAPPINESS_NEUTRAL)
+    } else {
+        0.0
+    };
     let small = balance::DEMAND_SMALL_CITY;
     let tax = tax_effect(world.economy.tax_rate);
     let f = &world.economy.fiscal;
@@ -66,8 +74,10 @@ pub fn target(world: &World) -> (Demand, f32) {
     let commute = world.traffic.avg_commute_s;
     let attract = balance::RES_BASE_DEMAND + balance::RES_JOBS_WEIGHT * (free_jobs - unemployed) / (households + small)
         - (commute - balance::COMMUTE_OK_S).max(0.0) / balance::COMMUTE_DEMAND_SCALE_S
+        - (crate::traffic::delay_factor(world) - balance::DELAY_OK_FACTOR).max(0.0) * balance::DELAY_DEMAND_PER_UNIT
         + tax
-        + res_fiscal;
+        + res_fiscal
+        + mood;
     let r = attract - balance::RES_VACANCY_WEIGHT * (res_vacancy - balance::RES_VACANCY_OK).max(0.0);
 
     let unemployment = if households > 0.0 { unemployed / households } else { 0.0 };
@@ -78,7 +88,8 @@ pub fn target(world: &World) -> (Demand, f32) {
             + tax
             + job_fiscal
     };
-    let want_c = pop * balance::SHOP_JOBS_PER_RESIDENT;
+    // Jobs follow the workforce (every adult wants their own job).
+    let want_c = households * balance::SHOP_JOBS_PER_WORKER;
     let want_i = want_c * balance::INDUSTRY_PER_SHOP;
     let demand = Demand {
         residential: r.clamp(-1.0, 1.0),

@@ -106,6 +106,13 @@ impl<K: Key, V> IdMap<K, V> {
             .filter(|s| s.version == version && s.value.is_some())
     }
 
+    /// Key of the entry in slot `idx`, if that slot is occupied (lets a
+    /// caller visit a subset of slots, e.g. every n-th).
+    pub fn key_at(&self, idx: usize) -> Option<K> {
+        let s = self.slots.get(idx)?;
+        s.value.as_ref().map(|_| make_key(idx, s.version))
+    }
+
     pub fn contains_key(&self, k: K) -> bool {
         self.slot(k).is_some()
     }
