@@ -8,6 +8,17 @@ use citysim_sim::*;
 pub const DAY: u64 = balance::TICKS_PER_DAY as u64;
 pub const HOUR: u64 = balance::TICKS_PER_HOUR as u64;
 
+/// `f` over `items` on one thread each, results in the order of `items`:
+/// for tests that grow several independent cities (same worlds, same
+/// assertions; the test takes as long as its slowest city).
+pub fn par_map<I: Send, T: Send>(items: impl IntoIterator<Item = I>, f: impl Fn(I) -> T + Sync) -> Vec<T> {
+    let f = &f;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = items.into_iter().map(|i| s.spawn(move || f(i))).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
 pub fn c(x: i32, y: i32) -> Cell {
     Cell::new(x, y)
 }

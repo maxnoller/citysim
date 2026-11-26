@@ -9,7 +9,7 @@ mod common;
 
 use citysim_sim::demand::{JoblessReason, jobs_view};
 use citysim_sim::*;
-use common::DAY;
+use common::{DAY, par_map};
 
 /// The two-district town on a street grid (`good`) or with everything
 /// through one junction, run for `days`.
@@ -45,22 +45,24 @@ fn commute_mood(w: &World) -> (f32, f32) {
 #[test]
 fn a_jammed_town_is_unhappy_about_its_commutes_and_says_so() {
     let (mut good, mut bad) = (Vec::new(), Vec::new());
-    for seed in [1, 2, 3] {
-        for (layout, out) in [(true, &mut good), (false, &mut bad)] {
-            let w = district_town(seed, layout, 3);
-            let (commute, stuck) = commute_mood(&w);
-            let gave_up = w.people.commute_moves_yesterday.left
-                + w.people.commute_moves_yesterday.moved_nearer
-                + w.people.commute_moves_today.left
-                + w.people.commute_moves_today.moved_nearer;
-            out.push((
-                commute,
-                stuck,
-                w.people.stats.avg_happiness,
-                traffic::delay_factor(&w),
-                gave_up,
-            ));
-        }
+    let towns = [1, 2, 3].into_iter().flat_map(|seed| [(seed, true), (seed, false)]);
+    for (layout, run) in par_map(towns, |(seed, layout)| {
+        let w = district_town(seed, layout, 3);
+        let (commute, stuck) = commute_mood(&w);
+        let gave_up = w.people.commute_moves_yesterday.left
+            + w.people.commute_moves_yesterday.moved_nearer
+            + w.people.commute_moves_today.left
+            + w.people.commute_moves_today.moved_nearer;
+        let run = (
+            commute,
+            stuck,
+            w.people.stats.avg_happiness,
+            traffic::delay_factor(&w),
+            gave_up,
+        );
+        (layout, run)
+    }) {
+        if layout { good.push(run) } else { bad.push(run) }
     }
     let mean = |v: &[(f32, f32, f32, f32, u32)], f: fn(&(f32, f32, f32, f32, u32)) -> f32| {
         v.iter().map(f).sum::<f32>() / v.len() as f32
@@ -83,16 +85,17 @@ fn a_jammed_town_is_unhappy_about_its_commutes_and_says_so() {
 #[test]
 fn traffic_costs_business_tax_and_the_budget_shows_it() {
     let (mut good, mut bad) = (Vec::new(), Vec::new());
-    for seed in [4, 5, 6] {
-        for (layout, out) in [(true, &mut good), (false, &mut bad)] {
-            let w = district_town(seed, layout, 2);
-            let t = w.economy.last_day_traffic;
-            let b = w.economy.last_day;
-            // Business tax is booked net of the loss, never below zero.
-            assert!(t.business_tax >= 0 && b.commercial_tax >= 0 && b.industrial_tax >= 0);
-            let business = (b.commercial_tax + b.industrial_tax + t.business_tax) as f32;
-            out.push((t.per_commute_s(), t.business_tax as f32 / business.max(1.0)));
-        }
+    let towns = [4, 5, 6].into_iter().flat_map(|seed| [(seed, true), (seed, false)]);
+    for (layout, run) in par_map(towns, |(seed, layout)| {
+        let w = district_town(seed, layout, 2);
+        let t = w.economy.last_day_traffic;
+        let b = w.economy.last_day;
+        // Business tax is booked net of the loss, never below zero.
+        assert!(t.business_tax >= 0 && b.commercial_tax >= 0 && b.industrial_tax >= 0);
+        let business = (b.commercial_tax + b.industrial_tax + t.business_tax) as f32;
+        (layout, (t.per_commute_s(), t.business_tax as f32 / business.max(1.0)))
+    }) {
+        if layout { good.push(run) } else { bad.push(run) }
     }
     eprintln!("lost s per commute, share of business tax lost: grid {good:?}, one junction {bad:?}");
     let lost = |v: &[(f32, f32)]| v.iter().map(|x| x.1).sum::<f32>() / v.len() as f32;
@@ -109,13 +112,16 @@ fn traffic_costs_business_tax_and_the_budget_shows_it() {
 fn nobody_spends_most_of_a_day_on_a_trip() {
     // A sensible player's growing town: no commute over eight in-game
     // hours, few over four, hardly any journey that long at all.
-    for seed in [7, 8, 9] {
+    let towns = par_map([7, 8, 9], |seed| {
         let mut w = World::new(seed);
         let mut p = scenarios::GridPlayer::new(&Zone::ALL);
         while w.time.tick < 4 * DAY {
             p.act(&mut w);
             w.step();
         }
+        (seed, w)
+    });
+    for (seed, w) in towns {
         let t = w.people.trip_times_yesterday;
         let h = t.max_ticks as f32 / balance::TICKS_PER_HOUR as f32;
         let commutes: u32 = t.commutes.iter().sum();
@@ -152,8 +158,13 @@ fn short_town(seed: u64, days: u64, fix: Option<u32>) -> World {
 
 #[test]
 fn a_town_short_of_work_land_says_what_is_missing_and_recovers_once_zoned() {
+    // Each seed's town short of land and its fixed copy, all six side by side.
+    let towns = [1, 2, 3]
+        .into_iter()
+        .flat_map(|seed| [(seed, 4, None), (seed, 5, Some(3))]);
+    let mut towns = par_map(towns, |(seed, days, fix)| short_town(seed, days, fix)).into_iter();
     for seed in [1, 2, 3] {
-        let w = short_town(seed, 4, None);
+        let (w, fixed) = (towns.next().unwrap(), towns.next().unwrap());
         let v = jobs_view(&w);
         eprintln!("seed {seed}: jobless {:.3}, demand {:?}, {v:?}", v.rate(), w.demand);
         // People are out of work, industry is what is short, it has no free
@@ -176,7 +187,7 @@ fn a_town_short_of_work_land_says_what_is_missing_and_recovers_once_zoned() {
             "{r:?}"
         );
         // Zoned on day 3: within two days nearly everyone has work again.
-        let w = short_town(seed, 5, Some(3));
+        let w = fixed;
         let v = jobs_view(&w);
         eprintln!("seed {seed} fixed: jobless {:.3}, {v:?}", v.rate());
         assert!(v.rate() < 0.03, "{v:?}");
