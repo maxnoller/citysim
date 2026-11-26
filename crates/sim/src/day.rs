@@ -137,6 +137,15 @@ fn trip_s(world: &World, purpose: TripPurpose, from: [f32; 2], to: [f32; 2]) -> 
     }
 }
 
+/// Vehicle seconds an off-screen trip estimated at `s` takes: at most
+/// `OFFSCREEN_MAX_TRIP_H`, more in proportion when traffic is bad.
+pub(crate) fn offscreen_s(world: &World, s: f32) -> f32 {
+    let tps = TICKS_PER_SECOND as f32;
+    let cap_s = balance::OFFSCREEN_MAX_TRIP_H * balance::TICKS_PER_HOUR as f32 / tps
+        * (traffic::delay_factor(world) / balance::DELAY_OK_FACTOR).max(1.0);
+    s.min(cap_s)
+}
+
 /// Ticks a trip of `s` estimated vehicle seconds takes, on the road or off
 /// screen alike (vehicle time is real time, see the `balance` time scales).
 fn secs_to_ticks(s: f32) -> u64 {
@@ -614,7 +623,7 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
     } else {
         1.0
     };
-    let arrive_tick = (!visible).then(|| now + secs_to_ticks(est * f));
+    let arrive_tick = (!visible).then(|| now + secs_to_ticks(offscreen_s(world, est * f)));
     let expected = if purpose == TripPurpose::ToWork && world.citizens[id].workplace() == Some(to) {
         expected_commute_ticks(world, id)
     } else {
@@ -706,7 +715,7 @@ pub(crate) fn move_in(world: &mut World, hid: crate::HouseholdId, driver: Citize
     } else {
         let (from, to) = (pos_of(world, None), pos_of(world, Some(home)));
         let t = if drives {
-            now + secs_to_ticks(road_s(world, from, to))
+            now + secs_to_ticks(offscreen_s(world, road_s(world, from, to)))
         } else {
             now + secs_to_ticks(estimate_s(from, to) * balance::CARLESS_TIME_FACTOR)
         };
@@ -749,7 +758,7 @@ pub(crate) fn continue_off_screen(world: &mut World, id: CitizenId) {
     let Some(c) = world.citizens.get(id) else { return };
     let Location::Travelling(j) = c.location else { return };
     let est = trip_s(world, j.purpose, pos_of(world, j.from), pos_of(world, Some(j.to)));
-    let t = now + secs_to_ticks(est * 0.5);
+    let t = now + secs_to_ticks(offscreen_s(world, est) * 0.5);
     let j = Journey {
         vehicle: None,
         arrive_tick: Some(t),
@@ -905,6 +914,12 @@ fn arrive(world: &mut World, id: CitizenId) {
     let hid = c.household;
     let home = world.households[hid].home;
     let to = if world.buildings.contains_key(j.to) { j.to } else { home };
+    world.people.trip_times_today.add(
+        now.saturating_sub(j.departed_tick),
+        matches!(j.purpose, TripPurpose::ToWork | TripPurpose::ToHome),
+        j.purpose.index() as u8,
+        j.arrive_tick.is_some(),
+    );
     if j.purpose == TripPurpose::ToWork && c.workplace() == Some(to) {
         // Door to door, waiting for the car included: they plan the next
         // commute by it.
@@ -916,12 +931,22 @@ fn arrive(world: &mut World, id: CitizenId) {
         // Off screen: the estimated drive (the commute a car would have,
         // in today's traffic; on foot without it).
         let (a, b) = (pos_of(world, j.from), pos_of(world, Some(j.to)));
-        let s = match j.mode {
-            TravelMode::Walking => estimate_s(a, b),
-            TravelMode::NoCar => road_s(world, a, b) * balance::CARLESS_TIME_FACTOR,
-            _ => road_s(world, a, b),
-        };
+        let s = offscreen_s(
+            world,
+            match j.mode {
+                TravelMode::Walking => estimate_s(a, b),
+                TravelMode::NoCar => road_s(world, a, b) * balance::CARLESS_TIME_FACTOR,
+                _ => road_s(world, a, b),
+            },
+        );
         world.citizens[id].last_commute_s = s;
+    }
+    // Commuters' time lost in traffic costs business (by the driver /
+    // traveller: each person's own trip).
+    if matches!(j.purpose, TripPurpose::ToWork | TripPurpose::ToHome) && world.citizens[id].job.is_some() {
+        let took = now.saturating_sub(j.departed_tick) as f32 / TICKS_PER_SECOND as f32;
+        let free = estimate_s(pos_of(world, j.from), pos_of(world, Some(j.to)));
+        crate::economy::record_commute_time(world, took, free);
     }
     if to == home {
         world.citizens[id].has_car = false;

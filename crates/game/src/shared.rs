@@ -15,6 +15,8 @@
 //! * Round 4, written by ui, drawn / honoured by gfx: `CurveToolView` (the
 //!   free-form road tool), `ToolPreview::area`, `WorldHighlight::doomed_roads`,
 //!   `WorldTarget::Vehicle`, `CameraFollow`, `CameraGoTo`.
+//! * Performance panel: `PerfProbe::detail` written by ui, `PerfProbe::render`
+//!   filled by gfx.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -633,6 +635,60 @@ pub fn cell_corners(c: Cell, inset: f32, height: f32) -> [Vec3; 4] {
     ]
 }
 
+// ---------------------------------------------------------------- performance panel
+
+/// How much the performance panel shows (written by ui). gfx measures its
+/// figures only while it is `Full`; `Off` and `Small` cost it nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PerfDetail {
+    #[default]
+    Off,
+    /// Frames per second and frame time.
+    Small,
+    /// Everything, including what only the renderer knows.
+    Full,
+}
+
+/// The performance panel's link to the renderer: ui sets `detail`, gfx
+/// fills `render` a few times a second while `detail` is `Full` (and
+/// leaves it as it was otherwise).
+#[derive(Resource, Debug, Clone, Default)]
+pub struct PerfProbe {
+    pub detail: PerfDetail,
+    pub render: Option<RenderStats>,
+}
+
+/// What only the renderer knows, averaged over the frames since the last
+/// refresh. `None` / empty where this backend or build cannot tell.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RenderStats {
+    /// Real time (s since start) of this refresh.
+    pub at: f32,
+    /// GPU time per frame (ms): the sum of the top-level render passes
+    /// (timestamp queries; Vulkan and DX12 only).
+    pub gpu_ms: Option<f32>,
+    /// GPU ms per frame of each top-level pass, slowest first.
+    pub passes: Vec<(String, f32)>,
+    /// CPU time of the render thread per frame (ms): from the start of its
+    /// frame to the GPU submit, not counting the wait for a swapchain image.
+    pub render_cpu_ms: Option<f32>,
+    /// Draw calls per frame: the main camera's passes, all shadow views.
+    pub draw_calls: (u32, u32),
+    /// Triangles per frame in the main passes (pipeline statistics).
+    pub triangles: Option<u64>,
+    /// Mesh entities, and how many of them are on screen.
+    pub meshes: (u32, u32),
+    /// Cars and trucks drawn, and how many of them are on screen.
+    pub vehicles: (u32, u32),
+    /// GPU memory the game has allocated and reserved (bytes; Vulkan and
+    /// DX12 only).
+    pub gpu_memory: Option<(u64, u64)>,
+    /// Graphics card, graphics API in use, driver.
+    pub adapter: String,
+    pub backend: String,
+    pub driver: String,
+}
+
 // ---------------------------------------------------------------- plugin
 
 /// True once the 3D scene's shaders are built and it really draws (written
@@ -672,6 +728,7 @@ impl Plugin for SharedPlugin {
         .init_resource::<DisplaySettings>()
         .init_resource::<CurveToolView>()
         .init_resource::<CameraFollow>()
+        .init_resource::<PerfProbe>()
         .add_message::<CameraGoTo>()
         // Without gfx there is nothing to wait for.
         .insert_resource(SceneReady(!cfg!(feature = "gfx")))

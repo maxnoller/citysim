@@ -230,6 +230,7 @@ const ASPHALT: Rgb = [62, 64, 70];
 const KERB: Rgb = [140, 140, 134];
 const MARK: Rgb = [212, 212, 204];
 const YELLOW_MARK: Rgb = [214, 180, 60];
+const MEDIAN: Rgb = [92, 128, 70];
 
 fn aspect_rgb(a: Aspect) -> Rgb {
     match a {
@@ -431,7 +432,31 @@ fn draw_world_opts(c: &mut Canvas, w: &World, v: &View, show_zones: bool, cars: 
             continue;
         }
         let cv = &seg.curve;
-        if seg.kind == RoadKind::Avenue || seg.kind == RoadKind::Highway {
+        if seg.kind == RoadKind::Avenue {
+            // The median, cut into turn pockets before junctions.
+            let len = seg.length;
+            let pf = junction::turn_pocket(w, s, true).map(|p| p.from_a(len));
+            let pb = junction::turn_pocket(w, s, false).map(|p| p.from_a(len));
+            let m0 = pb.map_or(lo, |p| p.1 + 0.3).max(lo);
+            let m1 = pf.map_or(hi, |p| p.0 - 0.3).min(hi);
+            let hw = seg.kind.median_half_width_m();
+            if m1 > m0 {
+                fill_strip(c, curve_strip(v, cv, m0, m1, hw, 0.0), MEDIAN);
+            }
+            for (p, side) in [(pf, 1.0f32), (pb, -1.0)] {
+                if let Some((a, b)) = p {
+                    fill_strip(c, curve_strip(v, cv, a, b, 0.08, side * hw), MARK);
+                    fill_strip(c, curve_strip(v, cv, a, b, 0.08, -side * hw), YELLOW_MARK);
+                    let stop = if side > 0.0 { b - 0.3 } else { a + 0.3 };
+                    fill_strip(c, curve_strip(v, cv, stop - 0.2, stop + 0.2, hw, 0.0), MARK);
+                }
+            }
+            let k = seg.kind;
+            let off = (k.lane_offset_m(0) + k.lane_offset_m(1)) * 0.5;
+            for side in [1.0, -1.0] {
+                dashes(c, v, cv, lo, hi, side * off, 0.12, 3.0, 7.0, MARK);
+            }
+        } else if seg.kind == RoadKind::Highway {
             fill_strip(c, curve_strip(v, cv, lo, hi, 0.18, 0.35), YELLOW_MARK);
             fill_strip(c, curve_strip(v, cv, lo, hi, 0.18, -0.35), YELLOW_MARK);
             let k = seg.kind;
@@ -969,7 +994,12 @@ fn draw_cars_by_purpose(c: &mut Canvas, w: &World, v: &View) {
 /// the citizens are doing.
 fn day(out: &str, seconds: u32) {
     let mut w = World::new(7);
-    let mut p = GridPlayer::new(&Zone::ALL);
+    // `CITYSIM_TOPDOWN_LAYOUT=hierarchy`: the avenue city.
+    let mut p = if std::env::var("CITYSIM_TOPDOWN_LAYOUT").as_deref() == Ok("hierarchy") {
+        GridPlayer::hierarchy()
+    } else {
+        GridPlayer::new(&Zone::ALL)
+    };
     let pop = std::env::var("CITYSIM_TOPDOWN_POP")
         .ok()
         .and_then(|s| s.parse().ok())

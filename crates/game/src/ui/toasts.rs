@@ -44,7 +44,7 @@ impl Toast {
 }
 
 #[derive(Component)]
-struct ToastStack;
+pub(super) struct ToastStack;
 
 #[derive(Component)]
 struct ToastItem {
@@ -58,13 +58,16 @@ struct ToastItem {
 
 const MAX_TOASTS: usize = 4;
 
+/// Top of the stack (the performance panel moves it while it shows).
+pub(super) const STACK_TOP: f32 = 72.0;
+
 fn spawn_stack(mut commands: Commands) {
     commands.spawn((
         Name::new("Toasts"),
         ToastStack,
         layout(Node {
             position_type: PositionType::Absolute,
-            top: px(72),
+            top: px(STACK_TOP),
             left: px(0),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Start,

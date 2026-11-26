@@ -85,6 +85,8 @@ pub enum UiAction {
     UiScale(usize),
     EdgeScroll(bool),
     LotMarkers(bool),
+    /// The performance panel's size.
+    Perf(crate::shared::PerfDetail),
     /// Fold / unfold a section of the side panel.
     Fold(super::people::FoldKey),
     /// Does nothing (a locked item).
@@ -438,7 +440,14 @@ pub fn spawn_button(
         _ if node.border == UiRect::DEFAULT => UiRect::all(px(1)),
         _ => node.border,
     };
-    let mut e = p.spawn((button, Node { border, ..node }, BorderColor::all(look.border)));
+    // A plate draws its own edge line along its slanted sides; Bevy's border
+    // would add the node's rectangle on top of it.
+    let border_color = if button.kind == ButtonKind::Speed {
+        Color::NONE
+    } else {
+        look.border
+    };
+    let mut e = p.spawn((button, Node { border, ..node }, BorderColor::all(border_color)));
     if button.kind == ButtonKind::Speed {
         e.insert(PlateAnim::new(
             PlateStyle::fill(look.top, look.bottom, look.border).slanted(SPEED_SLANT),
@@ -640,6 +649,7 @@ pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
         UiAction::UiScale(i) => cx.state.ui_scale == i,
         UiAction::EdgeScroll(on) => cx.display.edge_scroll == on,
         UiAction::LotMarkers(on) => cx.display.lot_markers == on,
+        UiAction::Perf(d) => cx.state.perf == d,
         UiAction::Snap(r) => cx.opts.rule(r),
         UiAction::ZoneDepth(d) => matches!(cx.tool, ActiveTool::Zone(_)) && cx.opts.zone_depth == d,
         UiAction::JunctionBrush(b) => cx.opts.junction_brush == b,
@@ -858,6 +868,7 @@ fn button_visuals(
         if a.press > 0.0 {
             look.top = t::mix(look.top, look.bottom, 0.6 * a.press);
         }
+        let plated = plate.is_some();
         match (grad, plate) {
             (_, Some(mut p)) => {
                 let style = PlateStyle::fill(look.top, look.bottom, look.border).slanted(SPEED_SLANT);
@@ -873,7 +884,9 @@ fn button_visuals(
             }
             (None, None) => {}
         }
-        border.set_if_neq(BorderColor::all(look.border));
+        if !plated {
+            border.set_if_neq(BorderColor::all(look.border));
+        }
         let scale = Vec2::splat(1.0 - 0.04 * a.press);
         if tf.scale != scale {
             tf.scale = scale;

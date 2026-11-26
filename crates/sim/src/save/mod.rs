@@ -6,7 +6,7 @@
 //!
 //! Version 7 (zoning on strips bent along curved roads, blocks six rows
 //! deep: the body is laid out as version 6, the bent lattices travel in
-//! extension block 3) is written now. Version 6 (citizens, household money
+//! extension block 4) is written now. Version 6 (citizens, household money
 //! and goods, the population bookkeeping; the 16-minute day, people bound
 //! to their cars, trips that name their buildings, party and cargo) loads
 //! with the same body; its zoning blocks are made again the current way
@@ -50,7 +50,7 @@ const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
-pub const EXTENSION_VERSION: u32 = 3;
+pub const EXTENSION_VERSION: u32 = 4;
 
 /// Every field of a [`Budget`], including those its own serde skips.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -157,18 +157,51 @@ impl ExtensionV2 {
     }
 }
 
-/// Extension block, version 3: version 2 plus the bent lattices of
-/// curved roads (`Lattice::strip`).
+/// Extension block, version 3: version 2 plus the traffic losses
+/// (`Economy::traffic_today`, `last_day_traffic`), the journey times and
+/// the households that gave up on their commute (`People::trip_times_*`,
+/// `commute_moves_*`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct ExtensionV3 {
     v2: ExtensionV2,
-    strips: Vec<(u16, crate::zoning::Strip)>,
+    traffic_today: crate::economy::TrafficLoss,
+    last_day_traffic: crate::economy::TrafficLoss,
+    trip_times: [crate::people::TripTimes; 2],
+    commute_moves: [crate::people::CommuteMoves; 2],
 }
 
 impl ExtensionV3 {
     pub(crate) fn of(w: &World) -> ExtensionV3 {
         ExtensionV3 {
             v2: ExtensionV2::of(w),
+            traffic_today: w.economy.traffic_today,
+            last_day_traffic: w.economy.last_day_traffic,
+            trip_times: [w.people.trip_times_today, w.people.trip_times_yesterday],
+            commute_moves: [w.people.commute_moves_today, w.people.commute_moves_yesterday],
+        }
+    }
+
+    pub(crate) fn restore(self, w: &mut World) {
+        self.v2.restore(w);
+        w.economy.traffic_today = self.traffic_today;
+        w.economy.last_day_traffic = self.last_day_traffic;
+        [w.people.trip_times_today, w.people.trip_times_yesterday] = self.trip_times;
+        [w.people.commute_moves_today, w.people.commute_moves_yesterday] = self.commute_moves;
+    }
+}
+
+/// Extension block, version 4: version 3 plus the bent lattices of
+/// curved roads (`Lattice::strip`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ExtensionV4 {
+    v3: ExtensionV3,
+    strips: Vec<(u16, crate::zoning::Strip)>,
+}
+
+impl ExtensionV4 {
+    pub(crate) fn of(w: &World) -> ExtensionV4 {
+        ExtensionV4 {
+            v3: ExtensionV3::of(w),
             strips: w
                 .zoning
                 .lattices()
@@ -178,7 +211,7 @@ impl ExtensionV3 {
     }
 
     pub(crate) fn restore(self, w: &mut World) {
-        self.v2.restore(w);
+        self.v3.restore(w);
         for (id, st) in self.strips {
             if let Some(Some(l)) = w.zoning.lattices.get_mut(id as usize) {
                 l.strip = Some(st);
@@ -222,7 +255,7 @@ pub(crate) fn save(world: &World) -> Vec<u8> {
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     let body = postcard::to_stdvec(world).expect("World is always serialisable");
     out.extend_from_slice(&body);
-    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV3::of(world))).expect("serialisable");
+    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV4::of(world))).expect("serialisable");
     out.extend_from_slice(&ext);
     out
 }
@@ -266,11 +299,16 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
             3 => postcard::from_bytes::<ExtensionV3>(rest)
                 .map_err(bad)?
                 .restore(&mut world),
+            4 => postcard::from_bytes::<ExtensionV4>(rest)
+                .map_err(bad)?
+                .restore(&mut world),
             _ => {}
         }
     }
     restore_derived(&mut world);
     world.roads.refresh_tables();
+    // Junctions saved before turn pockets: today's geometry.
+    crate::traffic::upgrade_junction_geometry(&mut world);
     world.cache.ensure_roads(&world.roads, world.versions.roads);
     world.cache.ensure_zoning(&world.zoning);
     if version == 6 {

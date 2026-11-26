@@ -249,6 +249,10 @@ pub(crate) fn night(world: &mut World) {
         p.trips_today = Default::default();
         p.trips_by_hour_yesterday = p.trips_by_hour;
         p.trips_by_hour = Default::default();
+        p.trip_times_yesterday = p.trip_times_today;
+        p.trip_times_today = Default::default();
+        p.commute_moves_yesterday = p.commute_moves_today;
+        p.commute_moves_today = Default::default();
         for pl in p.places.values_mut() {
             pl.sold_yesterday = pl.sold_today;
             pl.sold_today = 0.0;
@@ -504,6 +508,25 @@ fn household_day(world: &mut World, hid: HouseholdId) -> Option<bool> {
         }
     }
     if unhappy || hopeless {
+        return Some(true);
+    }
+    // Fed up with the traffic: move nearer work, or leave.
+    if let Some(work) = fed_up_with_commute(world, hid)
+        && world.rng.next_f32() < balance::COMMUTE_FED_UP_CHANCE
+    {
+        if all_home(world, hid)
+            && let Some(home) = nearer_home(world, hid, n, work)
+        {
+            world.people.commute_moves_today.moved_nearer += 1;
+            households::relocate(world, hid, home);
+            world.households[hid].rent = rent_for(world, home, n);
+            for m in world.households[hid].citizens.clone() {
+                world.citizens[m].log(day, LifeEvent::MovedHome);
+            }
+            world.people.events_today.moved_home += 1;
+            return Some(false);
+        }
+        world.people.commute_moves_today.left += 1;
         return Some(true);
     }
     None
@@ -855,12 +878,12 @@ fn happiness(world: &mut World, hid: HouseholdId, income: i64, costs: i64, ran_o
             if c.last_commute_s <= 0.0 {
                 0.8
             } else {
-                // Long in seconds, or long for the distance (the city's
-                // traffic: commutes over free-flow time), whichever is worse.
+                // Long in seconds, or long for the distance (their own
+                // commute over its free-flow time), whichever is worse.
                 lin(c.last_commute_s, balance::COMMUTE_OK_S, balance::HOPELESS_COMMUTE_S).min(lin(
-                    crate::traffic::delay_factor(world),
-                    balance::DELAY_OK_FACTOR,
-                    balance::DELAY_HOPELESS_FACTOR,
+                    commute_ratio(world, m),
+                    balance::COMMUTE_RATIO_OK,
+                    balance::COMMUTE_RATIO_BAD,
                 ))
             }
         } else {
@@ -892,6 +915,62 @@ fn happiness(world: &mut World, hid: HouseholdId, income: i64, costs: i64, ran_o
     } else {
         sum / members.len() as f32
     };
+}
+
+/// A worker's last commute over its free-flow estimate (home to work) plus
+/// `COMMUTE_RATIO_SLACK_S`, at least 1; 1 without a job or a commute yet.
+pub fn commute_ratio(world: &World, id: CitizenId) -> f32 {
+    let Some(c) = world.citizens.get(id) else { return 1.0 };
+    let (Some(job), Some(h)) = (c.job, world.households.get(c.household)) else {
+        return 1.0;
+    };
+    if c.last_commute_s <= 0.0 {
+        return 1.0;
+    }
+    let free = crate::day::estimate_s(home_pos(world, h.home), home_pos(world, job.workplace));
+    (c.last_commute_s / (free + balance::COMMUTE_RATIO_SLACK_S)).max(1.0)
+}
+
+/// Is every worker of the household fed up with their commute
+/// (`balance::COMMUTE_FED_UP_BELOW`)? The first worker's job if so.
+fn fed_up_with_commute(world: &World, hid: HouseholdId) -> Option<BuildingId> {
+    let h = &world.households[hid];
+    let mut first = None;
+    for &m in &h.citizens {
+        let Some(c) = world.citizens.get(m) else { continue };
+        let Some(job) = c.job else { continue };
+        if c.last_commute_s <= 0.0 || c.happiness.commute >= balance::COMMUTE_FED_UP_BELOW {
+            return None;
+        }
+        first.get_or_insert(job.workplace);
+    }
+    first
+}
+
+/// A free home with room for `n` at most `COMMUTE_MOVE_NEARER` times as far
+/// from `work` as the current one.
+fn nearer_home(world: &mut World, hid: HouseholdId, n: u32, work: BuildingId) -> Option<BuildingId> {
+    world.cache.ensure_places(&world.buildings, world.versions.buildings);
+    let homes = world.cache.homes.len();
+    if homes == 0 {
+        return None;
+    }
+    let cur = world.households[hid].home;
+    let wp = home_pos(world, work);
+    let now_d = geom::dist(wp, home_pos(world, cur));
+    let mut best: Option<(f32, BuildingId)> = None;
+    for _ in 0..balance::HOME_SEARCH_SAMPLES {
+        let b = world.cache.homes[world.rng.below(homes as u32) as usize];
+        let Some(bb) = world.buildings.get(b) else { continue };
+        if b == cur || bb.capacity < bb.occupied + n || !households::connected(world, bb.footprint) {
+            continue;
+        }
+        let d = geom::dist(wp, rect_center(bb.footprint));
+        if d <= now_d * balance::COMMUTE_MOVE_NEARER && best.is_none_or(|x| d < x.0) {
+            best = Some((d, b));
+        }
+    }
+    best.map(|b| b.1)
 }
 
 /// The happiness part most often worst among unhappy citizens (for tests

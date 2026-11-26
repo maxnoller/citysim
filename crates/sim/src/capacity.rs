@@ -157,6 +157,18 @@ pub fn build(b: &Bench) -> (World, Option<NodeId>) {
 /// Run a bench: `warmup_s` seconds to fill the queues, then `measure_s`
 /// seconds counted.
 pub fn run(b: &Bench, seed: u64, warmup_s: u32, measure_s: u32) -> BenchResult {
+    run_traced(b, seed, warmup_s, measure_s, &mut |_, _, _| {})
+}
+
+/// [`run`], calling `trace(world, junction node, tick)` after every step
+/// (diagnostics).
+pub fn run_traced(
+    b: &Bench,
+    seed: u64,
+    warmup_s: u32,
+    measure_s: u32,
+    trace: &mut dyn FnMut(&World, Option<NodeId>, u32),
+) -> BenchResult {
     let (mut w, node) = build(b);
     let r = ARM_CELLS - 1;
     // Arms: west, east, north, south (the direction they lie in).
@@ -273,6 +285,7 @@ pub fn run(b: &Bench, seed: u64, warmup_s: u32, measure_s: u32) -> BenchResult {
             }
         }
         w.step();
+        trace(&w, node, t);
         // Entries into the box.
         if let Some(n) = node {
             let mut now_in: Vec<VehicleId> = Vec::new();
