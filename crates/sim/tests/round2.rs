@@ -769,4 +769,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0xa93fdfe94e707488;
+const PINNED_CHECKSUM: u64 = 0xab25356a86b6785a;

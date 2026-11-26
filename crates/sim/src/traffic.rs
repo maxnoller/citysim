@@ -274,9 +274,8 @@ pub struct TrafficState {
     pub replan: VecDeque<VehicleId>,
     /// `versions.roads` the vehicles were last checked against.
     pub roads_version: u64,
-    /// Moving average of completed commutes (to and from work), door to
-    /// door, vehicle seconds: car trips on the road and those made off
-    /// screen (in today's traffic, `delay_factor`).
+    /// Moving average of completed car commutes (to and from work, on the
+    /// road), door to door, vehicle seconds.
     pub avg_commute_s: f32,
     /// Mean speed of the cars on the road that are moving this tick
     /// (faster than `balance::WAIT_SPEED`), m/s. Cars standing at a red

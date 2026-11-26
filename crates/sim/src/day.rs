@@ -918,13 +918,6 @@ fn arrive(world: &mut World, id: CitizenId) {
             TravelMode::NoCar => road_s(world, a, b) * balance::CARLESS_TIME_FACTOR,
             _ => road_s(world, a, b),
         };
-        // The city's average commute counts trips made off screen too.
-        let t = &mut world.traffic;
-        t.avg_commute_s = if t.avg_commute_s == 0.0 {
-            s
-        } else {
-            t.avg_commute_s + (s - t.avg_commute_s) * 0.02
-        };
         world.citizens[id].last_commute_s = s;
     }
     if to == home {

@@ -219,8 +219,8 @@ the free-form roads. What a renderer or the interface needs from the combination
   `TravelMode::Walking` is new. Trucks are `TripPurpose::Goods`.
 - **Traffic on every commute.** `TrafficState::delay_factor` (`traffic::delay_factor(world)`, at least 1): a moving
   average of commuting car trips' door-to-door time over their free-flow estimate. Commutes made off screen take that
-  long too, so a jammed town makes every commuter late, not only the drivers you see. `TrafficState::avg_commute_s` /
-  `Stats::avg_commute_s` count off-screen commutes as well.
+  long too, so a jammed town makes every commuter late, not only the drivers you see. `avg_commute_s` stays the
+  average of commutes driven on the road (residential demand follows it).
 - **Money.** New sinks (people side): avenue upkeep 10 per cell per day, `$100` per signalled junction per day, city
   services growing with size and density; the breakdown is `economy::running_costs(world)` /
   `economy.last_day_costs` (`RunningCosts`). New (r4-sim): `Economy::attendance` (`Attendance { scheduled_ticks,
