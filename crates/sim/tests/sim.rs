@@ -250,9 +250,15 @@ fn run_layout_delay(grid: bool, fix_on_day: Option<u32>, days: u32) -> (f32, f32
 
 #[test]
 fn bad_layout_jams_and_a_second_connection_fixes_it() {
-    let (grid_speed, grid_commute, grid_delay, grid_pop) = run_layout_delay(true, None, 6);
-    let (bad_speed, bad_commute, bad_delay, bad_pop) = run_layout_delay(false, None, 6);
-    let (fix_speed, fix_commute, fix_delay, fix_pop) = run_layout_delay(false, Some(3), 6);
+    // Three independent cities: grown side by side (the test's run time).
+    let [grid, bad, fix] = std::thread::scope(|s| {
+        [(true, None), (false, None), (false, Some(3))]
+            .map(|(grid, fix)| s.spawn(move || run_layout_delay(grid, fix, 6)))
+            .map(|h| h.join().unwrap())
+    });
+    let (grid_speed, grid_commute, grid_delay, grid_pop) = grid;
+    let (bad_speed, bad_commute, bad_delay, bad_pop) = bad;
+    let (fix_speed, fix_commute, fix_delay, fix_pop) = fix;
     println!("grid {grid_speed:.1} m/s {grid_commute:.0} s x{grid_delay:.2} pop {grid_pop}");
     println!("bad  {bad_speed:.1} m/s {bad_commute:.0} s x{bad_delay:.2} pop {bad_pop}");
     println!("fix  {fix_speed:.1} m/s {fix_commute:.0} s x{fix_delay:.2} pop {fix_pop}");

@@ -626,27 +626,40 @@ fn zero_tax_is_no_growth_button_and_high_tax_slows_growth() {
     assert_eq!(base, 0.0);
     assert!(demand::tax_effect(0.0) <= balance::LOW_TAX_DEMAND_MAX + 1e-6);
     assert!(demand::tax_effect(balance::MAX_TAX_RATE) < -0.5);
+    // Independent towns, run side by side (the test's run time): one at
+    // zero tax, and one town grown once and then copied to run on at
+    // default, zero and maximum tax (a copy runs exactly like a rebuild).
+    let (zero_tax_town, [normal, zero, high]) = std::thread::scope(|s| {
+        let zero_tax_town = s.spawn(|| {
+            let (mut w, _) = small_town(4);
+            w.apply(Command::SetTaxRate(0.0)).unwrap();
+            let money = w.economy.money;
+            for _ in 0..2 * DAY {
+                w.step();
+            }
+            (w, money)
+        });
+        let town = small_town(5);
+        let grow = |(mut w, mut p): (World, GridPlayer), rate: f32| {
+            w.apply(Command::SetTaxRate(rate)).unwrap();
+            for _ in 0..3 * DAY {
+                p.act(&mut w);
+                w.step();
+            }
+            w.stats.population
+        };
+        let grown = [balance::DEFAULT_TAX_RATE, 0.0, balance::MAX_TAX_RATE].map(|rate| {
+            let town = town.clone();
+            s.spawn(move || grow(town, rate))
+        });
+        (zero_tax_town.join().unwrap(), grown.map(|h| h.join().unwrap()))
+    });
     // A town at zero tax runs a loss every day and ends up in debt.
-    let (mut w, _) = small_town(4);
-    w.apply(Command::SetTaxRate(0.0)).unwrap();
-    let money = w.economy.money;
-    for _ in 0..2 * DAY {
-        w.step();
-    }
+    let (w, money) = zero_tax_town;
     assert!(w.economy.money < money);
     assert!(w.economy.history.last().unwrap().budget.net() < 0);
     assert_ne!(w.economy.fiscal.state, economy::FiscalState::Healthy);
     // Growth: the same town at default, zero and maximum tax.
-    let grow = |rate: f32| {
-        let (mut w, mut p) = small_town(5);
-        w.apply(Command::SetTaxRate(rate)).unwrap();
-        for _ in 0..3 * DAY {
-            p.act(&mut w);
-            w.step();
-        }
-        w.stats.population
-    };
-    let (normal, zero, high) = (grow(balance::DEFAULT_TAX_RATE), grow(0.0), grow(balance::MAX_TAX_RATE));
     assert!(high < normal * 9 / 10, "high tax {high} vs {normal}");
     assert!(
         zero < normal * 12 / 10,
