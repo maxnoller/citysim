@@ -195,9 +195,13 @@ pub const VEHICLE_SPACING_M: f32 = 6.0;
 /// Distance between the centres of two stopped cars in a queue, metres.
 pub const MIN_GAP_M: f32 = 5.5;
 /// Time headway drivers keep to the car ahead: allowed speed is
-/// `(gap - MIN_GAP_M) / FOLLOW_HEADWAY_S`. 1 s gives about 0.65 cars/s per
-/// lane at street speed.
-pub const FOLLOW_HEADWAY_S: f32 = 0.5;
+/// `(gap - MIN_GAP_M) / headway`. On avenues and the highway this one
+/// (a queue discharges at about 0.6 cars/s per lane, an empty lane carries
+/// about 0.7 at speed); on streets `STREET_FOLLOW_HEADWAY_S`.
+pub const FOLLOW_HEADWAY_S: f32 = 1.1;
+/// ... on streets: 2.75 m lanes lined with driveways and kerbside activity
+/// are driven with more distance (about 0.45 cars/s per lane from a queue).
+pub const STREET_FOLLOW_HEADWAY_S: f32 = 1.5;
 /// Acceleration, m/s².
 pub const ACCELERATION: f32 = 3.5;
 /// Comfortable braking used towards stop lines and junctions, m/s².
@@ -238,6 +242,12 @@ pub const DECIDE_DISTANCE_M: f32 = 45.0;
 /// moving off faster than this (m/s) without a full car spacing yet, when
 /// that lane is long (the queue cannot stop right behind the box).
 pub const EXIT_MOVING_SPEED: f32 = 3.0;
+/// How far ahead (seconds) a car about to enter a junction counts the room
+/// a moving out-lane frees for it.
+pub const EXIT_LOOKAHEAD_S: f32 = 2.0;
+/// ... only when the out-lane still has storage for this many more cars
+/// beyond everyone on it, heading for it and this car.
+pub const EXIT_STORAGE_MARGIN_CARS: f32 = 1.0;
 /// No lane changes and no cars pulling out of driveways this close behind
 /// a junction box, metres (cars leaving the box need the room).
 pub const NO_LANE_CHANGE_AFTER_BOX_M: f32 = 10.0;
@@ -246,6 +256,18 @@ pub const NO_LANE_CHANGE_AFTER_BOX_M: f32 = 10.0;
 /// it (m).
 pub const STOP_SIGN_SPEED: f32 = 1.0;
 pub const STOP_SIGN_DISTANCE_M: f32 = 1.5;
+/// ... after standing there this long, seconds (a real stop).
+pub const STOP_DWELL_S: f32 = 1.0;
+/// All-way stops: once the box is empty the next car sets off this much
+/// later, seconds (looking both ways).
+pub const ALL_WAY_REACTION_S: f32 = 1.2;
+/// A car slower than this (m/s) that is in the wrong lane for its next turn
+/// asks the car behind in the lane it needs to leave it a gap
+/// (`MERGE_ROOM_M` more than a standing queue's spacing), unless it is
+/// within `MERGE_MIN_LINE_M` of the stop line (it turns from where it is).
+pub const MERGE_ASK_SPEED: f32 = 3.0;
+pub const MERGE_ROOM_M: f32 = 1.2;
+pub const MERGE_MIN_LINE_M: f32 = 8.0;
 /// Critical gaps, seconds: a permissive left turn (and same-class cars)
 /// leaves this much time to a conflicting car with precedence, a car on a
 /// give-way approach this much to the major road.
@@ -258,7 +280,7 @@ pub const BOX_DEADLOCK_S: f32 = 20.0;
 pub const LANE_CHANGE_S: f32 = 1.2;
 /// Cars move into the lane their next turn needs within this distance of
 /// the stop line, metres.
-pub const LANE_PREPARE_M: f32 = 90.0;
+pub const LANE_PREPARE_M: f32 = 150.0;
 /// Extra stop-line distance beyond the carriageways of the crossing roads,
 /// metres: room for a pedestrian crossing and the kerb radius (junctions of
 /// three or more roads).
@@ -278,15 +300,24 @@ pub const LANE_MERGE_TAPER_M: f32 = 14.0;
 /// Minimum / maximum green of a phase, seconds of vehicle time. A phase
 /// ends early once nobody approaches on green (gap-out), never before its
 /// minimum, and is skipped when nobody waits for it.
-pub const SIGNAL_MIN_GREEN_S: f32 = 5.0;
-pub const SIGNAL_MAIN_MAX_GREEN_S: f32 = 30.0;
-pub const SIGNAL_SIDE_MAX_GREEN_S: f32 = 20.0;
-/// Protected left-turn phase (avenues).
+pub const SIGNAL_MIN_GREEN_S: f32 = 4.0;
+pub const SIGNAL_MAIN_MAX_GREEN_S: f32 = 20.0;
+pub const SIGNAL_SIDE_MAX_GREEN_S: f32 = 15.0;
+/// Protected left-turn phases on multi-lane approaches. Off: in a grid of
+/// short blocks the extra phases lengthen every cycle and queues spill back
+/// into the junctions behind (measured: about a quarter more standing time
+/// per trip in the avenue city); left turns are permissive and clear out
+/// at the end of green instead.
+pub const SIGNAL_LEFT_PHASES: bool = false;
+/// Protected left-turn phase (avenues), when `SIGNAL_LEFT_PHASES`.
 pub const SIGNAL_LEFT_MIN_GREEN_S: f32 = 4.0;
-pub const SIGNAL_LEFT_MAX_GREEN_S: f32 = 12.0;
+pub const SIGNAL_LEFT_MAX_GREEN_S: f32 = 8.0;
 /// Yellow and all-red clearance, seconds.
 pub const SIGNAL_YELLOW_S: f32 = 2.5;
 pub const SIGNAL_ALL_RED_S: f32 = 1.0;
+/// A green is held only for vehicles that reach the line within this many
+/// seconds (passage time); vehicles further back call their phase.
+pub const SIGNAL_PASSAGE_S: f32 = 2.5;
 /// Vehicles closer than this to the stop line call their phase, metres.
 pub const SIGNAL_DETECT_M: f32 = 40.0;
 /// Common cycle of coordinated signals along avenues, seconds ...
@@ -295,11 +326,19 @@ pub const SIGNAL_COORD_CYCLE_S: f32 = 60.0;
 pub const SIGNAL_COORD_MAIN_SHARE: f32 = 0.5;
 /// ... and offsets follow a platoon driving at this speed, m/s.
 pub const SIGNAL_PROGRESSION_SPEED: f32 = 14.0;
-/// Auto control turns a priority junction into signals when its busiest
-/// minute of vehicle time yesterday let in at least this many vehicles,
-/// and back below the lower number.
-pub const AUTO_SIGNAL_PER_MINUTE: u16 = 16;
-pub const AUTO_PRIORITY_PER_MINUTE: u16 = 9;
+/// Auto control turns an all-way junction (equal roads, no major one)
+/// into signals when its busiest minute of vehicle time yesterday let in
+/// plus left queued at least this many vehicles (about what an all-way
+/// stop passes: signals every short block cost more than they bring
+/// below it), and back below the lower number.
+pub const AUTO_SIGNAL_PER_MINUTE: u16 = 30;
+pub const AUTO_PRIORITY_PER_MINUTE: u16 = 18;
+/// Junctions with a major road (an avenue through streets, a street
+/// through a T): signals once the minor approaches' busiest minute (cars
+/// from them let in plus those still queued) reaches this, back to
+/// priority below the second (`junction::judge_busy`).
+pub const AUTO_SIGNAL_MINOR_PER_MINUTE: u16 = 30;
+pub const AUTO_PRIORITY_MINOR_PER_MINUTE: u16 = 18;
 
 /// Route planning: fixed cost of passing a junction, seconds (prefers
 /// straighter routes with fewer junctions).
@@ -316,10 +355,20 @@ pub const ROUTE_SIGNAL_SIDE_S: f32 = 8.0;
 /// Route planning: turning back the way the car came at a node, seconds
 /// (only when nothing else works).
 pub const ROUTE_UTURN_COST_S: f32 = 30.0;
+/// Routing cost of turns on top of the approach's wait
+/// (`drive::build_route_turns`): a left turn at a signal per oncoming lane
+/// it must find gaps in (half that from a major road at a priority
+/// junction; crossing or turning left out of a minor road per major lane),
+/// a right turn.
+pub const ROUTE_LEFT_PER_LANE_S: f32 = 8.0;
+pub const ROUTE_RIGHT_S: f32 = 1.0;
 /// Route planning: expected wait per car already on a segment direction
 /// that ends at a junction, multiplied by that direction's congestion.
 pub const ROUTE_QUEUE_COST_S: f32 = 2.0;
 
+/// A car that reaches its destination stands at the kerb this long before
+/// it is gone (parking), seconds.
+pub const PARK_DWELL_S: f32 = 0.0;
 /// A car slower than this counts as waiting.
 pub const WAIT_SPEED: f32 = 0.5;
 /// A car that has been waiting this long looks for a new route.
@@ -341,6 +390,19 @@ pub const MAX_VEHICLES: usize = 2_500;
 /// smaller city; never fewer than [`MIN_VEHICLE_BUDGET`]).
 pub const VEHICLES_PER_1000: usize = 125;
 pub const MIN_VEHICLE_BUDGET: usize = 150;
+/// Share of citizens' car trips that are real cars on the road (the rest
+/// happen off screen and take the delay the drawn cars measure,
+/// `traffic::delay_factor`): all of them in a small town, falling to
+/// `CAR_SHARE_LARGE` between `CAR_SHARE_FROM_POP` and `CAR_SHARE_TO_POP`
+/// residents. A fixed share, whatever the traffic: the network carries the
+/// cars of this share and the layout decides how well (see
+/// `traffic::car_share`).
+pub const CAR_SHARE_LARGE: f32 = 0.4;
+pub const CAR_SHARE_FROM_POP: f32 = 1_500.0;
+pub const CAR_SHARE_TO_POP: f32 = 5_000.0;
+/// Goods deliveries and exports driven as real trucks, as a share of the
+/// car share (trucks make up about a tenth of the traffic).
+pub const TRUCK_SHARE: f32 = 0.5;
 /// Cap of a car trip's time over its free-flow estimate in the delay
 /// factor (`TrafficState::delay_factor`).
 pub const DELAY_FACTOR_MAX: f32 = 8.0;
@@ -459,6 +521,13 @@ pub const LOW_TAX_DEMAND_MAX: f32 = 0.06;
 /// demand (round 3: 70 s with a sample of the commuters on the road; every
 /// car trip is on the road now, so rush hours are fuller) ...
 pub const COMMUTE_OK_S: f32 = 130.0;
+/// The city's traffic (`traffic::delay_factor`, commutes over free-flow
+/// time): up to `DELAY_OK_FACTOR` nobody minds; beyond it residential
+/// demand drops by `DELAY_DEMAND_PER_UNIT` per unit, and commuters' commute
+/// happiness falls to zero at `DELAY_HOPELESS_FACTOR`.
+pub const DELAY_OK_FACTOR: f32 = 2.5;
+pub const DELAY_HOPELESS_FACTOR: f32 = 5.0;
+pub const DELAY_DEMAND_PER_UNIT: f32 = 0.5;
 /// ... by 1.0 per this many extra seconds.
 pub const COMMUTE_DEMAND_SCALE_S: f32 = 180.0;
 

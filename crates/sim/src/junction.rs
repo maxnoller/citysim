@@ -248,6 +248,12 @@ pub struct JunctionState {
     pub movements: Vec<Movement>,
     /// Bit `j` of `conflicts[i]`: movements `i` and `j` cross or merge.
     pub conflicts: Vec<u128>,
+    /// For conflicting movements `i`, `j`: how far along `i` (metres, the
+    /// car's centre) a car must be before it no longer blocks `j` (it is
+    /// past where their paths meet). Derived from the movements; rebuilt
+    /// when empty (not saved).
+    #[serde(skip)]
+    pub clear_after: ClearTable,
     pub plan: Option<SignalPlan>,
     pub signal: SignalState,
     /// Vehicles stopped or crawling on each approach (by arm).
@@ -260,6 +266,17 @@ pub struct JunctionState {
     pub peak_minute_yesterday: u16,
     /// Auto control decided at the last midnight: was it busy?
     pub busy: bool,
+    /// Junctions with a major road: the minor approaches' demand, counted
+    /// like `entered_minute` / `peak_minute_*` (vehicles from minor arms let
+    /// in during a minute plus those still queued on them at its end). Auto
+    /// control signalises such a junction on this, not on the major road's
+    /// own traffic. Saved in the extension block (`save`).
+    #[serde(skip)]
+    pub minor_minute: u16,
+    #[serde(skip)]
+    pub minor_peak_today: u16,
+    #[serde(skip)]
+    pub minor_peak_yesterday: u16,
     /// Tick from which the box is clear of the last vehicle let in.
     pub clear_at: u64,
     /// Arm whose straight line was served last, and vehicles let through
@@ -268,7 +285,39 @@ pub struct JunctionState {
     pub phase_count: u16,
 }
 
+/// [`JunctionState::clear_after`]: a cache of the movements' geometry
+/// (always equal for comparisons; empty until first used after a load).
+#[derive(Debug, Clone, Default)]
+pub struct ClearTable(pub(crate) Vec<f32>);
+
+impl PartialEq for ClearTable {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 impl JunctionState {
+    /// Fill [`JunctionState::clear_after`] if it is empty.
+    pub(crate) fn ensure_clear(&mut self) {
+        if self.clear_after.0.is_empty() && !self.movements.is_empty() {
+            self.clear_after = ClearTable(build_clear(&self.movements, &self.conflicts));
+        }
+    }
+
+    /// Does a car on movement `o`, `dist` metres along it, block a car
+    /// that wants to enter on movement `m`? (They conflict and it has not
+    /// passed where their paths meet.)
+    pub fn blocks(&self, o: usize, dist: f32, m: usize) -> bool {
+        if !self.conflict(o, m) {
+            return false;
+        }
+        let n = self.movements.len().min(128);
+        match self.clear_after.0.get(o * n + m) {
+            Some(&c) => dist < c,
+            None => true,
+        }
+    }
+
     /// Index of the arm for segment `s`.
     pub fn arm_of(&self, s: SegmentId) -> Option<usize> {
         self.arms.iter().position(|a| a.segment == s)
@@ -634,6 +683,55 @@ pub(crate) fn build_conflicts(node_pos: [f32; 2], movements: &[Movement]) -> Vec
     out
 }
 
+/// [`JunctionState::clear_after`] for `movements` with `conflicts`: per
+/// ordered conflicting pair `(i, j)` the distance along `i` beyond which
+/// the rear of a car (half the longest body plus a sample step and a
+/// metre) has left the stretch of `i` that comes within
+/// `MOVEMENT_CLEARANCE_M` of `j`'s path. Infinite when that stretch runs to
+/// the end (merging into the same lane: the car blocks until it is out).
+pub(crate) fn build_clear(movements: &[Movement], conflicts: &[u128]) -> Vec<f32> {
+    const K: usize = 16;
+    let n = movements.len().min(128);
+    let pts: Vec<[[f32; 2]; K + 1]> = movements
+        .iter()
+        .take(n)
+        .map(|m| {
+            let mut out = [[0.0; 2]; K + 1];
+            for (k, p) in out.iter_mut().enumerate() {
+                *p = m.pose_at(m.length * k as f32 / K as f32).0;
+            }
+            out
+        })
+        .collect();
+    let clear2 = balance::MOVEMENT_CLEARANCE_M * balance::MOVEMENT_CLEARANCE_M;
+    let half = balance::TRUCK_BODY_M[0] * 0.5;
+    let mut out = vec![f32::INFINITY; n * n];
+    for i in 0..n {
+        let c = conflicts.get(i).copied().unwrap_or(0);
+        for j in 0..n {
+            if i == j || c >> j & 1 == 0 {
+                continue;
+            }
+            let last = (0..=K).rev().find(|&k| {
+                pts[j].iter().any(|q| {
+                    let d = geom::sub(pts[i][k], *q);
+                    geom::dot(d, d) < clear2
+                })
+            });
+            let len = movements[i].length;
+            let step = len / K as f32;
+            out[i * n + j] = match last {
+                Some(k) if k < K => {
+                    let d = len * k as f32 / K as f32 + step + half + 1.0;
+                    if d < len { d } else { f32::INFINITY }
+                }
+                _ => f32::INFINITY,
+            };
+        }
+    }
+    out
+}
+
 /// Do the paths of two movements come closer than a car's width (plus a
 /// margin) anywhere, so two cars on them would touch? Catches movements
 /// that do not cross topologically but pass side by side in a small box
@@ -730,7 +828,7 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
     // main roads, served alike.
     let equal = groups.len() >= 2 && score(&groups[0]) == score(&groups[1]);
     for (k, g) in groups.iter().enumerate() {
-        let wide = g.len() == 2 && g.iter().any(|&a| arms[a as usize].lanes_in >= 2);
+        let wide = balance::SIGNAL_LEFT_PHASES && g.len() == 2 && g.iter().any(|&a| arms[a as usize].lanes_in >= 2);
         if wide {
             phases.push(SignalPhase {
                 arms: g.clone(),
@@ -780,6 +878,28 @@ fn build_plan(roads: &RoadNetwork, n: NodeId, arms: &[Arm]) -> SignalPlan {
         cycle_s,
         offset_s,
         main,
+    }
+}
+
+/// Was a junction busy yesterday (auto control signalises it)? Junctions
+/// with a major road judge by their minor approaches' busiest minute (the
+/// major road flows regardless); all-way junctions by all of them.
+/// `was`: busy the day before (a lower bar to stay busy).
+pub(crate) fn judge_busy(j: &JunctionState, was: bool) -> bool {
+    if j.arms.iter().any(|a| a.major) {
+        let bar = if was {
+            balance::AUTO_PRIORITY_MINOR_PER_MINUTE
+        } else {
+            balance::AUTO_SIGNAL_MINOR_PER_MINUTE
+        };
+        j.minor_peak_yesterday >= bar
+    } else {
+        let bar = if was {
+            balance::AUTO_PRIORITY_PER_MINUTE
+        } else {
+            balance::AUTO_SIGNAL_PER_MINUTE
+        };
+        j.peak_minute_yesterday >= bar
     }
 }
 
@@ -842,6 +962,7 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
         control,
         queue: vec![0; deg],
         arms,
+        clear_after: ClearTable(build_clear(&movements, &conflicts)),
         movements,
         conflicts,
         plan,
@@ -850,6 +971,9 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
         peak_minute_today: old.map_or(0, |o| o.peak_minute_today),
         peak_minute_yesterday: old.map_or(0, |o| o.peak_minute_yesterday),
         busy,
+        minor_minute: old.map_or(0, |o| o.minor_minute),
+        minor_peak_today: old.map_or(0, |o| o.minor_peak_today),
+        minor_peak_yesterday: old.map_or(0, |o| o.minor_peak_yesterday),
         clear_at: old.map_or(0, |o| o.clear_at),
         last_served: old.filter(|_| same_shape).map_or(0, |o| o.last_served),
         phase_count: old.filter(|_| same_shape).map_or(0, |o| o.phase_count),
@@ -892,14 +1016,28 @@ fn ticks(s: f32) -> u32 {
 pub(crate) struct ArmDemand {
     /// A vehicle within detection range wants a non-left movement.
     pub through: bool,
-    /// ... wants a left turn (or U-turn).
+    /// ... a left turn (or U-turn), stuck at the line (calls the protected
+    /// left phase).
     pub left: bool,
+    /// ... a left turn, anywhere within detection (the through phase
+    /// serves it permissively).
+    pub through_left: bool,
+    /// A vehicle that would reach the line within the passage time
+    /// (`SIGNAL_PASSAGE_S`): keeps its phase green (any other movement /
+    /// a left turn). Vehicles further back call a phase but do not hold it,
+    /// so a green ends in the gap between platoons.
+    pub hold_through: bool,
+    pub hold_left: bool,
 }
 
 fn phase_demand(phase: &SignalPhase, demand: &[ArmDemand]) -> bool {
     phase.arms.iter().any(|&a| {
         let d = demand.get(a as usize).copied().unwrap_or_default();
-        if phase.left_only { d.left } else { d.through || d.left }
+        if phase.left_only {
+            d.left
+        } else {
+            d.through || d.left || d.through_left
+        }
     })
 }
 
@@ -932,7 +1070,16 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
                 // Nobody else waits: rest in this phase.
                 return;
             };
-            let mine = phase_demand(phase, demand);
+            // A running phase holds for cars about to reach the line that
+            // it serves (a left phase for left turners, moving or not).
+            let mine = phase.arms.iter().any(|&a| {
+                let d = demand.get(a as usize).copied().unwrap_or_default();
+                if phase.left_only {
+                    d.hold_left
+                } else {
+                    d.hold_through || d.hold_left
+                }
+            });
             let mut end = !mine || elapsed >= ticks(phase.max_green_s);
             if plan.coordinated {
                 let c = ticks(plan.cycle_s).max(1) as u64;

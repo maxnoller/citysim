@@ -83,6 +83,13 @@ fn deliveries(world: &mut World) {
                 }
             }
         }
+        // Most deliveries happen off screen (the truck share): the goods
+        // arrive at once.
+        if world.rng.next_f32() >= traffic::truck_share(world) {
+            people::count_trip(world, TripPurpose::Goods);
+            delivered(world, Place::At(to), Some(shop));
+            continue;
+        }
         let from = best.map_or(Place::Entry, |b| Place::At(b.1));
         let mut d = Departure::new(world, TripPurpose::Goods, from, Place::At(to));
         d.from_building = best.map(|b| b.2);
@@ -124,6 +131,10 @@ fn exports(world: &mut World) {
         let b = world.cache.factories[world.rng.below(f as u32) as usize];
         let Some(fb) = world.buildings.get(b) else { continue };
         if fb.occupied == 0 || !households::connected(world, fb.footprint) {
+            continue;
+        }
+        if world.rng.next_f32() >= traffic::truck_share(world) {
+            people::count_trip(world, TripPurpose::Goods);
             continue;
         }
         let from = Place::At(rect_center(fb.footprint));

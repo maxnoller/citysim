@@ -55,6 +55,11 @@ const SCENARIOS: &[Scenario] = &[
         days: 15,
     },
     Scenario {
+        name: "bypass",
+        about: "the streets-only city, relief roads around its worst junction (the gateway) at the start of day 8",
+        days: 15,
+    },
+    Scenario {
         name: "single_artery",
         about: "round 2: the same blocks hanging off one spine, grows to 10,000",
         days: 15,
@@ -107,6 +112,14 @@ const RESCUE_DAY: u32 = 8;
 /// The `rescue` scenario's upgrade, at the start of `RESCUE_DAY`; the player
 /// builds avenues from then on.
 fn rescue(sc: &Scenario, w: &mut World, player: &mut Option<GridPlayer>) {
+    if sc.name == "bypass" && w.time.day == RESCUE_DAY && w.time.tick_of_day == 0 {
+        let (built, cost) = scenarios::add_gateway_bypass(w, citysim_sim::RoadKind::Street);
+        eprintln!(
+            "bypass: day {} pop {}: {built} relief roads, ${cost}",
+            w.time.day, w.stats.population
+        );
+        return;
+    }
     if sc.name != "rescue" || w.time.day != RESCUE_DAY || w.time.tick_of_day != 0 {
         return;
     }
@@ -184,7 +197,7 @@ fn sample(w: &World, a: &mut HourAcc) {
 
 fn start(sc: &Scenario, w: &mut World) -> Option<GridPlayer> {
     match sc.name {
-        "grid" | "streets" | "rescue" => Some(GridPlayer::new(&Zone::ALL)),
+        "grid" | "streets" | "rescue" | "bypass" => Some(GridPlayer::new(&Zone::ALL)),
         "hierarchy" => Some(GridPlayer::hierarchy()),
         "single_artery" => Some(GridPlayer::single_artery()),
         "upfront" => {

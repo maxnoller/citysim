@@ -288,3 +288,136 @@ Measured (release, this machine, 10 seeds per scripted city; charts `sim-05`..`s
   2.2 %) and keeps them below the streets city's (5.2 % vs 8.3 % at day 15); residents 12,200 vs 11,300 and taxes
   $98k vs $91k a day at day 15. Its commute improves only slightly, and the streets city stays far richer ($80k vs
   $19k at day 15): the avenue hierarchy is not yet clearly better on commutes (see the r4-sim report).
+
+## 2026-11-26 (r4-traffic: junction capacity, car demand, layouts that matter)
+
+Goal: the road layout decides the outcome. Junction capacity was measured in isolation, fixed, and car demand set
+from it. Charts `traffic-02` (junction bench before/after), `traffic-03` (10 seeds of the avenue, streets and
+single-artery cities before/after), `traffic-04` (the two rescues), `traffic-05`/`06` (evening rush pictures),
+`traffic.mp4` (side-by-side evening rush) in the shots folder.
+
+### Junction bench (`citysim_sim::capacity`, `examples/jbench.rs`)
+
+- `capacity::run(&Bench, seed, warmup_s, measure_s) -> BenchResult`: one junction at cell (128, 64) on an empty map,
+  approaches saturated (or a rate), cars per minute through it by arm, lane and turn, cars per second per lane on
+  green. `Bench::crossing(main, cross, setting)`, `.turning(left, right)`, `.tee()`, `.loads(..)`;
+  `capacity::build(&Bench)` gives the bench world. Real trips, nothing special-cased.
+- Measured (cars per minute, all approaches saturated; before -> after): all-way stop of streets 41 (two arms
+  starved) -> 31 (fair, every arm alike), with 30 % turning 29 -> 25; signalised street x street 57 -> 56;
+  avenue x street 91 -> 128; avenue x avenue 100 -> 145 (with 20 % turning 50 -> 63, 30 % 44 -> 62); an avenue
+  through a street that gives way 117 cars per minute. Per lane on green: street 0.49 cars/s, avenue 0.63
+  (before 0.43). Avenue x avenue crossings carry 2.6x a street crossing straight through, 1.9x with 20 % turning.
+
+### Rules changed (what renderers / the interface may notice)
+
+- **Car following.** Time headway 1.1 s on avenues and the highway (`FOLLOW_HEADWAY_S`, was 0.5 s), 1.5 s on streets
+  (`STREET_FOLLOW_HEADWAY_S`, new): queues discharge at about 0.6 / 0.45 cars per second per lane; moving cars keep
+  visibly more distance. Standing queues are unchanged (`MIN_GAP_M`).
+- **Room beyond the box.** A car may enter behind a moving out-lane if the room its last car frees in
+  `EXIT_LOOKAHEAD_S` suffices and the out-lane still has storage for `EXIT_STORAGE_MARGIN_CARS` more (a discharging
+  platoon keeps flowing; a short block that could fill up needs the room now).
+- **Conflicts clear by distance.** `JunctionState::blocks(o, dist, m)`: a car on movement `o`, `dist` metres in,
+  blocks `m` only until it is past where their paths come within `MOVEMENT_CLEARANCE_M` (`JunctionState::clear_after`,
+  a cache rebuilt when empty, not saved). Two cars on conflicting movements may now share a box, never while both
+  are still in each other's way.
+- **Arrival times** count acceleration (a car pulling away from a queue arrives sooner than its speed says): signals
+  no longer end a green on a discharging queue, and precedence at the line is right for starting cars.
+- **Signals.** Actuated on the passage time: a green is held only for cars within `SIGNAL_PASSAGE_S` (2.5 s) of the
+  line; cars within `SIGNAL_DETECT_M` call their phase. Minimum green 4 s (was 5), main / side maximum 20 / 15 s (was
+  30 / 20). Protected left phases are off (`SIGNAL_LEFT_PHASES = false`; when on, a left phase is called only by a
+  left turner stuck at the line): every plan has one phase per opposite pair, left turns are permissive and a left
+  turner waiting at the line clears out on yellow. `ApproachView::left_protected` is therefore always false and
+  `left_aspect` follows the main aspect.
+- **Precedence.** A car of lower precedence never slips in ahead of a conflicting car with precedence that waits at
+  its line only for the box to clear (a chain of permissive left turns starved the oncoming stream). Two cars both let
+  go keep a stable order (the nearer one first).
+- **All-way stops** are first come, first served: a car stops for `STOP_DWELL_S` (1 s), the one that has stood
+  longest goes, nobody jumps a conflicting car's turn, and the next one sets off `ALL_WAY_REACTION_S` (1.2 s) after
+  the box empties. (Two arms of a crossing used to be starved.)
+- **Lane choice.** Cars move into their turning lane up to `LANE_PREPARE_M` (150 m, was 90) before the line; straight
+  cars avoid a lane whose next car turns left; a slow car in the wrong lane for its turn asks the car behind in the
+  lane it needs to leave a gap (zip merging: `MERGE_ASK_SPEED`, `MERGE_ROOM_M`, `MERGE_MIN_LINE_M`).
+- **Auto control.** All-way junctions (equal roads) get signals once their busiest minute (let in plus still queued)
+  reaches `AUTO_SIGNAL_PER_MINUTE` = 30 (was 16; back below 18), about what an all-way stop passes. Junctions with a
+  major road (an avenue through streets, a T) are judged by their *minor* approaches only
+  (`AUTO_SIGNAL_MINOR_PER_MINUTE` 30, back below 18): an avenue no longer gets a signal at every street because of its
+  own traffic. New counters `JunctionState::minor_minute`, `minor_peak_today`, `minor_peak_yesterday` (saved in the
+  extension block, see Saves).
+- **Routing** charges turns (`Derived::route_turns`, `drive::build_route_turns`): a left turn per oncoming lane it
+  must find gaps in (`ROUTE_LEFT_PER_LANE_S`), crossing or turning out of a minor road per major lane, a right turn
+  `ROUTE_RIGHT_S`. Drivers prefer to turn where it is easy.
+- **Parking** is modelled but off (`PARK_DWELL_S = 0`): a car standing at the kerb on arrival blocked the lane
+  behind it more than it showed anything.
+
+### Car demand (`traffic::car_share`, `traffic::truck_share`)
+
+- Below `CAR_SHARE_FROM_POP` (1,500 residents) every car trip is a car on the road, as before (small towns keep
+  their cars per 1,000 residents). Above it the share of citizens' car trips that are real cars falls to
+  `CAR_SHARE_LARGE` (0.4) at `CAR_SHARE_TO_POP` (5,000). Which citizens drive on screen is fixed per citizen
+  (`traffic::drawn_driver`): the same person always does. The share is fixed whatever the traffic: congestion is not
+  hidden, the network carries this share and the layout decides how well. The other trips happen off screen and
+  take the delay the drawn cars measure (`delay_factor`), as before.
+- Newcomers moving in and households moving out follow the same share (an undrawn move-in drives in off screen in
+  `road_s` time). Goods trucks: `TRUCK_SHARE` (0.5) of the car share; an undrawn delivery arrives at once.
+- `vehicle_budget` is unchanged and now rarely binds.
+
+### Consequences of traffic
+
+- `delay_factor` (commutes over free-flow time) above `DELAY_OK_FACTOR` (2.5) lowers residential demand by
+  `DELAY_DEMAND_PER_UNIT` (0.5) per unit, and a worker's commute happiness is the worse of the old absolute measure
+  and a linear fall from 2.5x to `DELAY_HOPELESS_FACTOR` (5x). `COMMUTE_OK_S` / `HOPELESS_COMMUTE_S` are unchanged
+  (the interface uses them).
+- An empty city forgets its delay factor (like its average commute).
+
+### Scenarios
+
+- `scenarios::add_gateway_bypass(world, kind) -> (roads built, money spent)`: the second fix for a jammed grid city,
+  two relief roads from the highway stub at (5, 128) into the grid at (20, 118) and (20, 138), around its worst
+  junction (the first crossing behind the gateway). `headless` scenario `bypass` (streets city, fix on day 8).
+- `GridPlayer` keeps a reserve of $5,000 beyond the price of its next block (`PLAYER_RESERVE`).
+
+### Saves
+
+- Extension block version 2 (`ExtensionV2`: version 1 plus the junctions' minor-road counters); version-1 blocks and
+  saves without a block still load. The body is unchanged (format 6).
+
+### Tools
+
+`examples/jbench.rs` (junction bench, CSV), `sigtrace.rs` (a bench signal second by second), `lanes.rs` (entries by
+approach, lane and turn at one junction of a save; `LANES_USE`, `LANES_TRACE`), `follow.rs` (follow cars through a
+save: time and standing per segment, detour factor), `simint` gains `controls <save>`, `bypass <save> <out>` and a
+breakdown by junction type of standing time and refusals; `topdown rush` takes `CITYSIM_TOPDOWN_LAYOUT=streets`,
+`CITYSIM_TOPDOWN_RED`, `CITYSIM_TOPDOWN_VIEW`; `overlap` takes `streets`.
+
+### Measured (release, this machine; 10 seeds per city unless noted)
+
+Commute over free-flow time (`delay_factor`) · car trips given up · residents · taxes per day:
+
+| | ~9,000–10,000 residents | ~12,000 | day 15 |
+|---|---|---|---|
+| Avenue hierarchy, before | 4.6x · 4.3 % · 9,700 (day 10) | 4.8x · 5.2 % · 10,800 (day 12) | 5.0x · 6.5 % · 12,200 · $95k |
+| Avenue hierarchy, after | 2.2x · 0.5 % · 9,600 (day 8) | 2.6x · 1.2 % · 12,000 (day 10) | 3.4x · 2.2 % · 16,800 · $144k |
+| Streets only, before | 4.7x · 7.4 % · 9,200 (day 10) | 4.9x · 8.4 % · 10,100 (day 12) | 4.9x · 8.3 % · 11,300 · $91k |
+| Streets only, after | 2.4x · 0.8 % · 8,700 (day 8) | 3.1x · 1.7 % · 10,700 (day 10) | 3.6x · 4.0 % · 14,700 · $123k |
+| Streets, main streets upgraded on day 8 | 1.5x · 0.06 % · 8,900 (day 8) | 2.0x · 0.4 % · 11,500 (day 10) | 3.1x · 1.6 % · 17,500 · $148k |
+| Streets, relief roads at the gateway on day 8 | 2.2x · 0.2 % · 8,700 (day 8) | 3.2x · 0.9 % · 10,800 (day 10) | 3.7x · 2.5 % · 15,200 · $128k |
+| Single artery | stalls at 2,200 residents, 4.2x, 7 % given up | | |
+
+- The avenue city now beats the streets city on every traffic measure at every size, grows 14 % larger by day 15,
+  and earns 16 % more tax a day; the rescue (upgrade) drops commutes from 2.0x to 1.5x the same day and keeps
+  give-ups down; relief roads halve give-ups but barely move commutes. Money at day 15: avenue city $85k, streets
+  city $165k, upgraded $75k (after paying ~$35k), relief roads $163k: a bigger city costs more in services, so net
+  income per day is about equal and the streets city still banks more (see the report).
+- Junction bench, step time and overlaps: see above; step time (20,000+ citizens, car budget topped up to 2,500)
+  mean 0.78 ms (before 0.87 on the same machine), p99 1.30 ms, max 3.1 ms; 16 steps 12.5 ms (13.9). Overlapping car
+  bodies over the 07:00–09:00 rush: 0 in the 10,000-resident avenue and streets cities, 2 pair-ticks (one pair at most,
+  0.24 m) in the organic town (8 before).
+- Other scenarios (3 seeds): grid player 5,000 residents on day 5 (the balance test's player: 28.6 real minutes at
+  2.5x), $30–36k in hand;
+  two-district grid town 2,200 / 3,400 residents on days 2 / 3 with 1.4 % / 3.3 % of trips given up (before 0.7 % /
+  2.6 %); one-junction town 1,600–2,000 residents, 20–24 % given up; fixed on day 2 2,800; organic town 8,700–9,300
+  residents on day 7 with 2–5 % given up (before 4,700, 4 %); overbuilt mesh broke (-$74k).
+- Cars on the road per 1,000 residents (hourly mean, before -> after): 500–1,500 residents: streets town 49.6 -> 49.2,
+  avenue town 32.5 -> 26.0 (every car trip is still a car there; trips are faster, so fewer are on the road at once);
+  4,000–6,000: 59–75 -> 17–23; 9,000–11,000: 89–97 -> 23–31 (the car share; a 12,000-resident city still shows
+  500–700 cars in its evening rush).

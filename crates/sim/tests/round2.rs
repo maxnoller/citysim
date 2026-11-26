@@ -162,11 +162,14 @@ fn default_controls_by_road_class() {
     // Two avenues: signals.
     assert_eq!(ctl(60, 128), Some(JunctionControl::Signal));
     // Opposite approaches share a phase; avenues get a protected left
-    // phase; two avenues crossing are served alike and not coordinated.
+    // phase when `SIGNAL_LEFT_PHASES` (called by a left turner stuck at
+    // the line); two avenues crossing are served alike and not
+    // coordinated.
     let j = junction::junction(&w, junction::junction_at(&w, c(60, 128)).unwrap()).unwrap();
     let plan = j.plan.as_ref().unwrap();
-    assert_eq!(plan.phases.len(), 4, "{plan:?}");
-    assert!(plan.phases.iter().filter(|p| p.left_only).count() == 2);
+    let lefts = if balance::SIGNAL_LEFT_PHASES { 2 } else { 0 };
+    assert_eq!(plan.phases.len(), 2 + lefts, "{plan:?}");
+    assert!(plan.phases.iter().filter(|p| p.left_only).count() == lefts);
     assert!(plan.phases.iter().all(|p| p.arms.len() == 2));
     assert!(!plan.coordinated);
     let through: Vec<f32> = plan
@@ -277,15 +280,19 @@ fn junction_boxes_never_hold_conflicting_cars_and_lanes_never_overlap() {
     let mut greens: std::collections::BTreeMap<(NodeId, usize), u32> = Default::default();
     let mut turns = [0u32; 4];
     let mut entered = 0u32;
+    let mut was_in: Vec<(VehicleId, NodeId)> = Vec::new();
     for t in 0..12 * 60 * TICKS_PER_SECOND as u64 {
         feed(&mut w, &mut k);
         w.step();
-        // Conflicting movements never share a box.
-        let mut boxed: Vec<(NodeId, usize, VehicleId)> = Vec::new();
+        // Conflicting movements share a box only once one car is past
+        // where their paths meet (never both still in each other's way).
+        let mut boxed: Vec<(NodeId, usize, f32)> = Vec::new();
+        let mut now_in: Vec<(VehicleId, NodeId)> = Vec::new();
         for (id, v) in w.vehicles.iter() {
             if let Some(jm) = v.junction {
-                boxed.push((jm.node, jm.movement as usize, id));
-                if jm.distance < 0.06 {
+                boxed.push((jm.node, jm.movement as usize, jm.distance));
+                now_in.push((id, jm.node));
+                if !was_in.contains(&(id, jm.node)) {
                     entered += 1;
                     turns[match jm.turn {
                         Turn::Straight => 0,
@@ -296,6 +303,7 @@ fn junction_boxes_never_hold_conflicting_cars_and_lanes_never_overlap() {
                 }
             }
         }
+        was_in = now_in;
         for (i, a) in boxed.iter().enumerate() {
             for b in &boxed[i + 1..] {
                 if a.0 == b.0 {
@@ -303,7 +311,7 @@ fn junction_boxes_never_hold_conflicting_cars_and_lanes_never_overlap() {
                         .or_else(|| w.traffic.junction_states.get(a.0))
                         .unwrap();
                     assert!(
-                        !j.conflict(a.1, b.1),
+                        !(j.blocks(a.1, a.2, b.1) && j.blocks(b.1, b.2, a.1)),
                         "tick {t}: {:?} and {:?} conflict in {:?}",
                         j.movements[a.1],
                         j.movements[b.1],
@@ -769,4 +777,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
     assert_eq!(sum, PINNED_CHECKSUM, "state checksum changed: {sum:#018x}");
 }
 
-const PINNED_CHECKSUM: u64 = 0x4b2cced8f7d48eaa;
+const PINNED_CHECKSUM: u64 = 0x8788dce3cc7e5ea3;

@@ -38,7 +38,7 @@ fn people_stay_with_their_car_and_nights_are_quiet() {
     eprintln!("travelling at 03:00 {night:?} (mean {n:.3}), at 08:00 {rush:?} (mean {r:.3})");
     // Most of those still on the way at 03:00 are newcomers driving in
     // through the town's one highway connection.
-    assert!(n < 0.10, "night travel {night:?}");
+    assert!(n < 0.07, "night travel {night:?}");
     assert!(n * 1.6 < r, "nights quieter than mornings: {n} vs {r}");
 }
 

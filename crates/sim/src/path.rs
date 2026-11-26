@@ -102,10 +102,12 @@ impl PathScratch {
     /// `target`. Each node expansion costs one unit of `budget` (the search
     /// always completes; the budget only limits how many searches a caller
     /// starts).
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &mut self,
         roads: &RoadNetwork,
         delays: &[[f32; 2]],
+        turns: &[Vec<f32>],
         sources: &[(NodeId, f32)],
         target: Target,
         budget: &mut i64,
@@ -163,7 +165,11 @@ impl PathScratch {
                 }
             }
             let came_by = self.prev[ui].map(|p| p.0);
-            for &s in &roads.nodes[u].segments {
+            let segs = &roads.nodes[u].segments;
+            let deg = segs.len();
+            let table = turns.get(ui).filter(|t| t.len() == deg * deg);
+            let from_pos = came_by.and_then(|c| segs.iter().position(|&x| x == c));
+            for (po, &s) in segs.iter().enumerate() {
                 let seg = &roads.segments[s];
                 let fwd = seg.a == u;
                 let v = if fwd { seg.b } else { seg.a };
@@ -171,6 +177,9 @@ impl PathScratch {
                 if came_by == Some(s) {
                     // Turning back where we came from.
                     c += balance::ROUTE_UTURN_COST_S;
+                }
+                if let (Some(t), Some(pi)) = (table, from_pos) {
+                    c += t[pi * deg + po];
                 }
                 self.relax(v, c, h(roads.nodes[v].pos), Some((s, u)));
             }

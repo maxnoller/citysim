@@ -306,6 +306,7 @@ fn money_stays_a_constraint_for_a_player_who_keeps_expanding() {
     let mut p = GridPlayer::new(&Zone::ALL);
     let (most, lowest, reached) = play(&mut w, &mut p);
     let minutes = real_s(reached) / 60.0;
+    eprintln!("5,000 after {minutes:.1} min, most ${most}, lowest ${lowest}");
     assert!(
         (24.0..=34.0).contains(&minutes),
         "5,000 residents after {minutes:.1} min"
@@ -314,8 +315,9 @@ fn money_stays_a_constraint_for_a_player_who_keeps_expanding() {
         (20_000..=40_000).contains(&most),
         "most cash before 5,000 residents: ${most}"
     );
-    // (Paying a block, then the night's upkeep, can dip it a little below.)
-    assert!(lowest >= hundred_cells * 3 / 4, "lowest cash ${lowest}");
+    // (Paying a block late in the day, before the night's takings, can dip
+    // it a little below.)
+    assert!(lowest >= hundred_cells * 9 / 10, "lowest cash ${lowest}");
     let waited = real_s(p.longest_money_wait_ticks);
     assert!(waited <= 60.0, "waited {waited:.0} s for money");
     // 100 road cells are a few real minutes of net income at 5,000

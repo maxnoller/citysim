@@ -855,7 +855,13 @@ fn happiness(world: &mut World, hid: HouseholdId, income: i64, costs: i64, ran_o
             if c.last_commute_s <= 0.0 {
                 0.8
             } else {
-                lin(c.last_commute_s, balance::COMMUTE_OK_S, balance::HOPELESS_COMMUTE_S)
+                // Long in seconds, or long for the distance (the city's
+                // traffic: commutes over free-flow time), whichever is worse.
+                lin(c.last_commute_s, balance::COMMUTE_OK_S, balance::HOPELESS_COMMUTE_S).min(lin(
+                    crate::traffic::delay_factor(world),
+                    balance::DELAY_OK_FACTOR,
+                    balance::DELAY_HOPELESS_FACTOR,
+                ))
             }
         } else {
             0.85

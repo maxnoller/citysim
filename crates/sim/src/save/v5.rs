@@ -266,6 +266,7 @@ impl JunctionStateV5 {
                 .map(|m| Movement::quadratic(m.from_arm, m.to_arm, m.from_lane, m.to_lane, m.turn, m.p0, m.p1, m.p2))
                 .collect(),
             conflicts: self.conflicts,
+            clear_after: Default::default(),
             plan: self.plan,
             signal: self.signal,
             queue: self.queue,
@@ -273,6 +274,9 @@ impl JunctionStateV5 {
             peak_minute_today: self.peak_minute_today,
             peak_minute_yesterday: self.peak_minute_yesterday,
             busy: self.busy,
+            minor_minute: 0,
+            minor_peak_today: 0,
+            minor_peak_yesterday: 0,
             clear_at: self.clear_at,
             last_served: self.last_served,
             phase_count: self.phase_count,

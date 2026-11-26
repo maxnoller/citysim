@@ -324,7 +324,7 @@ pub fn shortest_path(roads: &RoadNetwork, from: NodeId, to: NodeId) -> Option<Ve
     let mut scratch = path::PathScratch::default();
     let mut budget = i64::MAX;
     scratch
-        .search(roads, &[], &[(from, 0.0)], Target::Node(to), &mut budget)
+        .search(roads, &[], &[], &[(from, 0.0)], Target::Node(to), &mut budget)
         .map(|f| f.segments)
 }
 
@@ -382,6 +382,30 @@ pub fn vehicle_budget(world: &World) -> usize {
 /// car?
 pub fn has_room(world: &World) -> bool {
     world.vehicles.len() + world.traffic.pending.len() < vehicle_budget(world)
+}
+
+/// Share of citizens' car trips driven as real cars right now
+/// (`balance::CAR_SHARE_*`, by residents).
+pub fn car_share(world: &World) -> f32 {
+    let large = balance::CAR_SHARE_LARGE;
+    let pop = world.stats.population as f32;
+    let t = ((pop - balance::CAR_SHARE_FROM_POP) / (balance::CAR_SHARE_TO_POP - balance::CAR_SHARE_FROM_POP))
+        .clamp(0.0, 1.0);
+    1.0 + (large - 1.0) * t
+}
+
+/// Share of goods trips driven as real trucks (`balance::TRUCK_SHARE` of
+/// [`car_share`]); the others are delivered off screen.
+pub fn truck_share(world: &World) -> f32 {
+    car_share(world) * balance::TRUCK_SHARE
+}
+
+/// Is this citizen's car trip one of the drawn ones ([`car_share`])?
+pub(crate) fn drawn_driver(world: &World, citizen: CitizenId) -> bool {
+    world
+        .citizens
+        .get(citizen)
+        .is_some_and(|c| crate::people::habit(c.seed, 0xCA75_4A3E) < car_share(world))
 }
 
 /// [`TrafficState::delay_factor`], at least 1.
@@ -698,6 +722,7 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 match cache.path.search(
                     &world.roads,
                     &cache.route_delay,
+                    &cache.route_turns,
                     &[(end, remaining)],
                     Target::Access(dest),
                     budget,
@@ -849,10 +874,14 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 ],
             };
             let cache = &mut world.cache;
-            match cache
-                .path
-                .search(&world.roads, &cache.route_delay, &sources, Target::Access(to), budget)
-            {
+            match cache.path.search(
+                &world.roads,
+                &cache.route_delay,
+                &cache.route_turns,
+                &sources,
+                Target::Access(to),
+                budget,
+            ) {
                 Some(found) => (found.first == from_seg.b, found.segments, Some(found.last_node)),
                 None => {
                     ended.push(gone(TripEnd::NoRoute));
@@ -976,7 +1005,9 @@ fn update_loads(world: &mut World) {
         j.queue.iter_mut().for_each(|q| *q = 0);
     }
     for v in world.vehicles.values() {
-        if !v.stopped() || v.junction.is_some() {
+        // Cars on their last segment (parking, or about to) are not waiting
+        // for the junction ahead.
+        if !v.stopped() || v.junction.is_some() || v.route.is_empty() {
             continue;
         }
         let Some(seg) = v.segment.and_then(|s| world.roads.segments.get(s)) else {
@@ -998,17 +1029,23 @@ fn update_loads(world: &mut World) {
             let waiting: u16 = j.queue.iter().fold(0u16, |a, &q| a.saturating_add(q));
             j.peak_minute_today = j.peak_minute_today.max(j.entered_minute.saturating_add(waiting));
             j.entered_minute = 0;
+            let minor_waiting: u16 = j
+                .queue
+                .iter()
+                .zip(&j.arms)
+                .filter(|(_, a)| !a.major)
+                .fold(0u16, |acc, (&q, _)| acc.saturating_add(q));
+            j.minor_peak_today = j.minor_peak_today.max(j.minor_minute.saturating_add(minor_waiting));
+            j.minor_minute = 0;
         }
     }
     if world.time.tick_of_day == 0 {
         for j in world.traffic.junction_states.values_mut() {
             j.peak_minute_yesterday = j.peak_minute_today.max(j.entered_minute);
             j.peak_minute_today = 0;
-            let busy = if j.busy {
-                j.peak_minute_yesterday >= balance::AUTO_PRIORITY_PER_MINUTE
-            } else {
-                j.peak_minute_yesterday >= balance::AUTO_SIGNAL_PER_MINUTE
-            };
+            j.minor_peak_yesterday = j.minor_peak_today.max(j.minor_minute);
+            j.minor_peak_today = 0;
+            let busy = junction::judge_busy(j, j.busy);
             if busy != j.busy {
                 j.busy = busy;
                 let setting = j.setting;

@@ -63,6 +63,11 @@ pub(crate) struct Derived {
     /// control_version)` `route_delay_key`.
     pub route_delay: Vec<[f32; 2]>,
     pub route_delay_key: Option<(u64, u64)>,
+    /// Extra routing cost of each turn at a junction, by node slot: `deg x
+    /// deg` seconds indexed by the positions of the segment arrived by and
+    /// the one left by in `node.segments` (`drive::build_route_turns`),
+    /// built with `route_delay`.
+    pub route_turns: Vec<Vec<f32>>,
     places_key: Option<(u64, usize)>,
     /// Buildings by kind, in slot order (for random picks of shops, venues,
     /// factories and free homes), for `versions.buildings`.

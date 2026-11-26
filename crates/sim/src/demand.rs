@@ -74,6 +74,7 @@ pub fn target(world: &World) -> (Demand, f32) {
     let commute = world.traffic.avg_commute_s;
     let attract = balance::RES_BASE_DEMAND + balance::RES_JOBS_WEIGHT * (free_jobs - unemployed) / (households + small)
         - (commute - balance::COMMUTE_OK_S).max(0.0) / balance::COMMUTE_DEMAND_SCALE_S
+        - (crate::traffic::delay_factor(world) - balance::DELAY_OK_FACTOR).max(0.0) * balance::DELAY_DEMAND_PER_UNIT
         + tax
         + res_fiscal
         + mood;
