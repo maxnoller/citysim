@@ -417,3 +417,7 @@ Commute over free-flow time (`delay_factor`) · car trips given up · residents 
   two-district grid town 2,200 / 3,400 residents on days 2 / 3 with 1.4 % / 3.3 % of trips given up (before 0.7 % /
   2.6 %); one-junction town 1,600–2,000 residents, 20–24 % given up; fixed on day 2 2,800; organic town 8,700–9,300
   residents on day 7 with 2–5 % given up (before 4,700, 4 %); overbuilt mesh broke (-$74k).
+- Cars on the road per 1,000 residents (hourly mean, before -> after): 500–1,500 residents: streets town 49.6 -> 49.2,
+  avenue town 32.5 -> 26.0 (every car trip is still a car there; trips are faster, so fewer are on the road at once);
+  4,000–6,000: 59–75 -> 17–23; 9,000–11,000: 89–97 -> 23–31 (the car share; a 12,000-resident city still shows
+  500–700 cars in its evening rush).
