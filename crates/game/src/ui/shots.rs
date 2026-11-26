@@ -33,6 +33,11 @@ use crate::shared::{
 #[derive(Resource, Default)]
 struct SavedWorld(Option<citysim_sim::World>);
 
+/// The graphics quality the run started with (a step that changes it is
+/// undone by `reset`).
+#[derive(Resource, Default)]
+struct SavedQuality(Option<crate::shared::GraphicsQuality>);
+
 fn stash_world(w: &mut World) {
     let copy = w.resource::<SimWorld>().world.clone();
     let mut saved = w.resource_mut::<SavedWorld>();
@@ -66,6 +71,7 @@ impl Plugin for ShotsPlugin {
         })
         .init_resource::<Pointer>()
         .init_resource::<SavedWorld>()
+        .init_resource::<SavedQuality>()
         .add_systems(
             Update,
             run_shots.in_set(GameSet::Input).before(super::widgets::button_clicks),
@@ -182,6 +188,11 @@ fn reset(world: &mut World) {
     ui.keys_open = false;
     ui.following = false;
     ui.perf = PerfDetail::Off;
+    let quality = *world.resource::<crate::shared::GraphicsQuality>();
+    let first = *world.resource_mut::<SavedQuality>().0.get_or_insert(quality);
+    if quality != first {
+        *world.resource_mut::<crate::shared::GraphicsQuality>() = first;
+    }
     // Directly (a ClosePeople message would also drop a selection the
     // step makes this frame).
     world.resource_mut::<super::panel::PeopleView>().stack.clear();
@@ -428,16 +439,13 @@ fn steps() -> Vec<Step> {
         },
         Step {
             name: "perf-spike",
-            wait: 3.0,
+            wait: 2.0,
             setup: |w| {
-                // A real stall: saving and loading the city (only into a
-                // scratch slot) rebuilds every mesh.
+                // A real stall: another graphics quality (every pipeline
+                // is specialised again); `reset` switches it back.
                 reset(w);
                 w.resource_mut::<UiState>().perf = PerfDetail::Full;
-                if std::env::var_os("CITYSIM_SAVE_DIR").is_some_and(|d| !d.is_empty()) {
-                    w.write_message(UiAction::Save);
-                    w.write_message(UiAction::Load);
-                }
+                w.write_message(UiAction::Quality(crate::shared::GraphicsQuality::Low));
             },
         },
         Step {
@@ -1244,6 +1252,7 @@ impl Plugin for TourPlugin {
         })
         .init_resource::<TourData>()
         .init_resource::<SavedWorld>()
+        .init_resource::<SavedQuality>()
         .insert_resource(Pointer {
             smooth: true,
             ..default()

@@ -307,6 +307,11 @@ struct ProcSample {
 
 fn take_sample(mut sys: sysinfo::System, first: bool) -> (sysinfo::System, ProcSample) {
     use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate};
+    // The CPU list first: refreshing it later would reset the baseline the
+    // process CPU figure is measured against.
+    if first {
+        sys.refresh_cpu_list(CpuRefreshKind::nothing());
+    }
     let pid = sysinfo::get_current_pid().ok();
     if let Some(pid) = pid {
         sys.refresh_processes_specifics(
@@ -316,9 +321,6 @@ fn take_sample(mut sys: sysinfo::System, first: bool) -> (sysinfo::System, ProcS
         );
     }
     sys.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-    if first {
-        sys.refresh_cpu_list(CpuRefreshKind::nothing());
-    }
     let process = pid.and_then(|p| sys.process(p));
     let sample = ProcSample {
         cores: process.filter(|_| !first).map(|p| p.cpu_usage() / 100.0),
@@ -1099,6 +1101,7 @@ fn pass_name(p: &str) -> String {
         "late prepass" => "Late prepass",
         "ssao" => "Ambient occlusion",
         "smaa" => "Anti-aliasing",
+        "fxaa" => "Anti-aliasing (FXAA)",
         "bloom" => "Bloom",
         "tonemapping" => "Tone mapping",
         "upscaling" => "Upscaling",
