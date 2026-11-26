@@ -83,7 +83,7 @@ fn main() {
                 .turning(0.15, 0.15),
         ),
         (
-            "avenue x street priority, side 6/min",
+            "avenue x street priority (side 6/min)",
             Bench::crossing(K::Avenue, K::Street, S::Priority)
                 .loads(Load::Saturated, Load::Rate(6.0))
                 .turning(0.15, 0.15),

@@ -991,9 +991,19 @@ fn day(out: &str, seconds: u32) {
             hi[k] = hi[k].max(q[k]);
         }
     }
-    let (wpx, hpx) = (1280usize, 720usize);
-    let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0 + 10.0];
-    let k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
+    let (mut wpx, hpx) = (1280usize, 720usize);
+    let mut centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0 + 10.0];
+    let mut k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
+    // `CITYSIM_TOPDOWN_VIEW="width,x,y,scale"`: a fixed frame (the same for
+    // two cities side by side).
+    if let Some(v) = std::env::var("CITYSIM_TOPDOWN_VIEW").ok() {
+        let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+        if n.len() == 4 {
+            wpx = n[0] as usize;
+            centre = [n[1], n[2]];
+            k = n[3];
+        }
+    }
     let fps = 30;
     let mut child = Proc::new("ffmpeg")
         .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s"])
@@ -1743,7 +1753,15 @@ fn save_watch(out: &str, args: &[String]) {
 /// 16:00 to 19:30, cars coloured by trip purpose.
 fn rush(out: &str, seconds: u32) {
     let mut w = World::new(7);
-    let mut p = GridPlayer::hierarchy();
+    // `CITYSIM_TOPDOWN_LAYOUT=streets`: the same blocks on streets only,
+    // standing cars red (for side-by-side comparisons).
+    let streets = std::env::var("CITYSIM_TOPDOWN_LAYOUT").is_ok_and(|v| v == "streets");
+    let red = std::env::var("CITYSIM_TOPDOWN_RED").is_ok();
+    let mut p = if streets {
+        GridPlayer::new(&Zone::ALL)
+    } else {
+        GridPlayer::hierarchy()
+    };
     let pop = std::env::var("CITYSIM_TOPDOWN_POP")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -1769,9 +1787,19 @@ fn rush(out: &str, seconds: u32) {
             hi[k] = hi[k].max(q[k]);
         }
     }
-    let (wpx, hpx) = (1280usize, 720usize);
-    let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0 + 10.0];
-    let k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
+    let (mut wpx, hpx) = (1280usize, 720usize);
+    let mut centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0 + 10.0];
+    let mut k = ((wpx as f32 - 40.0) / (hi[0] - lo[0] + 60.0)).min((hpx as f32 - 140.0) / (hi[1] - lo[1] + 60.0));
+    // `CITYSIM_TOPDOWN_VIEW="width,x,y,scale"`: a fixed frame (the same for
+    // two cities side by side).
+    if let Some(v) = std::env::var("CITYSIM_TOPDOWN_VIEW").ok() {
+        let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+        if n.len() == 4 {
+            wpx = n[0] as usize;
+            centre = [n[1], n[2]];
+            k = n[3];
+        }
+    }
     let fps = 30;
     let mut child = Proc::new("ffmpeg")
         .args(["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s"])
@@ -1804,30 +1832,61 @@ fn rush(out: &str, seconds: u32) {
             w.step();
         }
         let mut cv = Canvas::new(wpx, hpx, GRASS);
-        draw_world_opts(&mut cv, &w, &view, false, false);
-        draw_cars_by_purpose(&mut cv, &w, &view);
+        draw_world_opts(&mut cv, &w, &view, false, red);
+        if !red {
+            draw_cars_by_purpose(&mut cv, &w, &view);
+        }
         cv.rect(0.0, 0.0, wpx as f32, 34.0, [22, 24, 28]);
         let a = inspect::activity_shares(&w);
+        let title = if streets { "STREETS ONLY" } else { "AVENUE HIERARCHY" };
         cv.text(
             10,
             10,
             &format!(
-                "AVENUE CITY EVENING RUSH  DAY {}  {:02}:{:02}   POP {}   CARS {} ({:.0}% STANDING)   GIVEN UP {}   TRAVELLING {:.0}%",
-                w.time.day,
+                "{title} {:02}:{:02} POP {} CARS {} ({:.0}% STAND)",
                 w.time.hour() as u32,
                 (w.time.hour().fract() * 60.0) as u32,
                 w.stats.population,
                 w.stats.vehicles_on_road,
                 w.traffic.stopped_share * 100.0,
-                w.traffic.stuck_removed,
-                a[5] * 100.0,
             ),
             2,
             [235, 235, 235],
         );
+        let _ = a;
         // Legend.
         cv.rect(0.0, hpx as f32 - 30.0, wpx as f32, 30.0, [22, 24, 28]);
         let mut x = 12.0;
+        if red {
+            cv.text(
+                12,
+                hpx as i32 - 22,
+                &format!(
+                    "RED: STANDING  COMMUTE X{:.1} FREE FLOW  GIVEN UP {}",
+                    traffic::delay_factor(&w),
+                    w.traffic.stuck_removed
+                ),
+                2,
+                [235, 235, 235],
+            );
+            pipe.write_all(&cv.px).unwrap();
+            continue;
+        }
+        if red {
+            cv.text(
+                12,
+                hpx as i32 - 22,
+                &format!(
+                    "RED: STANDING  COMMUTE X{:.1} FREE FLOW  GIVEN UP {}",
+                    traffic::delay_factor(&w),
+                    w.traffic.stuck_removed
+                ),
+                2,
+                [235, 235, 235],
+            );
+            pipe.write_all(&cv.px).unwrap();
+            continue;
+        }
         for (i, label) in PURPOSE_LABEL.iter().enumerate() {
             if i == 3 {
                 continue;

@@ -21,6 +21,7 @@ fn main() {
     let mut p = None;
     match which.as_str() {
         "hierarchy" => p = Some(GridPlayer::hierarchy()),
+        "streets" => p = Some(GridPlayer::new(&Zone::ALL)),
         _ => scenarios::prebuilt(&mut w, |w| {
             scenarios::organic(w);
         }),
