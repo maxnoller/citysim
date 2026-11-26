@@ -384,6 +384,29 @@ fn a_version_6_town_with_curves_loads_onto_strips() {
         "{} residents after two days",
         w.stats.population
     );
+    // New lots along the curves are offered to growth at once: zone the
+    // free land beside the curved roads and see it build.
+    let on_strip = |w: &World, b: &Building| w.zoning.lattice(b.footprint.lattice).is_some_and(|l| l.is_strip());
+    let curved: Vec<CellRef> = w
+        .zoning
+        .cells()
+        .filter(|(c, x)| x.free() && x.zone.is_none() && w.zoning.lattice(c.lattice).is_some_and(|l| l.is_strip()))
+        .map(|(c, _)| c)
+        .collect();
+    let before = w.buildings.values().filter(|b| on_strip(&w, b)).count();
+    w.apply(Command::ZoneCells {
+        cells: curved,
+        zone: Some(Zone::Residential),
+    })
+    .unwrap();
+    for _ in 0..2 * balance::TICKS_PER_DAY {
+        w.step();
+    }
+    let after = w.buildings.values().filter(|b| on_strip(&w, b)).count();
+    assert!(
+        after > before + 2,
+        "{before} -> {after} buildings on the curves' strips"
+    );
 }
 
 #[test]

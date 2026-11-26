@@ -7,7 +7,7 @@
 //! buildings around it, so recomputing any region gives the same result as
 //! recomputing the whole map.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::curve::{self, Curve, right_of, unit};
 use crate::roads::{RoadNetwork, SegmentId};
@@ -483,7 +483,7 @@ struct Ctx {
     bbounds: Vec<([f32; 2], [f32; 2])>,
     roads: Tiles,
     /// Road polylines (centre line) and reserve, by index.
-    polys: Vec<(Vec<[f32; 2]>, f32)>,
+    polys: Vec<(Vec<[f32; 2]>, f32, [f32; 2], [f32; 2])>,
     buildings: Tiles,
     bpolys: Vec<(BuildingId, LatticeId, [[f32; 2]; 4])>,
 }
@@ -557,7 +557,7 @@ impl Ctx {
             let r = seg.kind.reserve_half_width_m();
             let (lo, hi) = bounds_of(&pts);
             roads.add(polys.len() as u32, [lo[0] - r, lo[1] - r], [hi[0] + r, hi[1] + r]);
-            polys.push((pts, r));
+            polys.push((pts, r, lo, hi));
         }
         let mut buildings = Tiles::new();
         let mut bpolys = Vec::new();
@@ -648,8 +648,7 @@ fn under_road(ctx: &Ctx, l: &Lattice, i: i32, j: i32, scratch: &mut Vec<u32>) ->
     let (lo, hi) = bounds_of(&sq);
     ctx.roads.query(lo, hi, scratch);
     scratch.iter().any(|&k| {
-        let (pts, r) = &ctx.polys[k as usize];
-        let (plo, phi) = bounds_of(pts);
+        let (pts, r, plo, phi) = &ctx.polys[k as usize];
         if plo[0] > hi[0] + r || phi[0] < lo[0] - r || plo[1] > hi[1] + r || phi[1] < lo[1] - r {
             return false;
         }
@@ -769,8 +768,10 @@ pub(crate) fn renew_all(world: &mut World) {
     world.zoning.built_for.clear();
     world.zoning.roads_version = world.versions.roads.wrapping_add(1);
     let doomed = sync(world);
+    world.cache.forget_zoning();
     crate::growth::remove_buildings(world, &doomed);
     crate::growth::reseat(world);
+    world.cache.forget_zoning();
 }
 
 /// Recompute every cell whose centre lies in one of the boxes (after
@@ -862,7 +863,7 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
         }
     }
     // Road cover of cells, memoised (also needed for contest partners).
-    let mut road_memo: BTreeMap<CellRef, bool> = BTreeMap::new();
+    let mut road_memo: std::collections::HashMap<CellRef, bool> = std::collections::HashMap::new();
     let mut road_at = |c: CellRef, scratch: &mut Vec<u32>| -> bool {
         if let Some(&r) = road_memo.get(&c) {
             return r;
