@@ -1264,9 +1264,7 @@ fn section(
         p.spawn(layout(Node {
             flex_direction: FlexDirection::Column,
             width: percent(100),
-            margin: UiRect::top(px(if si == 0 && sec.title.is_empty() {
-                4.0
-            } else if city {
+            margin: UiRect::top(px(if city || si == 0 && sec.title.is_empty() {
                 4.0
             } else {
                 10.0

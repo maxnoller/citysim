@@ -20,7 +20,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   quality keys, save/load. One `UiPlugin`. Assets in `crates/game/assets/ui/`.
 - `crates/game/src/shared.rs` — the ONLY contract between gfx and ui; change it only by agreement. gfx and ui
   never import each other. `main.rs` just builds the App (features `gfx`, `ui`, both default).
-- `.github/workflows/ci.yml` — CI. `docs/` — README images (`screenshot.png`, `night.png`, `road-tool.png`, `traffic-overlay.png`).
+- `.github/workflows/ci.yml` — CI. `docs/` — README images (`screenshot.png`, `night.png`, `road-tool.png`, `people.png`, `traffic-overlay.png`), all from the real game.
 - `crates/game/src/dev/` — development tooling, not owned by gfx/ui: `scenario` (real scripted towns), `autoshot`
   (screenshot and exit), `control` (file control channel for scripted play). `scripts/play.py` plays the real game with
   OS input (xdotool) through that channel.
@@ -28,34 +28,32 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - Asset root resolves to `crates/game/assets` for `cargo run -p citysim` and for the binary run directly.
 
 ## shared.rs contract (summary)
-- `SimWorld { world, generation }` (`key(version)`, `replace(world)`), `SimClock { paused, speed }`, `SPEEDS`,
-  `SimCommand(Command)` message → applied in `GameSet::Sim`, result in `LastCommand`. `World::step` runs in
-  `FixedUpdate` (`SimStep` set) at `TICKS_PER_SECOND`, `steps_per_tick()` times.
+- `SimWorld { world, generation }` (`key(version)`, `replace(world)`), `SimClock { paused, speed }`, `SPEEDS = [1, 3,
+  6, 12]` (a day is 16 min at 1x, 80 s at 12x), `SimCommand(Command)` message → applied in `GameSet::Sim`, result in
+  `LastCommand`. `World::step` runs in `FixedUpdate` (`SimStep` set): the fixed rate is `TICKS_PER_SECOND` times
+  `SimClock::fixed_per_tick()` (fast speeds split a tick's steps over up to `MAX_FIXED_HZ` = 120 updates a second, so
+  no frame carries all 12), `steps_per_tick()` steps each. gfx interpolates cars across however many updates ran.
 - Frame order: `GameSet::{Input, Hover, Tools, Sim, Render}`.
-- `ActiveTool`, `ToolPreview` (ui writes with `set_if_neq`, gfx draws), `OverlayMode`, `GraphicsQuality`,
-  `PointerOverUi` (ui writes), `HoveredCell` (shared computes from the `WorldCamera` ray).
-- `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose).
-- Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`.
-- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B Esc/right-click, Space 1 2 3 4, O (maps), T, G,
-  F5/F9, J, Tab, Alt, Enter, Backspace, [ ], Ctrl+Z, P (people), U (budget), F (follow), arrows + Enter in menus.
-- `DisplaySettings::lot_markers` defaults to false: gfx marks empty zoned lots only while zoning (the zone overlay)
-  unless the player picks "Always" (persisted as `lot_markers_always`).
-- Round 2 (ui writes, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`, `SnapFeedback` (snapped point,
-  `SnapTarget`, `Guide` lines in sim metres, spacing), `PathPreview` (corners, legs with per-leg error and
-  `upgrade_cells`, length, cost), `WorldHighlight` (hovered / pinned `WorldTarget`, doomed buildings and road cells),
-  `DisplaySettings { edge_scroll, lot_markers }` (gfx's camera pans at the window edge when `edge_scroll`; default off).
-  `ToolPreview::line` is the leg under the cursor only.
-- Round 4 (ui writes, gfx draws / honours): `CurveToolView` (the free-form road being drawn or changed: pieces with
-  `PieceChange`, refused curves, `error_at`, control points, handles, tightest bend, planned nodes; written only when
-  it changes so gfx's `CITYSIM_GFX_TOOLDEMO` samples survive; its `snap`/`guides` stay empty, the live snap is in
-  `SnapFeedback`), `ToolPreview::area` (marquee quad along a lattice) and `zone_cells`, `WorldHighlight::doomed_roads`
-  (road parts the bulldozer removes, with kinds), `WorldTarget::Vehicle` (gfx draws a ring at its lane pose),
-  `CameraFollow { focus }` (gfx keeps the camera focus there, pans ignored), `CameraGoTo` message (move the focus /
-  zoom once). `RoadMode::{Straight, Curve, Continuous, Grid, Upgrade, Junction}`, `ZoneMode::{Paint, Frontage, Fill,
-  Marquee}`, `BulldozeMode::{Road, Area}`, `SnapTarget::Length`. `SPEEDS = [1, 3, 6, 12]` (a day is 16 min at 1x).
-  `PathPreview`, `ToolPreview::{line, rect, cells}` and `WorldHighlight::doomed_road_cells` are no longer written.
-- `SceneReady(bool)`: gfx sets it once the render pipelines are built (`gfx/loading.rs` counts them in the render
-  world); ui shows a loading card until then (`ui/loading.rs`), autoshot counts its delay from it.
+- `ActiveTool`, `OverlayMode`, `GraphicsQuality`, `PointerOverUi` (ui writes), `CameraInputBlocked` (ui: menu open or
+  keyboard in a drawer), `HoveredCell` / `HoveredPoint` (shared computes from the `WorldCamera` ray).
+- `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose; beats
+  `CameraFollow`), `CameraFollow { focus }` (gfx keeps the focus there), `CameraGoTo` message (move / zoom once).
+- Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`, `zone_cell_corners`.
+- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B J Esc/right-click, Space 1 2 3 4, O, T, G, F5/F9,
+  F6 (keyboard into the open drawer: arrows, Enter, Esc), Tab, Alt, Enter, Backspace, [ ], Ctrl+Z, P, U, F,
+  arrows + Enter in menus.
+- Tool feedback (ui writes with `set_if_neq`, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`
+  (`RoadMode::{Straight, Curve, Continuous, Grid, Upgrade, Junction}`, `ZoneMode::{Paint, Frontage, Fill, Marquee}`,
+  `BulldozeMode::{Road, Area}`), `SnapFeedback` (snapped point, `SnapTarget`, `Guide`s in sim metres, spacing),
+  `CurveToolView` (the free-form road being drawn: pieces with `PieceChange`, refused curves, `error_at`, control
+  points, handles, tightest bend, planned nodes; written only when it changes), `ToolPreview::{kind, area,
+  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, doomed buildings,
+  `doomed_roads`). Legacy, never written any more (gfx still draws them for its `CITYSIM_GFX_TOOLDEMO` samples):
+  `PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells`.
+- `DisplaySettings { edge_scroll, lot_markers }`: edge panning (default off); empty zoned lots are marked only while
+  zoning unless the player picks "Always" (persisted as `lot_markers_always`).
+- `SceneReady(bool)`: gfx sets it once the render pipelines are built (`gfx/loading.rs`); ui shows a loading card until
+  then, autoshot counts its delay from it.
 
 ## Sim facts for renderers
 - `MAP_CELLS = 256`, `CELL_SIZE = 8` m. Cell `(x, y)` centre = `((x+.5)*8, (y+.5)*8)` m; sim `(x, y)` → Bevy
@@ -66,11 +64,13 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `RoadSegment { load: [f32; 2], capacity: [f32; 2] }` indexed `[a→b, b→a]`; `congestion_in(forward)`.
 - Segment ids can vanish on road edits (split keeps the id for the `a` half): always re-check.
 - Time: vehicles move in real time (1 tick = 1/20 s), the calendar is compressed: a day = 16 min at 1x
-  (`balance::DAY_MINUTES`, `TICKS_PER_DAY` 19,200, an hour 40 real s); speeds to offer 1x, 3x, 6x, 16x.
+  (`balance::DAY_MINUTES`, `TICKS_PER_DAY` 19,200, an hour 40 real s). The interface shows every duration in game
+  time (`ui/people.rs` `span`, `bar::commute_text`: 40 s of driving reads "1 h").
 - Trip kind per car: `world.traffic.trips.get(vehicle_id).map(|t| t.purpose)` (`TripPurpose::Goods` = draw a truck).
 - HUD data: `stats` (population, households, `workforce`, employed, unemployed, `unemployment` = unemployed / workforce,
-  `vacant_jobs`, jobs, avg_commute_s, avg_speed m/s, congestion_share, buildings_by_kind); `employed + unemployed ==
-  workforce` (use these for the jobless figure). `demand` (-1..=1 per zone).
+  `vacant_jobs`, jobs, avg_commute_s, avg_speed m/s of moving cars, congestion_share, buildings_by_kind); `employed +
+  unemployed == workforce`. `traffic.stopped_share` (cars standing this tick; ui eases it), `traffic::delay_factor`
+  (shown as "trip delay"). `demand` (-1..=1 per zone).
 - Budget: `economy.last_day` = yesterday's `Budget { residential_tax, commercial_tax, industrial_tax, road_upkeep,
   services }` with `income()`, `expenses()` (upkeep + services), `net()`; `economy::budget_now(world)` = today so far;
   `economy.history[i].budget` per finished day (`DaySummary`); cost breakdown `economy::running_costs(world)` /
@@ -94,18 +94,14 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - Traffic diagnostics: `--example simint` (save a grown city, replay a day: where trip time goes, worst junctions).
 - Sim balance runs: `cargo run -p citysim_sim --release --example headless` (scripted cities in `citysim_sim::scenarios`).
 - `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep).
-- Round 2 (sim): `RoadKind::{Street, Highway, Avenue}` (`lane_count`, `lane_offset_m(lane)` right of travel, lane 0 =
-  kerb, `half_width_m`, `cost_per_cell`); `Command::BuildRoad { from, to, kind }` upgrades/downgrades built pieces in
-  place (`Preview.{new_pieces, upgraded, downgraded}`); `Command::SetJunctionControl { cell, control:
-  JunctionSetting::{Auto, Signal, Priority} }` (`Preview.junction`). `junction::{junction_view, signal_aspect,
-  movement_aspect, junction_at, junction_nodes, setback}`: control, per-approach aspect / left arrow / time to change /
-  queue / major, stop-line setback. Vehicles: `lane`, `lane_shift` (ease over `LANE_CHANGE_S`), `junction:
-  Option<JunctionMove>` (in the box: `pos`/`heading` follow the turn curve), `braking`, `stopped()`;
-  `drive::vehicle_pose(world, v)` = exact lane pose. Lots: frontage only, 1x1 / deep 1x2 / 2x2, `facing` to the road
-  (`growth::has_frontage`). Money: `economy.fiscal` (`FiscalState`, `reason.text()`, `service_level`). Saves: format 4;
-  version-3 saves load (`save::v3`). Scripted players: `GridPlayer::{new, hierarchy, single_artery}`; renders:
+- Roads: `RoadKind::{Street, Highway, Avenue}` (`lane_count`, `lane_offset_m(lane)` right of travel, lane 0 = kerb,
+  `half_width_m`, `upkeep_per_m`); `Command::BuildCurve { curve, kind }` (redrawing a built piece as the other kind
+  upgrades / downgrades it); `Command::SetNodeControl { node, control: JunctionSetting::{Auto, Signal, Priority} }`.
+  `junction::{junction_view, junction_shape, signal_aspect, movement_aspect, junction_nodes, setback}`. Vehicles:
+  `lane`, `lane_shift`, `junction: Option<JunctionMove>`, `braking`, `stopped()`, `route`; `drive::vehicle_pose(world,
+  v)` = exact lane pose. Money: `economy.fiscal` (`FiscalState`, `reason.text()`, `service_level`). Renders:
   `cargo run -p citysim_sim --release --example topdown -- signal|lots|video|watch out`.
-- Junction rules (round-2 integration): a junction's stop lines sit `JUNCTION_MARGIN_M` (2.5 m) beyond the crossing
+- Junction rules: a junction's stop lines sit `JUNCTION_MARGIN_M` (2.5 m) beyond the crossing
   carriageways (a bend: `BEND_MARGIN_M`), which leaves room for the zebra crossings gfx draws there; two movements
   conflict when their paths cross *or* come within `MOVEMENT_CLEARANCE_M` (car width plus room), so cars never
   touch in a box; a degree-2 node where the lane count changes (highway end, avenue -> street) gets a short merge box
@@ -128,7 +124,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `CITYSIM_BENCH_SIZE` (1920x1080) along a fixed camera path for `CITYSIM_BENCH_FRAMES` (1500) after
   `CITYSIM_BENCH_WARMUP` (240), sim running (`CITYSIM_BENCH_PAUSED=1` stops it), two GPU frames in flight; writes
   frame-time avg / median / p99 / worst 1 %, GPU ms per pass, triangles, entities, meshes, materials, draw calls, sim
-  step time. Use with a demo and `CITYSIM_GFX_QUALITY`.
+  step time. Use with a demo and `CITYSIM_GFX_QUALITY`; `CITYSIM_BENCH_SPEED=3` runs the sim at the top speed. Tail
+  figures are only meaningful on a quiet machine (other builds double them).
 - `CITYSIM_RECORD=dir`: windowless video frames (`frame_00000.png`...) at `CITYSIM_RECORD_FPS` (30) with a fixed time
   step, camera on a Catmull-Rom path `CITYSIM_RECORD_PATH="t,x,z,yaw,pitch,dist;..."`; join with ffmpeg.
 - Running the game on the owner's desktop: never open a window there; use `xvfb-run -a -s "-screen 0 1920x1080x24"
@@ -137,7 +134,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `CITYSIM_AUTOSHOT=out.png` (or `--autoshot`): screenshot then exit 0. `CITYSIM_SHOT_VIEW=wide|street|close`,
   `CITYSIM_SHOT_DELAY=25` (s, default 3), `CITYSIM_SHOT_OVERLAY=none|zones|traffic`. Without a demo it builds
   a small sample city. Example: `CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png CITYSIM_SHOT_DELAY=25 cargo run -p citysim`.
-- `CITYSIM_LOG_FPS=1` logs FPS (llvmpipe, 4 vCPU: small town 5–8, 10,000 residents ≈ 4 Low / 2 High). `CITYSIM_SEED=n`
+- `CITYSIM_LOG_FPS=1` logs FPS (meaningless under Xvfb: use `CITYSIM_BENCH`). `CITYSIM_SEED=n`
   world seed (the `hierarchy` demo reaches 10,000 fastest with seed 3). `CITYSIM_CONFIG_DIR` overrides the settings
   folder (`settings.cfg`; not written during autoshot / UI shots).
 - `CITYSIM_CONTROL=dir` + `scripts/play.py` (see its docstring): `launch`, `start`, `grow --until-pop N`, `road`, `zone`,
@@ -156,10 +153,11 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `ui/shapes.rs` (`Draft` chains of straight / curve / continuous pieces, `GridFrame`, `Stretch` of road between
   junctions), `ui/plan.rs` (`Op`s checked in order on a scratch copy; road parts named by centre line and resolved
   when their turn comes; undo by serials / curves / zone cells), `ui/readout.rs` (the cursor card's words),
-  `ui/people.rs` (names, portraits, person / place / car / city `Sheet`s with headline, trip bar, mood reason and
-  action links). A plan is sent only when every step passes. `scripts/play.py road` presses Enter to build its
+  `ui/people.rs` (names, portraits, person / place / car / city `Sheet`s with headline, trip bar (with lateness),
+  mood reason, action links, `Section::folding` sections the panel lets the player fold, remembered in
+  `panel::Folds`). One-line panel texts are cut with "…" by measured width (`panel::Ellipsis`). A plan is sent only when every step passes. `scripts/play.py road` presses Enter to build its
   two-point road.
-- ui look (round 4 HUD): docked to the screen edges, angular, gunmetal plates with one purple accent. `ui/theme.rs`
+- ui look (the HUD): docked to the screen edges, angular, gunmetal plates with one purple accent. `ui/theme.rs`
   is the only place for colours / sizes / fonts (accent = `ACCENT_SET`: base, fill gradient, ink-on-accent, text;
   swap those five to change the purple). Fonts: Barlow Semi Condensed (text) and Barlow Condensed (figures),
   static faces chosen by weight in `UiFonts`; Lucide for icons (it lacks arrows: no `→ ↑ ↓` in texts, use `›`).
@@ -174,7 +172,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   people pages), `panel.rs` (right-edge selection panel, `PeopleView`, follow, leader line, `PanelArea`),
   `context.rs` (cursor readout tag and the card builders), `menu.rs` (pause menu, `MenuFocus`, first-run plate),
   `settings.rs` (settings and keys plates). `UiState::tray: Option<InfoTray>` (budget / people / maps / stats; a
-  tool's tray replaces it). The interface is designed at 1920x1080 (`UiScale` 1.0) and compacts below a logical
+  tool's tray replaces it); `tray::TrayExtent` is the drawer's height (the side panel stays above it);
+  `UiState::tray_focus` while F6 keyboard focus is in a drawer. The interface is designed at 1920x1080 (`UiScale` 1.0) and compacts below a logical
   width of 1660 (`UiState::compact`).
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),

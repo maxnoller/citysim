@@ -103,7 +103,7 @@ impl SimClock {
         let s = self.speed_steps();
         (1..=s)
             .rev()
-            .find(|k| s % k == 0 && k * TICKS_PER_SECOND <= MAX_FIXED_HZ)
+            .find(|k| s.is_multiple_of(*k) && k * TICKS_PER_SECOND <= MAX_FIXED_HZ)
             .unwrap_or(1)
     }
 

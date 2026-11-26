@@ -383,7 +383,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                 ),
                 Hovered::default(),
             ));
-            for i in 0..COST_LINES.len() {
+            for (i, name) in COST_LINES.iter().enumerate() {
                 c.spawn(layout(Node {
                     align_items: AlignItems::Center,
                     justify_content: JustifyContent::SpaceBetween,
@@ -394,7 +394,7 @@ fn spawn_budget(mut commands: Commands, fonts: Res<UiFonts>, pages: Query<(Entit
                 .insert(BorderColor::all(t::RULE))
                 .with_children(|r| {
                     r.spawn((
-                        label(fonts, COST_LINES[i], t::FONT_SMALL, t::W_MEDIUM, t::SLOT_INK),
+                        label(fonts, *name, t::FONT_SMALL, t::W_MEDIUM, t::SLOT_INK),
                         BudgetText::CostLabel(i),
                     ));
                     r.spawn((

@@ -1010,7 +1010,11 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
     }
     let mut s = Sheet {
         kind: SheetKind::Vehicle,
-        headline: format!("{} · {} aboard", purpose_title(v.purpose), v.occupants),
+        headline: if truck {
+            "Delivering goods".to_string()
+        } else {
+            format!("Going {} · {} aboard", purpose_word(v.purpose), v.occupants)
+        },
         trip: driver_trip.map(|t| trip_bar(world, &t)),
         actions,
         title: if truck {
@@ -1020,7 +1024,11 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
         } else {
             "A car".into()
         },
-        subtitle: format!("{} · {}", purpose_title(v.purpose), super::context::kmh(veh.speed)),
+        subtitle: if veh.stopped() {
+            "Standing in traffic".into()
+        } else {
+            format!("Moving at {}", super::context::kmh(veh.speed))
+        },
         at: Some(citysim_sim::drive::vehicle_pose(world, veh).0),
         vehicle: Some(id),
         ..Default::default()
