@@ -102,13 +102,18 @@ find_seed() {
 save_profile() {
     local p=$1 dest="$seeds/$key/$1"
     [[ -d target/$p/deps ]] || return 0
+    # Only a full build (the game's dependencies, not just the simulation's).
+    if ! compgen -G "target/$p/deps/libbevy-*.rlib" >/dev/null; then
+        say "target/$p has no Bevy build: no $p seed saved"
+        return 0
+    fi
     if [[ -d "$dest" ]]; then
         say "seed $key/$p exists already"
         return 0
     fi
     local free_gb
     free_gb=$(df -BG --output=avail "$seeds" | tail -1 | tr -dc 0-9)
-    if ((free_gb < 20)); then
+    if ((free_gb < 12)); then
         say "only ${free_gb} GB free: not saving the $p seed" >&2
         return 0
     fi
@@ -165,6 +170,9 @@ case $mode in
     say "building the game and all tests (dev profile)"
     cargo build -p citysim
     cargo test --workspace --no-run
+    # The simulation alone resolves some dependency features differently from
+    # the workspace (simulation-only agents build with `-p citysim_sim`).
+    cargo test -p citysim_sim --no-run
     if [[ $mode == --build-release ]]; then
         say "building the release game"
         cargo build -p citysim --release
