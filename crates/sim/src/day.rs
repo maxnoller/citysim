@@ -941,6 +941,13 @@ fn arrive(world: &mut World, id: CitizenId) {
         );
         world.citizens[id].last_commute_s = s;
     }
+    // Commuters' time lost in traffic costs business (by the driver /
+    // traveller: each person's own trip).
+    if matches!(j.purpose, TripPurpose::ToWork | TripPurpose::ToHome) && world.citizens[id].job.is_some() {
+        let took = now.saturating_sub(j.departed_tick) as f32 / TICKS_PER_SECOND as f32;
+        let free = estimate_s(pos_of(world, j.from), pos_of(world, Some(j.to)));
+        crate::economy::record_commute_time(world, took, free);
+    }
     if to == home {
         world.citizens[id].has_car = false;
         let h = &mut world.households[hid];

@@ -46,7 +46,7 @@ const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
-pub const EXTENSION_VERSION: u32 = 2;
+pub const EXTENSION_VERSION: u32 = 3;
 
 /// Every field of a [`Budget`], including those its own serde skips.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -153,6 +153,39 @@ impl ExtensionV2 {
     }
 }
 
+/// Extension block, version 3: version 2 plus the traffic losses
+/// (`Economy::traffic_today`, `last_day_traffic`), the journey times and
+/// the households that gave up on their commute (`People::trip_times_*`,
+/// `commute_moves_*`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ExtensionV3 {
+    v2: ExtensionV2,
+    traffic_today: crate::economy::TrafficLoss,
+    last_day_traffic: crate::economy::TrafficLoss,
+    trip_times: [crate::people::TripTimes; 2],
+    commute_moves: [crate::people::CommuteMoves; 2],
+}
+
+impl ExtensionV3 {
+    pub(crate) fn of(w: &World) -> ExtensionV3 {
+        ExtensionV3 {
+            v2: ExtensionV2::of(w),
+            traffic_today: w.economy.traffic_today,
+            last_day_traffic: w.economy.last_day_traffic,
+            trip_times: [w.people.trip_times_today, w.people.trip_times_yesterday],
+            commute_moves: [w.people.commute_moves_today, w.people.commute_moves_yesterday],
+        }
+    }
+
+    pub(crate) fn restore(self, w: &mut World) {
+        self.v2.restore(w);
+        w.economy.traffic_today = self.traffic_today;
+        w.economy.last_day_traffic = self.last_day_traffic;
+        [w.people.trip_times_today, w.people.trip_times_yesterday] = self.trip_times;
+        [w.people.commute_moves_today, w.people.commute_moves_yesterday] = self.commute_moves;
+    }
+}
+
 /// Derived fields that are not stored at all, recomputed exactly as
 /// `stats::update` computes them.
 fn restore_derived(w: &mut World) {
@@ -188,7 +221,7 @@ pub(crate) fn save(world: &World) -> Vec<u8> {
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     let body = postcard::to_stdvec(world).expect("World is always serialisable");
     out.extend_from_slice(&body);
-    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV2::of(world))).expect("serialisable");
+    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV3::of(world))).expect("serialisable");
     out.extend_from_slice(&ext);
     out
 }
@@ -227,6 +260,9 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
                 .map_err(bad)?
                 .restore(&mut world),
             2 => postcard::from_bytes::<ExtensionV2>(rest)
+                .map_err(bad)?
+                .restore(&mut world),
+            3 => postcard::from_bytes::<ExtensionV3>(rest)
                 .map_err(bad)?
                 .restore(&mut world),
             _ => {}

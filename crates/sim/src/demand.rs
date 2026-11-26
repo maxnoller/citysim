@@ -226,7 +226,10 @@ pub fn jobs_view(world: &World) -> JobsView {
     let small = balance::DEMAND_SMALL_CITY;
     let want_c = workforce as f32 * balance::SHOP_JOBS_PER_WORKER;
     let want_i = want_c * balance::INDUSTRY_PER_SHOP;
-    let (sc, si) = ((want_c - c_jobs) / (want_c + small), (want_i - i_jobs) / (want_i + small));
+    let (sc, si) = (
+        (want_c - c_jobs) / (want_c + small),
+        (want_i - i_jobs) / (want_i + small),
+    );
     let short_of = if sc.max(si) <= 0.0 && unemployed == 0 {
         None
     } else if si >= sc {

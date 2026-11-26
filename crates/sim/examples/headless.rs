@@ -258,6 +258,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
     let (mut sum_ns, mut max_ns, mut n) = (0u128, 0u128, 0u64);
     let mut reached = [None::<u64>; 3];
     let mut costs: Vec<citysim_sim::RunningCosts> = Vec::new();
+    let mut losses: Vec<citysim_sim::TrafficLoss> = Vec::new();
     let mut extra: Vec<DayExtra> = Vec::new();
     let (mut given_up_before, mut day_ns_before) = (0u32, 0u128);
     while w.time.tick < total {
@@ -280,6 +281,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         sample(&w, &mut acc);
         if w.time.tick_of_day == 0 {
             costs.push(w.economy.last_day_costs);
+            losses.push(w.economy.last_day_traffic);
         }
         if w.time.tick_of_day == balance::TICKS_PER_DAY - 1 {
             // Just before midnight: the day's trips and give-ups.
@@ -325,7 +327,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
          streets,avenues,highway,signals,signal_count,services_base,services_city_size,services_density,\
          given_up,trips,happiness,avg_commute_s,step_mean_us,delay_factor,worked_share,\
          journeys,journey_mean_h,journey_over3h,journey_over4h,journey_over8h,journey_max_h,journey_max_purpose,journey_max_offscreen,commute_over4h,\
-         unhappy_commute_share,commute_happiness\n",
+         unhappy_commute_share,commute_happiness,traffic_lost_tax,traffic_lost_per_commute_s\n",
     );
     for (i, h) in w.economy.history.iter().enumerate() {
         let b = h.budget;
@@ -382,6 +384,9 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
             e.unhappy_commute,
             e.commute_happiness
         );
+        daily.pop();
+        let l = losses.get(i).copied().unwrap_or_default();
+        let _ = writeln!(daily, ",{},{:.1}", l.business_tax, l.per_commute_s());
     }
     std::fs::write(format!("{out_dir}/{}_seed{seed}_days.csv", sc.name), daily).expect("write csv");
     std::fs::write(format!("{out_dir}/{}_seed{seed}_hours.csv", sc.name), hours).expect("write csv");

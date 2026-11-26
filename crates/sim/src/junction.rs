@@ -578,6 +578,23 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             arms[i].setback = sb;
         }
     }
+    // A slight kink between two pieces of road (curves joined at an angle):
+    // a bend box long enough for cars side by side to turn on concentric
+    // curves (twice the half-width times the tangent of half the kink),
+    // instead of swinging round at the node.
+    if deg == 2 {
+        let (d0, d1) = (arms[0].dir, arms[1].dir);
+        let cos = -geom::dot(d0, d1);
+        if cos > 0.0 && cos < balance::BEND_KINK_COS {
+            let half_tan = geom::cross(d0, d1).abs() / (1.0 + cos);
+            let hw = arms[0].kind.half_width_m().max(arms[1].kind.half_width_m());
+            let need = 2.0 * hw * half_tan + balance::BEND_MARGIN_M;
+            for a in arms.iter_mut() {
+                let len = roads.segments[a.segment].length;
+                a.setback = a.setback.max(need.min(len * 0.4));
+            }
+        }
+    }
     // A road that changes width or kind without a junction (a lane ends,
     // or the lanes move sideways: the highway becoming an avenue, an avenue
     // continuing as a street): a short merge box, so
@@ -635,8 +652,15 @@ pub(crate) fn build_geometry(roads: &RoadNetwork, n: NodeId) -> (Vec<Arm>, Vec<M
             let din = [-line_a.dir[0], -line_a.dir[1]];
             let dout = line_b.dir;
             for (fl, tl, preferred) in lanes {
-                let p0 = geom_add(line_a.pos, scale(right_of(din), a.kind.lane_offset_m(fl)));
-                let p2 = geom_add(line_b.pos, scale(right_of(dout), b.kind.lane_offset_m(tl)));
+                let mut p0 = geom_add(line_a.pos, scale(right_of(din), a.kind.lane_offset_m(fl)));
+                let mut p2 = geom_add(line_b.pos, scale(right_of(dout), b.kind.lane_offset_m(tl)));
+                // A smooth join without a box: a short straight hop along
+                // the road (a path of no length has no direction to draw a
+                // car by).
+                if turn != Turn::UTurn && geom::dist(p0, p2) < 0.05 {
+                    p0 = geom_add(p0, scale(din, -0.25));
+                    p2 = geom_add(p2, scale(dout, 0.25));
+                }
                 let p1 = match turn {
                     Turn::UTurn => {
                         // Loop around the node.
@@ -1281,7 +1305,10 @@ pub(crate) fn pocket_lengths(
             Some((j, a)) => (
                 j.arms.len() >= 3 && has_pocket(j, a),
                 j.arms[a].setback,
-                j.arms.iter().filter(|x| x.kind.rank() >= RoadKind::Avenue.rank()).count(),
+                j.arms
+                    .iter()
+                    .filter(|x| x.kind.rank() >= RoadKind::Avenue.rank())
+                    .count(),
             ),
             None => (false, 0.0, 0),
         }
@@ -1306,10 +1333,7 @@ pub(crate) fn pocket_lengths(
         want_a = rank_a > rank_b;
         want_b = rank_b > rank_a;
     }
-    [
-        if want_b { alone } else { 0.0 },
-        if want_a { alone } else { 0.0 },
-    ]
+    [if want_b { alone } else { 0.0 }, if want_a { alone } else { 0.0 }]
 }
 
 /// The turn pocket at the end of segment `s` in direction `forward`, if it

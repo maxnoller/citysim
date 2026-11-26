@@ -76,7 +76,9 @@ pub use command::{
 pub use curve::{Curve, Pose};
 pub use demand::{Demand, JoblessReason, JobsView};
 pub use derived::Access;
-pub use economy::{Attendance, Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus, RunningCosts};
+pub use economy::{
+    Attendance, Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus, RunningCosts, TrafficLoss,
+};
 pub use geom::{Cell, CellRect};
 pub use grid::{CellData, GridView, Occupant, Zone};
 pub use growth::{BuildingMeta, GrowthState};
@@ -86,7 +88,7 @@ pub use inspect::CityPeople;
 pub use junction::{
     ApproachView, Aspect, JunctionControl, JunctionSetting, JunctionState, JunctionView, SignalStage, Turn,
 };
-pub use people::{LifeCounts, People, PeopleDay, PlacePeople, TripTimes};
+pub use people::{CommuteMoves, LifeCounts, People, PeopleDay, PlacePeople, TripTimes};
 pub use rng::Rng;
 pub use roads::{NodeId, RoadKind, RoadNetwork, RoadNode, RoadSegment, SegmentId};
 pub use save::LoadError;

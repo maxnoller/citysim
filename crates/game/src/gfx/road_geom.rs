@@ -425,9 +425,8 @@ pub fn layout(world: &World) -> RoadLayout {
             box_a: boxed.contains(&seg.a),
             box_b: boxed.contains(&seg.b),
             avoid: Vec::new(),
-            pockets: [true, false].map(|fwd| {
-                citysim_sim::junction::turn_pocket(world, sid, fwd).map(|p| p.from_a(seg.length))
-            }),
+            pockets: [true, false]
+                .map(|fwd| citysim_sim::junction::turn_pocket(world, sid, fwd).map(|p| p.from_a(seg.length))),
         });
     }
     // The highway continues off the map into the fog.
@@ -1144,7 +1143,16 @@ fn turn_pocket_marks(m: &mut MeshBuilder, s: &SegLayout, forward: bool, lo: f32,
     // Stop bar across the pocket and its arrow.
     let (stop, toward) = if forward { (hi, -1.0f32) } else { (lo, 1.0) };
     let bar = [stop, stop + toward * 0.4];
-    strip(m, f, bar[0].min(bar[1]), bar[0].max(bar[1]), -hw + 0.12, hw - 0.12, MARK_Y + 0.002, c);
+    strip(
+        m,
+        f,
+        bar[0].min(bar[1]),
+        bar[0].max(bar[1]),
+        -hw + 0.12,
+        hw - 0.12,
+        MARK_Y + 0.002,
+        c,
+    );
     if len > 10.0 {
         let t = stop + toward * 6.0;
         let (p, d) = f.pose(t);
