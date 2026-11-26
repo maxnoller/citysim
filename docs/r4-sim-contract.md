@@ -306,7 +306,7 @@ single-artery cities before/after), `traffic-04` (the two rescues), `traffic-05`
   starved) -> 31 (fair, every arm alike), with 30 % turning 29 -> 25; signalised street x street 57 -> 56;
   avenue x street 91 -> 128; avenue x avenue 100 -> 145 (with 20 % turning 50 -> 63, 30 % 44 -> 62); an avenue
   through a street that gives way 117 cars per minute. Per lane on green: street 0.49 cars/s, avenue 0.63
-  (before 0.43). Avenue x avenue crossings carry 3.4x a street crossing straight through, 1.9x with 20 % turning.
+  (before 0.43). Avenue x avenue crossings carry 2.6x a street crossing straight through, 1.9x with 20 % turning.
 
 ### Rules changed (what renderers / the interface may notice)
 
