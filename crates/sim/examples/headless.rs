@@ -9,7 +9,8 @@
 //! `target/headless/<scenario>.csv` (override with `CITYSIM_HEADLESS_OUT`).
 //!
 //! Seed sweeps: `-- --seeds 10 hierarchy streets` runs each named scenario
-//! for seeds 1..=10 (four at a time, one summary line each) and writes
+//! for seeds 1..=10 (one run per core, `CITYSIM_HEADLESS_THREADS=n` for fewer;
+//! one summary line each) and writes
 //! `<scenario>_seed<k>_days.csv` (residents, money and the budget per day)
 //! and `<scenario>_seed<k>_hours.csv` (per in-game hour: mean and peak cars
 //! on the road, the share of cars with an identified driver, trucks, cars
@@ -641,10 +642,12 @@ fn main() {
             .flat_map(|sc| (1..=seeds as u64).map(move |k| (sc, k)))
             .collect();
         let next = std::sync::atomic::AtomicUsize::new(0);
+        // One run per core (`CITYSIM_HEADLESS_THREADS=n` caps it).
         let threads: usize = std::env::var("CITYSIM_HEADLESS_THREADS")
             .ok()
             .and_then(|t| t.parse().ok())
-            .unwrap_or(4);
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+            .min(jobs.len().max(1));
         std::thread::scope(|s| {
             for _ in 0..threads {
                 s.spawn(|| {
