@@ -63,6 +63,10 @@ pub struct LifeCounts {
     /// Jobs found / lost.
     pub hired: u32,
     pub lost_jobs: u32,
+    /// Households fed up with their commute (they moved nearer work, which
+    /// also counts in `moved_home`, or left the city). Not saved.
+    #[serde(skip)]
+    pub fed_up_with_commute: u32,
 }
 
 /// One finished day of population history (for charts).
@@ -118,6 +122,59 @@ pub struct People {
     /// City statistics being gathered (one slice of citizens per tick,
     /// published to `stats` when complete).
     pub stats_acc: crate::inspect::StatsAcc,
+    /// How long journeys took door to door, today and yesterday (every
+    /// traveller, on and off screen; statistics, not saved).
+    #[serde(skip)]
+    pub trip_times_today: TripTimes,
+    #[serde(skip)]
+    pub trip_times_yesterday: TripTimes,
+}
+
+/// Journeys by how long they took, in-game hours
+/// (`TripTimes::BINS_H` upper bounds; the last bin is open).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TripTimes {
+    pub count: [u32; 7],
+    /// Commutes (to work and home) only.
+    pub commutes: [u32; 7],
+    /// Longest journey, ticks, its purpose (`TripPurpose::index`) and
+    /// whether it was made off screen.
+    pub max_ticks: u64,
+    pub max_purpose: u8,
+    pub max_off_screen: bool,
+    pub total_ticks: u64,
+}
+
+impl TripTimes {
+    pub const BINS_H: [f32; 6] = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0];
+
+    pub(crate) fn add(&mut self, ticks: u64, commute: bool, purpose: u8, off_screen: bool) {
+        if ticks > self.max_ticks {
+            self.max_purpose = purpose;
+            self.max_off_screen = off_screen;
+        }
+        let h = ticks as f32 / crate::balance::TICKS_PER_HOUR as f32;
+        let bin = Self::BINS_H.iter().position(|&b| h < b).unwrap_or(Self::BINS_H.len());
+        self.count[bin] += 1;
+        if commute {
+            self.commutes[bin] += 1;
+        }
+        self.max_ticks = self.max_ticks.max(ticks);
+        self.total_ticks += ticks;
+    }
+
+    /// Journeys in all.
+    pub fn total(&self) -> u32 {
+        self.count.iter().sum()
+    }
+
+    /// Share of journeys that took at least `h` hours (`h` one of
+    /// `BINS_H`).
+    pub fn share_over(&self, h: f32) -> f32 {
+        let from = Self::BINS_H.iter().position(|&b| b >= h).map_or(self.count.len(), |i| i + 1);
+        let n: u32 = self.count[from.min(self.count.len())..].iter().sum();
+        n as f32 / self.total().max(1) as f32
+    }
 }
 
 // ------------------------------------------------------------ helpers ----

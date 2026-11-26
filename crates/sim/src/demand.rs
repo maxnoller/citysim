@@ -81,20 +81,31 @@ pub fn target(world: &World) -> (Demand, f32) {
     let r = attract - balance::RES_VACANCY_WEIGHT * (res_vacancy - balance::RES_VACANCY_OK).max(0.0);
 
     let unemployment = if households > 0.0 { unemployed / households } else { 0.0 };
-    let jobs_term = |want: f32, have: f32, filled: f32| {
+    // Jobs follow the workforce (every adult wants their own job).
+    let want_c = households * balance::SHOP_JOBS_PER_WORKER;
+    let want_i = want_c * balance::INDUSTRY_PER_SHOP;
+    // People out of work call for the kind of jobs that is short: the
+    // unemployment boost goes to commerce and industry by their shortfall
+    // (alike when neither is short).
+    let short = |want: f32, have: f32| ((want - have) / (want + small)).max(0.0);
+    let (sc, si) = (short(want_c, c_jobs), short(want_i, i_jobs));
+    let (share_c, share_i) = if sc + si > 0.0 {
+        (sc / (sc + si), si / (sc + si))
+    } else {
+        (0.5, 0.5)
+    };
+    let jobs_term = |want: f32, have: f32, filled: f32, share: f32| {
         let vacancy = if have > 0.0 { (have - filled) / have } else { 0.0 };
-        balance::JOB_SHORTFALL_WEIGHT * (want - have) / (want + small) + balance::UNEMPLOYMENT_JOB_BOOST * unemployment
+        balance::JOB_SHORTFALL_WEIGHT * (want - have) / (want + small)
+            + 2.0 * share * balance::UNEMPLOYMENT_JOB_BOOST * unemployment
             - balance::JOB_VACANCY_WEIGHT * (vacancy - balance::JOB_VACANCY_OK).max(0.0)
             + tax
             + job_fiscal
     };
-    // Jobs follow the workforce (every adult wants their own job).
-    let want_c = households * balance::SHOP_JOBS_PER_WORKER;
-    let want_i = want_c * balance::INDUSTRY_PER_SHOP;
     let demand = Demand {
         residential: r.clamp(-1.0, 1.0),
-        commercial: jobs_term(want_c, c_jobs, c_filled).clamp(-1.0, 1.0),
-        industrial: jobs_term(want_i, i_jobs, i_filled).clamp(-1.0, 1.0),
+        commercial: jobs_term(want_c, c_jobs, c_filled, share_c).clamp(-1.0, 1.0),
+        industrial: jobs_term(want_i, i_jobs, i_filled, share_i).clamp(-1.0, 1.0),
     };
     (demand, attract.clamp(-1.0, 1.0))
 }
@@ -129,4 +140,119 @@ pub(crate) fn tick(world: &mut World) {
     d.residential += (t.residential - d.residential) * k;
     d.commercial += (t.commercial - d.commercial) * k;
     d.industrial += (t.industrial - d.industrial) * k;
+}
+
+/// Why people are out of work (`jobs_view`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum JoblessReason {
+    /// Hardly anyone (under `JOBLESS_OK` of the workforce).
+    None,
+    /// Jobs are free and reachable: they are being filled.
+    Searching,
+    /// The free jobs are in workplaces no road reaches from where the
+    /// jobless live.
+    NoJobsWithinReach,
+    /// Not enough jobs and no free land zoned for the kind that is short
+    /// (`JobsView::short_of`): zone more.
+    NoLandZoned,
+    /// Not enough jobs, land is zoned: workplaces are being built.
+    BuildingsComing,
+}
+
+impl JoblessReason {
+    /// A short sentence for the interface.
+    pub fn text(self) -> &'static str {
+        match self {
+            JoblessReason::None => "Nearly everyone who wants a job has one",
+            JoblessReason::Searching => "Looking for one of the free jobs",
+            JoblessReason::NoJobsWithinReach => "No jobs within reach: free jobs are cut off by road",
+            JoblessReason::NoLandZoned => "Not enough jobs: zone more land for work",
+            JoblessReason::BuildingsComing => "Not enough jobs yet: workplaces are being built",
+        }
+    }
+}
+
+/// The city's jobs at a glance: who is out of work and why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JobsView {
+    pub workforce: u32,
+    pub unemployed: u32,
+    /// Free job places, and those in workplaces connected to the road
+    /// network.
+    pub vacancies: u32,
+    pub vacancies_reachable: u32,
+    /// Free zoned lots, cells per zone `[R, C, I]`.
+    pub free_cells: [u32; 3],
+    /// The kind of work the city is short of (relative to its workforce),
+    /// if any: `Zone::Commercial` or `Zone::Industrial`.
+    pub short_of: Option<Zone>,
+    pub reason: JoblessReason,
+}
+
+impl JobsView {
+    /// `unemployed / workforce`.
+    pub fn rate(&self) -> f32 {
+        self.unemployed as f32 / self.workforce.max(1) as f32
+    }
+}
+
+/// Who is out of work and why (`O(buildings + zone cells)`: call it at
+/// most every few frames).
+pub fn jobs_view(world: &World) -> JobsView {
+    let (_, employed, workforce) = crate::stats::labour(world);
+    let unemployed = workforce.saturating_sub(employed);
+    let (mut vac, mut reach) = (0u32, 0u32);
+    let (mut c_jobs, mut i_jobs) = (0f32, 0f32);
+    for b in world.buildings.values() {
+        match b.kind {
+            Zone::Residential => continue,
+            Zone::Commercial => c_jobs += b.capacity as f32,
+            Zone::Industrial => i_jobs += b.capacity as f32,
+        }
+        let free = b.capacity.saturating_sub(b.occupied);
+        vac += free;
+        if free > 0 && crate::households::connected(world, b.footprint) {
+            reach += free;
+        }
+    }
+    let mut free_cells = [0u32; 3];
+    for (_, cd) in world.zoning.cells() {
+        if cd.free()
+            && let Some(z) = cd.zone
+        {
+            free_cells[crate::derived::zone_index(z)] += 1;
+        }
+    }
+    let small = balance::DEMAND_SMALL_CITY;
+    let want_c = workforce as f32 * balance::SHOP_JOBS_PER_WORKER;
+    let want_i = want_c * balance::INDUSTRY_PER_SHOP;
+    let (sc, si) = ((want_c - c_jobs) / (want_c + small), (want_i - i_jobs) / (want_i + small));
+    let short_of = if sc.max(si) <= 0.0 && unemployed == 0 {
+        None
+    } else if si >= sc {
+        Some(Zone::Industrial)
+    } else {
+        Some(Zone::Commercial)
+    };
+    let rate = unemployed as f32 / workforce.max(1) as f32;
+    let reason = if rate < balance::JOBLESS_OK {
+        JoblessReason::None
+    } else if reach * 2 >= unemployed {
+        JoblessReason::Searching
+    } else if vac * 2 >= unemployed {
+        JoblessReason::NoJobsWithinReach
+    } else if short_of.is_some_and(|z| free_cells[crate::derived::zone_index(z)] < balance::JOBLESS_LAND_CELLS) {
+        JoblessReason::NoLandZoned
+    } else {
+        JoblessReason::BuildingsComing
+    };
+    JobsView {
+        workforce,
+        unemployed,
+        vacancies: vac,
+        vacancies_reachable: reach,
+        free_cells,
+        short_of,
+        reason,
+    }
 }

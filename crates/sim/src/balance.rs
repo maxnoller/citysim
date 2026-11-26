@@ -540,8 +540,15 @@ pub const SHOP_JOBS_PER_WORKER: f32 = 0.44;
 pub const INDUSTRY_PER_SHOP: f32 = 1.5;
 /// Weight of the relative job shortfall on C / I demand.
 pub const JOB_SHORTFALL_WEIGHT: f32 = 1.4;
-/// Extra C / I demand per unit of unemployment rate.
-pub const UNEMPLOYMENT_JOB_BOOST: f32 = 1.5;
+/// Extra C / I demand per unit of unemployment rate (split between the two
+/// by their shortfall of jobs, `demand::target`: 9 % out of work with
+/// industry short adds about 0.6 to industrial demand).
+pub const UNEMPLOYMENT_JOB_BOOST: f32 = 3.5;
+/// `demand::jobs_view`: below this share of the workforce out of work
+/// nothing is wrong; fewer free zoned cells of the short kind of work than
+/// this counts as no land zoned.
+pub const JOBLESS_OK: f32 = 0.03;
+pub const JOBLESS_LAND_CELLS: u32 = 24;
 /// C / I demand falls by this per unit of unfilled-job rate above
 /// [`JOB_VACANCY_OK`].
 pub const JOB_VACANCY_WEIGHT: f32 = 2.0;
@@ -745,10 +752,10 @@ pub const JOB_DIST_SCALE_M: f32 = 1000.0;
 /// Shift starts (hours) per workplace: industry, offices (commercial level
 /// 3) and shops (early shift; the late shift starts
 /// [`LATE_SHIFT_OFFSET_H`] later).
-pub const INDUSTRY_START_H: [f32; 2] = [5.5, 8.0];
-pub const OFFICE_START_H: [f32; 2] = [8.0, 9.5];
-pub const SHOP_START_H: [f32; 2] = [7.0, 9.0];
-pub const LATE_SHIFT_OFFSET_H: f32 = 6.0;
+pub const INDUSTRY_START_H: [f32; 2] = [6.5, 8.5];
+pub const OFFICE_START_H: [f32; 2] = [8.5, 9.5];
+pub const SHOP_START_H: [f32; 2] = [8.0, 9.5];
+pub const LATE_SHIFT_OFFSET_H: f32 = 4.5;
 /// Shop workers on the late shift (shops stay staffed into the evening).
 pub const LATE_SHIFT_SHARE: f32 = 0.35;
 /// Industrial workers on the night shift (from ~21:00).
@@ -757,7 +764,7 @@ pub const NIGHT_SHIFT_SHARE: f32 = 0.08;
 pub const SHIFT_H: f32 = 8.5;
 pub const PART_TIME_SHIFT_H: f32 = 4.0;
 /// Personal offset from the workplace's start, +- hours (triangular).
-pub const SHIFT_PERSONAL_SPREAD_H: f32 = 1.8;
+pub const SHIFT_PERSONAL_SPREAD_H: f32 = 1.2;
 /// Day-to-day wobble of a shift start, +- hours.
 pub const SHIFT_DAILY_WOBBLE_H: f32 = 0.4;
 /// Workers leave home the expected door-to-door time of the trip before
@@ -784,7 +791,7 @@ pub const SLEEP_SPREAD_H: f32 = 1.0;
 pub const HOME_RECHECK_H: f32 = 1.0;
 /// Shops are visited between these hours ...
 pub const SHOP_OPEN_H: f32 = 8.0;
-pub const SHOP_CLOSE_H: f32 = 21.0;
+pub const SHOP_CLOSE_H: f32 = 19.5;
 /// Nobody sets off shopping who would arrive later than this before
 /// closing, hours; a shopper whose car arrives after closing finds the shop
 /// shut and goes home; a visit ends at closing time.
@@ -818,15 +825,15 @@ pub const LEISURE_GO_NEED: f32 = 0.55;
 /// two hours before [`LEISURE_CLOSE_H`]; above this need they go earlier.
 pub const LEISURE_URGENT_NEED: f32 = 0.85;
 pub const LEISURE_OPEN_H: f32 = 10.0;
-pub const LEISURE_CLOSE_H: f32 = 21.0;
+pub const LEISURE_CLOSE_H: f32 = 19.5;
 /// Venues close at this hour: nights out end then at the latest, and
 /// nobody sets off who would not have at least [`LEISURE_DURATION_H`] there
 /// before it.
-pub const LEISURE_LAST_H: f32 = 23.5;
+pub const LEISURE_LAST_H: f32 = 21.5;
 pub const LEISURE_FREE_H: f32 = 4.0;
 /// A night out lasts this long plus up to the spread (personal), hours.
-pub const LEISURE_DURATION_H: f32 = 1.5;
-pub const LEISURE_DURATION_SPREAD_H: f32 = 1.5;
+pub const LEISURE_DURATION_H: f32 = 1.25;
+pub const LEISURE_DURATION_SPREAD_H: f32 = 1.0;
 /// Venues compared when choosing one; a venue's score is its restoration
 /// rate over `1 + distance / this`.
 pub const LEISURE_SAMPLES: usize = 6;
@@ -854,6 +861,11 @@ pub const MAX_TRIP_H: f32 = 2.0;
 /// instead of driven (off screen, about as long as the drive would take),
 /// unless the citizen has the car with them or drives children along.
 pub const WALK_MAX_M: f32 = 100.0;
+/// A trip made off screen takes at most this many in-game hours in a city
+/// whose traffic is fine, longer in proportion as it gets worse
+/// (`* max(1, delay_factor / DELAY_OK_FACTOR)`): nobody's trip takes most
+/// of a day unless the roads are gridlocked.
+pub const OFFSCREEN_MAX_TRIP_H: f32 = 2.5;
 /// Without a free car a trip takes this many times as long (stands in for
 /// lifts, buses and walking until stage 3).
 pub const CARLESS_TIME_FACTOR: f32 = 1.8;
@@ -921,7 +933,22 @@ pub const MAX_AGE_YEARS: u32 = 104;
 
 /// Weights of the happiness components `[employment, commute,
 /// affordability, access, taxes, finances, housing]`.
-pub const HAPPINESS_WEIGHTS: [f32; 7] = [0.25, 0.15, 0.2, 0.15, 0.1, 0.1, 0.05];
+/// (Round 5: the commute weighs as much as having a job: a resident stuck in
+/// traffic every day is clearly unhappy about it.)
+pub const HAPPINESS_WEIGHTS: [f32; 7] = [0.22, 0.30, 0.16, 0.12, 0.08, 0.08, 0.04];
+/// A worker's commute happiness is the worse of its length
+/// (`COMMUTE_OK_S` .. `HOPELESS_COMMUTE_S`) and of how much longer than the
+/// free-flow time it took them: fine up to `COMMUTE_RATIO_OK` times,
+/// nothing left at `COMMUTE_RATIO_BAD` (their own trip, on screen or off).
+pub const COMMUTE_RATIO_OK: f32 = 1.6;
+pub const COMMUTE_RATIO_BAD: f32 = 4.0;
+/// A household whose workers all have commute happiness below this at a
+/// midnight is fed up with the traffic: with this chance it moves to a free
+/// home nearer the first worker's job (at least `COMMUTE_MOVE_NEARER` times
+/// as close), and failing that leaves the city.
+pub const COMMUTE_FED_UP_BELOW: f32 = 0.25;
+pub const COMMUTE_FED_UP_CHANCE: f32 = 0.2;
+pub const COMMUTE_MOVE_NEARER: f32 = 0.7;
 /// Happiness of a newcomer (and of every component before the first
 /// midnight).
 pub const HAPPINESS_START: f32 = 0.88;

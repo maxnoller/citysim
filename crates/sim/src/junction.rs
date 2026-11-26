@@ -1275,29 +1275,40 @@ pub(crate) fn pocket_lengths(
     if seg.kind.pocket_lane().is_none() {
         return [0.0; 2];
     }
-    // (wants a pocket, stop line setback) at node `n`.
-    let end = |n: NodeId| -> (bool, f32) {
+    // (wants a pocket, stop line setback, arterial arms) at node `n`.
+    let end = |n: NodeId| -> (bool, f32, usize) {
         match states.get(n).and_then(|j| j.arm_of(s).map(|a| (j, a))) {
-            Some((j, a)) => (j.arms.len() >= 3 && has_pocket(j, a), j.arms[a].setback),
-            None => (false, 0.0),
+            Some((j, a)) => (
+                j.arms.len() >= 3 && has_pocket(j, a),
+                j.arms[a].setback,
+                j.arms.iter().filter(|x| x.kind.rank() >= RoadKind::Avenue.rank()).count(),
+            ),
+            None => (false, 0.0, 0),
         }
     };
-    let (want_b, sb_b) = end(seg.b);
-    let (want_a, sb_a) = end(seg.a);
+    let (mut want_b, sb_b, rank_b) = end(seg.b);
+    let (mut want_a, sb_a, rank_a) = end(seg.a);
     let drivable = seg.length - sb_a - sb_b;
-    let one = |both: bool| -> f32 {
-        let room = if both {
-            (drivable - balance::POCKET_GAP_M) * 0.5
-        } else {
-            drivable - balance::NO_LANE_CHANGE_AFTER_BOX_M - balance::POCKET_GAP_M
-        };
-        let len = room.min(balance::POCKET_MAX_M);
+    let fit = |len: f32| -> f32 {
+        let len = len.min(balance::POCKET_MAX_M);
         if len >= balance::POCKET_MIN_M { len } else { 0.0 }
     };
-    let both = want_a && want_b;
+    // Room for one alone: all but the stretch behind the box where
+    // nobody changes lanes.
+    let alone = fit(drivable - balance::NO_LANE_CHANGE_AFTER_BOX_M - 2.0);
+    if want_a && want_b {
+        let shared = fit((drivable - balance::POCKET_GAP_M) * 0.5);
+        if shared > 0.0 {
+            return [shared, shared];
+        }
+        // No room for both: the busier junction (more arterial arms) gets
+        // it, neither when they are alike.
+        want_a = rank_a > rank_b;
+        want_b = rank_b > rank_a;
+    }
     [
-        if want_b { one(both) } else { 0.0 },
-        if want_a { one(both) } else { 0.0 },
+        if want_b { alone } else { 0.0 },
+        if want_a { alone } else { 0.0 },
     ]
 }
 
