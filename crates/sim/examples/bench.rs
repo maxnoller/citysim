@@ -102,6 +102,21 @@ fn main() {
             worst.truncate(5);
         }
     }
+    // Frames at top speed: 16 steps each, in order.
+    let frames: Vec<u128> = times.chunks(16).map(|c| c.iter().sum()).collect();
+    let fmean = frames.iter().sum::<u128>() as f64 / frames.len() as f64;
+    let mut fs = frames.clone();
+    fs.sort();
+    println!(
+        "16 steps (one frame at top speed): mean {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+        fmean / 1e6,
+        fs[fs.len() * 99 / 100] as f64 / 1e6,
+        fs[fs.len() - 1] as f64 / 1e6
+    );
+    if let Ok(f) = std::env::var("CITYSIM_BENCH_TIMES") {
+        let txt: String = times.iter().map(|t| format!("{}\n", t / 1000)).collect();
+        std::fs::write(f, txt).expect("write step times");
+    }
     times.sort();
     let n = times.len();
     let mean = times.iter().sum::<u128>() as f64 / n as f64;

@@ -1,8 +1,9 @@
 # Simulation contract: free-form roads and zoning that follows them
 
-Branch `r4-roads` (crate `citysim_sim`). This page is the contract between the simulation and the graphics /
-interface work. Additions are appended freely; changes to anything already listed are recorded at the bottom under a
-dated heading.
+Branches `r4-roads` and `r4-people`, merged on `r4-sim` (crate `citysim_sim`): one simulation of free-form roads and
+individual citizens. This page is the contract between the simulation and the graphics / interface work. Additions
+are appended freely; changes to anything already listed are recorded at the bottom under a dated heading. The people
+side of the model is summarised in "One model: roads and people" below.
 
 ## The model in short
 
@@ -200,3 +201,73 @@ Changed meaning:
 - Measured (release, this machine): zone-block regeneration after one road edit 0.35–0.47 ms in a 10,000-resident
   city; 20,000 citizens with 2,830 cars at the rush peak: mean step 1.35 ms, max 3.9 ms (r4 before: 1.25 ms, 3.8 ms);
   10,000-resident hierarchy city: no step over 5 ms in the spikes run.
+
+## One model: roads and people (r4-sim, 2026-11-26)
+
+`r4-people` (citizens bound to their cars, the 16-minute day, money sinks, the extended `inspect` API) is merged onto
+the free-form roads. What a renderer or the interface needs from the combination:
+
+- **Time.** A day lasts 16 real minutes at 1x: `balance::DAY_MINUTES = 16`, `TICKS_PER_DAY = 19_200`,
+  `TICKS_PER_HOUR = 800` (40 real seconds), new games start at 09:00 (`START_TICK_OF_DAY`). Cars still move in real
+  time (1 tick = 1/20 s), so a 40–90 s drive is 1–2¼ game hours. Speeds to offer: 1x, 3x, 6x, 16x (16 steps per
+  frame at 16x; see the measurements below). One day is one year of age (`DAYS_PER_YEAR = 1`).
+- **People in cars.** Every car trip is a car on the road while the vehicle budget allows
+  (`traffic::vehicle_budget`: 125 per 1,000 residents, 150–2,500); beyond it, and for walks of up to
+  `WALK_MAX_M` (100 m), trips happen off screen. A citizen is in their car from departure to arrival
+  (`Location::Travelling(Journey)`, `Journey::vehicle`); `Trip`/`Departure` name their buildings (`from_building`,
+  `to_building`), carry `party` (people in the car) and `cargo` (trucks); a household moving out drives out.
+  `TravelMode::Walking` is new. Trucks are `TripPurpose::Goods`.
+- **Traffic on every commute.** `TrafficState::delay_factor` (`traffic::delay_factor(world)`, at least 1): a moving
+  average of commuting car trips' door-to-door time over their free-flow estimate. Commutes made off screen take that
+  long too, so a jammed town makes every commuter late, not only the drivers you see. `TrafficState::avg_commute_s` /
+  `Stats::avg_commute_s` count off-screen commutes as well.
+- **Money.** New sinks (people side): avenue upkeep 10 per cell per day, `$100` per signalled junction per day, city
+  services growing with size and density; the breakdown is `economy::running_costs(world)` /
+  `economy.last_day_costs` (`RunningCosts`). New (r4-sim): `Economy::attendance` (`Attendance { scheduled_ticks,
+  worked_ticks, last_day_share }`, `share()`): commercial and industrial tax is paid on the share of scheduled shift
+  time workers actually got in (late arrivals work less).
+- **Saves.** Format 6 holds both sides' data. Formats 4 and 3 load (decoded through the frozen world-grid types in
+  `save::v5`; their clocks keep the time of day on the longer day). Format 5 (the unreleased first citizens layout)
+  is refused (`LoadError::UnsupportedVersion(5)`); `save::v5::save_as_v5` and `WorldV5` are gone. Format-6 files
+  written before 2026-11-26 do not load (new fields in `TrafficState` and `Economy`; nothing was released).
+- **Read API** (people side, unchanged here): `inspect::{plan, happiness_reasons, inside, citizen_pos}`,
+  `CitizenView::{money, happiness}`, `TripView::expected_tick`, `VehicleView::{party, cargo, requested_tick,
+  started_tick, on_road_s}`; `traffic::has_room`.
+
+### 2026-11-26 (r4-sim: what changed in the combination)
+
+Junctions and driving:
+- **Stop lines.** A waiting car stands with its *front bumper* `STOP_LINE_M` (now 0.5 m) behind the line; its centre
+  is `drive::stop_back_m(truck)` = half its body (`CAR_BODY_M` / `TRUCK_BODY_M`) + `STOP_LINE_M` before the line (was:
+  centre 0.6 m before, nose in the box). Renderers need nothing new: draw cars where `vehicle_pose` puts them.
+- **Committed entries.** A car let into a junction keeps its turn over cars of the same class until it is in; before,
+  two conflicting cars could swap places tick after tick and both crawl at walking pace.
+- **Turning lanes keep their order.** On multi-lane approaches lane `l` turns into lane `l` (double left and right
+  turns): `Movement::to_lane` changed for left turns from the outer lane and right turns from the inner lane;
+  `preferred` is unchanged (lefts from the inner lane, rights from the kerb lane). Two movements from one arm to
+  another in their own lanes, side by side, never conflict (the highway's two lanes into town used to block each
+  other through the merge box).
+- **Lane changes** see cars that just entered a box as still in the lane they left; lane choices are made every
+  other tick.
+- **Signals.** A car whose exit lane is jammed (its last car standing with no room behind it) does not call for green.
+  Two avenues crossing are served alike (both through phases up to `SIGNAL_MAIN_MAX_GREEN_S`, no coordination);
+  avenue coordination (green waves) covers every junction where an avenue pair meets lesser roads.
+- **Auto control.** Streets crossing an avenue give way to it (avenue arms `major`) until the junction is busy (was:
+  always lights). "Busy" counts the cars let in during the busiest minute *plus the cars still queued* at its end (a
+  jammed all-way stop let in fewer cars than the threshold however long its queues).
+- **Departures.** A car does not pull out into a standing queue (`SPAWN_QUEUE_M`, 25 m ahead in its lane); new cars
+  never start with their nose over a stop line.
+
+People:
+- Off-screen commutes use the delay factor (`day::road_s`); other off-screen trips the free-flow estimate.
+- Newcomers arrive by day (`MOVE_IN_DAY_H` 06–22, `MOVE_IN_NIGHT_SHARE` 0.2 of the mean rate at night; the same
+  number per day).
+
+Scripted cities: `scenarios::upgrade_to_hierarchy(world)` upgrades a streets grid's main streets (the lines
+`GridPlayer::hierarchy` builds as avenues) to avenues; the headless example has a `rescue` scenario using it.
+`GridPlayer::layout` and `scenarios::Layout` are public.
+
+Tools: `examples/simint.rs` (build a city to a population and save it; replay a day from a save and see where trip
+time goes, the junctions where cars stand and give up; `node`, `cross`, `flow` junction benches), `topdown save` /
+`savewatch` (views of a saved city), `headless --seeds` writes the day's give-ups, trips, happiness, commute, step time,
+delay factor and attendance; `plot_sweep.py` charts seed sweeps.

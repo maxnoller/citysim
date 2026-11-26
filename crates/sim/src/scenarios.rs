@@ -102,6 +102,43 @@ pub fn add_connections(w: &mut World) {
     road(w, (50, NORTH_RIBS[4]), (50, SOUTH_RIBS[4]));
 }
 
+/// Rescue a streets-only grid city: upgrade the built streets on the lines
+/// the [`Layout::Hierarchy`] player makes avenues (the trunk `y = 128` and
+/// every third block row, every second block column) to avenues, piece by
+/// piece, as far as the money goes. Pieces a building stands in the way of
+/// stay streets. Returns `(pieces upgraded, pieces refused, money spent)`.
+pub fn upgrade_to_hierarchy(w: &mut World) -> (u32, u32, i64) {
+    let before = w.economy.money;
+    let mut pieces: Vec<(Cell, Cell)> = Vec::new();
+    for (_, seg) in w.roads.segments.iter() {
+        if seg.kind != RoadKind::Street || !seg.curve.is_straight() {
+            continue;
+        }
+        let (a, b) = (Cell::from_pos(seg.curve.start()), Cell::from_pos(seg.curve.end()));
+        let row = a.y == b.y && (a.y - 128).rem_euclid(15) == 0 && a.x >= 11;
+        let col = a.x == b.x && (a.x - 20).rem_euclid(20) == 0 && a.x >= 20;
+        if row || col {
+            pieces.push(if a <= b { (a, b) } else { (b, a) });
+        }
+    }
+    pieces.sort();
+    let (mut ok, mut refused) = (0, 0);
+    for (a, b) in pieces {
+        if a == b {
+            continue;
+        }
+        match w.apply(Command::BuildRoad {
+            from: a,
+            to: b,
+            kind: RoadKind::Avenue,
+        }) {
+            Ok(_) => ok += 1,
+            Err(_) => refused += 1,
+        }
+    }
+    (ok, refused, before - w.economy.money)
+}
+
 /// How a [`GridPlayer`] lays out its roads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
