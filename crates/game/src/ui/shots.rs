@@ -24,14 +24,19 @@ use super::tools::{Press, ToolState};
 use super::widgets::{UiAction, UiButton};
 use super::{InfoTray, UiState};
 use crate::shared::{
-    ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, RoadChoice, RoadMode, SimClock,
-    SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
+    ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, OverlayMode, PerfDetail, RoadChoice, RoadMode,
+    SimClock, SimCommand, SimWorld, ToolModes, WorldCamera, WorldHighlight, ZoneMode, sim_to_world,
 };
 
 /// The scenario's world while a step shows a modified copy (broke, day 1);
 /// `reset` puts it back.
 #[derive(Resource, Default)]
 struct SavedWorld(Option<citysim_sim::World>);
+
+/// The graphics quality the run started with (a step that changes it is
+/// undone by `reset`).
+#[derive(Resource, Default)]
+struct SavedQuality(Option<crate::shared::GraphicsQuality>);
 
 fn stash_world(w: &mut World) {
     let copy = w.resource::<SimWorld>().world.clone();
@@ -66,6 +71,7 @@ impl Plugin for ShotsPlugin {
         })
         .init_resource::<Pointer>()
         .init_resource::<SavedWorld>()
+        .init_resource::<SavedQuality>()
         .add_systems(
             Update,
             run_shots.in_set(GameSet::Input).before(super::widgets::button_clicks),
@@ -181,6 +187,12 @@ fn reset(world: &mut World) {
     ui.settings_open = false;
     ui.keys_open = false;
     ui.following = false;
+    ui.perf = PerfDetail::Off;
+    let quality = *world.resource::<crate::shared::GraphicsQuality>();
+    let first = *world.resource_mut::<SavedQuality>().0.get_or_insert(quality);
+    if quality != first {
+        *world.resource_mut::<crate::shared::GraphicsQuality>() = first;
+    }
     // Directly (a ClosePeople message would also drop a selection the
     // step makes this frame).
     world.resource_mut::<super::panel::PeopleView>().stack.clear();
@@ -394,6 +406,46 @@ fn steps() -> Vec<Step> {
             setup: |w| {
                 reset(w);
                 w.resource_mut::<UiState>().tray = Some(InfoTray::Stats);
+            },
+        },
+        Step {
+            name: "perf-small",
+            wait: 4.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Small;
+            },
+        },
+        Step {
+            name: "perf-full",
+            wait: 4.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+            },
+        },
+        Step {
+            name: "perf-full-busy",
+            wait: 4.0,
+            setup: |w| {
+                // Next to the selection panel and the budget drawer.
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Budget);
+                if let Some(id) = building_where(w, |b| b.kind == Zone::Residential && b.occupied >= 3) {
+                    w.write_message(UiAction::Place(id));
+                }
+            },
+        },
+        Step {
+            name: "perf-spike",
+            wait: 2.0,
+            setup: |w| {
+                // A real stall: another graphics quality (every pipeline
+                // is specialised again); `reset` switches it back.
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                w.write_message(UiAction::Quality(crate::shared::GraphicsQuality::Low));
             },
         },
         Step {
@@ -1200,6 +1252,7 @@ impl Plugin for TourPlugin {
         })
         .init_resource::<TourData>()
         .init_resource::<SavedWorld>()
+        .init_resource::<SavedQuality>()
         .insert_resource(Pointer {
             smooth: true,
             ..default()

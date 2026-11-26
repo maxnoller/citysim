@@ -253,6 +253,7 @@ pub mod icon {
     pub const KEYBOARD: char = '\u{e284}';
     pub const SLASH: char = '\u{e51d}';
     pub const ROTATE: char = '\u{e148}'; // rotate-ccw
+    pub const GAUGE: char = '\u{e1bf}';
 }
 
 // ---------------------------------------------------------------- fonts

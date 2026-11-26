@@ -10,12 +10,15 @@ default = ["gfx", "ui"]
 # 3D drawing and the camera (src/gfx). Disable to check ui builds alone.
 gfx = []
 # 2D interface, tools, input, save/load (src/ui). Disable to check gfx alone.
-ui = []
+ui = ["dep:sysinfo"]
 
 [dependencies]
 citysim_sim.workspace = true
 bevy.workspace = true
 slotmap.workspace = true
+# The performance panel's process CPU and memory figures (ui); the same
+# version and features Bevy's own system-information diagnostics use.
+sysinfo = { version = "0.39", default-features = false, features = ["system"], optional = true }
 
 [lints]
 workspace = true
