@@ -759,7 +759,7 @@ fn window_keys(keys: Res<ButtonInput<KeyCode>>, mut ui: ResMut<UiState>) {
 }
 
 /// Size and place the window, slide it in and out, show its page.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn place_window(
     time: Res<Time<Real>>,
     ui: Res<UiState>,
@@ -870,6 +870,7 @@ fn window_area(
     area.set_if_neq(new);
 }
 
+#[allow(clippy::type_complexity)]
 fn update_header(
     ui: Res<UiState>,
     sim: Res<SimWorld>,

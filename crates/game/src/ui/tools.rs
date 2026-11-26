@@ -422,7 +422,7 @@ fn tool_keys(
         } else if keys.just_pressed(KeyCode::KeyB) {
             // A switch: on from any tool, off back to it.
             let mut t = *tool;
-            super::controls::toggle_demolish(&mut t, &mut *ui);
+            super::controls::toggle_demolish(&mut t, &mut ui);
             Some(t)
         } else if keys.just_pressed(KeyCode::KeyZ) {
             Some(ActiveTool::Zone(match *tool {

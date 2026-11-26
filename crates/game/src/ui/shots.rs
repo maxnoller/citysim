@@ -887,7 +887,7 @@ fn steps() -> Vec<Step> {
                     .filter_map(|id| {
                         let pts = super::route::vehicle_path(s, id)?;
                         let len = super::route::path_length(&pts);
-                        (len > 250.0).then(|| (id, pts))
+                        (len > 250.0).then_some((id, pts))
                     })
                     .min_by(|a, b| dist(a.1[0], f).total_cmp(&dist(b.1[0], f)));
                 w.resource_mut::<SimClock>().paused = true;

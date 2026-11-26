@@ -204,7 +204,7 @@ fn handle_actions(
             UiAction::CityPeople => toggle_window(&mut ui, &mut tool, CityPage::People),
             UiAction::CityPage(p) => open_window(&mut ui, &mut tool, p),
             UiAction::CloseWindow => ui.window = None,
-            UiAction::Demolish => toggle_demolish(&mut *tool, &mut *ui),
+            UiAction::Demolish => toggle_demolish(&mut tool, &mut ui),
             UiAction::TogglePause => clock.paused = !clock.paused,
             UiAction::Speed(i) => {
                 clock.speed = i;

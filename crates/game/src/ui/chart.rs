@@ -306,6 +306,7 @@ pub fn scale(columns: &[Column]) -> (f32, f32) {
 }
 
 /// The chart queries `fill` needs (one parameter for systems).
+#[allow(clippy::type_complexity)]
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct ChartNodes<'w, 's> {
     slots: Query<'w, 's, (&'static Slot, &'static Hovered)>,

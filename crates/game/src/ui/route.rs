@@ -68,6 +68,7 @@ fn smoothstep(x: f32) -> f32 {
 /// over for its turn). Curved roads are sampled at whole multiples of
 /// `STEP_M` from the segment's start, so the samples ahead of a moving car
 /// stay put.
+#[allow(clippy::too_many_arguments)]
 fn trace_segment(
     world: &World,
     s: SegmentId,
@@ -505,9 +506,18 @@ mod tests {
             assert!(!t.points.is_empty());
             // It starts at the car.
             assert!(dist(t.points[0], drive::vehicle_pose(&w, car).0) < 0.01);
-            // No jumps: the lanes and the turns join up.
-            for p in t.points.windows(2) {
-                assert!(dist(p[0], p[1]) < 30.0, "gap {:?}", p);
+            // No detours or missing pieces: about as long as the road still
+            // ahead (the last segment only partly, setbacks and turn paths
+            // shorten or lengthen it a little).
+            if car.junction.is_none()
+                && let Some(s) = car.segment
+            {
+                let len = |s| w.roads.segments.get(s).map_or(0.0, |g| g.length);
+                let last = car.route.last().map_or(len(s), |&l| len(l));
+                let ahead = len(s) - car.progress + car.route.iter().map(|&r| len(r)).sum::<f32>();
+                let drawn = path_length(&t.points);
+                assert!(drawn <= ahead + 60.0, "{drawn} m drawn, {ahead} m ahead");
+                assert!(drawn >= ahead - last - 60.0, "{drawn} m drawn, {ahead} m ahead");
             }
             // It ends where the car will stop.
             if let Some(dest) = w.traffic.trips.get(id).and_then(|t| t.dest)
