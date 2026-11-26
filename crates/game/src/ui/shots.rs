@@ -186,6 +186,7 @@ fn reset(world: &mut World) {
     world.resource_mut::<super::panel::PeopleView>().stack.clear();
     world.resource_mut::<SimClock>().paused = false;
     world.resource_mut::<super::top::PinnedAlert>().0 = None;
+    world.resource_mut::<super::loading::HoldLoading>().0 = false;
     *world.resource_mut::<Pointer>() = Pointer::default();
 }
 
@@ -826,6 +827,28 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            name: "people-car",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                let s = sim(w);
+                let f = town_focus(w);
+                let car = s
+                    .vehicles
+                    .iter()
+                    .filter(|(id, v)| {
+                        v.segment.is_some() && citysim_sim::inspect::vehicle(s, *id).is_some_and(|x| x.occupants >= 2)
+                    })
+                    .min_by(|a, b| dist(a.1.pos, f).total_cmp(&dist(b.1.pos, f)))
+                    .map(|(id, v)| (id, citysim_sim::drive::vehicle_pose(s, v).0));
+                w.resource_mut::<SimClock>().paused = true;
+                if let Some((id, at)) = car {
+                    w.write_message(UiAction::Vehicle(id));
+                    look(w, add(at, [1.0, 0.0], 30.0), 140.0);
+                }
+            },
+        },
+        Step {
             name: "people-city",
             wait: 1.5,
             setup: |w| {
@@ -955,6 +978,14 @@ fn steps() -> Vec<Step> {
                 // Keyboard focus on "Load game", the pointer over "Save game".
                 w.resource_mut::<super::menu::MenuFocus>().0 = Some(2);
                 w.resource_mut::<Pointer>().target = PointerTarget::Button(UiAction::Save);
+            },
+        },
+        Step {
+            name: "loading",
+            wait: 1.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<super::loading::HoldLoading>().0 = true;
             },
         },
         Step {

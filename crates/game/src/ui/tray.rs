@@ -441,13 +441,25 @@ fn item(
                     label(fonts, name, t::FONT_BODY, t::W_SEMIBOLD, base),
                     ButtonFg { owner: id, base },
                 ));
-                f.spawn((
-                    price,
-                    ButtonFg {
-                        owner: id,
-                        base: t::POSITIVE,
-                    },
-                ));
+                if locked.is_some() {
+                    f.spawn(layout(Node {
+                        align_items: AlignItems::Center,
+                        column_gap: px(3),
+                        ..default()
+                    }))
+                    .with_children(|l| {
+                        l.spawn(super::widgets::icon(fonts, icon::LOCK, 11.0, t::TEXT_MUTED));
+                        l.spawn(label(fonts, "Locked", 11.5, t::W_SEMIBOLD, t::TEXT_MUTED));
+                    });
+                } else {
+                    f.spawn((
+                        price,
+                        ButtonFg {
+                            owner: id,
+                            base: t::POSITIVE,
+                        },
+                    ));
+                }
             });
             spawn_brackets(b, id);
         },
@@ -597,14 +609,7 @@ fn road_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts, hatch: &MaterialNode
                     "Three lanes each way. Only the highway into town exists; you can't build more yet.",
                 ),
                 Some(hatch),
-                (
-                    layout(Node {
-                        align_items: AlignItems::Center,
-                        column_gap: px(3),
-                        ..default()
-                    }),
-                    Text::new(""),
-                ),
+                Text::new(""),
                 |pc| road_pic(pc, 6),
             );
         });

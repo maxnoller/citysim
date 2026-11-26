@@ -8,7 +8,7 @@ demand. Every household has a home and a job and drives to work on the shortest 
 so a bad road layout shows up as real traffic jams that you fix by rebuilding roads. Taxes, road upkeep and city
 services drive the budget.
 
-![A city of about 10,000 residents with avenues and streets](docs/screenshot.png)
+![The interface: a curved avenue being drawn while a driving resident is shown in the side panel](docs/screenshot.png)
 
 ![The same city at night](docs/night.png)
 
@@ -32,9 +32,12 @@ services drive the budget.
 - Day and night: the sun and moon cross the sky, street lamps, windows, headlights and brake lights come on at dusk.
 - Budget by category (taxes per zone type, road upkeep, city services), a daily history chart and a tax slider. Low
   taxes do not buy free growth; running into debt cuts city services, demand falls and residents move away until the
-  budget is fixed. The top bar and the budget panel say what is happening and what to do.
-- Inspect cards for buildings, roads and junctions with the inspected thing highlighted in the world; settings for
-  graphics quality, interface size, edge scrolling and empty-lot markers, remembered between sessions.
+  budget is fixed. The alert ribbon and the budget drawer say what is happening and what to do.
+- A game HUD docked to the screen edges: a bottom bar with money, residents, demand, the tool slots, the clock and
+  the speed switch; a build tray for the active tool with picture slots, options and live length / radius / cost;
+  a selection panel on the right edge for people, homes, workplaces, cars, roads and junctions (with follow, back
+  and links); the city plate, alert ribbon and system buttons along the top. Settings for graphics quality,
+  interface size, edge scrolling and empty-lot markers are remembered between sessions.
 - Pause and three speeds (1x, 3x, 6x; a day lasts 4 minutes at 1x), one save slot, graphics quality presets.
 
 Out of scope for this version: terrain height, water, curved roads, transit, pedestrians, utilities, land value,
@@ -63,7 +66,7 @@ kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows;
 |---|---|
 | Left click / drag | Use the current tool (roads: click corners, double-click or Enter builds the path, or drag one straight road; zones and bulldozer: drag a rectangle, or the mode chosen with Tab) |
 | Right click, Esc | Roads: right click builds the path, Esc cancels it; other tools: cancel the current action. Esc again returns to Inspect, then opens the pause menu |
-| I | Inspect (hover buildings and roads for live numbers; click pins the card) |
+| I | Inspect (hover buildings, roads and cars for live numbers; click shows them in the side panel) |
 | R | Road tool (press again to switch street / avenue) |
 | J | Junctions: hover for lights, phases and queues; click to switch automatic / traffic lights / priority |
 | Z | Zone tool (press again to cycle residential / commercial / industrial / de-zone) |
@@ -71,8 +74,10 @@ kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows;
 | Tab | Next mode of the tool (road: path / block / junctions; zone: rectangle / along a road / fill a block; bulldozer: rectangle / road) |
 | Alt · Backspace · [ ] | Hold to place without snapping · remove the last road corner · block size of the block tool |
 | Ctrl+Z | Undo the last road or zoning action (removing a road costs the demolition fee, no refund) |
-| T | Traffic overlay · O cycles overlays (zones, traffic) |
-| Space · 1 2 3 | Pause · speed 1x / 3x / 6x |
+| T | Traffic map · O cycles maps (zones, traffic) and opens the maps drawer |
+| P · U | The city's people · budget |
+| F | Follow the person or car in the side panel (a pan key or Esc stops) |
+| Space · 1 2 3 4 | Pause · speed 1x / 3x / 6x / 12x |
 | WASD or arrows · Q / E | Pan · rotate (Shift pans faster); edge scrolling can be switched on in Settings |
 | Mouse wheel · middle drag | Zoom · rotate and tilt |
 | G | Graphics quality (Low / Medium / High) |

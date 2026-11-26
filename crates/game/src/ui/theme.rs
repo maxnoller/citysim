@@ -248,6 +248,7 @@ pub mod icon {
     pub const TRUCK: char = '\u{e194}';
     pub const EYE: char = '\u{e0ba}';
     pub const CHART: char = '\u{e2a3}'; // bar-chart-3
+    pub const LOCK: char = '\u{e10b}';
     pub const KEYBOARD: char = '\u{e284}';
     pub const SLASH: char = '\u{e51d}';
     pub const ROTATE: char = '\u{e148}'; // rotate-ccw

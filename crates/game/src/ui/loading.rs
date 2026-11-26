@@ -12,13 +12,18 @@ pub struct LoadingPlugin;
 
 impl Plugin for LoadingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_loading)
+        app.init_resource::<HoldLoading>()
+            .add_systems(Startup, spawn_loading)
             .add_systems(Update, update_loading.in_set(GameSet::Render));
     }
 }
 
 #[derive(Component)]
 struct LoadingRoot;
+
+/// Show the loading plate again and keep it (screenshots of it; dev only).
+#[derive(Resource, Default)]
+pub struct HoldLoading(pub bool);
 
 /// The sliding highlight of the progress track.
 #[derive(Component)]
@@ -38,7 +43,10 @@ fn spawn_loading(mut commands: Commands, fonts: Res<UiFonts>, ready: Res<SceneRe
     if ready.0 {
         return;
     }
-    let fonts = fonts.into_inner();
+    spawn_plate(&mut commands, fonts.into_inner());
+}
+
+fn spawn_plate(commands: &mut Commands, fonts: &UiFonts) {
     commands
         .spawn((
             Name::new("Loading"),
@@ -124,6 +132,7 @@ fn spawn_loading(mut commands: Commands, fonts: Res<UiFonts>, ready: Res<SceneRe
 }
 
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 fn update_loading(
     mut commands: Commands,
     time: Res<Time<Real>>,
@@ -132,14 +141,21 @@ fn update_loading(
     mut bar: Query<&mut Node, With<LoadingBar>>,
     mut faded: Query<(&LoadingFade, Option<&mut BackgroundColor>, Option<&mut TextColor>)>,
     mut fade: Local<f32>,
+    hold: Res<HoldLoading>,
+    fonts: Res<UiFonts>,
 ) {
+    if hold.0 && root.is_empty() && hold.is_changed() {
+        *fade = 0.0;
+        spawn_plate(&mut commands, &fonts);
+        return;
+    }
     let Ok(root) = root.single() else { return };
     // An indeterminate bar sliding back and forth.
     let s = (time.elapsed_secs() * 1.6).sin() * 0.5 + 0.5;
     for mut n in &mut bar {
         n.left = px(s * (TRACK_W - BAR_W));
     }
-    if !ready.0 {
+    if !ready.0 || hold.0 {
         return;
     }
     *fade += time.delta_secs() / FADE_S;

@@ -596,7 +596,7 @@ pub fn spawn_brackets(b: &mut ChildSpawnerCommands, id: Entity) {
             layout(n),
             BorderColor::all(t::ACCENT),
             Visibility::Hidden,
-            GlobalZIndex(2),
+            ZIndex(2),
         ));
     }
 }

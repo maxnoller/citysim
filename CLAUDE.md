@@ -36,8 +36,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `PointerOverUi` (ui writes), `HoveredCell` (shared computes from the `WorldCamera` ray).
 - `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose).
 - Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`.
-- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B Esc/right-click, Space 1 2 3 4, O, G, F5/F9,
-  J, Tab, Alt, Enter, Backspace, [ ], Ctrl+Z, P (people).
+- Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B Esc/right-click, Space 1 2 3 4, O (maps), T, G,
+  F5/F9, J, Tab, Alt, Enter, Backspace, [ ], Ctrl+Z, P (people), U (budget), F (follow), arrows + Enter in menus.
+- `DisplaySettings::lot_markers` defaults to false: gfx marks empty zoned lots only while zoning (the zone overlay)
+  unless the player picks "Always" (persisted as `lot_markers_always`).
 - Round 2 (ui writes, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`, `SnapFeedback` (snapped point,
   `SnapTarget`, `Guide` lines in sim metres, spacing), `PathPreview` (corners, legs with per-leg error and
   `upgrade_cells`, length, cost), `WorldHighlight` (hovered / pinned `WorldTarget`, doomed buildings and road cells),
@@ -142,9 +144,26 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `ui/shapes.rs` (`Draft` chains of straight / curve / continuous pieces, `GridFrame`, `Stretch` of road between
   junctions), `ui/plan.rs` (`Op`s checked in order on a scratch copy; road parts named by centre line and resolved
   when their turn comes; undo by serials / curves / zone cells), `ui/readout.rs` (the cursor card's words),
-  `ui/people.rs` (names, portraits, person / place / car / city `Sheet`s). Widgets (`context.rs`, `toolopts.rs`,
-  `people_panel.rs`) only display them. A plan is sent only when every step passes. `scripts/play.py road` presses
-  Enter to build its two-point road.
+  `ui/people.rs` (names, portraits, person / place / car / city `Sheet`s with headline, trip bar, mood reason and
+  action links). A plan is sent only when every step passes. `scripts/play.py road` presses Enter to build its
+  two-point road.
+- ui look (round 4 HUD): docked to the screen edges, angular, gunmetal plates with one purple accent. `ui/theme.rs`
+  is the only place for colours / sizes / fonts (accent = `ACCENT_SET`: base, fill gradient, ink-on-accent, text;
+  swap those five to change the purple). Fonts: Barlow Semi Condensed (text) and Barlow Condensed (figures),
+  static faces chosen by weight in `UiFonts`; Lucide for icons (it lacks arrows: no `→ ↑ ↓` in texts, use `›`).
+  `ui/plate.rs` + `assets/ui/shaders/plate.wesl`: `PlateMaterial` (a `UiMaterial`) draws chamfered / slanted plates;
+  the node's border widths are the edge line, its border radii are the corner cuts, slants are fractions of the
+  height (Bevy 0.20 passes border widths in px ordered left, top, right, bottom). Static plates share materials via
+  `PlateCache`; animated ones use `PlateAnim`. Widgets (`widgets.rs`): `ButtonKind::{Slot, Segment, Toggle, Item,
+  Action, Primary, Ghost, Row, Danger, Speed, Stepper, Sys}` with hover / press / active / `Disabled` / `Focused`
+  looks, `caps`, `figure`, `Justified` (text alignment; text bundles already carry a `TextLayout`). Layout:
+  `bar.rs` (bottom bar), `top.rs` (city plate, `Alert` ribbon, system buttons), `tray.rs` (drawer over the bar:
+  roads / zones / clear / junctions / maps / statistics pages; `budget.rs` and `panel.rs` fill the budget and city
+  people pages), `panel.rs` (right-edge selection panel, `PeopleView`, follow, leader line, `PanelArea`),
+  `context.rs` (cursor readout tag and the card builders), `menu.rs` (pause menu, `MenuFocus`, first-run plate),
+  `settings.rs` (settings and keys plates). `UiState::tray: Option<InfoTray>` (budget / people / maps / stats; a
+  tool's tray replaces it). The interface is designed at 1920x1080 (`UiScale` 1.0) and compacts below a logical
+  width of 1660 (`UiState::compact`).
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`), `CITYSIM_GFX_HOUR=h` (pin the drawn time of
@@ -163,6 +182,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   ribbon over it between the arm cuts of `junction::junction_shape`. `gfx/land.rs`: one index of drawn road edges per
   roads version; building lots, lot markers and zone cells are fitted clear of it in their own frame (`land::fit`).
   The free-form road tool is drawn from `shared::CurveToolView` (filled by ui's road tool).
+  Trees under the road being drawn are left out of their chunks while `CurveToolView` is active (re-meshed at most
+  every 0.2 s). A selected vehicle (`WorldHighlight::selected`) gets white + accent ground rings and a floating
+  diamond above it that grows with camera distance (unlit, readable at night); gfx's accent is the ui purple.
 
 ## Bevy 0.20 API facts (verify in `~/.cargo/registry/src/*/bevy*-0.20.1`)
 - Events between systems are `Message`s (`#[derive(Message)]`, `add_message`, `MessageWriter::write`); `AppExit`
