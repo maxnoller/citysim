@@ -49,6 +49,7 @@ pub mod junction;
 pub mod life;
 pub mod path;
 pub mod people;
+pub mod restore;
 pub mod rng;
 pub mod roads;
 pub mod save;
@@ -89,6 +90,7 @@ pub use junction::{
     ApproachView, Aspect, JunctionControl, JunctionSetting, JunctionState, JunctionView, SignalStage, Turn,
 };
 pub use people::{CommuteMoves, LifeCounts, People, PeopleDay, PlacePeople, TripTimes};
+pub use restore::{BuildingRecord, RestoreProblem};
 pub use rng::Rng;
 pub use roads::{NodeId, RoadKind, RoadNetwork, RoadNode, RoadSegment, SegmentId};
 pub use save::LoadError;
