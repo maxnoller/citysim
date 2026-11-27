@@ -102,9 +102,9 @@ pub fn large_loss(buildings: usize, people: usize) -> bool {
     buildings > LARGE_LOSS_BUILDINGS || people > LARGE_LOSS_PEOPLE
 }
 
-/// What taking these buildings down means, in the readout's words:
-/// "Demolishes 3 homes, 1 shop", "11 residents move out · 4 jobs go", and
-/// for a large loss a warning line. `cost`: what the demolition adds to a
+/// What taking these buildings down means, in the readout's words, on one
+/// line: "Demolishes 3 homes, 11 residents · $6", "2 homes, 1 shop · 23
+/// residents, 6 jobs"; for a large loss a warning line too. `cost`: what the demolition adds to a
 /// road's price (shown with the buildings when not zero).
 fn loss_lines(world: &World, ids: &[citysim_sim::BuildingId], cost: Option<i64>) -> Vec<Line> {
     let mut lines = Vec::new();
@@ -132,38 +132,40 @@ fn loss_lines(world: &World, ids: &[citysim_sim::BuildingId], cost: Option<i64>)
         .filter(|(_, n)| *n > 0)
         .map(|((one, many), n)| format!("{n} {}", if n == 1 { one } else { many }))
         .collect();
-    let mut value = words.join(", ");
-    if let Some(c) = cost.filter(|&c| c > 0) {
-        value = format!("{value} · {}", format::money(c));
-    }
-    lines.push(Line::new("Demolishes", value, Tone::Warn));
     let mut who = Vec::new();
     if residents > 0 {
         who.push(format!(
-            "{} {} out",
+            "{} {}",
             format::group(residents as u64),
-            if residents == 1 {
-                "resident moves"
-            } else {
-                "residents move"
-            }
+            if residents == 1 { "resident" } else { "residents" }
         ));
     }
     if jobs > 0 {
         who.push(format!(
             "{} {}",
             format::group(jobs as u64),
-            if jobs == 1 { "job goes" } else { "jobs go" }
+            if jobs == 1 { "job" } else { "jobs" }
         ));
     }
+    // "3 homes, 11 residents", "2 homes, 1 shop · 23 residents, 6 jobs".
+    let mut value = words.join(", ");
     if !who.is_empty() {
-        lines.push(Line::text(who.join(" · "), Tone::Warn));
+        value.push_str(if words.len() == 1 && who.len() == 1 {
+            ", "
+        } else {
+            " · "
+        });
+        value.push_str(&who.join(", "));
     }
+    if let Some(c) = cost.filter(|&c| c > 0) {
+        value = format!("{value} · {}", format::money(c));
+    }
+    lines.push(Line::new("Demolishes", value, Tone::Warn));
     let people = (residents + jobs) as usize;
     if large_loss(ids.len(), people) {
         lines.push(Line::text(
             format!(
-                "Large demolition: {} buildings, {} people · Ctrl+Z puts them back",
+                "Large demolition: {} buildings, {} people lose home or job",
                 ids.len(),
                 format::group(people as u64)
             ),

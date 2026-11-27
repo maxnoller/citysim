@@ -910,14 +910,17 @@ fn tag_of(card: &Card) -> Tag {
         let color = if r.color == t::TEXT { t::SLOT_INK } else { r.color };
         lines.push((text, color));
     }
-    // Refusals and snaps first: they matter most at the cursor.
+    // Refusals, snaps and warnings (what a road takes down) first: they
+    // matter most at the cursor.
     lines.sort_by_key(|(_, c)| {
         if *c == t::NEGATIVE {
             0
         } else if *c == t::ACCENT_TEXT {
             1
-        } else {
+        } else if *c == t::WARNING {
             2
+        } else {
+            3
         }
     });
     lines.truncate(TAG_LINES);
