@@ -31,7 +31,6 @@ struct LotChunks {
     key: Option<((u64, u64), (u64, u64))>,
     shown: bool,
     chunks: HashMap<IVec2, (u64, Entity, bool)>,
-    fits: land::FitCache,
 }
 
 pub struct LotsPlugin;
@@ -171,7 +170,7 @@ fn rebuild_lots(
     mut state: Local<LotChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut vis: Query<&mut Visibility>,
-    edges: Res<RoadEdges>,
+    (edges, mut fits): (Res<RoadEdges>, ResMut<land::FitCache>),
 ) {
     let show = settings.lot_markers && !full_overlay(*mode, *tool);
     if show != state.shown {
@@ -192,7 +191,7 @@ fn rebuild_lots(
         return;
     }
     state.key = Some(key);
-    let by_chunk = land::cells_by_chunk(world, &edges, &mut state.fits, CHUNK_M, |z| {
+    let by_chunk = land::cells_by_chunk(world, &edges, &mut fits, CHUNK_M, |z| {
         z.zone.is_some() && z.building.is_none()
     });
     let free: HashMap<CellRef, Zone> = by_chunk

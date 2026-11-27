@@ -318,34 +318,36 @@ impl TripReason {
     }
 }
 
-/// The reason of a trip of `purpose` from `from` to `to` that set off at
-/// `departed_tick`, made by someone working at `workplace` and living at
-/// `home`.
+/// The reason of a trip of `purpose` from `from` to `to` (`None`: the
+/// highway) that set off at `departed_tick`, made by someone working at
+/// `workplace` and living at `home`.
 fn reason_of(
     world: &World,
     purpose: TripPurpose,
-    (from, to): (Option<BuildingId>, BuildingId),
+    (from, to): (Option<BuildingId>, Option<BuildingId>),
     departed_tick: u64,
-    (home, workplace): (BuildingId, Option<BuildingId>),
+    (home, workplace): (Option<BuildingId>, Option<BuildingId>),
 ) -> TripReason {
     let t = &world.time;
     let since_midnight = t.tick as i64 - t.tick_of_day as i64;
     let tod = (departed_tick as i64 - since_midnight).rem_euclid(balance::TICKS_PER_DAY as i64);
     let hour = tod as f32 / balance::TICKS_PER_HOUR as f32;
     let at_work = |b: Option<BuildingId>| b.is_some() && b == workplace;
+    let to_home = to.is_some() && to == home;
     match purpose {
         TripPurpose::ToWork => TripReason::ToWork,
         TripPurpose::ToHome => TripReason::HomeFromWork,
         TripPurpose::MoveIn => TripReason::MovingIn,
         TripPurpose::MoveOut => TripReason::MovingOut,
         TripPurpose::Goods => TripReason::Delivery,
-        TripPurpose::Shopping if to == home => TripReason::HomeFromShopping,
+        TripPurpose::Shopping if to_home => TripReason::HomeFromShopping,
         TripPurpose::Shopping if at_work(from) => TripReason::ShoppingAfterWork,
         TripPurpose::Shopping => TripReason::Groceries,
-        TripPurpose::Leisure if at_work(Some(to)) => TripReason::BackToWork,
+        TripPurpose::Leisure if at_work(to) => TripReason::BackToWork,
+        // Home first: someone off duty may have lunched where they work.
+        TripPurpose::Leisure if to_home && crate::day::midday_visit(hour) => TripReason::HomeFromLunch,
+        TripPurpose::Leisure if to_home => TripReason::HomeFromNightOut,
         TripPurpose::Leisure if at_work(from) => TripReason::LunchBreak,
-        TripPurpose::Leisure if to == home && crate::day::midday_visit(hour) => TripReason::HomeFromLunch,
-        TripPurpose::Leisure if to == home => TripReason::HomeFromNightOut,
         TripPurpose::Leisure if crate::day::midday_visit(hour) => TripReason::OutForLunch,
         TripPurpose::Leisure => TripReason::NightOut,
     }
@@ -400,6 +402,9 @@ pub struct NextStep {
     pub activity: Activity,
     /// Why they set off, when `activity` is `Travelling`.
     pub purpose: Option<TripPurpose>,
+    /// The same in more words (`TripReason::text()`): a trip home from a
+    /// lunch is not a trip home from work.
+    pub reason: Option<TripReason>,
     /// Where it happens (or where the trip goes).
     pub place: Option<BuildingId>,
     /// When it starts (tick), if known. For a car trip under way: the
@@ -432,10 +437,28 @@ pub fn plan(world: &World, id: CitizenId) -> Option<DayPlan> {
     let now = world.time.tick;
     let shift = crate::day::next_shift(world, id).map(|(_, leave, end)| (leave.max(0) as u64, end.max(0) as u64));
     let home = v.home;
-    let step = |activity, purpose, place, at_tick| {
+    // `made` is the trip's own purpose where `purpose` simplifies it (the
+    // way home from the shops is a `ToHome` step of a `Shopping` trip).
+    let step = |activity, purpose: Option<TripPurpose>, place: Option<BuildingId>, at_tick: Option<u64>| {
         Some(NextStep {
             activity,
             purpose,
+            reason: None,
+            place,
+            at_tick,
+        })
+    };
+    let trip_step = |made: TripPurpose, purpose: TripPurpose, from: Option<BuildingId>, place, at_tick: Option<u64>| {
+        Some(NextStep {
+            activity: Activity::Travelling,
+            purpose: Some(purpose),
+            reason: Some(reason_of(
+                world,
+                made,
+                (from, place),
+                at_tick.unwrap_or(now),
+                (Some(home), v.workplace),
+            )),
             place,
             at_tick,
         })
@@ -466,24 +489,27 @@ pub fn plan(world: &World, id: CitizenId) -> Option<DayPlan> {
             let until = Some(end.max(now));
             (
                 until,
-                step(Activity::Travelling, Some(TripPurpose::ToHome), Some(home), until),
+                trip_step(TripPurpose::ToHome, TripPurpose::ToHome, v.inside, Some(home), until),
             )
         }
         (Activity::Shopping | Activity::Leisure, None) => {
             let until = Some(c.until_tick.max(now));
-            (
-                until,
-                step(Activity::Travelling, Some(TripPurpose::ToHome), Some(home), until),
-            )
+            let made = if c.activity == Activity::Shopping {
+                TripPurpose::Shopping
+            } else {
+                TripPurpose::Leisure
+            };
+            (until, trip_step(made, TripPurpose::ToHome, v.inside, Some(home), until))
         }
         (Activity::Sleeping, None) => {
             let wake = c.until_tick.max(now);
             match shift {
                 Some((leave, _)) if leave <= wake => (
                     Some(leave),
-                    step(
-                        Activity::Travelling,
-                        Some(TripPurpose::ToWork),
+                    trip_step(
+                        TripPurpose::ToWork,
+                        TripPurpose::ToWork,
+                        Some(home),
                         v.workplace,
                         Some(leave),
                     ),
@@ -499,9 +525,10 @@ pub fn plan(world: &World, id: CitizenId) -> Option<DayPlan> {
             match shift {
                 Some((leave, _)) if leave < bed_t || (bed_t <= now && leave <= now) => (
                     None,
-                    step(
-                        Activity::Travelling,
-                        Some(TripPurpose::ToWork),
+                    trip_step(
+                        TripPurpose::ToWork,
+                        TripPurpose::ToWork,
+                        Some(home),
                         v.workplace,
                         Some(leave.max(now)),
                     ),
@@ -643,9 +670,9 @@ pub fn citizen(world: &World, id: CitizenId) -> Option<CitizenView<'_>> {
                 reason: reason_of(
                     world,
                     j.purpose,
-                    (j.from, j.to),
+                    (j.from, Some(j.to)),
                     j.departed_tick,
-                    (h.home, c.workplace()),
+                    (Some(h.home), c.workplace()),
                 ),
             })
         }
@@ -760,6 +787,9 @@ pub fn building_at(world: &World, pos: [f32; 2]) -> Option<BuildingId> {
 #[derive(Debug, Clone, Copy)]
 pub struct VehicleView {
     pub purpose: TripPurpose,
+    /// Why the trip is made (`TripReason::text()`), judged from the
+    /// owner's home and workplace and the time the trip was asked for.
+    pub reason: TripReason,
     /// The household it belongs to (none for trucks and cars of households
     /// that have left).
     pub household: Option<HouseholdId>,
@@ -800,16 +830,31 @@ pub fn vehicle(world: &World, id: VehicleId) -> Option<VehicleView> {
     };
     let driver = t.citizen.filter(|&c| world.citizens.contains_key(c));
     let now = world.time.tick;
+    let owner = t.owner.filter(|&c| world.citizens.contains_key(c));
+    let origin_building = t.from_building.or_else(|| at(t.from));
+    let destination_building = t.to_building.or_else(|| at(t.to));
+    let (home, workplace) = owner
+        .or(driver)
+        .and_then(|c| citizen(world, c))
+        .map_or((None, None), |c| (Some(c.home), c.workplace));
+    let home = home.or_else(|| v.household.and_then(|h| world.households.get(h)).map(|h| h.home));
     Some(VehicleView {
         purpose: t.purpose,
+        reason: reason_of(
+            world,
+            t.purpose,
+            (origin_building, destination_building),
+            t.requested_tick,
+            (home, workplace),
+        ),
         household: v.household,
         driver,
-        owner: t.owner.filter(|&c| world.citizens.contains_key(c)),
+        owner,
         occupants: (occupants(world, id).count() + t.party as usize).min(u8::MAX as usize) as u8,
         origin: t.from,
         destination: t.to,
-        origin_building: t.from_building.or_else(|| at(t.from)),
-        destination_building: t.to_building.or_else(|| at(t.to)),
+        origin_building,
+        destination_building,
         party: t.party,
         cargo: t.cargo,
         requested_tick: t.requested_tick,

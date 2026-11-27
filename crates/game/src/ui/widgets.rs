@@ -883,10 +883,13 @@ fn button_visuals(
         if let Some(act) = active_look(b.kind) {
             // Hovering an active button lifts it a touch.
             let act = blend(act, hover_look(ButtonKind::Primary), a.hover * 0.35);
-            look = blend(look, act, a.active);
+            // Selected but not in use (disabled): a faint fill and an accent
+            // edge, so its accent-coloured label stays readable.
+            look = blend(look, act, a.active * (1.0 - 0.8 * a.disabled));
         }
         if a.disabled > 0.0 {
-            look.border = t::mix(look.border, t::alpha(t::LINE, 0.5), a.disabled);
+            let edge = t::mix(t::alpha(t::LINE, 0.5), t::alpha(t::ACCENT, 0.7), a.active);
+            look.border = t::mix(look.border, edge, a.disabled);
         }
         if a.press > 0.0 {
             look.top = t::mix(look.top, look.bottom, 0.6 * a.press);
@@ -964,7 +967,9 @@ fn button_visuals(
         if b.kind == ButtonKind::Primary {
             c = t::ACCENT_INK;
         }
-        c = t::mix(c, t::TEXT_FAINT, anim.disabled * 0.8);
+        c = t::mix(c, t::TEXT_FAINT, anim.disabled * 0.8 * (1.0 - anim.active));
+        // Selected but disabled: the accent text on the faint fill.
+        c = t::mix(c, t::ACCENT_TEXT, anim.disabled * anim.active);
         if color.0 != c {
             color.0 = c;
         }

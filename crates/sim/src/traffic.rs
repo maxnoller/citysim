@@ -410,10 +410,21 @@ pub fn truck_share(world: &World) -> f32 {
 
 /// Is this citizen's car trip one of the drawn ones ([`car_share`])?
 pub(crate) fn drawn_driver(world: &World, citizen: CitizenId) -> bool {
+    drawn_at(world, citizen, car_share(world))
+}
+
+/// ... a lunch (a midday trip to or from a venue): drawn at most at a big
+/// city's share (`balance::LUNCH_CAR_SHARE`) whatever the town's size;
+/// a small town's lunches are short hops, most of them off screen.
+pub(crate) fn drawn_lunch(world: &World, citizen: CitizenId) -> bool {
+    drawn_at(world, citizen, car_share(world).min(balance::LUNCH_CAR_SHARE))
+}
+
+fn drawn_at(world: &World, citizen: CitizenId, share: f32) -> bool {
     world
         .citizens
         .get(citizen)
-        .is_some_and(|c| crate::people::habit(c.seed, 0xCA75_4A3E) < car_share(world))
+        .is_some_and(|c| crate::people::habit(c.seed, 0xCA75_4A3E) < share)
 }
 
 /// [`TrafficState::delay_factor`], at least 1.

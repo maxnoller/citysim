@@ -194,6 +194,46 @@ pub(crate) fn building_near(world: &World, c: &Curve, reach: f32) -> Option<(Bui
     best.map(|b| (b.1, b.2))
 }
 
+/// How far the quadrilateral `poly` reaches into the reserve of any road
+/// (metres; 0 or less: clear) and the unit direction away from the road it
+/// reaches into deepest. Measured as `building_near` measures it, so a
+/// building placed clear of every reserve never stands in the way of the
+/// identical road being built again.
+pub(crate) fn reserve_intrusion(world: &World, poly: &[[f32; 2]; 4]) -> (f32, [f32; 2]) {
+    let centre = [
+        poly.iter().map(|p| p[0]).sum::<f32>() / 4.0,
+        poly.iter().map(|p| p[1]).sum::<f32>() / 4.0,
+    ];
+    let blo = poly
+        .iter()
+        .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+    let bhi = poly
+        .iter()
+        .fold([f32::NEG_INFINITY; 2], |a, p| [a[0].max(p[0]), a[1].max(p[1])]);
+    let mut worst = (f32::NEG_INFINITY, [0.0, 0.0]);
+    for (_, seg) in world.roads.segments.iter() {
+        let reach = seg.kind.reserve_half_width_m();
+        let (lo, hi) = seg.curve.bounds();
+        if blo[0] > hi[0] + reach || bhi[0] < lo[0] - reach || blo[1] > hi[1] + reach || bhi[1] < lo[1] - reach {
+            continue;
+        }
+        let pts = seg.curve.flatten(0.05);
+        for w in pts.windows(2) {
+            let mut d = point_polygon_dist(w[0], poly);
+            for k in 0..4 {
+                d = d.min(seg_seg_dist(w[0], w[1], poly[k], poly[(k + 1) % 4]));
+            }
+            if reach - d > worst.0 {
+                let q = seg.curve.nearest(centre).2;
+                let (dx, dy) = (centre[0] - q[0], centre[1] - q[1]);
+                let n = libm::sqrtf(dx * dx + dy * dy).max(1e-6);
+                worst = (reach - d, [dx / n, dy / n]);
+            }
+        }
+    }
+    worst
+}
+
 /// Plan a road of `kind` along `curve`. `shorthand`: the cell command
 /// (`BuildRoad`), whose errors keep their old cell form.
 pub(crate) fn plan_road(world: &World, curve: Curve, kind: RoadKind) -> Result<RoadPlan, CommandError> {

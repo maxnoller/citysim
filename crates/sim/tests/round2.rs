@@ -808,5 +808,8 @@ fn long_scripted_run_has_a_pinned_checksum() {
 /// losses per booked day), then by the r6 rules: the day (lunch breaks,
 /// midday outings, the late shift, nights out), signals by pressure and
 /// queue, courtesy at arterial give-ways, street headway, pocket lengths,
-/// cheaper avenues and money through the day.
-const PINNED_CHECKSUM: u64 = 0x08bdb00bb471b5ef;
+/// cheaper avenues and money through the day; then by lunch out giving way
+/// to slow roads (and drawn at the big city's car share), courtesy at every
+/// priority junction, a 2.2 s street headway and the late shift an hour
+/// later.
+const PINNED_CHECKSUM: u64 = 0x36b5f64d457b3b01;

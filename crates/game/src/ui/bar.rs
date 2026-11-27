@@ -211,7 +211,14 @@ fn spawn_vitals(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 column_gap: px(11),
                 ..default()
             },
-            Some(Tooltip::new("Budget", "Taxes, road upkeep and city services by day; the tax rate.").key("U")),
+            Some(
+                Tooltip::new(
+                    "Budget",
+                    "Taxes, road upkeep and city services by day; the tax rate. Each hour the city is paid a 24th of \
+                     yesterday's net; midnight books the day and settles the rest.",
+                )
+                .key("U"),
+            ),
             |b, _| {
                 b.spawn((
                     super::widgets::icon(fonts, icon::WALLET, 28.0, t::ACCENT_TEXT),
@@ -790,7 +797,8 @@ fn spawn_time(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
             Wide,
             info_tip(
                 "Day",
-                "A day lasts 16 minutes at normal speed. Taxes and upkeep are booked at midnight.",
+                "A day lasts 16 minutes at normal speed. Money comes in every hour (a 24th of yesterday's net); \
+                 taxes and upkeep are booked at midnight, which settles the difference.",
             ),
         ))
         .with_children(|d| {
@@ -1000,8 +1008,9 @@ fn update_vitals(
             BarText::MoneyDelta => (
                 match (&note, booked) {
                     (Some(n), _) => n.short.to_uppercase(),
-                    (None, true) => format!("{} / day", format::signed_money(net)).to_uppercase(),
-                    (None, false) => "BOOKED AT MIDNIGHT".to_string(),
+                    // What each in-game hour pays in (`economy::hourly`).
+                    (None, true) => format!("{} / hour", format::signed_money(net / 24)).to_uppercase(),
+                    (None, false) => "FIRST TAXES AT MIDNIGHT".to_string(),
                 },
                 delta_color,
             ),

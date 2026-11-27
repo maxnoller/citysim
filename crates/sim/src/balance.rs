@@ -222,8 +222,10 @@ pub const MIN_GAP_M: f32 = 5.5;
 /// about 0.7 at speed); on streets `STREET_FOLLOW_HEADWAY_S`.
 pub const FOLLOW_HEADWAY_S: f32 = 1.1;
 /// ... on streets: 2.75 m lanes lined with driveways and kerbside activity
-/// are driven with more distance (about 0.45 cars/s per lane from a queue).
-pub const STREET_FOLLOW_HEADWAY_S: f32 = 2.6;
+/// are driven with more distance (about 0.5 cars/s, 1,350 an hour, per lane
+/// from a queue). 2.6 s made a small town of streets give up trips at its
+/// T junctions (queues backed up across them); 2.2 s keeps it as it was.
+pub const STREET_FOLLOW_HEADWAY_S: f32 = 2.2;
 /// Acceleration, m/s².
 pub const ACCELERATION: f32 = 3.5;
 /// Comfortable braking used towards stop lines and junctions, m/s².
@@ -505,6 +507,9 @@ pub const MIN_VEHICLE_BUDGET: usize = 150;
 pub const CAR_SHARE_LARGE: f32 = 0.4;
 pub const CAR_SHARE_FROM_POP: f32 = 1_500.0;
 pub const CAR_SHARE_TO_POP: f32 = 5_000.0;
+/// Lunches (midday trips to and from venues) are drawn at most at this
+/// share, the big city's (`traffic::drawn_lunch`).
+pub const LUNCH_CAR_SHARE: f32 = CAR_SHARE_LARGE;
 /// Goods deliveries and exports driven as real trucks, as a share of the
 /// car share (trucks make up about a tenth of the traffic).
 pub const TRUCK_SHARE: f32 = 0.5;
@@ -822,10 +827,12 @@ pub const JOB_DIST_SCALE_M: f32 = 1000.0;
 pub const INDUSTRY_START_H: [f32; 2] = [6.5, 8.5];
 pub const OFFICE_START_H: [f32; 2] = [8.5, 9.5];
 pub const SHOP_START_H: [f32; 2] = [8.0, 9.5];
-pub const LATE_SHIFT_OFFSET_H: f32 = 3.0;
+pub const LATE_SHIFT_OFFSET_H: f32 = 4.0;
 /// The late shift's personal offset, +- hours (triangular; narrower than
-/// [`SHIFT_PERSONAL_SPREAD_H`]: it ends after the evening rush, with the
-/// shops).
+/// [`SHIFT_PERSONAL_SPREAD_H`]: it starts after the lunch hour and ends
+/// after the evening rush, soon after the shops close; starting an hour
+/// earlier put its commute into the midday of a small town still busy with
+/// the morning's).
 pub const LATE_SHIFT_SPREAD_H: f32 = 0.75;
 /// Shop workers on the late shift (shops stay staffed into the evening).
 pub const LATE_SHIFT_SHARE: f32 = 0.35;
@@ -936,6 +943,12 @@ pub const MIDDAY_VISIT_SPREAD_H: f32 = 0.5;
 /// the car they came in, or on foot; the shift's end is unchanged). Not
 /// when less than [`LUNCH_MIN_LEFT_H`] of the shift would be left.
 pub const LUNCH_BREAK_SHARE: f32 = 0.3;
+/// Lunch out gives way to slow roads: with commutes taking up to the first
+/// value times their free-flow time (`traffic::delay_factor`) everyone who
+/// would go out for lunch (or take a lunch break out) does; from the second
+/// nobody does; linear between. A town whose roads are already slow is not
+/// loaded further at midday (in a small town every trip is a real car).
+pub const LUNCH_DELAY: [f32; 2] = [2.0, 3.0];
 pub const LUNCH_BREAK_H: [f32; 2] = [11.0, 12.5];
 pub const LUNCH_BREAK_VISIT_H: f32 = 0.5;
 pub const LUNCH_MAX_TRIP_H: f32 = 0.75;

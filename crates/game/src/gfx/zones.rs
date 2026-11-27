@@ -50,7 +50,6 @@ type ChunkKey = ((u64, u64), (u64, u64), bool);
 struct ZoneChunks {
     /// Grid and roads keys the chunks were last built for.
     key: Option<ChunkKey>,
-    fits: land::FitCache,
     shown: bool,
     chunks: HashMap<IVec2, (u64, Entity, bool)>,
 }
@@ -160,6 +159,7 @@ fn rebuild_zones(
     mut meshes: ResMut<Assets<Mesh>>,
     mut vis: Query<&mut Visibility>,
     edges: Res<RoadEdges>,
+    mut fits: ResMut<land::FitCache>,
 ) {
     let show = full_overlay(*mode, *tool);
     if show != state.shown {
@@ -188,7 +188,7 @@ fn rebuild_zones(
     }
     state.key = Some(key);
     let world = &sim.world;
-    let by_chunk = land::cells_by_chunk(world, &edges, &mut state.fits, CHUNK_M, |z| {
+    let by_chunk = land::cells_by_chunk(world, &edges, &mut fits, CHUNK_M, |z| {
         z.zone.is_some() || (land && z.building.is_none())
     });
     let zones: HashMap<CellRef, Zone> = by_chunk

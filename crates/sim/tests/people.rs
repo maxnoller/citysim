@@ -22,31 +22,36 @@ fn grid_city(seed: u64, days: u64) -> (World, GridPlayer) {
 /// road (trucks aside) carries its driver, who is in it, or a household
 /// moving out; nobody waits for a car that is not queued; an off-screen
 /// trip ends when it is due (plus the decision bucket's delay). At 03:00
-/// few are travelling (early-shift workers setting off for a long drive,
-/// the last cars home from a night out, newcomers still driving in), far
-/// fewer than at 08:00: measured over three towns and two nights each.
+/// few residents are travelling (early-shift workers setting off for a long
+/// drive, the last cars home from a night out), far fewer than at 08:00;
+/// newcomers may still be driving in through the town's one highway
+/// connection (how many depends on how fast the town grows): measured over
+/// three towns and two nights each.
 #[test]
 fn people_stay_with_their_car_and_nights_are_quiet() {
-    let (mut night, mut rush) = (Vec::new(), Vec::new());
+    let (mut night, mut rush, mut newcomers) = (Vec::new(), Vec::new(), Vec::new());
     for seed in [11, 12, 13] {
-        let (n, r) = nights_and_mornings(seed);
+        let (n, r, m) = nights_and_mornings(seed);
         night.extend(n);
         rush.extend(r);
+        newcomers.extend(m);
     }
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
-    let (n, r) = (mean(&night), mean(&rush));
-    eprintln!("travelling at 03:00 {night:?} (mean {n:.3}), at 08:00 {rush:?} (mean {r:.3})");
-    // Most of those still on the way at 03:00 are newcomers driving in
-    // through the town's one highway connection.
-    assert!(n < 0.06, "night travel {night:?}");
-    assert!(n * 1.6 < r, "nights quieter than mornings: {n} vs {r}");
+    let (n, r, m) = (mean(&night), mean(&rush), mean(&newcomers));
+    eprintln!(
+        "residents travelling at 03:00 {night:?} (mean {n:.3}), newcomers {m:.3}, at 08:00 {rush:?} (mean {r:.3})"
+    );
+    assert!(n < 0.01, "residents' night travel {night:?}");
+    assert!(m < 0.1, "newcomers still driving in at 03:00 {newcomers:?}");
+    assert!((n + m) * 1.6 < r, "nights quieter than mornings: {n} + {m} vs {r}");
 }
 
 /// Two days of a grid town from its first day on, checking the people /
 /// car bookkeeping; the travelling share at 03:00 and 08:00 each day.
-fn nights_and_mornings(seed: u64) -> (Vec<f32>, Vec<f32>) {
+fn nights_and_mornings(seed: u64) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let (mut w, mut p) = grid_city(seed, 1);
     let mut night = Vec::new();
+    let mut newcomers = Vec::new();
     let mut rush = Vec::new();
     let (mut cars, mut with_driver) = (0u64, 0u64);
     for _ in 0..2 * DAY {
@@ -81,7 +86,15 @@ fn nights_and_mornings(seed: u64) -> (Vec<f32>, Vec<f32>) {
         }
         let share = inspect::activity_shares(&w)[Activity::Travelling.index()];
         if w.time.tick_of_day == 3 * balance::TICKS_PER_HOUR {
-            night.push(share);
+            let n = w.citizens.len().max(1) as f32;
+            let moving_in = w
+                .citizens
+                .values()
+                .filter(|c| matches!(c.location, Location::Travelling(j) if j.purpose == TripPurpose::MoveIn))
+                .count() as f32
+                / n;
+            night.push(share - moving_in);
+            newcomers.push(moving_in);
         }
         if w.time.tick_of_day == 8 * balance::TICKS_PER_HOUR {
             rush.push(share);
@@ -92,7 +105,7 @@ fn nights_and_mornings(seed: u64) -> (Vec<f32>, Vec<f32>) {
     }
     assert!(w.stats.population > 1_000);
     assert!(with_driver * 100 >= cars * 98, "{with_driver} of {cars}");
-    (night, rush)
+    (night, rush, newcomers)
 }
 
 /// A commuter learns how long the trip to work takes and leaves early

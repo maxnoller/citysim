@@ -760,6 +760,39 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            // The hovered-cell frame and the fill preview on land cut where
+            // two roads' rows meet at an angle (`zoning::cell_shape`).
+            name: "zone-cut",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                let s = sim(w);
+                let f = town_focus(w);
+                let cut = citysim_sim::zoning::cell_shapes(s)
+                    .into_iter()
+                    .filter(|(c, p)| {
+                        p.len() >= 3
+                            && s.zoning
+                                .cell(*c)
+                                .is_some_and(|z| z.zone.is_none() && z.building.is_none())
+                    })
+                    .map(|(_, p)| {
+                        let n = p.len() as f32;
+                        let at = [
+                            p.iter().map(|q| q[0]).sum::<f32>() / n,
+                            p.iter().map(|q| q[1]).sum::<f32>() / n,
+                        ];
+                        (dist(at, f), at)
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                let Some((_, at)) = cut else { return };
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Zone(Some(Zone::Residential));
+                w.resource_mut::<ToolModes>().zone = ZoneMode::Fill;
+                point(w, Some(at));
+                look(w, at, 110.0);
+            },
+        },
+        Step {
             name: "zone-marquee",
             wait: 1.2,
             setup: |w| {
@@ -1100,6 +1133,39 @@ fn steps() -> Vec<Step> {
                 w.resource_mut::<SimClock>().paused = true;
                 if let Some((id, at)) = car {
                     w.write_message(UiAction::Vehicle(id));
+                    look(w, add(at, [1.0, 0.0], 30.0), 140.0);
+                }
+            },
+        },
+        Step {
+            // Someone driving on a midday trip (demo hour 12): the panel names
+            // it by its reason ("Driving out for lunch").
+            name: "people-lunch",
+            wait: 1.5,
+            setup: |w| {
+                use citysim_sim::inspect::{self, TripReason};
+                reset(w);
+                let s = sim(w);
+                let f = town_focus(w);
+                let who = s
+                    .vehicles
+                    .iter()
+                    .filter(|(_, v)| v.segment.is_some())
+                    .filter_map(|(id, v)| {
+                        let x = inspect::vehicle(s, id)?;
+                        let lunch = matches!(
+                            x.reason,
+                            TripReason::LunchBreak
+                                | TripReason::BackToWork
+                                | TripReason::OutForLunch
+                                | TripReason::HomeFromLunch
+                        );
+                        lunch.then_some((x.driver?, citysim_sim::drive::vehicle_pose(s, v).0))
+                    })
+                    .min_by(|a, b| dist(a.1, f).total_cmp(&dist(b.1, f)));
+                w.resource_mut::<SimClock>().paused = true;
+                if let Some((id, at)) = who {
+                    w.write_message(UiAction::Person(id));
                     look(w, add(at, [1.0, 0.0], 30.0), 140.0);
                 }
             },

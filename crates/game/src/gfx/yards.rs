@@ -11,6 +11,12 @@
 //! * industry: a concrete or gravel storage yard behind a wire fence, with
 //!   containers, pallets, crates, tanks and at higher levels a lorry.
 //!
+//! The furnished part reaches only so far back: a garden one and a half
+//! times the house's depth (12-16 m, at most two rows), a car park or storage
+//! yard at most three rows; the rest of a deep lot is open common green
+//! (one shade for every lot, so neighbours' greens join into a block's
+//! green middle; grass and a few trees, no fences or hedges across it).
+//!
 //! Varied by the building's seed and level. Merged into one mesh per 256 m
 //! chunk (all yards share the city material), with a near level of detail
 //! (everything) and a far one (ground, boundaries and trees); a chunk is
@@ -46,6 +52,15 @@ const FAR: (std::ops::Range<f32>, std::ops::Range<f32>) = (560.0..610.0, 1e6..1e
 const GROUND_Y: f32 = 0.028;
 /// Clearance kept from the drawn roads, metres.
 const ROAD_GAP: f32 = 0.4;
+/// Furnished yard behind the building: a home's garden one and a half times
+/// the house's depth (a house about 8 m deep at level 1, 10 m at level 2,
+/// flats more), at most `GARDEN_MAX_M` (two rows); a car park or storage
+/// yard at most `WORK_YARD_ROWS`.
+const HOUSE_DEPTH_M: [f32; 3] = [8.0, 10.0, 12.0];
+const GARDEN_MAX_M: f32 = 16.0;
+const WORK_YARD_ROWS: f32 = 3.0;
+/// Trees on the common green, per square metre.
+const GREEN_TREES_PER_M2: f32 = 1.0 / 260.0;
 
 /// One yard to draw.
 #[derive(Debug, Clone)]
@@ -59,6 +74,9 @@ struct Yard {
     quad: [Vec2; 4],
     /// Unit direction towards the building (and the road), world `(x, z)`.
     front: Vec2,
+    /// The lot's land behind the furnished yard, drawn as open common
+    /// green (same corner order).
+    rest: Option<[Vec2; 4]>,
 }
 
 impl Yard {
@@ -97,16 +115,29 @@ fn yard_of(world: &World, id: BuildingId, b: &Building) -> Option<Yard> {
         return None;
     }
     let q = world.zoning.lot_quad(fp)?.map(Vec2::from);
-    let t = balance::BUILT_DEPTH as f32 / fp.size[1].max(1) as f32;
-    let fl = q[0] + (q[3] - q[0]) * t;
-    let fr = q[1] + (q[2] - q[1]) * t;
+    let rows = fp.size[1].max(1) as f32;
+    let built = balance::BUILT_DEPTH as f32;
+    let row_m = (q[3].distance(q[0]) + q[2].distance(q[1])) * 0.5 / rows;
+    let cap = match b.kind {
+        Zone::Residential => {
+            let house = HOUSE_DEPTH_M[(b.level.clamp(1, 3) - 1) as usize];
+            (1.5 * house).min(GARDEN_MAX_M) / row_m.max(1.0)
+        }
+        Zone::Commercial | Zone::Industrial => WORK_YARD_ROWS,
+    };
+    let t = built / rows;
+    let tb = ((built + cap) / rows).min(1.0);
+    let along = |s: f32| (q[0] + (q[3] - q[0]) * s, q[1] + (q[2] - q[1]) * s);
+    let (fl, fr) = along(t);
+    let (bl, br) = along(tb);
     Some(Yard {
         id,
         kind: b.kind,
         level: b.level,
         seed: b.seed,
-        quad: [fl, fr, q[2], q[3]],
+        quad: [fl, fr, br, bl],
         front: Vec2::from(b.front_dir()).normalize_or(Vec2::Y),
+        rest: (tb < 0.999).then_some([bl, br, q[2], q[3]]),
     })
 }
 
@@ -166,7 +197,7 @@ fn yard_hash(yards: &[Yard]) -> u64 {
     let mut h = DefaultHasher::new();
     for y in yards {
         (y.id, y.kind, y.level, y.seed).hash(&mut h);
-        for p in y.quad {
+        for p in y.quad.iter().chain(y.rest.iter().flatten()) {
             p.x.to_bits().hash(&mut h);
             p.y.to_bits().hash(&mut h);
         }
@@ -325,6 +356,9 @@ fn draw_yard(
     cars: &mut Cars,
     lorry: &mut Option<MeshBuilder>,
 ) {
+    if let Some(rest) = y.rest {
+        common_green(near, far, rest, y.seed, edges);
+    }
     let Some(q) = clear_of_roads(y.quad, edges) else { return };
     let mut rng = Stream::new(y.seed ^ 0x7a2d_51e3);
     let (x0, z0, x1, z1) = y.inner();
@@ -401,6 +435,29 @@ fn draw_yard(
     let at = v3(y.centre(), 0.0);
     near.append(&m, at, y.yaw(), Vec3::ONE, [1.0; 4]);
     far.append(&f, at, y.yaw(), Vec3::ONE, [1.0; 4]);
+}
+
+/// Open common green on the back of a deep lot: grass in one shade for
+/// every lot (neighbouring greens join up) and a few trees; no boundaries.
+fn common_green(near: &mut MeshBuilder, far: &mut MeshBuilder, quad: [Vec2; 4], seed: u32, edges: &RoadEdges) {
+    let Some(q) = clear_of_roads(quad, edges) else { return };
+    let green = lin(mix(palette::GRASS, palette::GRASS_LIGHT, 0.35));
+    for m in [&mut *near, &mut *far] {
+        m.quad_up(q.map(|p| v3(p, GROUND_Y)), green);
+    }
+    let area = 0.5 * ((q[2] - q[0]).perp_dot(q[3] - q[1])).abs();
+    let mut rng = Stream::new(seed ^ 0x6c3e_9a11);
+    let want = area * GREEN_TREES_PER_M2;
+    let n = want.floor() as usize + usize::from(rng.chance(want.fract()));
+    for _ in 0..n {
+        // A point inside the quad (bilinear), kept off its edges.
+        let (u, v) = (rng.range(0.15, 0.85), rng.range(0.15, 0.85));
+        let p = (q[0].lerp(q[1], u)).lerp(q[3].lerp(q[2], u), v);
+        if edges.clearance(p) < 3.0 {
+            continue;
+        }
+        tree(near, far, &mut rng, p);
+    }
 }
 
 fn tree(m: &mut MeshBuilder, f: &mut MeshBuilder, rng: &mut Stream, p: Vec2) {
