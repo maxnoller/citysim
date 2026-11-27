@@ -846,9 +846,34 @@ pub struct Walker {
     pub leg_d: [f32; 2],
     pub leg_len: f32,
     pub next_mark: u16,
+    /// The crossing of the current leg, resolved (not saved).
+    #[serde(skip)]
+    ci: CiCache,
+}
+
+/// A walker's current crossing as an index into the network: (network's
+/// roads version, leg, crossing + 1; 0 none). Derived: always equal.
+#[derive(Debug, Clone, Copy, Default)]
+struct CiCache(u64, u16, u32);
+
+impl PartialEq for CiCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Walker {
+    /// The index in `net` of the crossing on the current leg (cached).
+    fn crossing_index(&mut self, net: &WalkNet) -> Option<u32> {
+        let CiCache(v, leg, ci) = self.ci;
+        if v == net.roads_version && v != 0 && leg == self.leg {
+            return ci.checked_sub(1);
+        }
+        let found = self.mark_at(self.leg).and_then(|k| net.crossing(k)).map(|x| x.0);
+        self.ci = CiCache(net.roads_version, self.leg, found.map_or(0, |i| i + 1));
+        found
+    }
+
     /// The crossing on the current leg, if any.
     pub fn crossing(&self) -> Option<CrossingKey> {
         self.mark_at(self.leg)
@@ -1256,6 +1281,7 @@ pub(crate) fn start(
         leg_d: [1.0, 0.0],
         leg_len: 0.0,
         next_mark: u16::MAX,
+        ci: CiCache::default(),
     };
     w.enter_leg();
     w.update_pose();
@@ -1329,7 +1355,7 @@ fn gather(world: &mut World) {
     }
     touched.clear();
     calls.clear();
-    for w in walkers.values() {
+    for (_, w) in walkers.iter_mut() {
         if w.state == WalkState::Walking {
             // About to reach a kerb: that crossing looks at the cars.
             if w.next_mark == w.leg + 1
@@ -1342,8 +1368,8 @@ fn gather(world: &mut World) {
             }
             continue;
         }
-        let Some(k) = w.mark_at(w.leg) else { continue };
-        let Some((ci, c)) = net.crossing(k) else { continue };
+        let Some(ci) = w.crossing_index(net) else { continue };
+        let c = &net.crossings[ci as usize];
         let st = &mut now[ci as usize];
         st.active = true;
         touched.push(ci);
@@ -1357,9 +1383,7 @@ fn gather(world: &mut World) {
             WalkState::Crossing => {
                 st.people += 1 + w.party.len() as u16;
                 let x = c.lateral(w.pos);
-                let pts = &w.route.pts;
-                let i = w.leg as usize;
-                let plus = c.lateral(pts[(i + 1).min(pts.len() - 1)]) >= c.lateral(pts[i]);
+                let plus = geom::dot(w.leg_d, crate::junction::right_of(c.dir)) >= 0.0;
                 let slack = if w.party.is_empty() { 0.8 } else { 1.6 };
                 let h = c.half_width;
                 let (s1, s0) = if plus {
@@ -1782,9 +1806,9 @@ pub(crate) fn tick(world: &mut World) {
                 break;
             }
             if w.state == WalkState::Waiting {
-                let k = w.mark_at(w.leg);
-                let go = match k.and_then(|k| world.walking.net.crossing(k)) {
-                    Some((ci, c)) => {
+                let go = match w.crossing_index(&world.walking.net) {
+                    Some(ci) => {
+                        let c = &world.walking.net.crossings[ci as usize];
                         let cross_s = (2.0 * (c.half_width + pavement_m(c.kind))) / w.speed.max(0.3);
                         let go = could_cross(world, ci) && {
                             evaluate(world, ci);
