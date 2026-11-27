@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use citysim_sim::zoning::{Lattice, ZoneCell};
-use citysim_sim::{CellRef, World, Zone};
+use citysim_sim::{CellRef, Facing, World, Zone};
 
 use super::road_geom;
 use crate::shared::{GameSet, SimWorld};
@@ -468,19 +468,73 @@ pub struct CellView {
     pub v: Vec2,
     /// Sides with a road in front (`ZoneCell::fronts`).
     pub fronts: u8,
+    /// The neighbouring cells in the order of the quad's edges: `-j`
+    /// (corners 0-1), `+i` (1-2), `+j` (2-3), `-i` (3-0); across the band
+    /// boundary of a block's grid the next band's cell.
+    pub nbrs: [CellRef; 4],
+    /// The land drawn for it: `quad`, or where the rows of two roads meet
+    /// at an angle the cell's land up to the line between them
+    /// (`zoning::cell_shape`, fitted clear of the roads). Convex.
+    pub poly: Vec<Vec2>,
+    /// The cell across each edge of `poly` (edge `k` runs from `poly[k]`
+    /// to `poly[k + 1]`), if any is drawn there.
+    pub edge_nbrs: Vec<Option<CellRef>>,
 }
 
 impl CellView {
-    pub fn center(&self) -> Vec2 {
-        (self.quad[0] + self.quad[2]) * 0.5
+    /// Centre of the drawn land.
+    pub fn poly_center(&self) -> Vec2 {
+        self.poly.iter().copied().sum::<Vec2>() / self.poly.len().max(1) as f32
     }
 }
 
-/// Fitted cell quads, valid for one roads version.
+/// Fitted cell quads and cell land shapes, valid for one roads version.
 #[derive(Default)]
 pub struct FitCache {
     key: Option<(u64, u64)>,
     quads: HashMap<CellRef, Option<[Vec2; 4]>>,
+    shapes: Option<citysim_sim::zoning::LandShapes>,
+    shape_of: HashMap<CellRef, Option<Vec<Vec2>>>,
+}
+
+/// Clip a convex polygon to the side of the line `a -> b` that holds `inner`.
+fn clip_half(poly: &[Vec2], a: Vec2, b: Vec2, inner: Vec2) -> Vec<Vec2> {
+    let d = b - a;
+    let side = |p: Vec2| d.perp_dot(p - a);
+    let s0 = side(inner).signum();
+    let n = poly.len();
+    let mut out = Vec::with_capacity(n + 2);
+    for k in 0..n {
+        let (p, q) = (poly[k], poly[(k + 1) % n]);
+        let (sp, sq) = (side(p) * s0, side(q) * s0);
+        if sp >= 0.0 {
+            out.push(p);
+        }
+        if (sp >= 0.0) != (sq >= 0.0) {
+            out.push(p + (q - p) * (sp / (sp - sq)));
+        }
+    }
+    out
+}
+
+/// Is `p` on the line through `a`, `b` (within 5 cm)?
+fn on_line(p: Vec2, a: Vec2, b: Vec2) -> bool {
+    let d = b - a;
+    let l = d.length();
+    l > 1e-4 && (d.perp_dot(p - a) / l).abs() < 0.05
+}
+
+/// Even-odd point in polygon.
+fn in_poly(poly: &[Vec2], p: Vec2) -> bool {
+    let mut c = false;
+    let n = poly.len();
+    for k in 0..n {
+        let (a, b) = (poly[k], poly[(k + 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            c = !c;
+        }
+    }
+    c
 }
 
 /// Usable zoning cells (`ZoneCell::usable`) that `keep` accepts, fitted
@@ -496,8 +550,15 @@ pub fn cells_by_chunk(
     if cache.key != edges.key {
         cache.key = edges.key;
         cache.quads.clear();
+        cache.shapes = None;
+        cache.shape_of.clear();
+    }
+    let multi = world.zoning.lattices().nth(1).is_some();
+    if multi && cache.shapes.is_none() {
+        cache.shapes = Some(citysim_sim::zoning::LandShapes::new(world));
     }
     let mut out: HashMap<IVec2, Vec<CellView>> = HashMap::new();
+    let mut shaped: Vec<(IVec2, usize)> = Vec::new();
     for (id, l) in world.zoning.lattices() {
         for (&(i, j), zc) in &l.cells {
             if !zc.usable() || !keep(zc) {
@@ -520,17 +581,123 @@ pub fn cells_by_chunk(
                 continue;
             };
             let (u, v) = l.axes_at(i as f32 + 0.5);
-            out.entry(road_geom::chunk_of(lot.c, chunk))
-                .or_default()
-                .push(CellView {
-                    cell,
-                    zone: zc.zone,
-                    free: zc.free(),
-                    quad,
-                    u: Vec2::from(u),
-                    v: Vec2::from(v),
-                    fronts: zc.fronts,
+            let nbrs = [Facing::MinusY, Facing::PlusX, Facing::PlusY, Facing::MinusX]
+                .map(|f| world.zoning.cell_across(cell, f));
+            // The cell's land where it differs from its quad, fitted clear
+            // of the roads like the quad (on the edges the fit moved).
+            let shape = match &cache.shapes {
+                Some(ls) => cache
+                    .shape_of
+                    .entry(cell)
+                    .or_insert_with(|| ls.shape(world, cell).map(|p| p.into_iter().map(Vec2::from).collect()))
+                    .clone(),
+                None => None,
+            };
+            let raw = l.cell_corners(i, j).map(Vec2::from);
+            let (poly, edge_nbrs) = match shape {
+                None => (quad.to_vec(), nbrs.map(Some).to_vec()),
+                Some(mut p) => {
+                    let mid = (quad[0] + quad[2]) * 0.5;
+                    for k in 0..4 {
+                        let (a, b) = (quad[k], quad[(k + 1) % 4]);
+                        if !(on_line(a, raw[k], raw[(k + 1) % 4]) && on_line(b, raw[k], raw[(k + 1) % 4])) {
+                            p = clip_half(&p, a, b, mid);
+                        }
+                    }
+                    if p.len() < 3 {
+                        continue;
+                    }
+                    // Edges along the quad's own sides have its neighbours;
+                    // the others are found below.
+                    let e = (0..p.len())
+                        .map(|k| {
+                            let (a, b) = (p[k], p[(k + 1) % p.len()]);
+                            (0..4)
+                                .find(|&s| {
+                                    let (c0, c1) = (quad[s], quad[(s + 1) % 4]);
+                                    on_line(a, c0, c1) && on_line(b, c0, c1)
+                                })
+                                .map(|s| nbrs[s])
+                        })
+                        .collect();
+                    (p, e)
+                }
+            };
+            let key = road_geom::chunk_of(lot.c, chunk);
+            let list = out.entry(key).or_default();
+            if poly.len() != 4 || edge_nbrs.iter().any(Option::is_none) {
+                shaped.push((key, list.len()));
+            }
+            list.push(CellView {
+                cell,
+                zone: zc.zone,
+                free: zc.free(),
+                quad,
+                u: Vec2::from(u),
+                v: Vec2::from(v),
+                fronts: zc.fronts,
+                nbrs,
+                poly,
+                edge_nbrs,
+            });
+        }
+    }
+    // Edges with no drawn cell of the same lattice beyond (cut land, or a
+    // neighbour another road's rows took): the cell drawn just beyond.
+    let drawn: std::collections::HashSet<CellRef> = out.values().flatten().map(|v| v.cell).collect();
+    for (key, list) in &out {
+        for (n, v) in list.iter().enumerate() {
+            if v.edge_nbrs.iter().any(|e| e.is_none_or(|c| !drawn.contains(&c))) {
+                shaped.push((*key, n));
+            }
+        }
+    }
+    shaped.sort_by_key(|(k, n)| (k.x, k.y, *n));
+    shaped.dedup();
+    if !shaped.is_empty() {
+        let bucket = |p: Vec2| IVec2::new((p.x / 16.0).floor() as i32, (p.y / 16.0).floor() as i32);
+        let mut index: HashMap<IVec2, Vec<(IVec2, usize)>> = HashMap::new();
+        for (key, list) in &out {
+            for (n, v) in list.iter().enumerate() {
+                let lo = v.poly.iter().fold(Vec2::splat(f32::MAX), |a, p| a.min(*p));
+                let hi = v.poly.iter().fold(Vec2::splat(f32::MIN), |a, p| a.max(*p));
+                let (b0, b1) = (bucket(lo), bucket(hi));
+                for y in b0.y..=b1.y {
+                    for x in b0.x..=b1.x {
+                        index.entry(IVec2::new(x, y)).or_default().push((*key, n));
+                    }
+                }
+            }
+        }
+        for (key, n) in shaped {
+            let Some(v) = out.get(&key).and_then(|l| l.get(n)) else {
+                continue;
+            };
+            let (poly, cell) = (v.poly.clone(), v.cell);
+            let ctr = poly.iter().copied().sum::<Vec2>() / poly.len() as f32;
+            let mut found = Vec::new();
+            for k in 0..poly.len() {
+                if v.edge_nbrs[k].is_some_and(|c| drawn.contains(&c)) {
+                    found.push(None);
+                    continue;
+                }
+                let (a, b) = (poly[k], poly[(k + 1) % poly.len()]);
+                let mid = (a + b) * 0.5;
+                let beyond = mid + (mid - ctr).normalize_or_zero() * 0.6;
+                let hit = index.get(&bucket(beyond)).and_then(|c| {
+                    c.iter()
+                        .map(|&(k2, n2)| &out[&k2][n2])
+                        .find(|o| o.cell != cell && in_poly(&o.poly, beyond))
+                        .map(|o| o.cell)
                 });
+                found.push(Some(hit));
+            }
+            let v = out.get_mut(&key).expect("chunk").get_mut(n).expect("cell");
+            for (k, f) in found.into_iter().enumerate() {
+                if let Some(f) = f {
+                    v.edge_nbrs[k] = f;
+                }
+            }
         }
     }
     out

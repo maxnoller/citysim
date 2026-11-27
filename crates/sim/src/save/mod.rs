@@ -363,6 +363,11 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     crate::traffic::upgrade_junction_geometry(&mut world);
     world.cache.ensure_roads(&world.roads, world.versions.roads);
     world.cache.ensure_zoning(&world.zoning);
+    // Block grids are not stored: found again, and made where a save from
+    // before them has per-road lattices.
+    if version >= 7 && crate::blocks::derive_faces(&mut world) > 0 {
+        world.cache.ensure_zoning(&world.zoning);
+    }
     if version == 6 {
         // Zoning blocks of the version-6 kind (two rows, straight blocks
         // along curves): made again the current way; zones move onto the

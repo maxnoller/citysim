@@ -19,6 +19,7 @@ use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 use citysim_sim::{CELL_SIZE, Cell, MAP_CELLS, MAP_SIZE_M, World};
 
+use super::greens::{Greens, GreensUpdate};
 use super::land::RoadEdges;
 use super::mesh_util::MeshBuilder;
 use super::noise::{self, Stream};
@@ -44,6 +45,8 @@ type Keys = ((u64, u64), (u64, u64));
 #[derive(Default)]
 struct TreeChunks {
     key: Option<(Keys, GraphicsQuality, u64)>,
+    /// `Greens::version` the chunks were made for.
+    greens: u64,
     /// Seconds since the last re-mesh for a changed road ghost.
     since_ghost: f32,
     /// Chunk -> (cells hash, [near, far] entities, trees placed).
@@ -64,7 +67,8 @@ impl Plugin for TreesPlugin {
             Update,
             (rebuild_trees, rebuild_outside)
                 .in_set(GameSet::Render)
-                .after(super::land::LandUpdate),
+                .after(super::land::LandUpdate)
+                .after(GreensUpdate),
         );
     }
 }
@@ -308,21 +312,24 @@ fn rebuild_trees(
     mut meshes: ResMut<Assets<Mesh>>,
     mut count: ResMut<TreeCount>,
     edges: Res<RoadEdges>,
-    (view, time): (Option<Res<CurveToolView>>, Res<Time<Real>>),
+    (view, time, greens): (Option<Res<CurveToolView>>, Res<Time<Real>>, Res<Greens>),
 ) {
     state.since_ghost += time.delta_secs();
     let ghost = view.map(|v| Ghost::of(&v)).unwrap_or_default();
     let keys = (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads));
     let key = (keys, *quality, ghost.key());
-    if state.key == Some(key) {
+    let greens_changed = state.greens != greens.version;
+    if state.key == Some(key) && !greens_changed {
         return;
     }
     // Only the ghost moved: re-mesh at most a few times a second.
-    if state.key.is_some_and(|(k, q, _)| k == keys && q == *quality) && state.since_ghost < 0.2 {
+    if state.key.is_some_and(|(k, q, _)| k == keys && q == *quality) && state.since_ghost < 0.2 && !greens_changed {
         return;
     }
     state.since_ghost = 0.0;
-    let quality_changed = state.key.is_some_and(|(_, q, _)| q != *quality);
+    // Greens changed: every chunk again (rare: a road edit made or took one).
+    let quality_changed = state.key.is_some_and(|(_, q, _)| q != *quality) || greens_changed;
+    state.greens = greens.version;
     state.key = Some(key);
     let world = &sim.world;
     let hashes = chunk_hashes(world, &ghost);
@@ -344,10 +351,10 @@ fn rebuild_trees(
                 for x in cx * CHUNK..(cx + 1) * CHUNK {
                     trees.clear();
                     cell_trees(x, y, &mut trees);
-                    for t in trees
-                        .iter()
-                        .filter(|t| keep(t, dens) && open(&taken, &edges, &ghost, Vec2::new(t.pos.x, t.pos.z)))
-                    {
+                    for t in trees.iter().filter(|t| {
+                        let p = Vec2::new(t.pos.x, t.pos.z);
+                        keep(t, dens) && open(&taken, &edges, &ghost, p) && !greens.contains(p)
+                    }) {
                         draw_tree(&mut m, t, false);
                         draw_tree(&mut far, t, true);
                         placed += usize::from(t.small == 0);

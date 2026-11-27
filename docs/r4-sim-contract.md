@@ -723,3 +723,52 @@ $34k (streets city: $20k against $22k); the avenue player's longest wait for mon
 on the road; `BY_START=1` by departure hour), `sigcity.rs` (a signal of a saved city second by second, `ARM=n` front
 cars), `dayprobe.rs` (who is where during the day), `midnight.rs` (the steps around midnight in a big city);
 `simint day` takes `SIMINT_FROM=h`; `headless` hourly CSVs have cars on the road by purpose.
+
+## 2026-11-27 (r6-zoning: one grid per block, greens, clean edges)
+
+Nothing new is stored: the save format stays at 7 (and 6 loads as before). Everything below is derived from the roads
+and blocks, found again on load.
+
+### Block grids (`faces`)
+
+- `faces` walks the faces of the road graph (the land roads enclose). A face whose sides are all **straight** roads in
+  **two directions** within 30° (a square, a rectangle, a trapezoid, a block a few degrees off true, an L: sides
+  alternate between the two directions) gets **one grid fitted between its kerbs**: column lines run from kerb to kerb
+  across it, each stretch between two kerbs of one direction divided into whole cells (stretched or squeezed by under
+  half a cell, cells stay 4-13 m a side), the rows likewise. Facing and meeting streets' rows are the same rows;
+  corner cells front both roads. Faces already on whole cells at right angles keep the shared straight lattices (the
+  grid town zones exactly as before); triangles, faces with curved sides and faces wider than 720 m keep per-road
+  lattices.
+- The grid is stored as strips (`Lattice::strip`), **one per band of rows** between two kerbs along the face's first
+  direction (one band for four sides, two for an L). Use the strip's geometry as for any strip. New:
+  `Zoning::is_block_grid(lattice)`, `Zoning::cell_across(cell, facing)` (the neighbour, across the boundary of two
+  bands of one grid the next band's cell; `BandLink { prev, next, rows }`), `Strip::spanning(i0, frames, rows)`.
+- A road edit that closes, opens or reshapes a face redoes the blocks of every road around it (the closure is
+  computed in `blocks::sync`); zones move onto the new cells as on any re-zoning. Block regeneration after one edit in
+  the 10,000-resident city: 0.24-0.70 ms (release, this 8-core sandbox; the same run of the previous code: 0.16-0.47
+  ms). Loading a version-7 save made before block grids remakes the faces' blocks (`blocks::derive_faces`): zones move,
+  buildings move onto the lots under them where those are free, the rest stay. Fixture
+  `tests/data/hand_blocks_v7.citysave`.
+
+### Leftover land (`faces::leftovers`)
+
+- `faces::leftover_faces(world) -> Vec<(face key, signature)>` (bounded faces up to 40,000 m²; the signature changes
+  with the face's roads, blocks and lattices), `faces::leftover(world, key, signature) -> Option<Leftover>`,
+  `faces::leftovers(world)`. `Leftover { face, signature, origin, step, size, inside, area_m2 }`: land inside the face
+  that no block of its roads reaches, sampled every 2 m (`contains(p)`); at least 96 m². Nothing can be built there;
+  gfx draws it as a small green (`gfx/greens.rs`).
+
+### Land where rows meet (`zoning::cell_shape`)
+
+- `zoning::cell_shape(world, cell) -> Option<Vec<[f32; 2]>>` / `cell_shapes(world)` / `LandShapes::new(world).shape(..)`:
+  the land a usable cell holds where it differs from its quadrilateral. Where the rows of two roads meet at an angle,
+  cells are cut along the line where the two roads' rows are equally deep, and a cell takes the land of the cells
+  behind it that the other road's rows took, up to that line. A convex polygon (empty: nothing left). Renderers draw
+  zones and lot markers with it. Land of different lattices overlaps only along the line by rounding (property test:
+  at most 1 in 50 cut cells over 4 m², never 32 m²). Growth still uses whole cells (a lot's building stands on its
+  front rows, well inside the line).
+
+### Zone paint
+
+- (ui) The brush takes every cell the pointer's path since the last frame crosses and every cell within half a cell's
+  diagonal of it, so a stroke is unbroken at any frame rate.

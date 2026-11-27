@@ -143,6 +143,13 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   nearer its own road keeps overlapping land; lots carry a yard behind the 2 built rows (`Footprint::built_area`).
   Zoning test bed: `cargo run -p citysim_sim --release --example topdown -- zonebed out.png [days]`;
   `scripts/zplay.py` plays the same layout in the game (`launch EXE load`, `zone`, `modes`, `hood`, `shots`).
+- Zoning r6 (`docs/r4-sim-contract.md`, "r6-zoning"): a block of land enclosed by straight streets in two directions
+  (hand-drawn squares, rectangles, trapezoids, L shapes) gets one grid between its kerbs (`faces`; strips, one per band
+  of rows: `Zoning::is_block_grid`, `cell_across`); enclosed land no block reaches is a green (`faces::leftovers`,
+  `gfx/greens.rs`); where rows of two roads meet at an angle the land is cut along the line between them
+  (`zoning::cell_shape`, drawn by `gfx/zones.rs`, `gfx/lots.rs`); lots' yards are drawn by `gfx/yards.rs`. Test bed of
+  hand-drawn blocks in the real game: `scripts/bplay.py` (`launch EXE [load]`, `roads`, `zone`, `grow`, `shots`,
+  `owner`, `paint`, `guide`, `video`).
 - Undo of demolitions: before sending a plan the tool records every building it will take down
   (`World::building_record` -> `restore::BuildingRecord`: building, lot cells with centres, households with members,
   staff); undo sends `Command::RestoreBuilding(record)` after the roads: the same building (new id) with its households
