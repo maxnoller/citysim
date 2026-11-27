@@ -323,7 +323,7 @@ mod follow_tests {
         let mut app = app(town());
         app.world_mut().resource_mut::<SimClock>().speed = speed;
         let step = |app: &mut App, i: usize| {
-            let dt = if i % 2 == 0 { 0.008 } else { 0.025 };
+            let dt = if i.is_multiple_of(2) { 0.008 } else { 0.025 };
             app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(dt)));
             app.update();
         };
