@@ -324,7 +324,15 @@ pub fn shortest_path(roads: &RoadNetwork, from: NodeId, to: NodeId) -> Option<Ve
     let mut scratch = path::PathScratch::default();
     let mut budget = i64::MAX;
     scratch
-        .search(roads, &[], &[], &[(from, 0.0)], Target::Node(to), &mut budget)
+        .search(
+            roads,
+            &[],
+            &[],
+            &[(from, 0.0)],
+            Target::Node(to),
+            crate::path::Bound::SAFE,
+            &mut budget,
+        )
         .map(|f| f.segments)
 }
 
@@ -750,6 +758,7 @@ fn replan_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                     &cache.route_turns,
                     &[(end, remaining)],
                     Target::Access(dest),
+                    cache.route_bound,
                     budget,
                 ) {
                     Some(found) => (found.segments, Some(found.last_node)),
@@ -905,6 +914,7 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
                 &cache.route_turns,
                 &sources,
                 Target::Access(to),
+                cache.route_bound,
                 budget,
             ) {
                 Some(found) => (found.first == from_seg.b, found.segments, Some(found.last_node)),

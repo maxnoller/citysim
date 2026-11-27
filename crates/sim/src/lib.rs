@@ -84,7 +84,7 @@ pub use grid::{CellData, GridView, Occupant, Zone};
 pub use growth::{BuildingMeta, GrowthState};
 pub use households::{Household, HouseholdId, HouseholdKind, HouseholdState, Ledger};
 pub use idmap::IdMap;
-pub use inspect::CityPeople;
+pub use inspect::{CityPeople, TripReason};
 pub use junction::{
     ApproachView, Aspect, JunctionControl, JunctionSetting, JunctionState, JunctionView, SignalStage, Turn,
 };

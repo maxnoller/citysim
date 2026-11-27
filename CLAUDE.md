@@ -119,14 +119,16 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   services }` with `income()`, `expenses()` (upkeep + services), `net()`; `economy::budget_now(world)` = today so far;
   `economy.history[i].budget` per finished day (`DaySummary`); cost breakdown `economy::running_costs(world)` /
   `economy.last_day_costs`. Shops and works pay tax on the shift time actually worked (`economy.attendance`).
-- Money: start 30,000, street 65 / avenue 90 per cell to build (`balance::ROAD_COST_PER_CELL`,
-  `AVENUE_COST_PER_CELL`; roads are priced by the metre), upkeep 4 / 8 per cell per day, $80 per signalled junction
+- Money: start 30,000, street 65 / avenue 75 per cell to build (`balance::ROAD_COST_PER_CELL`,
+  `AVENUE_COST_PER_CELL`; roads are priced by the metre), upkeep 4 / 6 per cell per day, $80 per signalled junction
   per day, services per resident growing with size and density. Business tax lost to traffic:
   `economy.last_day_traffic` / `economy::traffic_loss_now(world)` (`TrafficLoss`; the commercial and industrial tax
-  lines are already net of it; the budget page shows it as its own line and, per day seen, as a chart). Why people
+  lines are already net of it; per booked day `DaySummary::traffic`; the budget page shows it as a line and a chart).
+  Money flows hourly: a 24th of yesterday's net each in-game hour (`Economy::advanced_today`), midnight books the rest. Why people
   are jobless: `demand::jobs_view(world)` (`JobsView`, `JoblessReason::text()`; shown under the statistics tiles). Bulldozing is never refused for lack of money. Money
   may go negative.
-- People: individual citizens in households (`world.citizens`, `inspect::*`); every car trip is a car on the road up
+- People: individual citizens in households (`world.citizens`, `inspect::*`; why a trip is made:
+  `TripView::reason.text()`, e.g. a midday `Leisure` trip is a lunch); every car trip is a car on the road up
   to `traffic::vehicle_budget` (125 per 1,000 residents), the rest happen off screen; commutes off screen take
   `traffic::delay_factor` times their free-flow time (what the roads do to real cars).
 - Zoning is on lattices of blocks along each road side (`world.zoning`; `world.grid_view()` answers world-cell
@@ -138,7 +140,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `scripts/zplay.py` plays the same layout in the game (`launch EXE load`, `zone`, `modes`, `hood`, `shots`).
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
-- Saves: format version 7 (strips in extension block 4; version 6 loads, its zoning is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
+- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5; version 6 loads, its zoning
+  is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
   `crates/sim/tests/data/round1_town.citysave`), version 5 is refused; `World::load` rejects structurally damaged
   saves. Round-1 saves keep their old second-row buildings until they are rebuilt.
 - Scenarios: `scenarios::{GridPlayer, two_districts, add_connections, overbuilt, organic, upgrade_to_hierarchy}`;

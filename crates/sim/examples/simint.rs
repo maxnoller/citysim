@@ -158,6 +158,13 @@ fn day(args: &[String]) {
             .count();
         println!("after reset: {sig} signals");
     }
+    // `SIMINT_FROM=h`: skip to that hour of the day first.
+    if let Some(h) = std::env::var("SIMINT_FROM").ok().and_then(|h| h.parse::<u32>().ok()) {
+        let day = w.time.day;
+        while w.time.day == day && w.time.tick_of_day < h * balance::TICKS_PER_HOUR {
+            w.step();
+        }
+    }
     println!(
         "loaded day {} {:.1}h pop {} cars {}",
         w.time.day,
