@@ -96,6 +96,13 @@ fn sample(w: &Walker, slot: u8) -> ((Vec2, f32, f32, f32), bool, bool) {
     };
     let hidden = done < DOOR_HIDE_M || left < DOOR_HIDE_M;
     let standing = w.state == WalkState::Waiting;
+    // People waiting at a kerb stand back from it a little, each their own
+    // distance (not all on the corner's one point).
+    let p = if standing {
+        p - dir * (0.15 + 1.3 * (hash(w.seed ^ 0x51DE) % 100) as f32 / 100.0)
+    } else {
+        p
+    };
     ((p, w.heading, w.walked_m, ground), standing, hidden)
 }
 
