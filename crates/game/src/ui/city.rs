@@ -1016,13 +1016,38 @@ pub fn delay_stat(w: &World) -> (&'static str, String, Color) {
     )
 }
 
+/// Trips made on foot today against all trips started (by car, lift or on
+/// foot): yesterday's until today has a few.
+fn walk_stat(w: &World) -> (&'static str, String, Color) {
+    let st = &w.walking.stats;
+    let (on_foot, other) = if st.walked_today + st.other_today >= 50 {
+        (st.walked_today, st.other_today)
+    } else {
+        (st.walked_yesterday, st.other_yesterday)
+    };
+    let all = on_foot + other;
+    (
+        "Trips on foot today",
+        if all == 0 {
+            "\u{2014}".into()
+        } else {
+            format!(
+                "{} · {}",
+                super::context::pct(on_foot as f32 / all as f32),
+                format::group(on_foot as u64)
+            )
+        },
+        t::TEXT,
+    )
+}
+
 /// The statistics page's live figures (what the statistics drawer showed).
 fn stats_tiles(w: &World, standing: f32) -> [(&'static str, String, Color); STATS_TILES] {
     let s = &w.stats;
     let g = |v: u32| format::group(v as u64);
     [
         ("Residents", g(s.population), t::TEXT),
-        ("Households", g(s.households), t::TEXT),
+        walk_stat(w),
         ("Workforce", g(s.workforce), t::TEXT),
         ("Employed", g(s.employed), t::TEXT),
         (
@@ -1037,7 +1062,11 @@ fn stats_tiles(w: &World, standing: f32) -> [(&'static str, String, Color); STAT
             super::bar::commute_text(s.avg_commute_s),
             super::bar::commute_color(s.avg_commute_s),
         ),
-        ("Cars on roads", g(s.vehicles_on_road), t::TEXT),
+        (
+            "Cars · people on foot",
+            format!("{} · {}", g(s.vehicles_on_road), g(w.walking.walkers.len() as u32)),
+            t::TEXT,
+        ),
         (
             "Cars standing",
             super::context::pct(standing),

@@ -164,4 +164,32 @@ fn main() {
         t_clone.as_secs_f64() * 1e3,
         t.elapsed().as_secs_f64() * 1e3
     );
+    // The steps after: the first rebuilds the walking network and sends
+    // walkers and cars on new ways.
+    let step_ms = |w: &mut World| {
+        let t = Instant::now();
+        w.step();
+        t.elapsed().as_secs_f64() * 1e3
+    };
+    let mut plain = w.clone();
+    let quiet: Vec<f64> = (0..5).map(|_| step_ms(&mut plain)).collect();
+    let after: Vec<f64> = (0..5).map(|_| step_ms(&mut real)).collect();
+    println!(
+        "steps without an edit {:?} ms; after the grid {:?} ms ({} walkers)",
+        quiet.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>(),
+        after.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>(),
+        real.walking.walkers.len()
+    );
+    // One street edit in the real city (the first street of the grid),
+    // then the step after it.
+    let mut one = w.clone();
+    let t = Instant::now();
+    one.apply(Command::Clearing(Box::new(Command::BuildCurve {
+        curve: curves[0],
+        kind: RoadKind::Street,
+    })))
+    .unwrap();
+    let apply_ms = t.elapsed().as_secs_f64() * 1e3;
+    let next = step_ms(&mut one);
+    println!("one street: apply {apply_ms:.1} ms, the step after {next:.1} ms");
 }

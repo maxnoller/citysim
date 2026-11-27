@@ -65,6 +65,10 @@ pub struct World {
     pub people: People,
     /// Zone blocks, lattices and cells (see [`crate::zoning`]).
     pub zoning: crate::Zoning,
+    /// People on foot: walkers, the walking network, crossing states (see
+    /// [`crate::walk`]; walkers travel in save extension block 6).
+    #[serde(skip)]
+    pub walking: crate::walk::Walking,
     /// Lazily rebuilt indices derived from the state above. Not saved,
     /// ignored by `==`.
     #[serde(skip)]
@@ -93,6 +97,7 @@ impl World {
             citizens: IdMap::new(),
             people: People::default(),
             zoning: crate::Zoning::default(),
+            walking: Default::default(),
             cache: Derived::default(),
         };
         let start = World::highway_entry_cell();
@@ -177,7 +182,9 @@ impl World {
         economy::hourly(self);
         households::tick(self);
         crate::errands::tick(self);
+        crate::walk::prepare(self);
         traffic::tick(self);
+        crate::walk::tick(self);
         stats::update(self);
     }
 

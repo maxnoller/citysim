@@ -59,6 +59,7 @@ pub mod side;
 pub mod stats;
 pub mod time;
 pub mod traffic;
+pub mod walk;
 pub mod world;
 pub mod zoning;
 

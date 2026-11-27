@@ -233,6 +233,7 @@ pub mod icon {
     pub const WALLET: char = '\u{e204}';
     pub const USERS: char = '\u{e1a4}';
     pub const USER: char = '\u{e19f}';
+    pub const WALK: char = '\u{e3b9}'; // footprints
     pub const BRIEFCASE: char = '\u{e062}';
     pub const SUN: char = '\u{e178}';
     pub const MOON: char = '\u{e11e}';

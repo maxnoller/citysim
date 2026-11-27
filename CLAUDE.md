@@ -84,11 +84,13 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `CurveToolView` (the free-form road being drawn: pieces with `PieceChange`, refused curves, `error_at`, control
   points, handles, tightest bend, planned nodes, `stale`: the plan shown is the last one checked while a newer one has
   been in the works for 0.15 s, gfx dims it; written only when it changes), `ToolPreview::{kind, area,
-  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, doomed buildings (the
-  bulldozer's and those a road being drawn takes), `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`,
+  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, `Walker(CitizenId)` (a
+  person on foot: gfx rings the drawn figure, `gfx/guides.rs` `walker_drawn`), doomed buildings (the bulldozer's and
+  those a road being drawn takes), `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`,
   `WorldHighlight::doomed_road_cells` and
   `shared::cell_corners` / `zone_cell_corners` are gone: nothing wrote or used them any more.)
-- `RouteView { state: RouteState::{None, Driving, Planned, Unseen}, points, origin, destination }` (ui writes while a
+- `RouteView { state: RouteState::{None, Driving, Planned, Unseen, Walking}, points, origin, destination }` (`Walking`: a
+  person on foot on the map, `points` along the pavements and zebras ahead, gfx draws a narrower line) (ui writes while a
   car or person is selected, only when it changes meaningfully: a new route, the car 2.5 m further on; gfx draws it in
   `gfx/route.rs`): `points` in sim metres along the lanes (lane offsets, left-turn pockets and junction turn paths included) from the car
   (or the trip's start when `Planned` / `Unseen`) to where it stops; `RouteEnd { pos, building }` at both ends (gfx
@@ -185,7 +187,12 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `undo`, `shot`; `CPLAY_FRAME=0.9` on a software renderer).
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
-- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5; version 6 loads, its zoning
+- People on foot (`citysim_sim::walk`, contract section "r7-walk"): walking network derived from the roads (pavements,
+  junction and mid-block zebras, `walk::midblock_positions`), walkers in `world.walking.walkers` (`walker_of`, pose
+  `pos` / `heading` / `state`, `walked_m`), cars give way at zebras, people cross signals with the parallel green.
+  gfx draws them in `gfx/people.rs` (figures from `gfx/person_gen.rs`: 8 builds x 8 walk poses + standing, colours
+  per person by `MeshTag` and the palette lists in the day buffer, `city.wesl` kinds 10-13); ui hovers / follows them.
+- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5, walkers in block 6; version 6 loads, its zoning
   is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
   `crates/sim/tests/data/round1_town.citysave`), version 5 is refused; `World::load` rejects structurally damaged
   saves. Round-1 saves keep their old second-row buildings until they are rebuilt.
@@ -328,6 +335,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   window or a drawer (it flips, else hides). The interface is designed at 1920x1080 (`UiScale` 1.0) and compacts below a logical
   width of 1660 (`UiState::compact`); the compact bar needs `theme::MIN_LAYOUT` (1380 px), larger interface sizes are
   held back to it, and the bar's figure columns only ever widen (proportional digits).
+- `CITYSIM_GFX_PEOPLE_SHOWCASE=x,z` (every figure build standing and walking at a spot), `CITYSIM_PEOPLE_TIMING=1`
+  (people sync CPU time every 5 s); `CITYSIM_RECORD_PATH` keyframes take an optional 7th value (sim speed index from
+  there), `CITYSIM_RECORD_FOLLOW=t0,t1` follows a walker's drawn figure.
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`), `CITYSIM_GFX_HOUR=h` (pin the drawn time of

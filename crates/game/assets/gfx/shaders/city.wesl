@@ -26,6 +26,9 @@ struct CityParams {
     unused: f32,
     // Cloud drift speed, m/s (x, y), cloud size, m (z), unused (w).
     wind: vec4<f32>,
+    // People's colours: skin from 0, hair from 8, clothes on top from 16,
+    // below from 32 (`city_material::PERSON_COLOURS_AT`).
+    people: array<vec4<f32>>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
@@ -180,6 +183,23 @@ fn fragment(
         if h < city.windows * (0.14 + 0.4 * wall) {
             glow += warm * (2.4 * city.night * (0.4 + 0.6 * far));
         }
+    } else if kind >= 10u && kind <= 13u {
+        // A person's colour slot, picked by the entity's tag
+        // (`person_gen::person_tag`); the vertex colour shades it.
+        let tag = get_tag(in.instance_index);
+        var idx = 32u + ((tag >> 5u) & 7u);
+        if kind == 10u {
+            idx = ((tag >> 8u) & 7u) % 6u;
+        } else if kind == 11u {
+            idx = 8u + ((tag >> 11u) & 7u);
+        } else if kind == 12u {
+            idx = 16u + ((tag >> 1u) & 15u);
+        }
+        let col = base * city.people[idx].rgb;
+        pbr_input.material.base_color = vec4<f32>(col, 1.0);
+        // Under the street lights at night: a faint lift so people read
+        // against the dark pavement (not a glow).
+        glow = col * (0.22 * city.night);
         } else if kind == 7u {
         // Shop fronts: a warm interior glow, kept low so a whole glazed
         // ground floor does not bloom into a white panel.

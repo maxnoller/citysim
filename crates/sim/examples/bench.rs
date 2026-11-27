@@ -87,10 +87,16 @@ fn main() {
         peak = peak.max(w.vehicles.len());
         if w.time.tick_of_day.is_multiple_of(2 * balance::TICKS_PER_HOUR) {
             println!(
-                "  {:02}:00 cars {} waiting to start {}",
+                "  {:02}:00 cars {} waiting to start {}, on foot {} ({} at kerbs)",
                 w.time.tick_of_day / balance::TICKS_PER_HOUR,
                 w.vehicles.len(),
-                w.traffic.pending.len()
+                w.traffic.pending.len(),
+                w.walking.walkers.len(),
+                w.walking
+                    .walkers
+                    .values()
+                    .filter(|x| x.state == walk::WalkState::Waiting)
+                    .count()
             );
         }
         times.push(dt);

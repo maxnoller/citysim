@@ -397,13 +397,45 @@ fn pulse_marker(
     }
 }
 
-/// The ring under a hovered or selected vehicle, at its exact lane pose.
+/// Where the figure of a person walking on the map is drawn this frame.
+fn walker_drawn(
+    world: &citysim_sim::World,
+    people: &Query<&super::people::PersonVisual>,
+    c: citysim_sim::CitizenId,
+) -> Option<Vec3> {
+    let (leader, w) = citysim_sim::walk::walker_of(world, c)?;
+    let slot = if c == leader {
+        0
+    } else {
+        w.party.iter().position(|&p| p == c)? as u8 + 1
+    };
+    people
+        .iter()
+        .find(|v| v.leader == leader && v.slot == slot)
+        .map(|v| v.drawn)
+}
+
+/// The ring under a hovered or selected vehicle, at its exact lane pose,
+/// or under a person on foot (smaller, at the drawn figure).
 fn vehicle_ring(
     hl: Res<WorldHighlight>,
     sim: Res<SimWorld>,
+    people: Query<&super::people::PersonVisual>,
     mut q: Query<(&mut Transform, &mut Visibility), With<VehicleRing>>,
 ) {
     let Ok((mut t, mut vis)) = q.single_mut() else { return };
+    let walker = [&hl.selected, &hl.hovered].into_iter().find_map(|x| match x {
+        Some(WorldTarget::Walker(c)) => walker_drawn(&sim.world, &people, *c),
+        _ => None,
+    });
+    if let Some(p) = walker {
+        t.translation = Vec3::new(p.x, p.y + 0.06, p.z);
+        t.rotation = Quat::IDENTITY;
+        t.scale = Vec3::new(0.32, 1.0, 0.32);
+        vis.set_if_neq(Visibility::Inherited);
+        return;
+    }
+    t.scale = Vec3::ONE;
     let id = [&hl.selected, &hl.hovered].into_iter().find_map(|x| match x {
         Some(WorldTarget::Vehicle(v)) => Some(*v),
         _ => None,
@@ -445,6 +477,7 @@ fn vehicle_marker(
     hl: Res<WorldHighlight>,
     sim: Res<SimWorld>,
     camera: Query<&GlobalTransform, With<WorldCamera>>,
+    people: Query<&super::people::PersonVisual>,
     mut q: Query<(&mut Transform, &mut Visibility), With<VehicleMarker>>,
 ) {
     let Ok((mut t, mut vis)) = q.single_mut() else { return };
@@ -453,14 +486,17 @@ fn vehicle_marker(
             .world
             .vehicles
             .get(*v)
-            .map(|veh| citysim_sim::drive::vehicle_pose(&sim.world, veh)),
+            .map(|veh| citysim_sim::drive::vehicle_pose(&sim.world, veh).0),
+        // Above a person on foot: lower, over their head.
+        Some(WorldTarget::Walker(c)) => walker_drawn(&sim.world, &people, *c).map(|p| [p.x, p.z]),
         _ => None,
     };
-    let Some((pos, _)) = pose else {
+    let Some(pos) = pose else {
         vis.set_if_neq(Visibility::Hidden);
         return;
     };
-    let base = Vec3::new(pos[0], 0.0, pos[1]);
+    let person = matches!(hl.selected, Some(WorldTarget::Walker(_)));
+    let base = Vec3::new(pos[0], if person { -3.0 } else { 0.0 }, pos[1]);
     let k = camera
         .single()
         .map(|c| (c.translation().distance(base) / 120.0).clamp(1.0, 8.0))
@@ -582,7 +618,7 @@ fn draw_highlight(
                     disc(&mut m, Vec2::from(*p), w * 0.5, y, soft);
                 }
             }
-            WorldTarget::Vehicle(_) => {}
+            WorldTarget::Vehicle(_) | WorldTarget::Walker(_) => {}
             WorldTarget::Junction { node, pos } => {
                 let r = junction::junction(world, *node)
                     .map_or(8.0, |j| j.arms.iter().map(|a| a.setback).fold(6.0, f32::max) + 3.0);
