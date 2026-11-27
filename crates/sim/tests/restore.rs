@@ -368,3 +368,42 @@ fn roads_and_buildings_come_back(w: &mut World, home: BuildingId) {
     w.check_sim_invariants().expect("sim invariants");
     check_full(w);
 }
+
+/// Undo puts a removed road back: in a grown town of curved roads every
+/// road, taken out on its own, can be built again exactly where it stood
+/// (buildings that grew beside a curve stay clear of its reserve).
+#[test]
+fn every_road_of_a_curved_town_can_be_put_back() {
+    let mut w = World::new(7);
+    scenarios::prebuilt(&mut w, |w| {
+        scenarios::organic(w);
+    });
+    while w.time.tick < 2 * DAY {
+        w.step();
+    }
+    assert!(w.buildings.len() > 200, "{} buildings", w.buildings.len());
+    let segs: Vec<SegmentId> = w.roads.segments.keys().collect();
+    let mut curved = 0;
+    for s in segs {
+        let seg = &w.roads.segments[s];
+        if seg.kind == RoadKind::Highway {
+            continue;
+        }
+        let (curve, kind, len) = (seg.curve, seg.kind, seg.length);
+        curved += usize::from(!curve.is_straight());
+        let mut c = w.clone();
+        c.apply(Command::RemoveRoad {
+            segment: s,
+            from_m: 0.0,
+            to_m: len,
+        })
+        .expect("remove");
+        let back = Command::BuildCurve { curve, kind };
+        assert!(
+            c.preview(&back).is_ok(),
+            "{s:?} ({kind:?}): {:?}",
+            c.preview(&back).err()
+        );
+    }
+    assert!(curved > 20, "{curved} curved roads");
+}

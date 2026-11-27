@@ -175,7 +175,32 @@ pub fn has_frontage(world: &World, fp: &Footprint, f: Facing) -> bool {
 fn footprint_of(world: &World, cells: &[CellRef], f: Facing) -> Footprint {
     let (lo, hi) = rect_of(cells);
     let l = world.zoning.lattice(cells[0].lattice).expect("cell lattice");
-    Footprint::new(cells[0].lattice, l, lo, hi, f)
+    placed(world, Footprint::new(cells[0].lattice, l, lo, hi, f))
+}
+
+/// A lot's rectangle moved clear of every road's reserve. Lots are chosen
+/// by cell centres; on a curved road side the straight rectangle over
+/// curved cells reaches a little into the reserve on the inside of a bend
+/// (up to about a metre), which would make the very road beside it
+/// impossible to build again (undo). Rectangles on straight lattices are
+/// already clear and stay as they are; a lot that cannot be cleared by a
+/// small move (squeezed between roads) keeps its least intruding place.
+pub(crate) fn placed(world: &World, fp: Footprint) -> Footprint {
+    let (mut into, mut away) = crate::build::reserve_intrusion(world, &fp.corners());
+    let mut best = (into, fp);
+    let mut cur = fp;
+    for _ in 0..6 {
+        if into <= 0.01 {
+            break;
+        }
+        let step = into + 0.02;
+        cur.center = [cur.center[0] + away[0] * step, cur.center[1] + away[1] * step];
+        (into, away) = crate::build::reserve_intrusion(world, &cur.corners());
+        if into < best.0 {
+            best = (into, cur);
+        }
+    }
+    best.1
 }
 
 /// Lot for a new building of zone `z` on front-row cell `c`: facing, then

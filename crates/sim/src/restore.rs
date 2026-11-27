@@ -193,7 +193,7 @@ pub(crate) fn plan(world: &World, rec: &BuildingRecord) -> Result<Footprint, Res
             now.iter().map(|c| c.j).max().unwrap_or(0),
         ];
         let l = world.zoning.lattice(lattice).ok_or(RestoreProblem::LandChanged)?;
-        let nf = Footprint::new(lattice, l, lo, hi, b.facing);
+        let nf = crate::growth::placed(world, Footprint::new(lattice, l, lo, hi, b.facing));
         if nf.area() != fp.area() {
             return Err(RestoreProblem::LandChanged);
         }
