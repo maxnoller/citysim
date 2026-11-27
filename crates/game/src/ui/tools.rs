@@ -1082,11 +1082,10 @@ fn junction_click(
     };
     let (ring_before, setting_before) = (j.ring, j.setting);
     let mut cmds: Vec<Command> = Vec::new();
-    let text;
-    match opts.ring_brush {
+    let text: String = match opts.ring_brush {
         Some(size) => {
             cmds.push(Command::SetRoundabout { node, size: Some(size) });
-            text = format!("{} built", super::context::ring_name(size));
+            format!("{} built", super::context::ring_name(size))
         }
         None => {
             let next = opts.junction_brush.unwrap_or_else(|| {
@@ -1102,7 +1101,7 @@ fn junction_click(
             if next != setting_before || ring_before.is_none() {
                 cmds.push(Command::SetNodeControl { node, control: next });
             }
-            text = match (ring_before.is_some(), next) {
+            match (ring_before.is_some(), next) {
                 (true, JunctionSetting::Auto) => "Roundabout taken away: an ordinary junction again".into(),
                 (true, s) => format!(
                     "Roundabout taken away: {}",
@@ -1110,9 +1109,9 @@ fn junction_click(
                 ),
                 (false, JunctionSetting::Auto) => "Junction back to automatic".into(),
                 (false, s) => format!("Junction set to {}", super::context::setting_name(s).to_lowercase()),
-            };
+            }
         }
-    }
+    };
     // Check the whole plan on a copy, and record what undo needs.
     let mut scratch = world.clone();
     let mut buildings = Vec::new();

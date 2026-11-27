@@ -48,19 +48,16 @@ fn main() {
     }
     for (name, mut w) in runs {
         let mut line = String::new();
-        let mut entered = 0u32;
         for minute in 0..60 {
             for _ in 0..(60 * TICKS_PER_SECOND) {
                 w.step();
             }
             let j = junction::junction(&w, n).unwrap();
             let q: u32 = j.queue.iter().map(|&x| x as u32).max().unwrap_or(0);
-            entered += j.peak_minute_today as u32 * 0;
             if minute % 10 == 9 {
                 line += &format!(" {:>4}", q);
             }
         }
-        let _ = entered;
         println!(
             "{name:9} longest queue at 10/20/../60 min:{line}   delay factor {:.2}, given up {}",
             traffic::delay_factor(&w),

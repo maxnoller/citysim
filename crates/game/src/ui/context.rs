@@ -333,9 +333,9 @@ pub fn tool_card(
             let mut card = junction_card(world, *node)?;
             card.rows.truncate(1);
             if junction::junction(world, *node).is_some_and(|j| j.ring.is_some()) {
-                let s = opts.junction_brush.map_or("an ordinary junction".to_string(), |b| {
-                    format!("{}", setting_name(b).to_lowercase())
-                });
+                let s = opts
+                    .junction_brush
+                    .map_or("an ordinary junction".to_string(), |b| setting_name(b).to_lowercase());
                 card.hint = format!("Click: back to {s}");
                 return Some(card);
             }
