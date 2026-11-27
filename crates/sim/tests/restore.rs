@@ -155,9 +155,20 @@ fn staff_who_found_other_work_stay_there() {
     let work = fullest(&w, Zone::Commercial);
     let rec = demolish(&mut w, work);
     assert!(!rec.workers.is_empty(), "it had staff");
+    // Until some of the staff have found other work (not so long that a new
+    // building grows on the empty lot).
+    let found = |w: &World| {
+        rec.workers
+            .iter()
+            .any(|r| w.citizens.get(r.citizen).is_some_and(|c| c.job.is_some()))
+    };
     for _ in 0..DAY / 2 {
         w.step();
+        if w.time.tick.is_multiple_of(HOUR) && found(&w) {
+            break;
+        }
     }
+    assert!(found(&w), "someone found other work");
     let elsewhere: Vec<CitizenId> = rec
         .workers
         .iter()

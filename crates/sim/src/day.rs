@@ -393,8 +393,15 @@ fn goes_out_for_lunch(world: &World, id: CitizenId, tod: f32) -> bool {
     let [lo, hi] = balance::MIDDAY_OUT_H;
     let start = lo + habit(c.seed, 0x1C4) * (hi - lo - balance::HOME_RECHECK_H);
     (start..start + balance::HOME_RECHECK_H).contains(&tod)
-        && daily(c.seed, world.time.day, 0x1C4B) < balance::MIDDAY_OUT_SHARE
+        && daily(c.seed, world.time.day, 0x1C4B) < balance::MIDDAY_OUT_SHARE * lunch_room(world)
         && !world.households[c.household].austerity
+}
+
+/// Share of the people who would go out for lunch that do, by how slow
+/// the roads are (`balance::LUNCH_DELAY`).
+pub(crate) fn lunch_room(world: &World) -> f32 {
+    let [full, none] = balance::LUNCH_DELAY;
+    ((none - crate::traffic::delay_factor(world)) / (none - full)).clamp(0.0, 1.0)
 }
 
 /// The end of the shift `id` is at or on a break from (they set off to
@@ -414,7 +421,7 @@ pub(crate) fn on_shift(world: &World, id: CitizenId) -> Option<i64> {
 /// and `end` ticks), if they take a break that day.
 fn lunch_tick(world: &World, id: CitizenId, d: u32, start: i64, end: i64) -> Option<i64> {
     let seed = world.citizens[id].seed;
-    if daily(seed, d, 0x10C4) >= balance::LUNCH_BREAK_SHARE {
+    if daily(seed, d, 0x10C4) >= balance::LUNCH_BREAK_SHARE * lunch_room(world) {
         return None;
     }
     let [lo, hi] = balance::LUNCH_BREAK_H;
@@ -742,7 +749,13 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
         trip_s(world, purpose, fp, tp)
     };
     // Every car trip is a car on the road while the budget allows.
-    let visible = mode == TravelMode::Driving && traffic::has_room(world) && traffic::drawn_driver(world, id);
+    let lunch = purpose == TripPurpose::Leisure && midday_visit(world.time.hour());
+    let drawn = if lunch {
+        traffic::drawn_lunch(world, id)
+    } else {
+        traffic::drawn_driver(world, id)
+    };
+    let visible = mode == TravelMode::Driving && traffic::has_room(world) && drawn;
     if mode == TravelMode::Driving {
         world.citizens[id].has_car = true;
     }

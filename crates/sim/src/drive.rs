@@ -705,12 +705,10 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         let reacted = now >= j.clear_at + secs_to_ticks(balance::ALL_WAY_REACTION_S);
         // Courtesy: a minor-road car that has waited long at its line is let
         // in when every conflicting car with priority is creeping (on an
-        // arterial: a queue on a street leaves gaps of its own).
-        let arterial_major = j
-            .arms
-            .iter()
-            .any(|a| a.major && a.kind.rank() >= crate::RoadKind::Avenue.rank());
-        if j.control == JunctionControl::Priority && !all_way && arterial_major {
+        // avenue or a priority street alike: in a town of streets the main
+        // streets' queues held side streets until their cars gave up).
+        let has_major = j.arms.iter().any(|a| a.major);
+        if j.control == JunctionControl::Priority && !all_way && has_major {
             let long = secs_to_ticks(balance::COURTESY_WAIT_S) as u32;
             for x in k..e {
                 let f = &fronts[x];
