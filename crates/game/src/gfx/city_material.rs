@@ -44,13 +44,36 @@ impl Default for DayParams {
 }
 
 impl DayParams {
-    /// The buffer contents (two vec4s).
+    /// The buffer contents: two vec4s, then the people's colours
+    /// (`PERSON_COLOURS_AT`, read by `city.wesl`).
     pub fn to_buffer(self) -> Vec<[f32; 4]> {
-        vec![
+        let mut out = vec![
             [self.night, self.windows, self.clouds, 0.0],
             [self.wind.x, self.wind.y, self.wind.z, 0.0],
-        ]
+        ];
+        out.extend(person_colours());
+        out
     }
+}
+
+/// Where each person colour list starts in the colours after the two
+/// parameter vec4s (skin, hair, top, bottom; keep in sync with
+/// `city.wesl`).
+pub const PERSON_COLOURS_AT: [usize; 4] = [0, 8, 16, 32];
+
+/// The people's colour lists, laid out at `PERSON_COLOURS_AT` (40 vec4s).
+fn person_colours() -> Vec<[f32; 4]> {
+    use super::palette::{PERSON_BOTTOM, PERSON_HAIR, PERSON_SKIN, PERSON_TOP, lin};
+    let mut out = vec![[1.0; 4]; 40];
+    for (at, list) in PERSON_COLOURS_AT
+        .iter()
+        .zip([&PERSON_SKIN[..], &PERSON_HAIR, &PERSON_TOP, &PERSON_BOTTOM])
+    {
+        for (i, c) in list.iter().enumerate() {
+            out[at + i] = lin(*c);
+        }
+    }
+    out
 }
 
 /// A new buffer for the day parameters.

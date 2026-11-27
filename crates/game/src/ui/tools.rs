@@ -1584,6 +1584,13 @@ pub fn target_at(world: &World, p: [f32; 2], radius: f32) -> Option<WorldTarget>
     if let Some(v) = vehicle_near(world, p, 3.2f32.max(radius * 0.45)) {
         return Some(WorldTarget::Vehicle(v));
     }
+    // People are smaller still: a closer reach, and only near enough to
+    // see them.
+    if radius < 12.0
+        && let Some(c) = walker_near(world, p, 1.2f32.max(radius * 0.35))
+    {
+        return Some(WorldTarget::Walker(c));
+    }
     if let Some(b) = zoning::building_at(world, p) {
         return Some(WorldTarget::Building(b));
     }
@@ -1830,7 +1837,21 @@ pub fn target_exists(world: &World, t: &WorldTarget) -> bool {
         WorldTarget::Road(s) => s.segments.iter().all(|&id| world.roads.segments.contains_key(id)),
         WorldTarget::Junction { node, .. } => world.roads.nodes.get(*node).is_some_and(|n| n.segments.len() >= 3),
         WorldTarget::Vehicle(v) => world.vehicles.contains_key(*v),
+        WorldTarget::Walker(c) => citysim_sim::walk::walker_of(world, *c).is_some(),
     }
+}
+
+/// The person on foot nearest to `p` within `reach` metres (children walk
+/// beside their adult: the adult is picked).
+pub fn walker_near(world: &World, p: [f32; 2], reach: f32) -> Option<citysim_sim::CitizenId> {
+    let mut best: Option<(f32, citysim_sim::CitizenId)> = None;
+    for (&id, w) in world.walking.walkers.iter() {
+        let d = dist(w.pos, p);
+        if d <= reach && w.done_m() > 1.4 && w.left_m() > 1.4 && best.is_none_or(|b| d < b.0) {
+            best = Some((d, id));
+        }
+    }
+    best.map(|b| b.1)
 }
 
 #[cfg(test)]
