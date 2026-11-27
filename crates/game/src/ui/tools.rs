@@ -286,6 +286,9 @@ pub struct ToolState {
     stroke_last: Option<[f32; 2]>,
     last_click: Option<(f32, [f32; 2])>,
     pub undo: Vec<UndoRecord>,
+    /// The world the undo records belong to (`SimWorld::generation`): a
+    /// new game or a load drops them.
+    undo_generation: u64,
     /// The current plan and the inputs it came from.
     pub plan: ToolPlan,
     plan_key: Option<(Pending, WorldKey)>,
@@ -723,10 +726,7 @@ pub fn pending(
                 let live = state.live.as_ref().map(|s| s.point).filter(|_| cursor.is_some());
                 let k = road_kind(kind);
                 let (curves, grid) = draft_roads(&state.draft, live, world);
-                let ops = curves
-                    .iter()
-                    .map(|&curve| Op::Cmd(Command::BuildCurve { curve, kind: k }))
-                    .collect();
+                let ops = curves.iter().map(|&curve| plan::road_op(curve, k)).collect();
                 Pending::Road {
                     ops,
                     curves,
@@ -970,7 +970,10 @@ fn refresh_plan(state: &mut ToolState, sim: &SimWorld, pending: Pending) {
 /// toast to show, and whether it was sent.
 fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimCommand>) -> (Option<Toast>, bool) {
     let pending = state.plan.pending.clone();
-    let base = state.scratch_for(sim).clone();
+    let mut base = state.scratch_for(sim).clone();
+    // The cached copy's clock may be behind: the commands are applied at
+    // the real world's tick, and road payments are refunded by it.
+    base.time = sim.world.time.clone();
     let (eval, after) = plan::evaluate(&base, pending.ops());
     if eval.steps.is_empty() {
         return (pending.hint().map(|h| Toast::new(ToastKind::Info, h)), false);
@@ -991,7 +994,9 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
             } else {
                 "road".to_string()
             };
-            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label, lost()));
+            let lost = lost();
+            toast = road_toast(&lost, "Road built");
+            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label, lost));
         }
         Pending::Upgrade { kind, .. } => {
             let label = if *kind == RoadKind::Avenue {
@@ -999,7 +1004,9 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
             } else {
                 "change to street"
             };
-            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label.into(), lost()));
+            let lost = lost();
+            toast = road_toast(&lost, "Road changed");
+            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label.into(), lost));
         }
         Pending::Bulldoze { .. } => {
             let removed = eval.removed().len();
@@ -1109,7 +1116,8 @@ fn junction_click(
     // Check the whole plan on a copy, and record what undo needs.
     let mut scratch = world.clone();
     let mut buildings = Vec::new();
-    let mut zones: Vec<(CellRef, Option<Zone>)> = Vec::new();
+    let mut zones: Vec<([f32; 2], Zone)> = Vec::new();
+    let mut paid: Vec<(u64, i64)> = Vec::new();
     for cmd in &cmds {
         match scratch.preview(cmd) {
             Ok(p) => {
@@ -1117,8 +1125,11 @@ fn junction_click(
                 zones.extend(
                     p.zone_cells
                         .iter()
-                        .filter_map(|&c| Some((c, world.zoning.cell(c)?.zone))),
+                        .filter_map(|&c| Some((world.zoning.cell_center(c)?, world.zoning.cell(c)?.zone?))),
                 );
+                if p.road_cost > 0 {
+                    paid.push((world.time.tick, p.road_cost));
+                }
             }
             Err(e) => return (Toast::new(ToastKind::Error, super::context::error_text(&e)), None),
         }
@@ -1132,17 +1143,8 @@ fn junction_click(
         (None, Some(_)) => "roundabout's removal".to_string(),
         (None, None) => "junction change".to_string(),
     };
-    let text = if buildings.is_empty() {
-        text
-    } else {
-        format!(
-            "{text} · {} building{} taken down (Ctrl+Z brings {} back)",
-            buildings.len(),
-            if buildings.len() == 1 { "" } else { "s" },
-            if buildings.len() == 1 { "it" } else { "them" }
-        )
-    };
-    let toast = Toast::new(ToastKind::Info, text);
+    // The roads' toast for what was taken down (a warning for a large loss).
+    let toast = road_toast(&buildings, &text).unwrap_or_else(|| Toast::new(ToastKind::Info, text));
     (
         toast,
         Some(UndoRecord::Junction {
@@ -1152,8 +1154,43 @@ fn junction_click(
             setting: setting_before,
             buildings,
             zones,
+            paid,
         }),
     )
+}
+
+/// The toast after a road that took buildings down (none when it took
+/// nothing: building a road is its own feedback).
+fn road_toast(lost: &[citysim_sim::BuildingRecord], done: &str) -> Option<Toast> {
+    if lost.is_empty() {
+        return None;
+    }
+    let n = lost.len();
+    let people: usize = lost.iter().map(|r| r.residents()).sum();
+    let mut what = if n == 1 {
+        "1 building demolished".to_string()
+    } else {
+        format!("{n} buildings demolished")
+    };
+    if people > 0 {
+        what.push_str(&format!(
+            ", {} {} moved out",
+            super::format::group(people as u64),
+            if people == 1 { "resident" } else { "residents" }
+        ));
+    }
+    let kind = if super::readout::large_loss(n, people) {
+        ToastKind::Warning
+    } else {
+        ToastKind::Info
+    };
+    Some(Toast::new(
+        kind,
+        format!(
+            "{done} · {what} · Ctrl+Z puts {}",
+            if n == 1 { "it back" } else { "them back" }
+        ),
+    ))
 }
 
 fn push_undo(state: &mut ToolState, rec: UndoRecord) {
@@ -1180,7 +1217,12 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
     let refused: Vec<usize> = eval
         .steps
         .iter()
-        .filter(|s| matches!(s.result, Err(CommandError::CannotRestore(_))))
+        .filter(|s| {
+            matches!(
+                s.result,
+                Err(CommandError::CannotRestore(_) | CommandError::NoSuchReceipt)
+            )
+        })
         .map(|s| s.op)
         .collect();
     let restores = ops
@@ -1229,8 +1271,17 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
             _ => None,
         })
         .collect();
-    let road_cost: i64 = eval.cost + back.iter().map(|r| r.building.footprint.area() as i64).sum::<i64>();
-    if road_cost > 0 && back.len() < ops.len() {
+    let refunded: i64 = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Cmd(Command::Refund { amount, .. }) => Some(*amount),
+            _ => None,
+        })
+        .sum();
+    let road_cost: i64 = eval.cost + back.iter().map(|r| r.building.footprint.area() as i64).sum::<i64>() + refunded;
+    if refunded > 0 {
+        extra = format!(" · {} refunded", super::format::money(refunded));
+    } else if road_cost > 0 && back.len() < ops.len() {
         extra = format!(" (the road costs {})", super::format::money(road_cost));
     }
     if !back.is_empty() {
@@ -1365,10 +1416,7 @@ fn finish(
         if curves.is_empty() {
             return None;
         }
-        let ops: Vec<Op> = curves
-            .iter()
-            .map(|&curve| Op::Cmd(Command::BuildCurve { curve, kind }))
-            .collect();
+        let ops: Vec<Op> = curves.iter().map(|&curve| plan::road_op(curve, kind)).collect();
         Some(Pending::Road {
             ops,
             curves,
@@ -1446,6 +1494,10 @@ fn use_tool(
 ) {
     state.batch_frame = false;
     let state = state.as_mut();
+    if state.undo_generation != sim.generation {
+        state.undo.clear();
+        state.undo_generation = sim.generation;
+    }
     let undo_asked = actions.read().any(|a| *a == UiAction::Undo);
     if ui.menu_open {
         state.reset();
@@ -1646,10 +1698,7 @@ fn curve_view(state: &ToolState) -> CurveToolView {
             let mut error_at = None;
             for s in &plan.eval.steps {
                 if let Err(e) = &s.result {
-                    let curve = match plan.pending.ops().get(s.op) {
-                        Some(Op::Cmd(Command::BuildCurve { curve, .. })) => Some(*curve),
-                        _ => None,
-                    };
+                    let curve = plan.pending.ops().get(s.op).and_then(plan::road_curve);
                     refused.extend(curve);
                     if error_at.is_none() {
                         error_at = e.at().or(curve.map(|c| c.end()));
@@ -1760,6 +1809,9 @@ fn publish(
             tp.kind = PreviewKind::Road;
             tp.error = error;
             tp.cost = plan.eval.cost;
+            // The grown buildings the road takes down, marked as the
+            // bulldozer marks them.
+            doomed_buildings = plan.eval.buildings();
             if let Pending::Upgrade { stretch, .. } = &plan.pending {
                 stretch_hl = Some(stretch.clone());
             }

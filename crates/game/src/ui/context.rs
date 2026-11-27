@@ -149,6 +149,8 @@ pub fn error_text(e: &CommandError) -> String {
             citysim_sim::RestoreProblem::NoRoad => "no road reaches the lot any more".into(),
         },
         CommandError::Roundabout(p) => ring_problem_text(p),
+        CommandError::NotARoadCommand => "Only roads clear their way".into(),
+        CommandError::NoSuchReceipt => "There's nothing to refund".into(),
     }
 }
 
@@ -309,16 +311,10 @@ pub fn tool_card(
                             format!("{} a day", format::money(size.upkeep_per_day())),
                             t::TEXT_MUTED,
                         ));
-                        if !p.buildings.is_empty() {
-                            card.rows.push(Row::new(
-                                "Takes down",
-                                format!(
-                                    "{} building{}",
-                                    p.buildings.len(),
-                                    if p.buildings.len() == 1 { "" } else { "s" }
-                                ),
-                                t::WARNING,
-                            ));
+                        // The land it takes, as a road clearing its way says it.
+                        for l in readout::loss_lines(world, &p.buildings, Some(p.demolition_cost)) {
+                            card.rows
+                                .push(Row::new(l.label.clone(), l.value.clone(), tone_color(l.tone)));
                         }
                         card.hint = "Click: build it · Ctrl+Z: undo".into();
                     }
@@ -352,7 +348,7 @@ pub fn tool_card(
         }
         ActiveTool::Road if modes.road == RoadMode::Upgrade => {
             state.cursor.filter(|_| state.on_map || state.busy())?;
-            readout::upgrade(plan, dragging).map(|r| readout_card(&r))
+            readout::upgrade(world, plan, dragging).map(|r| readout_card(&r))
         }
         ActiveTool::Road => {
             let live = state.live.as_ref();
@@ -377,7 +373,7 @@ pub fn tool_card(
             let start_dir = start
                 .and_then(|p| fsnap::on_net(world, p, 0.5, 0.3))
                 .and_then(|on| fsnap::direction_at(world, on, None));
-            readout::road(modes.road, plan, live, start_dir, state.snap_off).map(|r| readout_card(&r))
+            readout::road(world, modes.road, plan, live, start_dir, state.snap_off).map(|r| readout_card(&r))
         }
         ActiveTool::Zone(_) => {
             state.cursor.filter(|_| state.on_map || state.busy())?;
@@ -988,14 +984,17 @@ fn tag_of(card: &Card) -> Tag {
         let color = if r.color == t::TEXT { t::SLOT_INK } else { r.color };
         lines.push((text, color));
     }
-    // Refusals and snaps first: they matter most at the cursor.
+    // Refusals, snaps and warnings (what a road takes down) first: they
+    // matter most at the cursor.
     lines.sort_by_key(|(_, c)| {
         if *c == t::NEGATIVE {
             0
         } else if *c == t::ACCENT_TEXT {
             1
-        } else {
+        } else if *c == t::WARNING {
             2
+        } else {
+            3
         }
     });
     lines.truncate(TAG_LINES);

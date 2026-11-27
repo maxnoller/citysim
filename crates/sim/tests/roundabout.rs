@@ -313,6 +313,23 @@ fn money_upkeep_and_removal() {
     let p = set(&mut w, n, R::Small).unwrap();
     assert_eq!(p.cost, R::Small.cost());
     assert_eq!(w.economy.money, before - R::Small.cost());
+    // Undo gives the ring's price back once (`Refund`, as for roads).
+    assert_eq!(p.road_cost, R::Small.cost());
+    let tick = w.time.tick;
+    w.apply(Command::Refund {
+        tick,
+        amount: p.road_cost,
+    })
+    .expect("refund");
+    assert_eq!(w.economy.money, before);
+    assert!(
+        w.preview(&Command::Refund {
+            tick,
+            amount: p.road_cost
+        })
+        .is_err()
+    );
+    w.economy.money -= R::Small.cost();
     let costs = economy::running_costs(&w);
     assert_eq!(costs.roundabouts, R::Small.upkeep_per_day());
     assert_eq!(costs.roundabout_count, 1);

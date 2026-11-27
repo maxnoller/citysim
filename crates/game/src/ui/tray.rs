@@ -1701,7 +1701,9 @@ fn update_figures(
     let road = match *tool {
         ActiveTool::Road if modes.road.draws() || modes.road == RoadMode::Upgrade => {
             let mut f = readout::road_figures(modes.road, plan);
-            if state.draft.is_empty() && !matches!(plan.pending, super::tools::Pending::Road { .. }) {
+            // An upgrade pointed at shows its own cost.
+            let pointing = matches!(&plan.pending, super::tools::Pending::Upgrade { ops, .. } if !ops.is_empty());
+            if state.draft.is_empty() && !matches!(plan.pending, super::tools::Pending::Road { .. }) && !pointing {
                 // Nothing drawn yet: what a cell of this road costs.
                 let k = super::tools::road_kind(*kind);
                 f[2] = Figure {
