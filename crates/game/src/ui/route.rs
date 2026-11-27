@@ -303,8 +303,11 @@ pub struct Trip {
     /// The car on the road, if any.
     pub vehicle: Option<VehicleId>,
     /// Under way off the map: where they should be by now (`points` then
-    /// start there).
+    /// start there), the sim tick of that estimate and how far they go along
+    /// `points` per tick (metres).
     pub at: Option<[f32; 2]>,
+    pub at_tick: u64,
+    pub pace: f32,
 }
 
 fn building_end(world: &World, b: BuildingId) -> Option<RouteEnd> {
@@ -341,6 +344,8 @@ pub fn vehicle_trip(world: &World, id: VehicleId) -> Option<Trip> {
         destination: place_end(world, t.to, t.to_building),
         vehicle: Some(id),
         at: None,
+        at_tick: 0,
+        pace: 0.0,
     })
 }
 
@@ -367,6 +372,8 @@ fn planned_trip_now(world: &World, state: RouteState, from: BuildingId, to: Buil
         destination: building_end(world, to),
         vehicle: None,
         at: None,
+        at_tick: 0,
+        pace: 0.0,
     })
 }
 
@@ -391,6 +398,8 @@ fn person_trip_of(world: &World, p: &inspect::DayPlan) -> Option<Trip> {
                 destination: building_end(world, t.to),
                 vehicle: None,
                 at: None,
+                at_tick: 0,
+                pace: 0.0,
             })
         });
     }
@@ -467,10 +476,14 @@ fn under_way(world: &World, t: &inspect::TripView, trip: &Trip) -> Trip {
     let eta = t.eta_tick.unwrap_or(t.expected_tick);
     let span = eta.saturating_sub(t.departed_tick).max(1) as f32;
     let f = (world.time.tick.saturating_sub(t.departed_tick) as f32 / span).clamp(0.0, 1.0);
-    let (at, rest) = split_at(&pts, path_length(&pts) * f);
+    let len = path_length(&pts);
+    let (at, rest) = split_at(&pts, len * f);
     Trip {
         points: rest,
         at,
+        at_tick: world.time.tick,
+        // Until they arrive (the estimate stops at the end).
+        pace: if f < 1.0 { len / span } else { 0.0 },
         ..trip.clone()
     }
 }
@@ -594,6 +607,9 @@ fn publish_route(
         origin: trip.origin,
         destination: trip.destination,
         traveller: trip.at,
+        traveller_tick: trip.at_tick,
+        traveller_pace: trip.pace,
+        vehicle: trip.vehicle.filter(|_| trip.state == RouteState::Driving),
     };
     // A moving car: publish again only once it is a few metres further on
     // or anything else changed (the samples ahead of it stay put).

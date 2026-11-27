@@ -184,26 +184,31 @@ fn pick(
     match demo.kind {
         Kind::Car | Kind::Arrive => {
             let seen = look_ahead(w, ticks);
-            let best = seen
-                .iter()
-                .filter(|(id, s)| {
-                    let Some(v) = w.vehicles.get(*id) else { return false };
-                    match demo.kind {
-                        Kind::Car => s.gone_at.is_none() && s.junctions >= 1 && s.restarts >= 1 && v.speed > 3.0,
+            // Cars that fit; for `car`, if none stays the whole time (fast
+            // speeds), the longest-lived one that turns and stops.
+            let fits = |id: VehicleId, s: &Seen, whole: bool| {
+                let Some(v) = w.vehicles.get(id) else { return false };
+                v.speed > 3.0
+                    && match demo.kind {
+                        Kind::Car => (!whole || s.gone_at.is_none()) && s.junctions >= 1 && s.restarts >= 1,
                         _ => {
                             s.gone_at.is_some_and(|g| g > ticks / 3 && g < ticks * 3 / 4)
-                                && w.traffic.trips.get(*id).is_some_and(|t| t.owner.is_some())
-                                && v.speed > 3.0
+                                && w.traffic.trips.get(id).is_some_and(|t| t.owner.is_some())
                         }
                     }
-                })
-                .min_by(|a, b| {
-                    let pa = citysim_sim::drive::vehicle_pose(w, &w.vehicles[a.0]).0;
-                    let pb = citysim_sim::drive::vehicle_pose(w, &w.vehicles[b.0]).0;
-                    // Prefer more junctions and stops, then the nearest.
-                    let score = |s: &Seen, p| near(p) - 60.0 * (s.junctions.min(3) + s.restarts.min(2)) as f32;
-                    score(&a.1, pa).total_cmp(&score(&b.1, pb))
-                });
+            };
+            let any_whole = seen.iter().any(|(id, s)| fits(*id, s, true));
+            let best = seen.iter().filter(|(id, s)| fits(*id, s, any_whole)).min_by(|a, b| {
+                let pa = citysim_sim::drive::vehicle_pose(w, &w.vehicles[a.0]).0;
+                let pb = citysim_sim::drive::vehicle_pose(w, &w.vehicles[b.0]).0;
+                // Prefer staying long, more junctions and stops, then the nearest.
+                let score = |s: &Seen, p| {
+                    near(p)
+                        - 60.0 * (s.junctions.min(3) + s.restarts.min(2)) as f32
+                        - 2000.0 * s.ticks as f32 / ticks as f32
+                };
+                score(&a.1, pa).total_cmp(&score(&b.1, pb))
+            });
             match best {
                 Some((id, s)) => {
                     info!(

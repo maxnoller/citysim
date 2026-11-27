@@ -309,7 +309,7 @@ fn next_dt(rec: Res<Recorder>, frame: Res<FrameCount>, mut strategy: ResMut<Time
 
 const LOG_HEADER: &str = "frame,t,dt,paused,speed,vehicle,body_x,body_z,heading,sim_x,sim_z,ring_shown,ring_x,ring_z,\
 dia_shown,dia_x,dia_z,trav_shown,trav_x,trav_z,focus_x,focus_z,yaw,pitch,distance,follow_x,follow_z,\
-body_sx,body_sy,ring_sx,ring_sy,dia_sx,dia_sy,trav_sx,trav_sy";
+body_sx,body_sy,ring_sx,ring_sy,dia_sx,dia_sy,trav_sx,trav_sy,mark_sx,mark_sy";
 
 /// Where a ground point is on a 1920x1080 screen through `cam`.
 fn screen(cam: &GlobalTransform, fov: f32, p: Vec3) -> Vec2 {
@@ -379,11 +379,14 @@ fn log_frame(
         }
     };
     let (bs, rs, ds, ts) = (sc(b), sc(r), sc(d), sc(tr));
+    // Where the interface's leader line should end: the followed car's
+    // body (else the traveller's marker) 1.5 m up.
+    let mark = sc(if b.is_nan() { tr } else { b } + Vec3::Y * 1.5);
     let fo = follow.focus.unwrap_or([f32::NAN; 2]);
     let sp = sim_pt.unwrap_or([f32::NAN; 2]);
     let _ = writeln!(
         log,
-        "{},{:.5},{:.5},{},{},{},{:.4},{:.4},{:.5},{:.4},{:.4},{},{:.4},{:.4},{},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.5},{:.5},{:.4},{:.4},{:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+        "{},{:.5},{:.5},{},{},{},{:.4},{:.4},{:.5},{:.4},{:.4},{},{:.4},{:.4},{},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.5},{:.5},{:.4},{:.4},{:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
         frame.0,
         rec_t(frame.0, start, fps),
         time.delta_secs(),
@@ -419,6 +422,8 @@ fn log_frame(
         ds.y,
         ts.x,
         ts.y,
+        mark.x,
+        mark.y,
     );
 }
 

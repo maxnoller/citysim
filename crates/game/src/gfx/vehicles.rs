@@ -11,7 +11,18 @@
 //! * in a junction box: along the movement's curve (`JunctionMove`), the
 //!   rear on the approach lane while it is not yet in the box.
 //!
-//! Samples are taken once per sim tick and interpolated between ticks.
+//! Samples are taken after every fixed update that moved the sim (at fast
+//! speeds a tick's steps are spread over several, so each is sampled) and
+//! the body is drawn between the last two, at a drawn moment
+//! ([`DrawClock`]) that runs one fixed update behind the newest sample with
+//! real time: the body moves at the same pace whatever the frame times.
+//! Paused, the drawn moment glides on to the newest sample and stops there
+//! (no jump); resumed, it runs on from where it stopped.
+//!
+//! Where the highlighted, followed and routed vehicles are drawn goes to
+//! `shared::DrawnPoses` each frame ([`DrawnSet`]) for the ring, the
+//! diamond, the camera and the interface's marks.
+//!
 //! Brake lights come on when the sim says the car brakes or it stands.
 
 use std::collections::HashMap;
@@ -25,7 +36,10 @@ use super::palette;
 use super::road_geom::{ROAD_Y, lane_offset};
 use super::scene::WorldMaterials;
 use super::vehicle_gen::{self, SHAPES};
-use crate::shared::{GameSet, SimWorld, WorldCamera};
+use crate::shared::{
+    CameraFollow, DrawnPoses, DrawnVehicle, FollowOn, GameSet, RouteView, SimStep, SimWorld, WorldCamera,
+    WorldHighlight, WorldTarget,
+};
 use bevy::mesh::MeshTag;
 
 /// If a vehicle moves further than this in one tick it teleported.
@@ -63,22 +77,26 @@ enum Kind {
     Truck,
 }
 
+/// A pose: body centre (sim metres) and heading (radians).
+type Pose = (Vec2, f32);
+
 #[derive(Component)]
 pub(super) struct VehicleVisual {
-    /// (centre, heading) at the previous and the latest sim tick.
-    prev: (Vec2, f32),
-    cur: (Vec2, f32),
+    /// The body's pose at the last three samples ([`DrawClock`]), newest
+    /// last.
+    poses: [Pose; 3],
     seed: u32,
     kind: Kind,
     model: usize,
     /// The model the entity's mesh shows.
     mesh_model: Option<usize>,
     lod: bool,
-    /// Speed at the last sample, and whether the brake lights are on.
-    speed: f32,
+    /// Whether the brake lights are on.
     brake: bool,
     /// Brake state the entity's material shows.
     shown_brake: Option<bool>,
+    /// The pose drawn this frame.
+    shown: Pose,
 }
 
 /// Brake lights: the sim's flag, or standing.
@@ -91,21 +109,21 @@ impl VehicleVisual {
         let model = model_index(v.seed, kind);
         let now = place(world, v, model_size(model).0 * 0.5);
         VehicleVisual {
-            prev: now,
-            cur: now,
+            poses: [now; 3],
             seed: v.seed,
             kind,
             model,
             mesh_model: None,
             lod: false,
-            speed: v.speed,
             brake: braking(v),
             shown_brake: None,
+            shown: now,
         }
     }
 
-    /// Take the sim's newest state of the vehicle (once per sim tick).
-    fn step(&mut self, world: &World, v: &Vehicle, kind: Kind) {
+    /// Take the sim's newest state of the vehicle (after a fixed update
+    /// that moved the sim).
+    fn sample(&mut self, world: &World, v: &Vehicle, kind: Kind) {
         if self.seed != v.seed {
             *self = VehicleVisual {
                 lod: self.lod,
@@ -120,14 +138,103 @@ impl VehicleVisual {
             self.model = model_index(v.seed, kind);
         }
         let now = place(world, v, model_size(self.model).0 * 0.5);
-        self.brake = braking(v);
-        self.speed = v.speed;
-        self.prev = self.cur;
-        self.cur = now;
-        if self.prev.0.distance(self.cur.0) > TELEPORT_M {
-            self.prev = self.cur;
+        if self.poses[2].0.distance(now.0) > TELEPORT_M {
+            self.poses = [now; 3];
+        } else {
+            self.poses = [self.poses[1], self.poses[2], now];
         }
     }
+
+    /// The pose at `k` samples after the oldest kept (0..=2).
+    fn pose_at(&self, k: f32) -> Pose {
+        let (a, b, t) = if k <= 1.0 {
+            (self.poses[0], self.poses[1], k.max(0.0))
+        } else {
+            (self.poses[1], self.poses[2], (k - 1.0).min(1.0))
+        };
+        (a.0.lerp(b.0, t), lerp_angle(a.1, b.1, t))
+    }
+}
+
+/// The moment cars are drawn at, in samples (fixed updates that moved the
+/// sim): one behind the newest sample plus the fixed clock's overstep
+/// while the sim runs. It only ever moves forward, at the pace of real time
+/// (a little faster to catch up after a stall).
+#[derive(Resource, Debug)]
+pub(super) struct DrawClock {
+    /// Samples taken (the newest is number `newest`).
+    newest: u64,
+    /// The sim tick at the last three samples, newest last.
+    ticks: [u64; 3],
+    /// The drawn moment, in samples.
+    s: f64,
+    /// The last fixed update moved the sim.
+    moving: bool,
+    /// The sim tick at the last fixed update, and the world's generation.
+    last_tick: u64,
+    generation: u64,
+}
+
+impl Default for DrawClock {
+    fn default() -> Self {
+        DrawClock {
+            newest: 2,
+            ticks: [0; 3],
+            s: 2.0,
+            moving: false,
+            last_tick: 0,
+            // Not a world's: the first frame starts over.
+            generation: u64::MAX,
+        }
+    }
+}
+
+impl DrawClock {
+    /// The drawn moment as samples after the oldest kept (0..=2).
+    fn k(&self) -> f32 {
+        (self.s - (self.newest as f64 - 2.0)).clamp(0.0, 2.0) as f32
+    }
+
+    /// The drawn moment as a sim tick (fractional).
+    pub fn tick(&self) -> f64 {
+        let k = self.k() as f64;
+        let [a, b, c] = self.ticks.map(|t| t as f64);
+        if k <= 1.0 {
+            a + (b - a) * k
+        } else {
+            b + (c - b) * (k - 1.0)
+        }
+    }
+
+    /// Advance the drawn moment by `dt` seconds of a fixed clock with
+    /// period `h` s and overstep fraction `over`.
+    fn advance(&mut self, dt: f64, h: f64, over: f64) {
+        let newest = self.newest as f64;
+        let target = if self.moving {
+            newest - 1.0 + over.clamp(0.0, 1.0)
+        } else {
+            newest
+        };
+        let step = dt / h.max(1e-6);
+        // Behind (after a stall or a pause): catch up a little faster.
+        let behind = target - self.s > step + 1e-6;
+        let s = self.s + if behind { step * 1.5 } else { step };
+        self.s = s.min(target).max(self.s);
+        if target - self.s > 2.0 {
+            self.s = target;
+        }
+        self.s = self.s.max(newest - 2.0);
+    }
+}
+
+/// Placing what moves this frame, in `GameSet::Render`: the cars (and
+/// their [`DrawnPoses`]), then the off-map traveller's marker
+/// (`route.rs`). Order after `Traveller` to read where things are drawn
+/// this frame (the ring, the diamond, the camera).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum DrawnSet {
+    Vehicles,
+    Traveller,
 }
 
 /// Centre and heading of a vehicle's body whose front is at the sim's point.
@@ -171,24 +278,24 @@ fn place(world: &World, v: &Vehicle, half: f32) -> (Vec2, f32) {
 #[derive(Resource, Default)]
 pub(super) struct VehicleEntities(pub HashMap<VehicleId, Entity>);
 
-#[derive(Default)]
-struct SyncState {
-    last_fixed: f64,
-    last_tick: u64,
-    generation: u64,
-    /// The sim advanced on the most recent fixed update.
-    moving: bool,
-    /// Fixed updates between the kept poses (see `sync_vehicles`).
-    span: u32,
-}
-
 pub struct VehiclesPlugin;
 
 impl Plugin for VehiclesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VehicleEntities>()
+            .init_resource::<DrawClock>()
             .add_systems(Startup, setup)
-            .add_systems(Update, sync_vehicles.in_set(GameSet::Render));
+            .add_systems(FixedUpdate, sample_vehicles.after(SimStep))
+            .configure_sets(
+                Update,
+                (DrawnSet::Vehicles, DrawnSet::Traveller)
+                    .chain()
+                    .in_set(GameSet::Render),
+            )
+            .add_systems(
+                Update,
+                (sync_vehicles, publish_drawn).chain().in_set(DrawnSet::Vehicles),
+            );
     }
 }
 
@@ -284,25 +391,64 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     a + d * t
 }
 
+/// After every fixed update: a new sample of every drawn vehicle when the
+/// sim moved.
+fn sample_vehicles(
+    sim: Res<SimWorld>,
+    entities: Res<VehicleEntities>,
+    mut clock: ResMut<DrawClock>,
+    mut q: Query<&mut VehicleVisual>,
+) {
+    let world = &sim.world;
+    let tick = world.time.tick;
+    if clock.generation != sim.generation {
+        // A new world: `sync_vehicles` starts over.
+        return;
+    }
+    clock.moving = tick != clock.last_tick;
+    clock.last_tick = tick;
+    if !clock.moving {
+        return;
+    }
+    clock.newest += 1;
+    clock.ticks = [clock.ticks[1], clock.ticks[2], tick];
+    for (&id, &e) in &entities.0 {
+        if let Ok(mut vis) = q.get_mut(e)
+            && let Some(v) = world.vehicles.get(id)
+        {
+            vis.sample(world, v, kind_of(world, id));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sync_vehicles(
     mut commands: Commands,
     sim: Res<SimWorld>,
+    time: Res<Time>,
     fixed: Res<Time<Fixed>>,
     models: Res<VehicleModels>,
     mats: Res<WorldMaterials>,
-    mut state: Local<SyncState>,
+    mut clock: ResMut<DrawClock>,
     mut entities: ResMut<VehicleEntities>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
     mut q: Query<(&mut VehicleVisual, &mut Transform, &mut Mesh3d, &mut MeshTag)>,
 ) {
     let cam = cams.single().map_or(Vec3::ZERO, |c| c.translation());
     let world = &sim.world;
-    if state.generation != sim.generation {
+    if clock.generation != sim.generation {
         for (_, e) in entities.0.drain() {
             commands.entity(e).despawn();
         }
-        state.generation = sim.generation;
+        let tick = world.time.tick;
+        *clock = DrawClock {
+            newest: 2,
+            ticks: [tick; 3],
+            s: 2.0,
+            moving: false,
+            last_tick: tick,
+            generation: sim.generation,
+        };
     }
     let vehicles = &world.vehicles;
     entities.0.retain(|id, e| {
@@ -312,45 +458,22 @@ fn sync_vehicles(
         }
         keep
     });
-    // Did a fixed update run since last frame, and did the sim advance?
-    let fixed_now = fixed.elapsed_secs_f64();
-    let stepped = fixed_now != state.last_fixed;
-    let tick = world.time.tick;
-    let advanced = tick != state.last_tick;
-    if stepped {
-        // Fast speeds run several fixed updates a frame: the poses kept
-        // (`prev`, `cur`) are this many fixed updates apart.
-        let period = fixed.timestep().as_secs_f64().max(1e-6);
-        state.span = (((fixed_now - state.last_fixed) / period).round() as u32).clamp(1, 16);
-        state.moving = advanced;
-    }
-    state.last_fixed = fixed_now;
-    state.last_tick = tick;
-    // Draw one fixed update behind the newest pose: the same lag at every
-    // speed, so cars move evenly whatever the frame rate.
-    let alpha = if state.moving {
-        let span = state.span.max(1) as f32;
-        ((span - 1.0 + fixed.overstep_fraction().clamp(0.0, 1.0)) / span).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let tick_now = stepped && advanced;
+    clock.advance(
+        time.delta_secs_f64(),
+        fixed.timestep().as_secs_f64(),
+        fixed.overstep_fraction_f64(),
+    );
+    let k = clock.k();
     for (id, v) in vehicles.iter() {
-        let kind = kind_of(world, id);
         match entities.0.get(&id) {
             Some(&e) => {
-                let Ok((mut vis, _, _, _)) = q.get_mut(e) else {
-                    continue;
-                };
-                if tick_now {
-                    vis.step(world, v, kind);
-                } else if stepped {
-                    vis.prev = vis.cur;
+                if let Ok((mut vis, _, _, _)) = q.get_mut(e) {
+                    vis.brake = braking(v);
                 }
             }
             None => {
-                let mut vis = VehicleVisual::new(world, v, kind);
-                let (p, h) = vis.cur;
+                let mut vis = VehicleVisual::new(world, v, kind_of(world, id));
+                let (p, h) = vis.poses[2];
                 let pos = Vec3::new(p.x, ROAD_Y, p.y);
                 vis.lod = cam.distance(pos) > LOD_FAR;
                 let mesh = models.mesh(vis.model, vis.lod);
@@ -374,8 +497,8 @@ fn sync_vehicles(
             // the renderer re-specialise the car.
             *tag = MeshTag::new(if vis.brake { TAG_BRAKE } else { 0 });
         }
-        let p = vis.prev.0.lerp(vis.cur.0, alpha);
-        let h = lerp_angle(vis.prev.1, vis.cur.1, alpha);
+        let (p, h) = vis.pose_at(k);
+        vis.shown = (p, h);
         let new = Transform::from_xyz(p.x, ROAD_Y, p.y).with_rotation(Quat::from_rotation_y(-h));
         if *t != new {
             *t = new;
@@ -387,6 +510,49 @@ fn sync_vehicles(
             vis.mesh_model = Some(vis.model);
             mesh.0 = models.mesh(vis.model, lod);
         }
+    }
+}
+
+/// Where the vehicles the interface points at are drawn this frame. New
+/// vehicles spawned this frame are not drawn yet (their entity comes with
+/// the next command flush): they are left out.
+fn publish_drawn(
+    hl: Res<WorldHighlight>,
+    follow: Res<CameraFollow>,
+    route: Res<RouteView>,
+    entities: Res<VehicleEntities>,
+    q: Query<&VehicleVisual>,
+    mut drawn: ResMut<DrawnPoses>,
+) {
+    let mut ids: Vec<VehicleId> = Vec::with_capacity(4);
+    for t in [&hl.selected, &hl.hovered] {
+        if let Some(WorldTarget::Vehicle(v)) = t {
+            ids.push(*v);
+        }
+    }
+    if let FollowOn::Vehicle(v) = follow.on {
+        ids.push(v);
+    }
+    ids.extend(route.vehicle);
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if out.iter().any(|(v, _)| *v == id) {
+            continue;
+        }
+        let Some(vis) = entities.0.get(&id).and_then(|e| q.get(*e).ok()) else {
+            continue;
+        };
+        out.push((
+            id,
+            DrawnVehicle {
+                pos: vis.shown.0.to_array(),
+                heading: vis.shown.1,
+                half_length: model_size(vis.model).0 * 0.5,
+            },
+        ));
+    }
+    if drawn.vehicles != out {
+        drawn.vehicles = out;
     }
 }
 
