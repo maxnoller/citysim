@@ -32,6 +32,7 @@
 //! cars are drawn (`vehicles::DrawClock`): it glides evenly however rarely
 //! ui republishes, and the camera follows it there (`DrawnPoses`).
 
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::MeshTag;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
@@ -83,6 +84,7 @@ impl Plugin for RoutePlugin {
                     .before(DrawnSet::Traveller),
             )
             .add_systems(Update, move_traveller.in_set(DrawnSet::Traveller))
+            .add_systems(Update, end_warm_up)
             .add_systems(Update, trim_route.in_set(GameSet::Render).after(DrawnSet::Traveller));
     }
 }
@@ -184,6 +186,32 @@ struct RouteLine {
     solid: bool,
 }
 
+/// Draws the route materials during loading (`setup`).
+#[derive(Component)]
+struct RouteWarmUp;
+
+/// Seconds after the scene is ready that the warm-up triangles stay.
+const WARM_UP_S: f32 = 20.0;
+
+/// Remove the warm-up triangles a while after the scene is ready.
+fn end_warm_up(
+    mut commands: Commands,
+    ready: Res<crate::shared::SceneReady>,
+    time: Res<Time<Real>>,
+    q: Query<Entity, With<RouteWarmUp>>,
+    mut since: Local<Option<f32>>,
+) {
+    if q.is_empty() || !ready.0 {
+        return;
+    }
+    let t = *since.get_or_insert(time.elapsed_secs());
+    if time.elapsed_secs() - t > WARM_UP_S {
+        for e in &q {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
 /// The pin above the destination (moved every frame).
 #[derive(Component)]
 struct RoutePin;
@@ -233,6 +261,7 @@ fn setup(
         double_sided: true,
         ..default()
     }));
+    let (overlay_warm, solid_warm) = (overlay.clone(), solid.clone());
     commands.spawn((
         Name::new("Route edge"),
         RouteLine { solid: false },
@@ -279,6 +308,26 @@ fn setup(
         Visibility::Hidden,
         NotShadowCaster,
     ));
+    // Compile the route material's pipelines while the game loads (as the
+    // other materials' are), not on the first selection: a triangle of zero
+    // area per material, never culled, drawn until a while after the scene
+    // is ready (the warm-up cameras of the other qualities run then too).
+    let mut zero = MeshBuilder::new();
+    zero.tri_c(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, [[1.0; 4]; 3]);
+    let zero = meshes.add(zero.build());
+    for (name, mat) in [("Route warm-up (edge)", overlay_warm), ("Route warm-up", solid_warm)] {
+        commands.spawn((
+            Name::new(name),
+            RouteWarmUp,
+            Mesh3d(zero.clone()),
+            MeshMaterial3d(mat),
+            MeshTag::new(0),
+            Transform::default(),
+            Visibility::Visible,
+            NoFrustumCulling,
+            NotShadowCaster,
+        ));
+    }
     commands.insert_resource(RouteMaterials { glow });
 }
 
