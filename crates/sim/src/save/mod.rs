@@ -223,11 +223,14 @@ impl ExtensionV4 {
 
 /// Extension block, version 5: version 4 plus what traffic cost the city
 /// on every booked day (`DaySummary::traffic` of each `Economy::history`
-/// entry, in order).
+/// entry, in order) and the money credited ahead of today's booking
+/// (`Economy::advanced_today`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct ExtensionV5 {
     v4: ExtensionV4,
     day_traffic: Vec<Option<crate::economy::TrafficLoss>>,
+    /// `Economy::advanced_today`.
+    advanced_today: i64,
 }
 
 impl ExtensionV5 {
@@ -235,6 +238,7 @@ impl ExtensionV5 {
         ExtensionV5 {
             v4: ExtensionV4::of(w),
             day_traffic: w.economy.history.iter().map(|d| d.traffic).collect(),
+            advanced_today: w.economy.advanced_today,
         }
     }
 
@@ -243,6 +247,7 @@ impl ExtensionV5 {
         for (d, t) in w.economy.history.iter_mut().zip(self.day_traffic) {
             d.traffic = t;
         }
+        w.economy.advanced_today = self.advanced_today;
     }
 }
 

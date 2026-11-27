@@ -75,10 +75,10 @@ pub const STARTING_MONEY: i64 = 30_000;
 /// Cost of one cell of newly built road (per cell-to-cell piece of length).
 /// The main money sink: an expanding city spends most of its surplus here.
 pub const ROAD_COST_PER_CELL: i64 = 65;
-/// Cost of one cell of avenue (round 5: 140 -> 90, a hierarchy must be
-/// affordable to the player who builds it). Upgrading a street to an
-/// avenue costs the difference; downgrading is free (no refund).
-pub const AVENUE_COST_PER_CELL: i64 = 90;
+/// Cost of one cell of avenue (round 5: 140 -> 90, round 6: 75; a hierarchy
+/// must be affordable to the player who builds it). Upgrading a street to
+/// an avenue costs the difference; downgrading is free (no refund).
+pub const AVENUE_COST_PER_CELL: i64 = 75;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
@@ -88,8 +88,8 @@ pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// ($1 per 4 real minutes, as in round 2.)
 pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 4;
 /// Daily upkeep per avenue cell (four lanes, more to maintain; round 5:
-/// 10 -> 8).
-pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 8;
+/// 10 -> 8, round 6: 6).
+pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 6;
 /// Daily upkeep of a junction with traffic lights (power, maintenance),
 /// part of road upkeep. Busy junctions get lights automatically, so a city
 /// whose traffic needs many lights pays for them.
@@ -103,26 +103,27 @@ pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 3.6;
 /// A bigger city needs more complex services (hospitals, a fire brigade
 /// with ladders, transit, courts): each resident costs up to this much more
 /// per day, `* pop² / (pop² + SERVICES_CITY_SIZE_POP²)`: little in a town
-/// ($0.2 at 3,000 residents), $1.2 at 10,000, $1.8 at 20,000. Total
+/// ($0.1 at 3,000 residents), $0.6 at 10,000, $1.1 at 20,000. Total
 /// services therefore grow faster than the population, but a well-run
-/// bigger city still nets more per day than a smaller one (round 5: the
-/// size term was steep enough to cancel a hierarchy's extra residents).
-pub const SERVICES_CITY_SIZE_PER_RESIDENT: f32 = 2.2;
+/// bigger city keeps netting more per day as it grows (round 6: 2.2 at
+/// 9,000 made net income fall beyond 8,000 residents).
+pub const SERVICES_CITY_SIZE_PER_RESIDENT: f32 = 1.5;
 /// Population at which half of [`SERVICES_CITY_SIZE_PER_RESIDENT`] applies.
-pub const SERVICES_CITY_SIZE_POP: f32 = 9_000.0;
+pub const SERVICES_CITY_SIZE_POP: f32 = 12_000.0;
 /// The cost of density: extra services per resident per day by the level
 /// of their home `[1, 2, 3]` (apartment blocks need more fire cover,
 /// policing and rubbish collection than houses).
 pub const SERVICES_DENSITY_PER_RESIDENT: [f32; 3] = [0.0, 0.4, 1.0];
 
 /// Traffic costs business: every commute's time beyond
-/// `TRAFFIC_FREE_FACTOR` times its free-flow estimate is output lost at
+/// `TRAFFIC_FREE_FACTOR` times its free-flow estimate (rush-hour traffic in
+/// a city that works costs nothing; round 6: 1.6 -> 2.0) is output lost at
 /// `TRAFFIC_OUTPUT_PER_S` dollars per vehicle second ($10 an in-game hour
 /// of one worker), and the business tax on it (tax rate times that)
 /// is not paid, up to `TRAFFIC_LOSS_MAX_SHARE` of the day's business tax
 /// (`economy::TrafficLoss`, taken off the commercial and industrial tax
 /// lines).
-pub const TRAFFIC_FREE_FACTOR: f32 = 1.6;
+pub const TRAFFIC_FREE_FACTOR: f32 = 2.0;
 pub const TRAFFIC_OUTPUT_PER_S: f32 = 0.9;
 pub const TRAFFIC_LOSS_MAX_SHARE: f32 = 0.7;
 
