@@ -49,22 +49,25 @@ pub struct BuildingModels {
     meshes: HashMap<ModelKey, Models>,
     emitters: HashMap<ModelKey, Vec<Vec3>>,
     driveways: HashMap<ModelKey, Vec<(f32, f32)>>,
+    doors: HashMap<ModelKey, Vec<Vec2>>,
     sites: HashMap<(ModelKey, u8), Handle<Mesh>>,
 }
 
 /// One generated model: middle and distant meshes, smoke emitters and
 /// driveways.
-type Generated = (ModelKey, [Mesh; 2], Vec<Vec3>, Vec<(f32, f32)>);
+type Generated = (ModelKey, [Mesh; 2], Vec<Vec3>, Vec<(f32, f32)>, Vec<Vec2>);
 
 fn generate_pair(key: ModelKey) -> Generated {
     let mut mid = building_gen::generate(key, Lod::Mid);
     let emitters = std::mem::take(&mut mid.emitters);
     let driveways = std::mem::take(&mut mid.driveways);
+    let doors = mid.doors.iter().map(|p| Vec2::new(p.x, p.z)).collect();
     (
         key,
         [mid.build_gpu(), building_gen::generate(key, Lod::Far).build_gpu()],
         emitters,
         driveways,
+        doors,
     )
 }
 
@@ -108,9 +111,10 @@ impl BuildingModels {
         if todo.is_empty() {
             return;
         }
-        for (key, [mid, far], emitters, driveways) in in_parallel(todo, generate_pair) {
+        for (key, [mid, far], emitters, driveways, doors) in in_parallel(todo, generate_pair) {
             self.emitters.insert(key, emitters);
             self.driveways.insert(key, driveways);
+            self.doors.insert(key, doors);
             self.meshes.insert(
                 key,
                 Models {
@@ -156,6 +160,12 @@ impl BuildingModels {
     /// Driveway x ranges at the lot front, in model space (after `get`).
     pub fn driveways(&self, key: ModelKey) -> &[(f32, f32)] {
         self.driveways.get(&key).map_or(&[], Vec::as_slice)
+    }
+
+    /// Front doors, model space `(x, z)` (the model's front is `+z`), after
+    /// `get`.
+    pub fn doors(&self, key: ModelKey) -> &[Vec2] {
+        self.doors.get(&key).map_or(&[], Vec::as_slice)
     }
 
     /// Chimney tops that smoke, in model space (after `get`).
@@ -275,6 +285,30 @@ pub struct DrivewayMouths {
     pub points: Vec<Vec2>,
 }
 
+/// Where each finished building's front doors are (sim metres, on the
+/// ground at the facade), from the drawn models: the entrance a walker
+/// would use (issue 51; the sim still lets people in and out at the middle
+/// of the lot's front edge). `version` changes whenever any door moves.
+/// Several doors for a terrace (one per house); a building under
+/// construction has none.
+#[derive(Resource, Default)]
+pub struct BuildingDoors {
+    pub version: u64,
+    pub doors: HashMap<BuildingId, Vec<Vec2>>,
+}
+
+impl BuildingDoors {
+    /// The door of `b` nearest to `p` (sim metres), if it has any.
+    #[allow(dead_code)]
+    pub fn nearest(&self, b: BuildingId, p: Vec2) -> Option<Vec2> {
+        self.doors
+            .get(&b)?
+            .iter()
+            .copied()
+            .min_by(|x, y| x.distance_squared(p).total_cmp(&y.distance_squared(p)))
+    }
+}
+
 /// A building still under construction (its children show the site).
 #[derive(Component)]
 struct Site {
@@ -392,6 +426,7 @@ impl Plugin for BuildingsPlugin {
         app.init_resource::<BuildingModels>()
             .init_resource::<BuildingEntities>()
             .init_resource::<DrivewayMouths>()
+            .init_resource::<BuildingDoors>()
             .add_systems(
                 Update,
                 (
@@ -451,6 +486,7 @@ fn sync_buildings(
     mut index: ResMut<BuildingEntities>,
     edges: Res<RoadEdges>,
     mut mouths: ResMut<DrivewayMouths>,
+    mut doors: ResMut<BuildingDoors>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
 ) {
     let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
@@ -583,11 +619,25 @@ fn sync_buildings(
     if sp.filling {
         return;
     }
-    // Driveway mouths of every finished (or growing) building.
+    // Driveway mouths and doors of every finished (or growing) building.
     let mut points = Vec::new();
+    let mut door_map: HashMap<BuildingId, Vec<Vec2>> = HashMap::new();
     for (id, (_, key, _, inset)) in &sp.entities {
         let Some(b) = buildings.get(*id) else { continue };
         let lot = lot_of(b);
+        let ds: Vec<Vec2> = models
+            .doors(*key)
+            .iter()
+            .map(|d| {
+                lot.world(Vec2::new(
+                    inset.shift.x + d.x * inset.scale.x,
+                    inset.shift.y + d.y * inset.scale.z,
+                ))
+            })
+            .collect();
+        if !ds.is_empty() {
+            door_map.insert(*id, ds);
+        }
         for &(x0, x1) in models.driveways(*key) {
             let x = (x0 + x1) * 0.5;
             points.push(lot.world(Vec2::new(
@@ -600,6 +650,10 @@ fn sync_buildings(
     if points != mouths.points {
         mouths.points = points;
         mouths.version += 1;
+    }
+    if door_map != doors.doors {
+        doors.doors = door_map;
+        doors.version += 1;
     }
 }
 

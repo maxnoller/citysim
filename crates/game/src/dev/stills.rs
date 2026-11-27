@@ -43,7 +43,8 @@ enum View {
     Sheet(CameraPose),
     /// Close behind a vehicle on a kind of trip (`trip:movein`,
     /// `trip:moveout`, `trip:lorry`, `trip:delivery`), picked when the shot
-    /// is taken: a moving household nearest its new home, else the first.
+    /// is taken: a moving household nearest its new home, else the first;
+    /// `trip:walker` close to a person walking.
     Trip(String),
 }
 
@@ -189,6 +190,21 @@ fn trip_pose(world: &citysim_sim::World, kind: &str) -> Option<CameraPose> {
             continue;
         }
         best = Some((score, v.pos, v.heading));
+    }
+    if kind == "walker" {
+        // Someone on foot with a way still to go, looked at from close by.
+        let (_, w) = world
+            .walking
+            .walkers
+            .iter()
+            .filter(|(_, w)| w.left_m() > 40.0 && w.done_m() > 5.0)
+            .max_by(|a, b| a.1.left_m().total_cmp(&b.1.left_m()))?;
+        return Some(CameraPose {
+            focus: Vec3::new(w.pos[0], 0.0, w.pos[1]),
+            yaw: 0.8,
+            pitch: 0.45,
+            distance: 16.0,
+        });
     }
     let (_, p, h) = best?;
     Some(CameraPose {

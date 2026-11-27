@@ -300,11 +300,21 @@ impl Face {
         m.cuboid2(min, max, color, shade(color, 1.08));
     }
 
+    /// Record an entrance at `a` along this face (front faces only: the
+    /// ones people use from the street), on the ground at the wall.
+    pub fn entrance(&self, m: &mut MeshBuilder, a: f32) {
+        if self.n.z > 0.5 {
+            let p = self.at(a, 0.0, 0.0);
+            m.doors.push(p.with_y(0.0));
+        }
+    }
+
     /// A front door centred at `a`: frame, leaf (panelled near, with a
     /// fanlight over it), a step and a small lamp beside it.
     #[allow(clippy::too_many_arguments)]
     pub fn door(&self, m: &mut MeshBuilder, a: f32, y0: f32, w: f32, h: f32, frame: Color, leaf: Color, step: Color) {
         let hw = w * 0.5;
+        self.entrance(m, a);
         if m.lod {
             self.rect(m, a - hw, a + hw, y0, y0 + h, 0.05, leaf);
             return;
@@ -1481,6 +1491,36 @@ mod tests {
                             assert!(p.iter().all(|v| v.is_finite()));
                             assert!(p[0].abs() <= half && p[2].abs() <= half, "outside lot: {p:?} {kind:?}");
                             assert!(p[1] >= -0.01 && p[1] < 60.0, "height {p:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod door_tests {
+    use super::*;
+
+    #[test]
+    fn every_model_has_a_front_door_in_its_lot_and_all_levels_agree() {
+        for kind in Zone::ALL {
+            for level in 1..=3u8 {
+                for cells in [(1, 1), (1, 2), (2, 2)] {
+                    for variant in 0..VARIANTS as u8 {
+                        let key = ModelKey {
+                            kind,
+                            cells,
+                            level,
+                            variant,
+                        };
+                        let doors: Vec<Vec<Vec3>> = Lod::ALL.iter().map(|&l| generate(key, l).doors).collect();
+                        assert!(!doors[1].is_empty(), "{key:?} has no door");
+                        assert!(doors.iter().all(|d| d == &doors[1]), "{key:?}: levels disagree");
+                        let (hw, hd) = (cells.0 as f32 * 4.0, cells.1 as f32 * 4.0);
+                        for d in &doors[1] {
+                            assert!(d.x.abs() <= hw && d.z > 0.0 && d.z <= hd, "{key:?}: door {d}");
                         }
                     }
                 }

@@ -151,6 +151,7 @@ pub(super) fn shop(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: u3
     f.rect(m, 0.35, f.width - 0.35, 0.0, 0.45, 0.035, shade(surround, 0.8));
     f.lit_rect(m, Glow::Shop, 0.4, f.width - 0.4, 0.45, 2.9, 0.04, palette::GLASS);
     let door = f.width * rng.range(0.25, 0.75);
+    f.entrance(m, door);
     f.rect(m, door - 0.6, door + 0.6, 0.0, 2.5, 0.06, shade(palette::GLASS, 0.75));
     for a in spread(f.width - 0.8, 3) {
         f.rect(m, 0.4 + a - 0.04, 0.4 + a + 0.04, 0.45, 2.9, 0.06, surround);
@@ -580,6 +581,7 @@ pub(super) fn office(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, storeys: 
             m.cylinder(p, 0.09, 3.5, 8, palette::METAL_DARK, palette::METAL_DARK);
         }
         let c = f.at(f.width * 0.5, 0.0, 0.5);
+        f.entrance(m, f.width * 0.5);
         m.cylinder(c, 0.85, 2.4, 10, shade(glass, 0.9), mullion);
         // Company name on the canopy edge.
         lettering(
@@ -672,6 +674,7 @@ pub(super) fn supermarket(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect) {
     // A band of the brand colour along the top, the glazed entrance under
     // a deep canopy on posts, a tall sign over it.
     f.rect(m, 0.0, f.width, top - 1.1, top, 0.03, accent);
+    f.entrance(m, f.width * 0.5);
     f.lit_rect(
         m,
         Glow::Shop,

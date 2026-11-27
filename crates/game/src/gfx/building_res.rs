@@ -1091,6 +1091,7 @@ pub(super) fn apartments(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, store
     let per = per_of(f.width);
     let a = spread(f.width, per)[per / 2];
     f.lit_rect(m, Glow::Shop, a - 0.75, a + 0.75, 0.0, 2.6, 0.08, palette::GLASS);
+    f.entrance(m, a);
     f.slab(m, a - 1.3, a + 1.3, 2.8, 2.98, 1.4, accent, accent);
     m.fine_only(|m| {
         f.rect(m, a - 0.04, a + 0.04, 0.0, 2.6, 0.09, palette::METAL_DARK);

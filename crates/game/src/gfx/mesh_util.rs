@@ -85,6 +85,9 @@ pub struct MeshBuilder {
     /// Driveways meeting the lot's front edge (`+z`): their model-space x
     /// ranges, so street furniture keeps clear of them.
     pub driveways: Vec<(f32, f32)>,
+    /// Front doors (the threshold, on the ground) in model space: where
+    /// people go in and out. Every level of detail records the same.
+    pub doors: Vec<Vec3>,
 }
 
 impl MeshBuilder {
