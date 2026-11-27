@@ -61,7 +61,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - Asset root resolves to `crates/game/assets` for `cargo run -p citysim` and for the binary run directly.
 
 ## shared.rs contract (summary)
-- `SimWorld { world, generation }` (`key(version)`, `replace(world)`), `SimClock { paused, speed }`, `SPEEDS = [1, 3,
+- `SimWorld { world, generation }` (`key(version)`, `replace(world)`: frees the old world on a thread), `SimClock { paused, speed }`, `SPEEDS = [1, 3,
   6, 12]` (a day is 16 min at 1x, 80 s at 12x), `SimCommand(Command)` message → applied in `GameSet::Sim`, result in
   `LastCommand`. `World::step` runs in `FixedUpdate` (`SimStep` set): the fixed rate is `TICKS_PER_SECOND` times
   `SimClock::fixed_per_tick()` (fast speeds split a tick's steps over up to `MAX_FIXED_HZ` = 120 updates a second, so
