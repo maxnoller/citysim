@@ -3,17 +3,17 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: daily
+    open-pull-requests-limit: 20
     groups:
       actions:
         patterns: ["*"]
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: monthly
-    # Bevy moves as a whole and by hand; everything else arrives as one grouped update.
-    ignore:
-      - dependency-name: "bevy*"
+      interval: daily
+    open-pull-requests-limit: 20
+    # Compatible updates arrive together in one pull request; each major version gets its own.
     groups:
       cargo:
         patterns: ["*"]

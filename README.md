@@ -113,8 +113,7 @@ kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows;
   `shared.rs` (the only contract between the two), `dev/` (development scenarios, screenshots, scripted play).
 - `scripts/play.py` — scripted play-through driving the real game with OS input (development).
 
-See `CLAUDE.md` for developer notes and dev flags, `CONTRIBUTING.md` for how changes get in, and
-`THIRD_PARTY_NOTICES.md` for bundled font licences.
+See `CLAUDE.md` for developer notes and dev flags, and `THIRD_PARTY_NOTICES.md` for bundled font licences.
 
 ## Development shortcuts
 
@@ -136,5 +135,6 @@ High at 12x.
 
 ## Licence
 
-The source is published to be read. No licence is granted for now: all rights reserved. The bundled fonts keep their
-own licences (`THIRD_PARTY_NOTICES.md`).
+The source is published to be read. No licence is granted for now: all rights reserved. The project is developed by
+its owner; outside pull requests are not accepted. The bundled fonts keep their own licences
+(`THIRD_PARTY_NOTICES.md`).
