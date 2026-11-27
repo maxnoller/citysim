@@ -30,6 +30,7 @@ mod panel;
 mod people;
 mod perf;
 mod plan;
+mod planner;
 mod plate;
 mod pointer;
 mod readout;

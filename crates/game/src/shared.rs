@@ -95,6 +95,10 @@ pub struct SimClock {
     pub paused: bool,
     /// Index into [`SPEEDS`] (0 = 1x).
     pub speed: usize,
+    /// ui is sending a plan in parts over a few frames: no steps until it
+    /// has all been applied (so nothing changes between its parts; not
+    /// shown as a pause).
+    pub hold: bool,
 }
 
 impl SimClock {
@@ -115,7 +119,7 @@ impl SimClock {
 
     /// Sim steps per fixed update (0 while paused).
     pub fn steps_per_tick(&self) -> u32 {
-        if self.paused {
+        if self.paused || self.hold {
             0
         } else {
             self.speed_steps() / self.fixed_per_tick()
@@ -455,6 +459,10 @@ pub struct CurveToolView {
     pub guides: Vec<Guide>,
     /// Junctions it would make or use.
     pub nodes: Vec<([f32; 2], NodeChange)>,
+    /// What is shown (`pieces`, `refused`, `error_at`, `nodes`) is the last
+    /// plan checked; a newer one has been in the works for a moment (gfx
+    /// draws it dimmed). The points, handles and snap are always current.
+    pub stale: bool,
 }
 
 /// A stretch of road between two junctions (or dead ends).

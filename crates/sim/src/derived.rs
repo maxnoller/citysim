@@ -109,6 +109,9 @@ pub(crate) struct Derived {
     pub gave_up_reasons: [u32; 5],
     /// Debug: wall-clock time of the last zone-block regeneration, ns.
     pub last_block_sync_ns: u64,
+    /// What each junction's state was last built from
+    /// (`traffic::sync_junctions` rebuilds only those whose roads changed).
+    pub junction_inputs: crate::side::SideTable<NodeId, crate::junction::JunctionInputs>,
 }
 
 impl PartialEq for Derived {

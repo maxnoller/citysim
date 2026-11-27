@@ -41,12 +41,13 @@ use citysim_sim::{
 use super::UiState;
 use super::fsnap::{self, Anchor, OnNet, SnapOptions, Snapped, add, dist, dot, mul, sub};
 use super::plan::{self, Evaluated, Op, UndoRecord};
+use super::planner::{self, Done, Planner};
 use super::shapes::{Draft, GridFrame, Placed, Shape, Stretch};
 use super::toasts::{Toast, ToastKind};
 use super::widgets::UiAction;
 use crate::shared::{
     ActiveTool, BulldozeMode, CurveToolView, GameSet, HoveredCell, PointerOverUi, PreviewKind, RoadChoice, RoadMode,
-    RoadStretch, ScriptPointer, SimCommand, SimWorld, SnapFeedback, ToolModes, ToolPreview, WorldCamera,
+    RoadStretch, ScriptPointer, SimClock, SimCommand, SimWorld, SnapFeedback, ToolModes, ToolPreview, WorldCamera,
     WorldHighlight, WorldTarget, ZoneMode,
 };
 
@@ -237,14 +238,31 @@ impl Pending {
     }
 }
 
-/// The evaluated pending action.
+/// The evaluated pending action (the last one checked: while a newer one
+/// is being checked, `stale`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolPlan {
     pub pending: Pending,
     pub eval: Evaluated,
+    /// A newer pending action is being checked; this is the one before.
+    pub stale: bool,
+    /// The road pieces and junctions of `eval` (`Evaluated::pieces` /
+    /// `nodes`, worked out once per plan).
+    pub pieces: Vec<(Curve, PieceChange)>,
+    pub nodes: Vec<([f32; 2], citysim_sim::command::NodeChange)>,
 }
 
 impl ToolPlan {
+    fn new(pending: Pending, eval: Evaluated) -> ToolPlan {
+        ToolPlan {
+            pieces: eval.pieces(),
+            nodes: eval.nodes(),
+            pending,
+            eval,
+            stale: false,
+        }
+    }
+
     pub fn error(&self) -> Option<&CommandError> {
         self.eval.first_error()
     }
@@ -283,14 +301,63 @@ pub struct ToolState {
     stroke_last: Option<[f32; 2]>,
     last_click: Option<(f32, [f32; 2])>,
     pub undo: Vec<UndoRecord>,
-    /// The current plan and the inputs it came from.
+    /// The plan shown and the inputs it came from.
     pub plan: ToolPlan,
     plan_key: Option<(Pending, WorldKey)>,
-    scratch: Option<(WorldKey, World)>,
+    /// Real time the shown plan became stale.
+    stale_since: Option<f32>,
+    /// The request the frame has already waited for (it waits once).
+    waited: Option<(Pending, WorldKey)>,
+    /// Copy of the world the plans are checked on (`plan::scratch`), its
+    /// id for the planner.
+    scratch: Option<(WorldKey, u64, std::sync::Arc<World>)>,
+    scratch_made: u64,
+    /// Checks plans on a worker thread.
+    planner: Planner,
+    /// A click (or Enter, a release, Ctrl+Z) waiting for its plan to be
+    /// checked before it is sent.
+    job: Option<Job>,
+    /// Commands of a plan being sent in parts, with the time each took to
+    /// check (an estimate of what it costs to apply).
+    outbox: std::collections::VecDeque<(Command, f32)>,
     /// A plan was sent this frame (its parts' results are summarised by
     /// the tool, not toasted one by one).
     pub batch_frame: bool,
 }
+
+/// An action waiting for its plan.
+enum Job {
+    /// Send the first of `cands` that is accepted (from `idx`), else
+    /// report why the last one is not; then `then`.
+    Commit {
+        cands: Vec<Pending>,
+        idx: usize,
+        then: Then,
+    },
+    /// Take `rec` back with `ops` (buildings that cannot come back are
+    /// left out once: `kept_out`).
+    Undo {
+        rec: UndoRecord,
+        ops: Vec<Op>,
+        kept_out: Vec<String>,
+        filtered: bool,
+    },
+}
+
+/// What happens to the tool once a plan has been sent (or refused).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Then {
+    Nothing,
+    /// The road is built: a new road; refused: a grid keeps its corner and
+    /// width.
+    Road,
+}
+
+/// Estimated cost (ms, the time to check them) of the commands sent per
+/// frame when a plan is sent in parts.
+const SEND_BUDGET_MS: f32 = 3.0;
+/// Seconds a plan may be stale before the preview shows it dimmed.
+const STALE_DIM_S: f32 = 0.15;
 
 impl ToolState {
     /// Something can be taken back with Ctrl+Z.
@@ -302,12 +369,29 @@ impl ToolState {
         !self.draft.is_empty() || self.press.is_some()
     }
 
-    fn scratch_for(&mut self, sim: &SimWorld) -> &World {
+    /// The scratch copy of the world now, and its id.
+    fn scratch_for(&mut self, sim: &SimWorld) -> (u64, std::sync::Arc<World>) {
         let key = world_key(sim);
-        if self.scratch.as_ref().is_none_or(|(k, _)| *k != key) {
-            self.scratch = Some((key, plan::scratch(&sim.world)));
+        if self.scratch.as_ref().is_none_or(|(k, _, _)| *k != key) {
+            self.scratch_made += 1;
+            self.scratch = Some((key, self.scratch_made, std::sync::Arc::new(plan::scratch(&sim.world))));
         }
-        &self.scratch.as_ref().expect("just set").1
+        let (_, id, w) = self.scratch.as_ref().expect("just set");
+        (*id, w.clone())
+    }
+
+    /// The pending action of the job waiting for its plan.
+    fn job_pending(&self) -> Option<&Pending> {
+        match &self.job {
+            Some(Job::Commit { cands, idx, .. }) => cands.get(*idx),
+            _ => None,
+        }
+    }
+
+    /// The plan shown has been stale long enough to be shown so (a plan
+    /// checked within a few frames is never dimmed).
+    pub fn dimmed(&self, now: f32) -> bool {
+        self.plan.stale && self.stale_since.is_some_and(|t| now - t >= STALE_DIM_S)
     }
 
     pub fn reset(&mut self) {
@@ -942,30 +1026,167 @@ pub fn pending(
     }
 }
 
-fn refresh_plan(state: &mut ToolState, sim: &SimWorld, pending: Pending) {
+fn refresh_plan(state: &mut ToolState, sim: &SimWorld, pending: Pending, now: f32) {
     let key = (pending, world_key(sim));
     if state.plan_key.as_ref() == Some(&key) {
+        state.plan.stale = false;
+        state.stale_since = None;
         return;
     }
-    let started = std::time::Instant::now();
-    let (eval, _) = plan::evaluate(state.scratch_for(sim), key.0.ops());
-    let ms = started.elapsed().as_secs_f32() * 1e3;
-    if ms > 8.0 {
-        debug!("tool plan took {ms:.1} ms ({} steps)", eval.steps.len());
+    if key.0.ops().is_empty() {
+        state.plan = ToolPlan::new(key.0.clone(), Evaluated::default());
+        state.plan_key = Some(key);
+        state.stale_since = None;
+        return;
     }
-    state.plan = ToolPlan {
-        pending: key.0.clone(),
-        eval,
+    let (id, base) = state.scratch_for(sim);
+    // Wait (a little) only the first frame a plan is asked for.
+    let wait = if state.waited.as_ref() == Some(&key) {
+        std::time::Duration::ZERO
+    } else {
+        planner::WAIT
     };
-    state.plan_key = Some(key);
+    state.waited = Some(key.clone());
+    if let Some(done) = state.planner.request(id, &base, key.0.ops(), wait) {
+        if done.ms > 8.0 {
+            debug!("tool plan took {:.1} ms ({} steps)", done.ms, done.eval.steps.len());
+        }
+        state.plan = ToolPlan::new(key.0.clone(), done.eval.clone());
+        state.plan_key = Some(key);
+        state.stale_since = None;
+        return;
+    }
+    // Still being checked: keep showing the last plan of the same tool.
+    if std::mem::discriminant(&state.plan.pending) != std::mem::discriminant(&key.0) {
+        state.plan = ToolPlan::new(key.0.clone(), Evaluated::default());
+        state.plan_key = None;
+    }
+    state.plan.stale = true;
+    state.stale_since.get_or_insert(now);
 }
 
-/// Send the current plan (only when every step is accepted). Returns the
+/// Carry on with the action waiting for its plan (once the plan sent
+/// before it has all gone out): send it when it is checked.
+fn drive_job(state: &mut ToolState, sim: &SimWorld, toasts: &mut MessageWriter<Toast>) {
+    if !state.outbox.is_empty() {
+        return;
+    }
+    // A refused candidate moves on to the next one within the frame.
+    for _ in 0..4 {
+        let Some(job) = state.job.take() else { return };
+        let ops: Vec<Op> = match &job {
+            Job::Commit { cands, idx, .. } => cands[*idx].ops().to_vec(),
+            Job::Undo { ops, .. } => ops.clone(),
+        };
+        let (id, base) = state.scratch_for(sim);
+        if state.planner.request(id, &base, &ops, planner::WAIT).is_none() {
+            state.job = Some(job);
+            return;
+        }
+        let done = state.planner.take(id, &ops).expect("just checked");
+        match job {
+            Job::Commit { cands, idx, then } => {
+                if done.eval.first_error().is_some() && idx + 1 < cands.len() {
+                    state.job = Some(Job::Commit {
+                        cands,
+                        idx: idx + 1,
+                        then,
+                    });
+                    continue;
+                }
+                let pending = cands[idx].clone();
+                let (toast, sent) = commit(state, sim, &pending, done);
+                if let Some(t) = toast {
+                    toasts.write(t);
+                }
+                if then == Then::Road {
+                    if sent {
+                        state.reset();
+                    } else if state.draft.shape == Shape::Grid {
+                        // Refused: keep the corner and width so the player
+                        // can fix it.
+                        state.draft.points.truncate(2);
+                    }
+                }
+            }
+            Job::Undo {
+                rec,
+                ops,
+                mut kept_out,
+                filtered,
+            } => {
+                // Buildings whose lot has changed stay demolished; the rest
+                // of the undo (roads, other buildings) still goes ahead.
+                let refused: Vec<usize> = done
+                    .eval
+                    .steps
+                    .iter()
+                    .filter(|s| matches!(s.result, Err(CommandError::CannotRestore(_))))
+                    .map(|s| s.op)
+                    .collect();
+                if !filtered && !refused.is_empty() && refused.len() < ops.len() {
+                    for s in &done.eval.steps {
+                        if let Err(e @ CommandError::CannotRestore(_)) = &s.result {
+                            kept_out.push(super::context::error_text(e));
+                        }
+                    }
+                    let ops = ops
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(i, _)| !refused.contains(i))
+                        .map(|(_, o)| o)
+                        .collect();
+                    state.job = Some(Job::Undo {
+                        rec,
+                        ops,
+                        kept_out,
+                        filtered: true,
+                    });
+                    continue;
+                }
+                toasts.write(finish_undo(state, sim, &rec, &ops, &kept_out, done));
+            }
+        }
+        return;
+    }
+}
+
+/// Send queued commands of a plan sent in parts: about
+/// [`SEND_BUDGET_MS`] of them a frame; the simulation holds still until
+/// the last one is applied.
+fn pump_outbox(state: &mut ToolState, out: &mut MessageWriter<SimCommand>, clock: &mut SimClock) {
+    let sending = !state.outbox.is_empty();
+    let mut budget = SEND_BUDGET_MS;
+    while let Some((cmd, ms)) = state.outbox.pop_front() {
+        debug!("tool sends {cmd:?}");
+        out.write(SimCommand(cmd));
+        budget -= ms;
+        if budget <= 0.0 {
+            break;
+        }
+    }
+    if sending {
+        state.batch_frame = true;
+    }
+    // Hold from the frame the first part goes out until the frame after
+    // the last one (applied in this frame's `GameSet::Sim`).
+    if clock.hold != sending {
+        clock.hold = sending;
+    }
+}
+
+/// Send `pending`, checked as `done` (only when every step is accepted):
+/// its commands are queued and go out over the next frames. Returns the
 /// toast to show, and whether it was sent.
-fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimCommand>) -> (Option<Toast>, bool) {
-    let pending = state.plan.pending.clone();
-    let base = state.scratch_for(sim).clone();
-    let (eval, after) = plan::evaluate(&base, pending.ops());
+fn commit(state: &mut ToolState, sim: &SimWorld, pending: &Pending, done: Done) -> (Option<Toast>, bool) {
+    let Done {
+        eval,
+        base,
+        after,
+        step_ms,
+        ..
+    } = done;
+    let base: &World = &base;
     if eval.steps.is_empty() {
         return (pending.hint().map(|h| Toast::new(ToastKind::Info, h)), false);
     }
@@ -975,8 +1196,8 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
     let mut toast = None;
     // Buildings the plan takes down (bulldozed, or on land a new road now
     // needs), recorded from the real world so undo can put them back.
-    let lost = || plan::demolished(&sim.world, &base, &after);
-    match &pending {
+    let lost = || plan::demolished(&sim.world, base, &after);
+    match pending {
         Pending::Road { curves, grid, .. } => {
             let label = if grid.is_some() {
                 "street grid".to_string()
@@ -985,7 +1206,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
             } else {
                 "road".to_string()
             };
-            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label, lost()));
+            push_undo(state, plan::undo_for_roads(base, &after, &eval, label, lost()));
         }
         Pending::Upgrade { kind, .. } => {
             let label = if *kind == RoadKind::Avenue {
@@ -993,7 +1214,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
             } else {
                 "change to street"
             };
-            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label.into(), lost()));
+            push_undo(state, plan::undo_for_roads(base, &after, &eval, label.into(), lost()));
         }
         Pending::Bulldoze { .. } => {
             let removed = eval.removed().len();
@@ -1009,7 +1230,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
                 };
                 push_undo(
                     state,
-                    plan::undo_for_roads(&base, &after, &eval, label.into(), buildings),
+                    plan::undo_for_roads(base, &after, &eval, label.into(), buildings),
                 );
             }
             if removed == 0 && n > 0 {
@@ -1039,15 +1260,16 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
                 } else {
                     "de-zoning".into()
                 };
-                push_undo(state, plan::undo_for_zones(&base, &cells, label));
+                push_undo(state, plan::undo_for_zones(base, &cells, label));
             }
         }
         Pending::None => {}
     }
     state.batch_frame = eval.steps.len() > 1;
-    for cmd in eval.cmds() {
-        debug!("tool sends {cmd:?}");
-        out.write(SimCommand(cmd));
+    for (st, ms) in eval.steps.iter().zip(step_ms) {
+        if let Some(cmd) = &st.cmd {
+            state.outbox.push_back((cmd.clone(), ms));
+        }
     }
     (toast, true)
 }
@@ -1059,44 +1281,42 @@ fn push_undo(state: &mut ToolState, rec: UndoRecord) {
     }
 }
 
-fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimCommand>) -> Toast {
+/// Ctrl+Z: take the last action back once its plan is checked
+/// ([`drive_job`]). A toast now only when there is nothing to do.
+fn undo(state: &mut ToolState, sim: &SimWorld) -> Option<Toast> {
     let Some(rec) = state.undo.pop() else {
-        return Toast::new(ToastKind::Info, "Nothing to undo");
+        return Some(Toast::new(ToastKind::Info, "Nothing to undo"));
     };
     let label = rec.label().to_string();
-    let mut ops = plan::undo_ops(&sim.world, &rec);
+    let ops = plan::undo_ops(&sim.world, &rec);
     if ops.is_empty() {
-        return Toast::new(ToastKind::Info, format!("The {label} is already gone"));
+        return Some(Toast::new(ToastKind::Info, format!("The {label} is already gone")));
     }
-    let base = state.scratch_for(sim).clone();
-    let (mut eval, _) = plan::evaluate(&base, &ops);
-    // Buildings whose lot has changed stay demolished; the rest of the
-    // undo (roads, other buildings) still goes ahead.
-    let mut kept_out: Vec<String> = Vec::new();
-    let refused: Vec<usize> = eval
-        .steps
-        .iter()
-        .filter(|s| matches!(s.result, Err(CommandError::CannotRestore(_))))
-        .map(|s| s.op)
-        .collect();
-    let restores = ops
-        .iter()
-        .filter(|o| matches!(o, Op::Cmd(Command::RestoreBuilding(_))))
-        .count();
-    if !refused.is_empty() && refused.len() < ops.len() {
-        for s in &eval.steps {
-            if let Err(e @ CommandError::CannotRestore(_)) = &s.result {
-                kept_out.push(super::context::error_text(e));
-            }
-        }
-        ops = ops
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| !refused.contains(i))
-            .map(|(_, o)| o)
-            .collect();
-        eval = plan::evaluate(&base, &ops).0;
-    }
+    state.job = Some(Job::Undo {
+        rec,
+        ops,
+        kept_out: Vec::new(),
+        filtered: false,
+    });
+    None
+}
+
+/// Send the undo of `rec` checked as `done` (operations `ops`), or say why
+/// it cannot be done.
+fn finish_undo(
+    state: &mut ToolState,
+    sim: &SimWorld,
+    rec: &UndoRecord,
+    ops: &[Op],
+    kept_out: &[String],
+    done: Done,
+) -> Toast {
+    let label = rec.label().to_string();
+    let restores = match rec {
+        UndoRecord::Roads { buildings, .. } => buildings.len(),
+        UndoRecord::Zones { .. } => 0,
+    };
+    let eval = done.eval;
     if let Some(e) = eval.first_error() {
         if let CommandError::BuildingInTheWay { at, building } = e {
             let b = sim.world.buildings.get(*building);
@@ -1114,8 +1334,10 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
         );
     }
     state.batch_frame = true;
-    for cmd in eval.cmds() {
-        out.write(SimCommand(cmd));
+    for (st, ms) in eval.steps.iter().zip(done.step_ms) {
+        if let Some(cmd) = &st.cmd {
+            state.outbox.push_back((cmd.clone(), ms));
+        }
     }
     let mut extra = String::new();
     let back: Vec<&citysim_sim::BuildingRecord> = ops
@@ -1164,13 +1386,7 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
 }
 
 /// What the road tools do with a placed point.
-fn place_point(
-    state: &mut ToolState,
-    sim: &SimWorld,
-    p: Snapped,
-    out: &mut MessageWriter<SimCommand>,
-    toasts: &mut MessageWriter<Toast>,
-) -> Placed {
+fn place_point(state: &mut ToolState, sim: &SimWorld, p: Snapped) -> Placed {
     let w = &sim.world;
     let first = state.draft.is_empty();
     let placed = state.draft.place(p.point);
@@ -1182,7 +1398,7 @@ fn place_point(
         });
     }
     if placed == Placed::Grid {
-        finish(state, sim, out, toasts, false);
+        finish(state, sim, false);
     }
     placed
 }
@@ -1230,13 +1446,8 @@ pub fn align_grid(world: &World, g: GridFrame) -> GridFrame {
 }
 
 /// Build the draft (with the live piece when `with_live`).
-fn finish(
-    state: &mut ToolState,
-    sim: &SimWorld,
-    out: &mut MessageWriter<SimCommand>,
-    toasts: &mut MessageWriter<Toast>,
-    with_live: bool,
-) {
+/// It is sent once its plan is checked ([`drive_job`]).
+fn finish(state: &mut ToolState, sim: &SimWorld, with_live: bool) {
     let mut live = if with_live && state.on_map {
         state.live.as_ref().map(|s| s.point)
     } else {
@@ -1272,31 +1483,25 @@ fn finish(
             grid,
         })
     };
-    let Some(mut p) = draft_plan(live) else {
+    let Some(p) = draft_plan(live) else {
         state.reset();
         return;
     };
     // The piece under the cursor is refused but the pieces already placed
     // are fine: build those (the cursor piece was never clicked).
-    if placed && live.is_some() && state.draft.shape != Shape::Grid {
-        let (eval, _) = plan::evaluate(state.scratch_for(sim), p.ops());
-        if eval.first_error().is_some()
-            && let Some(q) = draft_plan(None)
-        {
-            p = q;
-        }
+    let mut cands = vec![p];
+    if placed
+        && live.is_some()
+        && state.draft.shape != Shape::Grid
+        && let Some(q) = draft_plan(None)
+    {
+        cands.push(q);
     }
-    refresh_plan(state, sim, p);
-    let (toast, sent) = commit(state, sim, out);
-    if let Some(t) = toast {
-        toasts.write(t);
-    }
-    if sent {
-        state.reset();
-    } else if state.draft.shape == Shape::Grid {
-        // Refused: keep the corner and width so the player can fix it.
-        state.draft.points.truncate(2);
-    }
+    state.job = Some(Job::Commit {
+        cands,
+        idx: 0,
+        then: Then::Road,
+    });
 }
 
 /// Esc / right-click: drop the piece in progress, then the whole road.
@@ -1339,20 +1544,32 @@ fn use_tool(
     mut state: ResMut<ToolState>,
     mut out: MessageWriter<SimCommand>,
     mut toasts: MessageWriter<Toast>,
+    mut clock: ResMut<SimClock>,
 ) {
     state.batch_frame = false;
     let state = state.as_mut();
+    let now = time.elapsed_secs();
+    // An action waiting for its plan, then whatever is queued to send.
+    drive_job(state, &sim, &mut toasts);
+    pump_outbox(state, &mut out, &mut clock);
     let undo_asked = actions.read().any(|a| *a == UiAction::Undo);
+    if state.job.is_some() {
+        // Input waits until the action is on its way (a few frames at
+        // most).
+        return;
+    }
     if ui.menu_open {
         state.reset();
         return;
     }
     if undo_asked || ctrl(&keys) && keys.just_pressed(KeyCode::KeyZ) {
         state.reset();
-        toasts.write(undo(state, &sim, &mut out));
+        if let Some(t) = undo(state, &sim) {
+            toasts.write(t);
+        }
+        // Checked and sent from the next frame.
         return;
     }
-    let now = time.elapsed_secs();
     let pressed = mouse.just_pressed(MouseButton::Left) && state.on_map && !over_ui.0;
     // A release outside the window may never arrive: the button simply is
     // no longer held.
@@ -1361,7 +1578,7 @@ fn use_tool(
     // The stroke so far, before the preview of this frame.
     extend_stroke(state, *tool, modes.zone, &sim.world);
     let p = pending(*tool, *modes, *kind, &opts, state, &sim.world);
-    refresh_plan(state, &sim, p);
+    refresh_plan(state, &sim, p, now);
     if (keys.just_pressed(KeyCode::Escape) && !ui.tray_focus || right) && state.busy() {
         step_back(state);
         return;
@@ -1387,7 +1604,7 @@ fn use_tool(
                     .is_some_and(|(t, at)| now - t < DOUBLE_CLICK_S && dist(at, live.point) < state.radius.max(2.0));
                 state.last_click = Some((now, live.point));
                 if double && !state.draft.is_empty() {
-                    finish(state, &sim, &mut out, &mut toasts, false);
+                    finish(state, &sim, false);
                     state.last_click = None;
                 } else {
                     let lattice = sim
@@ -1399,7 +1616,7 @@ fn use_tool(
                     // not from the snapped point (a snap of a few metres is
                     // not a drag, and must not add a piece on release).
                     let at = state.cursor.unwrap_or(live.point);
-                    place_point(state, &sim, live, &mut out, &mut toasts);
+                    place_point(state, &sim, live);
                     state.press = Some(Press {
                         at,
                         time: now,
@@ -1416,14 +1633,14 @@ fn use_tool(
             {
                 // The release of a drag is the next point.
                 let fresh = state.draft.pieces.is_empty() && state.draft.points.len() == 1;
-                let placed = place_point(state, &sim, live, &mut out, &mut toasts);
+                let placed = place_point(state, &sim, live);
                 if fresh && placed == Placed::Piece && state.draft.shape != Shape::Curve {
-                    finish(state, &sim, &mut out, &mut toasts, false);
+                    finish(state, &sim, false);
                 }
                 state.last_click = None;
             }
             if enter && !state.draft.is_empty() {
-                finish(state, &sim, &mut out, &mut toasts, true);
+                finish(state, &sim, true);
             }
         }
         ActiveTool::Road if modes.road == RoadMode::Junction => {
@@ -1476,13 +1693,13 @@ fn use_tool(
             // Paint: add the cells under the pointer's path.
             extend_stroke(state, *tool, modes.zone, &sim.world);
             if released && state.press.is_some() {
-                // The plan for the release position.
+                // The plan for the release position, sent once checked.
                 let p = pending(*tool, *modes, *kind, &opts, state, &sim.world);
-                refresh_plan(state, &sim, p);
-                let (toast, _) = commit(state, &sim, &mut out);
-                if let Some(t) = toast {
-                    toasts.write(t);
-                }
+                state.job = Some(Job::Commit {
+                    cands: vec![p],
+                    idx: 0,
+                    then: Then::Nothing,
+                });
                 state.reset();
             }
         }
@@ -1551,7 +1768,7 @@ pub fn stretch_target(world: &World, st: &Stretch) -> RoadStretch {
 }
 
 /// The curve tool view of the current plan.
-fn curve_view(state: &ToolState) -> CurveToolView {
+fn curve_view(state: &ToolState, now: f32) -> CurveToolView {
     let plan = &state.plan;
     let live = state
         .live
@@ -1578,7 +1795,7 @@ fn curve_view(state: &ToolState) -> CurveToolView {
             CurveToolView {
                 active: true,
                 kind: Some(*kind),
-                pieces: plan.eval.pieces(),
+                pieces: plan.pieces.clone(),
                 refused,
                 error_at,
                 points: state.draft.control_points(live),
@@ -1586,11 +1803,12 @@ fn curve_view(state: &ToolState) -> CurveToolView {
                 tightest,
                 snap: None,
                 guides: Vec::new(),
-                nodes: plan.eval.nodes(),
+                nodes: plan.nodes.clone(),
+                stale: state.dimmed(now),
             }
         }
         Pending::Upgrade { kind, ops, .. } => {
-            let mut pieces = plan.eval.pieces();
+            let mut pieces = plan.pieces.clone();
             if pieces.is_empty() {
                 pieces = ops
                     .iter()
@@ -1616,6 +1834,7 @@ fn curve_view(state: &ToolState) -> CurveToolView {
                 pieces,
                 refused,
                 error_at: plan.error().and_then(|e| e.at()),
+                stale: state.dimmed(now),
                 ..default()
             }
         }
@@ -1628,6 +1847,7 @@ type HoverKey = (Option<(i32, i32)>, (u64, u64, u64), u64);
 /// Inspect selection (pinned by a click) lives in `WorldHighlight::selected`.
 #[allow(clippy::too_many_arguments)]
 fn publish(
+    time: Res<Time<Real>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     over_ui: Res<PointerOverUi>,
@@ -1656,11 +1876,16 @@ fn publish(
         }
         return;
     }
-    let p = pending(*tool, *modes, *kind, &opts, state, w);
-    refresh_plan(state, &sim, p);
+    // The action waiting to be sent shows its own plan.
+    let p = match state.job_pending() {
+        Some(p) => p.clone(),
+        None => pending(*tool, *modes, *kind, &opts, state, w),
+    };
+    let now = time.elapsed_secs();
+    refresh_plan(state, &sim, p, now);
     // The free-form road (written only when it changes, so gfx's own
     // sample states survive while no road is drawn).
-    let view = curve_view(state);
+    let view = curve_view(state, now);
     if *last_view != view {
         *last_view = view.clone();
         curve.set_if_neq(view);
@@ -1956,5 +2181,115 @@ mod tests {
         assert!(e.ok(), "{:?}", e.first_error());
         let removed: f32 = e.removed().iter().map(|(c, _)| c.length()).sum();
         assert!((removed - 80.0).abs() < 1.0, "{removed}");
+    }
+
+    /// A grown city (hierarchy roads, about 5,000 residents) and an 8 x 13
+    /// street grid of 40 m blocks next to it that can all be built.
+    fn grown_city_and_grid() -> (SimWorld, GridFrame) {
+        let mut w = World::new(3);
+        let mut player = citysim_sim::scenarios::GridPlayer::hierarchy();
+        while w.stats.population < 5_000 && w.time.day < 40 {
+            player.act(&mut w);
+            w.step();
+        }
+        w.economy.money = 50_000_000;
+        let hi = w
+            .roads
+            .nodes
+            .values()
+            .fold([f32::MIN; 2], |m, n| [m[0].max(n.pos[0]), m[1].max(n.pos[1])]);
+        let lo = w
+            .roads
+            .nodes
+            .values()
+            .fold([f32::MAX; 2], |m, n| [m[0].min(n.pos[0]), m[1].min(n.pos[1])]);
+        let mid = (lo[1] + hi[1]) * 0.5;
+        for step in [1.0f32, 2.0, 4.0, 8.0] {
+            let g = GridFrame {
+                a: [
+                    (hi[0] / 8.0).round() * 8.0 + step * 8.0,
+                    (mid / 8.0).round() * 8.0 - 160.0,
+                ],
+                u: [0.0, 1.0],
+                v: [1.0, 0.0],
+                nu: 8,
+                nv: 13,
+                block_m: 40.0,
+            };
+            let (e, _) = plan::evaluate(&plan::scratch(&w), &grid_ops(&g));
+            if e.first_error().is_none() {
+                return (
+                    SimWorld {
+                        world: w,
+                        generation: 0,
+                    },
+                    g,
+                );
+            }
+        }
+        panic!("no room for the grid");
+    }
+
+    fn grid_ops(g: &GridFrame) -> Vec<Op> {
+        g.streets()
+            .into_iter()
+            .map(|curve| {
+                Op::Cmd(Command::BuildCurve {
+                    curve,
+                    kind: RoadKind::Street,
+                })
+            })
+            .collect()
+    }
+
+    fn grid_pending(g: GridFrame) -> Pending {
+        Pending::Road {
+            ops: grid_ops(&g),
+            curves: g.streets(),
+            kind: RoadKind::Street,
+            grid: Some(g),
+        }
+    }
+
+    #[test]
+    fn a_large_grid_pending_never_holds_up_a_frame() {
+        // The owner's case: a grid of a hundred blocks hanging on the
+        // cursor while the camera moves, so its depth changes from frame to
+        // frame. Checking it takes many frames; the frame must not wait for
+        // it (only the first frame of a plan waits, at most
+        // `planner::WAIT`).
+        let (sim, g) = grown_city_and_grid();
+        let started = std::time::Instant::now();
+        let (want, _) = plan::evaluate(&plan::scratch(&sim.world), &grid_ops(&g));
+        let plain_ms = started.elapsed().as_secs_f32() * 1e3;
+        assert!(want.first_error().is_none());
+        // Generous for CI's two-core runner; about 30 ms on a desktop.
+        assert!(plain_ms < 1_500.0, "checking the grid took {plain_ms:.0} ms");
+        let mut state = ToolState::default();
+        let mut worst = 0.0f32;
+        for frame in 0..40 {
+            let nv = 11 + (frame / 3) % 4;
+            let t = std::time::Instant::now();
+            refresh_plan(
+                &mut state,
+                &sim,
+                grid_pending(GridFrame { nv, ..g }),
+                frame as f32 / 60.0,
+            );
+            worst = worst.max(t.elapsed().as_secs_f32() * 1e3);
+        }
+        assert!(worst < 25.0, "a frame spent {worst:.1} ms on the plan");
+        // Held still, the plan arrives and is exactly the plain one.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            refresh_plan(&mut state, &sim, grid_pending(g), 1.0);
+            if !state.plan.stale && state.plan.pending == grid_pending(g) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the plan never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(state.plan.eval, want);
+        assert_eq!(state.plan.pieces, want.pieces());
     }
 }

@@ -659,10 +659,21 @@ pub(crate) fn sync_junctions(world: &mut World) {
     world.traffic.junctions_version = world.versions.roads;
     let roads = &world.roads;
     let states = &mut world.traffic.junction_states;
+    let inputs = &mut world.cache.junction_inputs;
     states.retain_keys(|n| roads.nodes.contains_key(n));
+    inputs.retain_keys(|n| roads.nodes.contains_key(n));
     for n in roads.nodes.keys() {
+        // Only junctions whose own roads changed are built again; the rest
+        // get what a rebuild would give them (`rebuild_unchanged`).
+        if let Some(j) = states.get_mut(n)
+            && inputs.get(n).is_some_and(|i| i.matches(roads, n))
+        {
+            junction::rebuild_unchanged(j);
+            continue;
+        }
         let old = states.remove(n);
         states.insert(n, junction::build_state(roads, n, old.as_ref()));
+        inputs.insert(n, junction::JunctionInputs::of(roads, n));
     }
 }
 
@@ -1256,4 +1267,39 @@ pub fn overlapping_bodies(bodies: &[(VehicleId, [[f32; 2]; 4])], tol: f32) -> Ve
 /// saved; for benchmarks).
 pub fn debug_last_block_sync_ns(world: &World) -> u64 {
     world.cache.last_block_sync_ns
+}
+
+#[cfg(test)]
+mod junction_sync_tests {
+    use crate::scenarios::GridPlayer;
+    use crate::{World, Zone};
+
+    /// `sync_junctions` rebuilds only junctions whose roads changed; a
+    /// world that rebuilds every junction on every road change (the
+    /// remembered inputs dropped before each step) must stay identical
+    /// while a city grows by commands under traffic.
+    #[test]
+    fn incremental_junction_sync_equals_rebuilding_every_junction() {
+        let mut a = World::new(11);
+        let mut b = World::new(11);
+        let mut pa = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+        let mut pb = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+        let mut edits = 0;
+        while a.stats.population < 4_000 && a.time.day < 12 {
+            let v = a.versions.roads;
+            b.cache.junction_inputs = Default::default();
+            pa.act(&mut a);
+            pb.act(&mut b);
+            if a.versions.roads != v {
+                edits += 1;
+                assert_eq!(a.traffic.junction_states, b.traffic.junction_states, "after an edit");
+            }
+            a.step();
+            b.cache.junction_inputs = Default::default();
+            b.step();
+        }
+        assert!(edits > 15, "{edits} road edits");
+        assert_eq!(a.traffic.junction_states, b.traffic.junction_states);
+        assert!(a == b, "the worlds drifted apart");
+    }
 }
