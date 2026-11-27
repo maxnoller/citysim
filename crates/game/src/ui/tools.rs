@@ -943,6 +943,9 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
         return (Some(Toast::new(ToastKind::Error, super::context::error_text(e))), false);
     }
     let mut toast = None;
+    // Buildings the plan takes down (bulldozed, or on land a new road now
+    // needs), recorded from the real world so undo can put them back.
+    let lost = || plan::demolished(&sim.world, &base, &after);
     match &pending {
         Pending::Road { curves, grid, .. } => {
             let label = if grid.is_some() {
@@ -952,7 +955,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
             } else {
                 "road".to_string()
             };
-            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label));
+            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label, lost()));
         }
         Pending::Upgrade { kind, .. } => {
             let label = if *kind == RoadKind::Avenue {
@@ -960,22 +963,32 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
             } else {
                 "change to street"
             };
-            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label.into()));
+            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label.into(), lost()));
         }
         Pending::Bulldoze { .. } => {
             let removed = eval.removed().len();
-            let lost = eval.buildings().len();
-            if removed > 0 {
-                push_undo(state, plan::undo_for_roads(&base, &after, &eval, "demolition".into()));
-            } else if lost > 0 {
-                toast = Some(Toast::new(
-                    ToastKind::Info,
-                    if lost == 1 {
-                        "Building demolished".to_string()
-                    } else {
-                        format!("{lost} buildings demolished")
-                    },
-                ));
+            let buildings = lost();
+            let n = buildings.len();
+            if removed > 0 || n > 0 {
+                let label = if removed > 0 {
+                    "demolition"
+                } else if n == 1 {
+                    "building demolition"
+                } else {
+                    "demolition of buildings"
+                };
+                push_undo(
+                    state,
+                    plan::undo_for_roads(&base, &after, &eval, label.into(), buildings),
+                );
+            }
+            if removed == 0 && n > 0 {
+                let what = if n == 1 {
+                    "Building demolished".to_string()
+                } else {
+                    format!("{n} buildings demolished")
+                };
+                toast = Some(Toast::new(ToastKind::Info, format!("{what} · Ctrl+Z puts it back")));
             }
         }
         Pending::Zone { zone, .. } => {
@@ -1021,13 +1034,50 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
         return Toast::new(ToastKind::Info, "Nothing to undo");
     };
     let label = rec.label().to_string();
-    let ops = plan::undo_ops(&sim.world, &rec);
+    let mut ops = plan::undo_ops(&sim.world, &rec);
     if ops.is_empty() {
         return Toast::new(ToastKind::Info, format!("The {label} is already gone"));
     }
     let base = state.scratch_for(sim).clone();
-    let (eval, _) = plan::evaluate(&base, &ops);
+    let (mut eval, _) = plan::evaluate(&base, &ops);
+    // Buildings whose lot has changed stay demolished; the rest of the
+    // undo (roads, other buildings) still goes ahead.
+    let mut kept_out: Vec<String> = Vec::new();
+    let refused: Vec<usize> = eval
+        .steps
+        .iter()
+        .filter(|s| matches!(s.result, Err(CommandError::CannotRestore(_))))
+        .map(|s| s.op)
+        .collect();
+    let restores = ops
+        .iter()
+        .filter(|o| matches!(o, Op::Cmd(Command::RestoreBuilding(_))))
+        .count();
+    if !refused.is_empty() && refused.len() < ops.len() {
+        for s in &eval.steps {
+            if let Err(e @ CommandError::CannotRestore(_)) = &s.result {
+                kept_out.push(super::context::error_text(e));
+            }
+        }
+        ops = ops
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !refused.contains(i))
+            .map(|(_, o)| o)
+            .collect();
+        eval = plan::evaluate(&base, &ops).0;
+    }
     if let Some(e) = eval.first_error() {
+        if let CommandError::BuildingInTheWay { at, building } = e {
+            let b = sim.world.buildings.get(*building);
+            debug!(
+                "undo refused: building {building:?} in the way at {at:?}: {:?} ops {:?}",
+                b.map(|b| (b.center(), b.footprint, b.created_tick)),
+                ops.iter()
+                    .filter(|o| !matches!(o, Op::Cmd(Command::RestoreBuilding(_))))
+                    .collect::<Vec<_>>()
+            );
+        }
         return Toast::new(
             ToastKind::Warning,
             format!("Can't undo the {label}: {}", super::context::error_text(e)),
@@ -1038,13 +1088,47 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
         out.write(SimCommand(cmd));
     }
     let mut extra = String::new();
-    if eval.cost > 0 {
-        extra = format!(" (costs {}, no refund)", super::format::money(eval.cost));
+    let back: Vec<&citysim_sim::BuildingRecord> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Cmd(Command::RestoreBuilding(r)) => Some(&**r),
+            _ => None,
+        })
+        .collect();
+    let road_cost: i64 = eval.cost + back.iter().map(|r| r.building.footprint.area() as i64).sum::<i64>();
+    if road_cost > 0 && back.len() < ops.len() {
+        extra = format!(" (the road costs {})", super::format::money(road_cost));
     }
-    if let UndoRecord::Roads { lost_buildings, .. } = rec
-        && lost_buildings > 0
-    {
-        extra.push_str(" · demolished buildings don't come back");
+    if !back.is_empty() {
+        let people: usize = back.iter().map(|r| r.residents()).sum();
+        let staff: usize = back.iter().map(|r| r.workers.len()).sum();
+        let what = if back.len() == 1 {
+            "building back".to_string()
+        } else {
+            format!("{} buildings back", back.len())
+        };
+        extra.push_str(&format!(" · {what}"));
+        if people > 0 {
+            extra.push_str(&format!(
+                ", {people} {}",
+                if people == 1 { "resident" } else { "residents" }
+            ));
+        } else if staff > 0 {
+            extra.push_str(&format!(", {staff} on the staff"));
+        }
+    }
+    if !kept_out.is_empty() {
+        let n = kept_out.len();
+        let first = kept_out[0].trim_end_matches('.').to_string();
+        let msg = if n == restores {
+            format!("Undid the {label}{extra}, but the buildings can't come back: {first}")
+        } else {
+            format!(
+                "Undid the {label}{extra}; {n} {} can't come back: {first}",
+                if n == 1 { "building" } else { "buildings" }
+            )
+        };
+        return Toast::new(ToastKind::Warning, msg);
     }
     Toast::new(ToastKind::Success, format!("Undid the {label}{extra}"))
 }

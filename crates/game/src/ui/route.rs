@@ -29,7 +29,11 @@ pub struct RoutePlugin;
 
 impl Plugin for RoutePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (jump_to_destination, publish_route).in_set(GameSet::Render));
+        app.init_resource::<TripCache>()
+            .add_systems(Update, (jump_to_destination, publish_route).in_set(GameSet::Render));
+        if std::env::var("CITYSIM_ROUTE_STATS").is_ok_and(|v| v == "1") {
+            app.add_systems(Update, log_route_stats);
+        }
     }
 }
 
@@ -298,6 +302,9 @@ pub struct Trip {
     pub destination: Option<RouteEnd>,
     /// The car on the road, if any.
     pub vehicle: Option<VehicleId>,
+    /// Under way off the map: where they should be by now (`points` then
+    /// start there).
+    pub at: Option<[f32; 2]>,
 }
 
 fn building_end(world: &World, b: BuildingId) -> Option<RouteEnd> {
@@ -333,11 +340,25 @@ pub fn vehicle_trip(world: &World, id: VehicleId) -> Option<Trip> {
         origin: place_end(world, t.from, t.from_building),
         destination: place_end(world, t.to, t.to_building),
         vehicle: Some(id),
+        at: None,
     })
 }
 
+/// Route searches and traces of planned trips, and the time they took
+/// (`CITYSIM_ROUTE_STATS=1` logs them every 5 s).
+pub static PLANNED_TRACES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PLANNED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// A planned trip between two buildings (`None` without a road route).
 fn planned_trip(world: &World, state: RouteState, from: BuildingId, to: BuildingId) -> Option<Trip> {
+    let t0 = std::time::Instant::now();
+    let out = planned_trip_now(world, state, from, to);
+    PLANNED_TRACES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PLANNED_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    out
+}
+
+fn planned_trip_now(world: &World, state: RouteState, from: BuildingId, to: BuildingId) -> Option<Trip> {
     let r = inspect::planned_route(world, from, to)?;
     Some(Trip {
         state,
@@ -345,6 +366,7 @@ fn planned_trip(world: &World, state: RouteState, from: BuildingId, to: Building
         origin: building_end(world, from),
         destination: building_end(world, to),
         vehicle: None,
+        at: None,
     })
 }
 
@@ -352,6 +374,10 @@ fn planned_trip(world: &World, state: RouteState, from: BuildingId, to: Building
 /// trip they will make.
 pub fn person_trip(world: &World, id: CitizenId) -> Option<Trip> {
     let p = inspect::plan(world, id)?;
+    person_trip_of(world, &p)
+}
+
+fn person_trip_of(world: &World, p: &inspect::DayPlan) -> Option<Trip> {
     if let Some(t) = p.trip {
         if let Some(car) = t.vehicle.filter(|c| world.vehicles.contains_key(*c)) {
             return vehicle_trip(world, car);
@@ -364,6 +390,7 @@ pub fn person_trip(world: &World, id: CitizenId) -> Option<Trip> {
                 origin: building_end(world, from),
                 destination: building_end(world, t.to),
                 vehicle: None,
+                at: None,
             })
         });
     }
@@ -373,6 +400,97 @@ pub fn person_trip(world: &World, id: CitizenId) -> Option<Trip> {
         return None;
     }
     planned_trip(world, RouteState::Planned, from, to)
+}
+
+/// What a person's planned (or off-screen) trip depends on: the roads, the
+/// trip they are on (and whether its car is on the map), and where they are
+/// and go next.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TripKey {
+    person: CitizenId,
+    roads: u64,
+    trip: Option<(Option<BuildingId>, BuildingId, Option<VehicleId>)>,
+    inside: Option<BuildingId>,
+    next: Option<(Activity, Option<BuildingId>)>,
+}
+
+/// The selected person's trip, traced once and kept until something it
+/// depends on changes ([`TripKey`]). A trip in a car on the map follows the
+/// car, so it is traced each time it is asked for (no route search: the
+/// car carries its route).
+#[derive(Resource, Default)]
+pub struct TripCache {
+    kept: Option<(TripKey, Option<Trip>)>,
+}
+
+impl TripCache {
+    pub fn person(&mut self, world: &World, id: CitizenId) -> Option<Trip> {
+        let p = inspect::plan(world, id)?;
+        let car = p
+            .trip
+            .and_then(|t| t.vehicle)
+            .filter(|c| world.vehicles.contains_key(*c));
+        if car.is_some() {
+            return person_trip_of(world, &p);
+        }
+        let key = TripKey {
+            person: id,
+            roads: world.versions.roads,
+            trip: p.trip.map(|t| (t.from, t.to, t.vehicle)),
+            inside: p.inside,
+            next: p.next.map(|n| (n.activity, n.place)),
+        };
+        let fresh = !matches!(&self.kept, Some((k, _)) if *k == key);
+        if fresh {
+            self.kept = Some((key, person_trip_of(world, &p)));
+        }
+        let trip = self.kept.as_ref().and_then(|k| k.1.as_ref())?;
+        // Under way off the map: from where they should be by now.
+        match p.trip {
+            Some(t) if trip.state == RouteState::Unseen => Some(under_way(world, &t, trip)),
+            _ => Some(trip.clone()),
+        }
+    }
+}
+
+/// An off-screen trip (on foot, a lift, a car beyond those drawn) as it
+/// stands now: the share of its time gone, along its way (a straight line
+/// when there is no way by road), gives where they should be; the way
+/// still ahead starts there.
+fn under_way(world: &World, t: &inspect::TripView, trip: &Trip) -> Trip {
+    let mut pts = trip.points.clone();
+    if pts.len() < 2
+        && let (Some(o), Some(d)) = (trip.origin, trip.destination)
+    {
+        pts = vec![o.pos, d.pos];
+    }
+    let eta = t.eta_tick.unwrap_or(t.expected_tick);
+    let span = eta.saturating_sub(t.departed_tick).max(1) as f32;
+    let f = (world.time.tick.saturating_sub(t.departed_tick) as f32 / span).clamp(0.0, 1.0);
+    let (at, rest) = split_at(&pts, path_length(&pts) * f);
+    Trip {
+        points: rest,
+        at,
+        ..trip.clone()
+    }
+}
+
+/// The point `d` metres along `pts`, and the part of `pts` from there on.
+fn split_at(pts: &[[f32; 2]], d: f32) -> (Option<[f32; 2]>, Vec<[f32; 2]>) {
+    let mut left = d;
+    for (i, w) in pts.windows(2).enumerate() {
+        let l = dist(w[0], w[1]);
+        if left <= l {
+            let k = if l > 1e-6 { left / l } else { 0.0 };
+            let p = [w[0][0] + (w[1][0] - w[0][0]) * k, w[0][1] + (w[1][1] - w[0][1]) * k];
+            let mut rest = vec![p];
+            rest.extend_from_slice(&pts[i + 1..]);
+            return (Some(p), rest);
+        }
+        left -= l;
+    }
+    let last = pts.last().copied();
+    (last, last.into_iter().collect())
 }
 
 /// "Going to ›": the camera moves to the destination (following stops;
@@ -396,6 +514,23 @@ fn jump_to_destination(
     }
 }
 
+fn log_route_stats(time: Res<Time<Real>>, mut since: Local<f32>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    *since += time.delta_secs();
+    if *since < 5.0 {
+        return;
+    }
+    let n = PLANNED_TRACES.swap(0, Relaxed);
+    let ns = PLANNED_NS.swap(0, Relaxed);
+    info!(
+        "route stats: {:.1} planned traces/s, {:.3} ms/s, {:.3} ms each",
+        n as f32 / *since,
+        ns as f32 / 1e6 / *since,
+        if n > 0 { ns as f32 / 1e6 / n as f32 } else { 0.0 }
+    );
+    *since = 0.0;
+}
+
 /// What publishing remembers between frames.
 #[derive(Default)]
 struct Published {
@@ -407,7 +542,7 @@ struct Published {
 
 /// Seconds between re-traces of a car's line, and of a planned trip.
 const CAR_EVERY_S: f32 = 0.15;
-const PLAN_EVERY_S: f32 = 4.0;
+const PLAN_EVERY_S: f32 = 0.5;
 
 /// Keep `RouteView` on the selected person or car.
 fn publish_route(
@@ -415,6 +550,7 @@ fn publish_route(
     sim: Res<SimWorld>,
     view: Res<PeopleView>,
     mut route: ResMut<RouteView>,
+    mut cache: ResMut<TripCache>,
     mut last: Local<Published>,
 ) {
     let target = view
@@ -429,7 +565,7 @@ fn publish_route(
     };
     last.age += time.delta_secs();
     let fresh = last.target != Some(target) || sim.is_changed() && last.age > 10.0;
-    let every = if route.state == RouteState::Driving {
+    let every = if route.state == RouteState::Driving || route.traveller.is_some() {
         CAR_EVERY_S
     } else {
         PLAN_EVERY_S
@@ -441,7 +577,7 @@ fn publish_route(
     last.target = Some(target);
     let w = &sim.world;
     let trip = match target {
-        Target::Person(c) => person_trip(w, c),
+        Target::Person(c) => cache.person(w, c),
         Target::Vehicle(v) => vehicle_trip(w, v),
         Target::Place(_) => None,
     };
@@ -457,10 +593,12 @@ fn publish_route(
         points: trip.points,
         origin: trip.origin,
         destination: trip.destination,
+        traveller: trip.at,
     };
     // A moving car: publish again only once it is a few metres further on
     // or anything else changed (the samples ahead of it stay put).
     let same_rest = new.state == route.state
+        && new.traveller.is_some() == route.traveller.is_some()
         && new.origin == route.origin
         && new.destination == route.destination
         && new.points.len() == route.points.len()

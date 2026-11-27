@@ -30,6 +30,10 @@ pub enum UiAction {
     ZoneTool,
     /// Pick an overlay (the maps tray).
     Overlay(OverlayMode),
+    /// An overlay key: `Some(map)` toggles that map (T), `None` steps
+    /// through them (O). Works in every state; the maps drawer comes up
+    /// only where nothing else is open.
+    MapKey(Option<OverlayMode>),
     TogglePause,
     Speed(usize),
     ToggleBudget,
@@ -663,7 +667,7 @@ pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
         UiAction::UiScale(i) => cx.state.ui_scale == i,
         UiAction::EdgeScroll(on) => cx.display.edge_scroll == on,
         UiAction::LotMarkers(on) => cx.display.lot_markers == on,
-        UiAction::Perf(d) => cx.state.perf == d,
+        UiAction::Perf(d) => cx.state.perf_choice == d,
         UiAction::Snap(r) => cx.opts.rule(r),
         UiAction::ZoneDepth(d) => matches!(cx.tool, ActiveTool::Zone(_)) && cx.opts.zone_depth == d,
         UiAction::JunctionBrush(b) => cx.opts.junction_brush == b,

@@ -44,7 +44,15 @@ impl Plugin for CityPlugin {
             )
             .add_systems(
                 Update,
-                (place_window, update_header, update_tiles, record_losses, update_charts).in_set(GameSet::Render),
+                (
+                    perf_room,
+                    place_window.after(perf_room),
+                    update_header,
+                    update_tiles,
+                    record_losses,
+                    update_charts,
+                )
+                    .in_set(GameSet::Render),
             )
             .add_systems(PostUpdate, window_area.after(bevy::ui::UiSystems::Layout));
     }
@@ -753,6 +761,50 @@ fn window_keys(keys: Res<ButtonInput<KeyCode>>, mut ui: ResMut<UiState>) {
     }
 }
 
+/// Room the window needs beside the full performance panel (logical px).
+const BESIDE_PERF_W: f32 = 880.0;
+
+/// The window's right edge (logical px): left of the side panel while it
+/// is open, else the screen's.
+fn right_edge(panel: &super::panel::PanelArea, screen: Vec2) -> f32 {
+    match panel.0 {
+        Some(r) => r.min.x - 14.0,
+        None => screen.x - SIDE,
+    }
+}
+
+/// The performance panel's form on screen: the player's choice, except the
+/// full panel steps down to its small strip while the city window is open
+/// and there is no room for both side by side (the window then sits below
+/// the strip); it comes back full when the window closes. Whatever else
+/// sets `UiState::perf` (F3, the panel's buttons, the settings, the
+/// environment) sets the choice.
+fn perf_room(
+    mut ui: ResMut<UiState>,
+    ui_scale: Res<UiScale>,
+    panel: Res<super::panel::PanelArea>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut written: Local<Option<crate::shared::PerfDetail>>,
+) {
+    use crate::shared::PerfDetail;
+    if *written != Some(ui.perf) && ui.perf_choice != ui.perf {
+        ui.perf_choice = ui.perf;
+    }
+    let Ok(win) = window.single() else { return };
+    let screen = Vec2::new(win.width(), win.height()) / ui_scale.0.max(0.01);
+    let room = right_edge(&panel, screen) - (super::perf::FULL_W + 14.0) >= BESIDE_PERF_W;
+    let crowded = ui.window.is_some() && !ui.menu_open && !room;
+    let shown = if ui.perf_choice == PerfDetail::Full && crowded {
+        PerfDetail::Small
+    } else {
+        ui.perf_choice
+    };
+    if ui.perf != shown {
+        ui.perf = shown;
+    }
+    *written = Some(shown);
+}
+
 /// Size and place the window, slide it in and out, show its page.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn place_window(
@@ -809,10 +861,7 @@ fn place_window(
     // the side panel while it is open, centred when there is room.
     let Ok(win) = window.single() else { return };
     let screen = Vec2::new(win.width(), win.height()) / ui_scale.0.max(0.01);
-    let right_edge = match panel.0 {
-        Some(r) => r.min.x - 14.0,
-        None => screen.x - SIDE,
-    };
+    let right_edge = right_edge(&panel, screen);
     // Beside the full performance panel (docked left) when there is room
     // for a useful window, else over it; below the small one.
     let mut left_edge = SIDE;
@@ -823,7 +872,7 @@ fn place_window(
                 .single()
                 .map(|(r, c)| c.size.x * c.inverse_scale_factor * r.fit)
                 .unwrap_or(super::perf::FULL_W);
-            if right_edge - (w + 14.0) >= 880.0 {
+            if right_edge - (w + 14.0) >= BESIDE_PERF_W {
                 left_edge = w + 14.0;
             }
         }
