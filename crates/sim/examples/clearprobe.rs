@@ -103,6 +103,22 @@ fn main() {
                 across.push((x, curve));
             }
         }
+        // Long roads from the road at an angle, through several blocks.
+        if std::env::var("CLEARPROBE_LONG").is_ok() {
+            for k in -4i32..=4 {
+                let a = k as f32 * 15f32.to_radians();
+                let (sn, cs) = (a.sin(), a.cos());
+                let d2 = [dir[0] * cs - dir[1] * sn, dir[0] * sn + dir[1] * cs];
+                for len in [80.0f32, 120.0, 160.0, 200.0] {
+                    let curve = Curve::straight(p, add(p, d2, len));
+                    if let Some(x) = takes(&w, curve, RoadKind::Street)
+                        && x.0 > 10
+                    {
+                        across.push((x, curve));
+                    }
+                }
+            }
+        }
         // A curve from the road out through the lots, bending along them.
         for side in [1.0f32, -1.0] {
             let corner = add(p, dir, 28.0);
