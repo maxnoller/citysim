@@ -79,7 +79,8 @@ pub use curve::{Curve, Pose};
 pub use demand::{Demand, JoblessReason, JobsView};
 pub use derived::Access;
 pub use economy::{
-    Attendance, Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus, RunningCosts, TrafficLoss,
+    Attendance, Budget, DaySummary, Economy, FiscalReason, FiscalState, FiscalStatus, Receipts, RunningCosts,
+    TrafficLoss,
 };
 pub use geom::{Cell, CellRect};
 pub use grid::{CellData, GridView, Occupant, Zone};

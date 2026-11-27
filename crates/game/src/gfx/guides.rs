@@ -82,7 +82,14 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     };
     let mats = GuideMaterials {
         glow: materials.add(add(Color::srgb(0.22, 0.4, 0.62))),
-        doom: materials.add(add(Color::srgb(0.55, 0.08, 0.04))),
+        // Blended, not added: light roofs and walls read as red too (an
+        // added dark red barely showed on a grey roof).
+        doom: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.86, 0.1, 0.06, 0.6),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        }),
     };
     for (name, marker) in [("Snap marker", true), ("Guide lines", false)] {
         let mut ec = commands.spawn((
@@ -605,6 +612,17 @@ fn draw_highlight(
         }
     }
     for id in &hl.doomed_buildings {
+        // The lot outlined in red on the ground: a small house deep in its
+        // lot, or one under the road being drawn, still shows.
+        if let Some(b) = world.buildings.get(*id) {
+            outline(
+                &mut m,
+                &b.corners().map(Vec2::from),
+                0.45,
+                y,
+                lin(palette::TOOL_BAD.with_alpha(0.9)),
+            );
+        }
         if let Some(&(parent, key, model_tf)) = index.0.get(id) {
             let (detail, _) = models.get(key, &mut meshes);
             let mut tf = model_tf;

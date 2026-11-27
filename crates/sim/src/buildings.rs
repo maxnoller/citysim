@@ -46,6 +46,16 @@ impl Building {
         (self.footprint.size[0] as i32, self.footprint.size[1] as i32)
     }
 
+    /// Does the building make way for a road drawn through its lot? A road
+    /// that clears its way (`Command::Clearing`) takes such buildings down
+    /// as the bulldozer would; any other building in the way refuses the
+    /// road (`CommandError::BuildingInTheWay`). Every building grown by
+    /// itself on zoned land gives way, and that is every building today;
+    /// buildings the player places by hand will not.
+    pub fn gives_way_to_roads(&self) -> bool {
+        true
+    }
+
     /// Centre in sim metres.
     pub fn center(&self) -> [f32; 2] {
         self.footprint.center

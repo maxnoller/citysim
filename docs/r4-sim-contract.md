@@ -808,3 +808,31 @@ and blocks, found again on load.
 
 - (ui) The brush takes every cell the pointer's path since the last frame crosses and every cell within half a cell's
   diagonal of it, so a stroke is unbroken at any frame rate.
+
+## 2026-11-27 (r7-roadclear: a road drawn over grown buildings takes them down)
+
+Nothing new is stored: saves, scenarios and the pinned checksum are unchanged (plain road commands mean what they
+meant).
+
+- `Building::gives_way_to_roads() -> bool`: the one rule for which buildings make way for a road. Every building grown
+  by itself on zoned land does, which is every building today; buildings the player places by hand will answer no
+  and keep refusing roads. Anything else that takes buildings down for road land (a junction upgrade) asks this.
+- `World::buildings_in_reserve(curve, kind) -> Vec<BuildingId>`: what stands in the reserve a road of `kind` needs
+  along `curve`, measured exactly as a road command measures what is in its way (the lot's whole footprint closer than
+  `reserve_half_width_m() - 0.05` to the centre line), in id order.
+- `Command::Clearing(Box<Command>)` around `BuildRoad`, `BuildCurve` or `SetRoadKind`: the buildings in the new road's
+  reserve that give way are taken down with it, as the bulldozer takes them (residents leave the city, staff lose the
+  job, the lot's cells under the road lose their zone as every reserve does, the rest of the lot keeps it), and paid for
+  at the bulldozer's price (`BULLDOZE_COST_PER_CELL` per lot cell). The command needs the money for road and
+  demolitions together. Refused exactly as the inner command is for everything else; a building that does not give
+  way still refuses it with `BuildingInTheWay`; any other inner command: `CommandError::NotARoadCommand`.
+  `preview` agrees with `apply`; what it lists is exactly what goes (tests: `tests/clearing.rs`, on grid and curved
+  lots). A change of kind clears only where the new kind needs a wider reserve: never today, every kind keeps 4 m (the
+  avenue's 16 m drawn width is wider than its reserve; gfx fits lots clear of the drawn road).
+- `Preview::buildings` (now also for roads clearing their way), `Preview::demolition_cost` (the part of `cost` for
+  them), `Preview::road_cost` (the part of `cost` paid for road by any road command).
+- `Command::Refund { tick, amount }`: gives back a payment of `amount` a road command made for road at `tick`, once
+  (`economy.receipts`, the session's latest `RECEIPTS_KEPT` = 512 payments, never saved, ignored by `==`). Refused with
+  `CommandError::NoSuchReceipt`. The interface's undo of a road sends it last, after taking the road back, putting the
+  zoning the road's land took back (`ZoneCells`) and restoring the buildings (`RestoreBuilding`, which refunds the
+  demolitions). Undoing a road still pays the bulldozer's dollar a cell to take it away.
