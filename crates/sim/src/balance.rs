@@ -381,6 +381,27 @@ pub const SIGNAL_ALL_RED_S: f32 = 1.0;
 /// A green is held only for vehicles that reach the line within this many
 /// seconds (passage time); vehicles further back call their phase.
 pub const SIGNAL_PASSAGE_S: f32 = 2.5;
+/// Queue-based gap-out: a through green whose approaches have at most
+/// [`SIGNAL_DISCHARGED_CARS`] standing cars left ends (after its minimum)
+/// when another approach has [`SIGNAL_SWITCH_QUEUE_CARS`] standing, even
+/// if more cars are arriving.
+pub const SIGNAL_DISCHARGED_CARS: u16 = 1;
+/// (A car near the line slower than this, m/s, is still pulling away from
+/// a queue: it holds the green whatever stands elsewhere.)
+pub const SIGNAL_DISCHARGE_SPEED: f32 = 7.0;
+/// Signals that are not coordinated serve next the phase with the most
+/// cars standing for it (left phases: the cars in the pockets), not the
+/// next one in plan order; a phase whose front car has waited this long is
+/// served first.
+pub const SIGNAL_BY_QUEUE: bool = true;
+pub const SIGNAL_STARVED_S: f32 = 60.0;
+/// A car standing in a turn pocket counts this many times (a full pocket
+/// spills into the inner lane and blocks it).
+pub const SIGNAL_POCKET_WEIGHT: u32 = 3;
+/// With this many cars in a pocket its left phase runs before its own
+/// through phase (a full pocket spills into the inner lane).
+pub const SIGNAL_LEFT_FIRST_CARS: u16 = 4;
+pub const SIGNAL_SWITCH_QUEUE_CARS: u16 = 4;
 /// Vehicles closer than this to the stop line call their phase, metres.
 pub const SIGNAL_DETECT_M: f32 = 40.0;
 /// Common cycle of coordinated signals along avenues, seconds ...

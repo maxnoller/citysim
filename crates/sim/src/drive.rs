@@ -1341,10 +1341,13 @@ fn tick_signals(
                     }
                     d.through_left = true;
                     d.hold_left |= near;
+                    d.pocket = d.pocket.max(f.pocket_cars);
                 } else {
                     d.through = true;
                     d.hold_through |= near;
                 }
+                d.discharging |= near && f.speed < balance::SIGNAL_DISCHARGE_SPEED;
+                d.wait_s = d.wait_s.max(f.wait as f32 / crate::TICKS_PER_SECOND as f32);
             }
             kk += 1;
         }

@@ -502,8 +502,13 @@ fn at_home(world: &mut World, id: CitizenId) {
         let h = &world.households[c.household];
         let usual = balance::LEISURE_OPEN_H
             + habit(c.seed, 0x1E15E) * (balance::LEISURE_CLOSE_H - 2.0 - balance::LEISURE_OPEN_H);
+        // After a day's work only when the need is urgent: most go out on
+        // their days off (in the daytime).
+        let worked_today = c.worked_day == world.time.day;
+        let urgent = c.leisure_need >= balance::LEISURE_URGENT_NEED;
         if c.leisure_need >= balance::LEISURE_GO_NEED
-            && (tod >= usual || c.leisure_need >= balance::LEISURE_URGENT_NEED)
+            && (tod >= usual || urgent)
+            && (!worked_today || urgent)
             && free_h >= balance::LEISURE_FREE_H
             && !h.austerity
             && (balance::LEISURE_OPEN_H..balance::LEISURE_CLOSE_H).contains(&tod)

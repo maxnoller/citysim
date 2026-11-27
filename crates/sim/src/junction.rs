@@ -1102,6 +1102,14 @@ pub(crate) struct ArmDemand {
     /// so a green ends in the gap between platoons.
     pub hold_through: bool,
     pub hold_left: bool,
+    /// A car holding the green (above) is still pulling away from a queue
+    /// (slower than `SIGNAL_DISCHARGE_SPEED`).
+    pub discharging: bool,
+    /// Cars standing in this arm's turn pocket (its front left turner's
+    /// count).
+    pub pocket: u16,
+    /// Longest a front car calling from this arm has waited, seconds.
+    pub wait_s: f32,
 }
 
 fn phase_demand(phase: &SignalPhase, demand: &[ArmDemand]) -> bool {
@@ -1136,10 +1144,51 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
             if elapsed < ticks(phase.min_green_s) {
                 return;
             }
-            // Next phase with demand, in plan order.
-            let next = (1..np)
-                .map(|k| (s.phase as usize + k) % np)
-                .find(|&p| phase_demand(&plan.phases[p], demand));
+            // Next phase with demand: in plan order on a coordinated
+            // signal; else the one with the most cars standing (a phase whose
+            // cars have waited `SIGNAL_STARVED_S` first), plan order on a tie.
+            let order = (1..np).map(|k| (s.phase as usize + k) % np);
+            let next = if plan.coordinated || !balance::SIGNAL_BY_QUEUE {
+                order.clone().find(|&p| phase_demand(&plan.phases[p], demand))
+            } else {
+                let score = |p: usize| {
+                    let ph = &plan.phases[p];
+                    let mut cars = 0u32;
+                    let mut starved = false;
+                    for &a in &ph.arms {
+                        let d = demand.get(a as usize).copied().unwrap_or_default();
+                        let q = j.queue.get(a as usize).copied().unwrap_or(0);
+                        starved |= d.wait_s >= balance::SIGNAL_STARVED_S;
+                        cars += if ph.left_only {
+                            d.pocket.max(d.left as u16) as u32 * balance::SIGNAL_POCKET_WEIGHT
+                        } else {
+                            q.saturating_sub(d.pocket) as u32
+                        };
+                    }
+                    (starved, cars)
+                };
+                // A through phase whose own left phase is called comes after
+                // it (lefts lead: a full pocket would block the inner lane).
+                let left_first = |p: usize| {
+                    let ph = &plan.phases[p];
+                    !ph.left_only
+                        && plan.phases.iter().enumerate().any(|(q, l)| {
+                            q != s.phase as usize
+                                && l.left_only
+                                && l.arms == ph.arms
+                                && l.arms.iter().any(|&a| {
+                                    demand
+                                        .get(a as usize)
+                                        .is_some_and(|d| d.pocket >= balance::SIGNAL_LEFT_FIRST_CARS)
+                                })
+                        })
+                };
+                order
+                    .filter(|&p| phase_demand(&plan.phases[p], demand) && !left_first(p))
+                    .enumerate()
+                    .max_by(|(ia, a), (ib, b)| score(*a).cmp(&score(*b)).then(ib.cmp(ia)))
+                    .map(|(_, p)| p)
+            };
             let Some(mut next) = next else {
                 // Nobody else waits: rest in this phase.
                 return;
@@ -1154,6 +1203,29 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
                     d.hold_through || d.hold_left
                 }
             });
+            // Queue-based gap-out: once this phase's standing queues have
+            // discharged, a trickle of arrivals no longer holds the green
+            // against a standing queue elsewhere.
+            let served = phase
+                .arms
+                .iter()
+                .map(|&a| j.queue.get(a as usize).copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            let discharging = phase
+                .arms
+                .iter()
+                .any(|&a| demand.get(a as usize).is_some_and(|d| d.discharging));
+            let waiting = (0..j.arms.len())
+                .filter(|a| !phase.arms.contains(&(*a as u8)))
+                .map(|a| j.queue.get(a).copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            let mine = mine
+                && (phase.left_only
+                    || discharging
+                    || served > balance::SIGNAL_DISCHARGED_CARS
+                    || waiting < balance::SIGNAL_SWITCH_QUEUE_CARS);
             let mut end = !mine || elapsed >= ticks(phase.max_green_s);
             if plan.coordinated {
                 let c = ticks(plan.cycle_s).max(1) as u64;
