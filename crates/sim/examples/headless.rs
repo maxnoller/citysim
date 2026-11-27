@@ -161,6 +161,8 @@ struct DayExtra {
     journeys: citysim_sim::TripTimes,
     unhappy_commute: f32,
     commute_happiness: f32,
+    walked: u32,
+    other: u32,
 }
 
 /// Per-hour vehicle measurements.
@@ -174,6 +176,8 @@ struct HourAcc {
     pending: u64,
     /// Cars on the road by trip purpose (`TripPurpose::ALL` order).
     by_purpose: [u64; TripPurpose::COUNT],
+    /// People walking on the map.
+    walkers: u64,
 }
 
 /// One hourly row: `day,hour,population,money,cars_mean,cars_peak,occupied_share,trucks_mean,given_up,pending_mean`,
@@ -197,17 +201,29 @@ fn hour_row(w: &World, a: &HourAcc, out: &mut String) {
         a.by_purpose.iter().fold(String::new(), |mut s, &c| {
             let _ = write!(s, ",{:.2}", c as f64 / n);
             s
-        })
+        }) + &{
+            // People on foot, and the trips started in the hour that just
+            // ended on foot and otherwise.
+            let h = (w.time.tick_of_day / balance::TICKS_PER_HOUR + 23) as usize % 24;
+            let st = &w.walking.stats;
+            let (wk, ot) = if h == 23 {
+                (st.walked_by_hour_yesterday[h], st.other_by_hour_yesterday[h])
+            } else {
+                (st.walked_by_hour[h], st.other_by_hour[h])
+            };
+            format!(",{:.2},{},{}", a.walkers as f64 / n, wk, ot)
+        }
     );
 }
 
 /// Column names of the per-purpose car counts in the hourly CSV.
-const HOUR_PURPOSES: &str = ",to_work,to_home,move_in,move_out,shopping,goods,leisure";
+const HOUR_PURPOSES: &str = ",to_work,to_home,move_in,move_out,shopping,goods,leisure,walkers_mean,walked,other";
 
 fn sample(w: &World, a: &mut HourAcc) {
     a.ticks += 1;
     let n = w.vehicles.len() as u32;
     a.cars += n as u64;
+    a.walkers += w.walking.walkers.len() as u64;
     a.peak = a.peak.max(n);
     a.pending += w.traffic.pending.len() as u64;
     for t in w.traffic.trips.values() {
@@ -321,6 +337,8 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
                     }
                     (sum / n.max(1) as f64) as f32
                 },
+                walked: w.walking.stats.walked_today,
+                other: w.walking.stats.other_today,
             });
             given_up_before = w.traffic.stuck_removed;
             day_ns_before = sum_ns;
@@ -340,7 +358,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
          streets,avenues,highway,signals,signal_count,services_base,services_city_size,services_density,\
          given_up,trips,happiness,avg_commute_s,step_mean_us,delay_factor,worked_share,\
          journeys,journey_mean_h,journey_over3h,journey_over4h,journey_over8h,journey_max_h,journey_max_purpose,journey_max_offscreen,commute_over4h,\
-         unhappy_commute_share,commute_happiness,traffic_lost_tax,traffic_lost_per_commute_s\n",
+         unhappy_commute_share,commute_happiness,traffic_lost_tax,traffic_lost_per_commute_s,walked,other_trips\n",
     );
     for (i, h) in w.economy.history.iter().enumerate() {
         let b = h.budget;
@@ -399,7 +417,14 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         );
         daily.pop();
         let l = losses.get(i).copied().unwrap_or_default();
-        let _ = writeln!(daily, ",{},{:.1}", l.business_tax, l.per_commute_s());
+        let _ = writeln!(
+            daily,
+            ",{},{:.1},{},{}",
+            l.business_tax,
+            l.per_commute_s(),
+            e.walked,
+            e.other
+        );
     }
     std::fs::write(format!("{out_dir}/{}_seed{seed}_days.csv", sc.name), daily).expect("write csv");
     std::fs::write(format!("{out_dir}/{}_seed{seed}_hours.csv", sc.name), hours).expect("write csv");

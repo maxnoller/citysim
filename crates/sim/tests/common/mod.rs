@@ -110,7 +110,7 @@ pub fn check_consistency(w: &World, after_step: bool) {
                 let on_road = j.vehicle.is_some_and(|v| w.vehicles.contains_key(v));
                 let waiting = w.traffic.pending.iter().any(|d| d.citizen == Some(cid));
                 let off_screen = j.arrive_tick.is_some();
-                let riding = j.mode == TravelMode::Passenger;
+                let riding = j.mode == TravelMode::Passenger || citysim_sim::walk::walker_of(w, cid).is_some();
                 assert!(
                     on_road || waiting || off_screen || riding,
                     "tick {tick}: {cid:?} travelling nowhere: {j:?}"

@@ -229,6 +229,7 @@ pub(crate) fn decide(world: &mut World, id: CitizenId) {
                         .get(d)
                         .is_none_or(|d| !matches!(d.location, Location::Travelling(dj) if dj.arrive_tick.is_none()))
                 }),
+                TravelMode::Walking => crate::walk::walker_of(world, id).is_none(),
                 _ => match j.vehicle {
                     Some(v) => !world.vehicles.contains_key(v),
                     None => !world.traffic.pending.iter().any(|d| d.citizen == Some(id)),
@@ -455,7 +456,7 @@ fn go_lunch(world: &mut World, id: CitizenId) -> bool {
         }
         let Some(bb) = world.buildings.get(b) else { continue };
         let d = geom::dist(fp, rect_center(bb.footprint));
-        if (!car && d > balance::WALK_MAX_M) || !crate::households::connected(world, bb.footprint) {
+        if (!car && d > balance::WALK_LUNCH_MAX_M) || !crate::households::connected(world, bb.footprint) {
             continue;
         }
         if best.is_none_or(|x| d < x.0) {
@@ -463,8 +464,10 @@ fn go_lunch(world: &mut World, id: CitizenId) -> bool {
         }
     }
     let Some((_, venue)) = best else { return false };
-    let trip_h = secs_to_ticks(estimate_s(fp, pos_of(world, Some(venue)))) as f32 / HOUR as f32;
-    if trip_h > balance::LUNCH_MAX_TRIP_H {
+    let vp = pos_of(world, Some(venue));
+    let trip_h = secs_to_ticks(estimate_s(fp, vp)) as f32 / HOUR as f32;
+    let walk_h = secs_to_ticks(walk_s(world, id, fp, vp)) as f32 / HOUR as f32;
+    if trip_h > balance::LUNCH_MAX_TRIP_H && walk_h > balance::LUNCH_WALK_MAX_TRIP_H {
         return false;
     }
     go(world, id, venue, TripPurpose::Leisure, &[]);
@@ -629,12 +632,18 @@ pub(crate) fn go_leisure(world: &mut World, id: CitizenId) -> bool {
     // trip without a car is not worth it) and there is time for it before
     // the venue closes.
     let vp = pos_of(world, Some(venue));
-    let factor = if car || geom::dist(fp, vp) <= balance::WALK_MAX_M {
-        1.0
+    let walkable = geom::dist(fp, vp) * balance::OFFSCREEN_ROUTE_FACTOR <= balance::WALK_MAX_M;
+    let trip_h = if !car && walkable {
+        secs_to_ticks(walk_s(world, id, fp, vp)) as f32 / HOUR as f32
     } else {
-        balance::CARLESS_TIME_FACTOR
+        let factor = if car { 1.0 } else { balance::CARLESS_TIME_FACTOR };
+        secs_to_ticks(estimate_s(fp, vp) * factor) as f32 / HOUR as f32
     };
-    let trip_h = secs_to_ticks(estimate_s(fp, vp) * factor) as f32 / HOUR as f32;
+    let longest = if !car && walkable {
+        balance::WALK_TRIP_MAX_H
+    } else {
+        balance::LEISURE_DURATION_H
+    };
     // In today's traffic (by car), there and back.
     let road_h = if car {
         trip_h * traffic::delay_factor(world)
@@ -642,7 +651,7 @@ pub(crate) fn go_leisure(world: &mut World, id: CitizenId) -> bool {
         trip_h
     };
     let hour = world.time.hour();
-    if trip_h > balance::LEISURE_DURATION_H
+    if trip_h > longest
         || hour + road_h + balance::LEISURE_DURATION_H > balance::LEISURE_LAST_H
         || hour + 2.0 * road_h + balance::LEISURE_DURATION_H > balance::LEISURE_HOME_BY_H
     {
@@ -732,21 +741,35 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
     let from = c.location.building();
     let at_home = from == Some(world.households[hid].home);
     let (fp, tp) = (pos_of(world, from), pos_of(world, Some(to)));
-    let near = geom::dist(fp, tp) <= balance::WALK_MAX_M;
-    let mode = if c.has_car && c.drives() {
-        TravelMode::Driving
-    } else if near {
+    // On foot when the way is short enough (a share that falls with its
+    // length); a worker's lunch may be walked though the car is at work.
+    let car_with_them = c.has_car && c.drives();
+    let lunch_break = purpose == TripPurpose::Leisure && on_shift(world, id).is_some();
+    let walk = if !car_with_them || lunch_break {
+        walk_choice(world, id, from, to, purpose)
+    } else {
+        None
+    };
+    let c = &world.citizens[id];
+    let mode = if walk.is_some() {
         TravelMode::Walking
+    } else if c.has_car && c.drives() {
+        TravelMode::Driving
     } else if c.drives() && at_home && world.households[hid].free_cars(world) > 0 {
         TravelMode::Driving
     } else {
         TravelMode::NoCar
     };
     // On foot the roads do not matter; by car or otherwise they do.
-    let est = if mode == TravelMode::Walking {
-        estimate_s(fp, tp)
-    } else {
-        trip_s(world, purpose, fp, tp)
+    let est = match &walk {
+        Some(r) => {
+            let mut pace = crate::walk::pace(world, id);
+            for &p in passengers {
+                pace = pace.min(crate::walk::pace(world, p));
+            }
+            r.len / pace
+        }
+        None => trip_s(world, purpose, fp, tp),
     };
     // Every car trip is a car on the road while the budget allows.
     let lunch = purpose == TripPurpose::Leisure && midday_visit(world.time.hour());
@@ -764,8 +787,21 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
     } else {
         1.0
     };
-    let arrive_tick = (!visible).then(|| now + secs_to_ticks(offscreen_s(world, est * f)));
-    let expected = if purpose == TripPurpose::ToWork && world.citizens[id].workplace() == Some(to) {
+    // A walk is walked on the map while there is room for it.
+    let walked = mode == TravelMode::Walking
+        && from.is_some()
+        && world.walking.walkers.len() < crate::walk::walker_budget(world)
+        && !world.walking.walkers.contains_key(&id);
+    let arrive_tick = if walked {
+        None
+    } else if mode == TravelMode::Walking {
+        Some(now + secs_to_ticks(est))
+    } else {
+        (!visible).then(|| now + secs_to_ticks(offscreen_s(world, est * f)))
+    };
+    let expected = if mode == TravelMode::Walking {
+        secs_to_ticks(est)
+    } else if purpose == TripPurpose::ToWork && world.citizens[id].workplace() == Some(to) {
         expected_commute_ticks(world, id)
     } else {
         secs_to_ticks(est)
@@ -793,6 +829,16 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
     let until = arrive_tick.unwrap_or(now + HOUR);
     people::set_place(world, id, Activity::Travelling, Location::Travelling(journey), until);
     people::count_trip(world, purpose);
+    crate::walk::count_trip(world, mode == TravelMode::Walking);
+    if walked && let Some(route) = walk {
+        // Children walk along with them (car-sharing riders do not: below).
+        let party: Vec<CitizenId> = if purpose == TripPurpose::ToWork {
+            Vec::new()
+        } else {
+            passengers.to_vec()
+        };
+        crate::walk::start(world, id, &party, from, to, route);
+    }
     for &p in passengers {
         if purpose == TripPurpose::ToWork {
             match world.citizens[p].workplace() {
@@ -816,6 +862,12 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
         let j = if mode == TravelMode::Driving {
             Journey {
                 mode: TravelMode::Passenger,
+                driver: Some(id),
+                ..journey
+            }
+        } else if mode == TravelMode::Walking {
+            // On foot beside them (`walk::walker_of` finds them by it).
+            Journey {
                 driver: Some(id),
                 ..journey
             }
@@ -898,7 +950,12 @@ pub(crate) fn continue_off_screen(world: &mut World, id: CitizenId) {
     let now = world.time.tick;
     let Some(c) = world.citizens.get(id) else { return };
     let Location::Travelling(j) = c.location else { return };
-    let est = trip_s(world, j.purpose, pos_of(world, j.from), pos_of(world, Some(j.to)));
+    let est = if j.mode == TravelMode::Walking {
+        let at = crate::walk::walker_of(world, id).map_or(pos_of(world, j.from), |(_, w)| w.pos);
+        walk_s(world, id, at, pos_of(world, Some(j.to)))
+    } else {
+        trip_s(world, j.purpose, pos_of(world, j.from), pos_of(world, Some(j.to)))
+    };
     let t = now + secs_to_ticks(offscreen_s(world, est) * 0.5);
     let j = Journey {
         vehicle: None,
@@ -930,6 +987,59 @@ fn riders_of(world: &World, driver: CitizenId) -> Vec<CitizenId> {
             )
         })
         .collect()
+}
+
+/// Seconds to walk from `a` to `b` (by the pavements, estimated).
+pub(crate) fn walk_s(world: &World, id: CitizenId, a: [f32; 2], b: [f32; 2]) -> f32 {
+    geom::dist(a, b) * balance::OFFSCREEN_ROUTE_FACTOR / crate::walk::pace(world, id)
+}
+
+/// Walk this trip? A route along the pavements no longer than this
+/// citizen walks, and the person's draw for it below the share that walks
+/// that far (a habit for commutes, a daily choice otherwise).
+fn walk_choice(
+    world: &mut World,
+    id: CitizenId,
+    from: Option<BuildingId>,
+    to: BuildingId,
+    purpose: TripPurpose,
+) -> Option<crate::walk::Route> {
+    let c = &world.citizens[id];
+    if c.stage == LifeStage::Child {
+        return None;
+    }
+    let senior = c.stage == LifeStage::Senior;
+    let seed = c.seed;
+    let from = from?;
+    let max = balance::WALK_MAX_M * if senior { balance::WALK_SENIOR_RANGE } else { 1.0 };
+    let draw = match purpose {
+        TripPurpose::ToWork | TripPurpose::ToHome => habit(seed, 0x3A1F),
+        _ => daily(seed, world.time.day, 0x3A20 + purpose.index() as u64),
+    };
+    let (a, b) = (world.buildings.get(from)?, world.buildings.get(to)?);
+    if geom::dist(crate::walk::door(a), crate::walk::door(b)) > max {
+        return None;
+    }
+    let commute = matches!(purpose, TripPurpose::ToWork | TripPurpose::ToHome);
+    let k = if commute { balance::WALK_COMMUTE_FACTOR } else { 1.0 };
+    // Cheap first: a draw no walk of this kind would beat.
+    if draw >= k * crate::walk::walk_share(0.0, senior) {
+        return None;
+    }
+    let route = crate::walk::route_between(world, from, to, max)?;
+    (draw < k * crate::walk::walk_share(route.len, senior)).then_some(route)
+}
+
+/// A walker reached the door: they (and the children with them) arrive.
+pub(crate) fn walk_arrived(world: &mut World, id: CitizenId, party: &[CitizenId]) {
+    arrive(world, id);
+    for &p in party {
+        if world.citizens.get(p).is_some_and(
+            |c| matches!(c.location, Location::Travelling(j) if j.mode == TravelMode::Walking && j.driver == Some(id)),
+        ) {
+            arrive(world, p);
+        }
+    }
 }
 
 /// A car trip ended (traffic callback).
@@ -1068,6 +1178,12 @@ fn arrive(world: &mut World, id: CitizenId) {
         world.citizens[id].commute_ticks = took.max(1);
     }
     let c = &world.citizens[id];
+    let commute = matches!(j.purpose, TripPurpose::ToWork | TripPurpose::ToHome) && c.job.is_some();
+    if j.arrive_tick.is_none() && j.mode == TravelMode::Walking && commute {
+        // A walk to work is a fine commute: as long as the drive would be.
+        world.citizens[id].last_commute_s = estimate_s(pos_of(world, j.from), pos_of(world, Some(j.to)));
+    }
+    let c = &world.citizens[id];
     if j.arrive_tick.is_some() && matches!(j.purpose, TripPurpose::ToWork | TripPurpose::ToHome) && c.job.is_some() {
         // Off screen: the estimated drive (the commute a car would have,
         // in today's traffic; on foot without it).
@@ -1086,7 +1202,12 @@ fn arrive(world: &mut World, id: CitizenId) {
     // traveller: each person's own trip).
     if matches!(j.purpose, TripPurpose::ToWork | TripPurpose::ToHome) && world.citizens[id].job.is_some() {
         let took = now.saturating_sub(j.departed_tick) as f32 / TICKS_PER_SECOND as f32;
-        let free = estimate_s(pos_of(world, j.from), pos_of(world, Some(j.to)));
+        // Walkers lose no time to traffic.
+        let free = if j.mode == TravelMode::Walking {
+            took
+        } else {
+            estimate_s(pos_of(world, j.from), pos_of(world, Some(j.to)))
+        };
         crate::economy::record_commute_time(world, took, free);
     }
     if to == home {

@@ -34,9 +34,10 @@ impl Plugin for PeoplePlugin {
             let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             (v.len() >= 2).then(|| Vec2::new(v[0], v[1]))
         }) {
-            app.add_systems(PostStartup, move |c: Commands, m: Res<PeopleModels>, w: Res<WorldMaterials>| {
-                showcase(c, m, w, at)
-            });
+            app.add_systems(
+                PostStartup,
+                move |c: Commands, m: Res<PeopleModels>, w: Res<WorldMaterials>| showcase(c, m, w, at),
+            );
         }
     }
 }
@@ -68,7 +69,11 @@ fn showcase(mut commands: Commands, models: Res<PeopleModels>, mats: Res<WorldMa
                 person_gen::SENIOR_BUILD => 0.95,
                 _ => 0.94 + 0.12 * ((h >> 20) % 100) as f32 / 100.0,
             };
-            let hair = if build == person_gen::SENIOR_BUILD { 6 + (h >> 13) % 2 } else { (h >> 13) % 6 };
+            let hair = if build == person_gen::SENIOR_BUILD {
+                6 + (h >> 13) % 2
+            } else {
+                (h >> 13) % 6
+            };
             let tag = person_gen::person_tag(h % 16, (h >> 4) % 8, (h >> 8) % 6, hair);
             let p = at + Vec2::new(k as f32 * 1.5, build as f32 * 2.0);
             commands.spawn((

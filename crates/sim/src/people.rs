@@ -619,7 +619,12 @@ pub(crate) fn check(world: &World) -> Result<(), String> {
                         return Err(format!("{id:?} rides {v:?} whose trip is not theirs"));
                     }
                 }
-                if j.vehicle.is_none() && j.arrive_tick.is_none() && j.mode != TravelMode::Passenger {
+                if j.mode == TravelMode::Walking && j.arrive_tick.is_none() {
+                    // On foot on the map: their walker (or their party's).
+                    if crate::walk::walker_of(world, id).is_none() {
+                        return Err(format!("{id:?} walks without a walker"));
+                    }
+                } else if j.vehicle.is_none() && j.arrive_tick.is_none() && j.mode != TravelMode::Passenger {
                     let waiting = world.traffic.pending.iter().any(|d| d.citizen == Some(id));
                     if !waiting {
                         return Err(format!("{id:?} waits for a car that is not queued"));

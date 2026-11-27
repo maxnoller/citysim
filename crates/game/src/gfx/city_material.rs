@@ -65,7 +65,10 @@ pub const PERSON_COLOURS_AT: [usize; 4] = [0, 8, 16, 32];
 fn person_colours() -> Vec<[f32; 4]> {
     use super::palette::{PERSON_BOTTOM, PERSON_HAIR, PERSON_SKIN, PERSON_TOP, lin};
     let mut out = vec![[1.0; 4]; 40];
-    for (at, list) in PERSON_COLOURS_AT.iter().zip([&PERSON_SKIN[..], &PERSON_HAIR, &PERSON_TOP, &PERSON_BOTTOM]) {
+    for (at, list) in PERSON_COLOURS_AT
+        .iter()
+        .zip([&PERSON_SKIN[..], &PERSON_HAIR, &PERSON_TOP, &PERSON_BOTTOM])
+    {
         for (i, c) in list.iter().enumerate() {
             out[at + i] = lin(*c);
         }

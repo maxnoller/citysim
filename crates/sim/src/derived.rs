@@ -98,6 +98,18 @@ pub(crate) struct Derived {
     pub denials: [u64; 4],
     /// Debug counters: junction entries by turn `[straight, right, left, u-turn]`.
     pub turns: [u64; 4],
+    /// Car ticks held for people on zebras (diagnostics): entering at a
+    /// signal, entering at a priority junction, in a box before the exit
+    /// zebra, before a mid-block zebra (people on it), before a mid-block
+    /// zebra (no room beyond).
+    pub walk_holds: [u64; 5],
+    /// Crossings a car stood waiting for this tick (front cars refused at
+    /// their line), for `walk::tick`.
+    pub walk_waits: Vec<u32>,
+    /// Cars after this tick's driving, for `walk`: (segment slot, car) of
+    /// cars on lanes, sorted; (node slot, car) of cars in boxes, sorted.
+    pub walk_lanes: Vec<(u32, crate::VehicleId)>,
+    pub walk_boxed: Vec<(u32, crate::VehicleId)>,
     /// Debug: denials per node slot, by reason (as `denials`).
     pub node_denials: Vec<[u32; 4]>,
     /// Debug: cars that gave up, `(tick, segment, forward, metres before the

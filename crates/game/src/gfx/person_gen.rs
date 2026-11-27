@@ -58,16 +58,88 @@ struct Build {
 }
 
 const BUILD_LIST: [Build; BUILDS] = [
-    Build { girth: 0.92, sleeves: false, hair: 0, skirt: false, coat: false, bag: false, head: 1.0, lean: 0.02 },
-    Build { girth: 1.0, sleeves: true, hair: 0, skirt: false, coat: false, bag: true, head: 1.0, lean: 0.03 },
-    Build { girth: 1.12, sleeves: true, hair: 2, skirt: false, coat: false, bag: false, head: 1.02, lean: 0.03 },
-    Build { girth: 0.9, sleeves: false, hair: 1, skirt: true, coat: false, bag: true, head: 0.98, lean: 0.02 },
-    Build { girth: 0.95, sleeves: true, hair: 1, skirt: false, coat: false, bag: false, head: 0.98, lean: 0.02 },
-    Build { girth: 1.04, sleeves: true, hair: 0, skirt: false, coat: true, bag: false, head: 1.0, lean: 0.03 },
+    Build {
+        girth: 0.92,
+        sleeves: false,
+        hair: 0,
+        skirt: false,
+        coat: false,
+        bag: false,
+        head: 1.0,
+        lean: 0.02,
+    },
+    Build {
+        girth: 1.0,
+        sleeves: true,
+        hair: 0,
+        skirt: false,
+        coat: false,
+        bag: true,
+        head: 1.0,
+        lean: 0.03,
+    },
+    Build {
+        girth: 1.12,
+        sleeves: true,
+        hair: 2,
+        skirt: false,
+        coat: false,
+        bag: false,
+        head: 1.02,
+        lean: 0.03,
+    },
+    Build {
+        girth: 0.9,
+        sleeves: false,
+        hair: 1,
+        skirt: true,
+        coat: false,
+        bag: true,
+        head: 0.98,
+        lean: 0.02,
+    },
+    Build {
+        girth: 0.95,
+        sleeves: true,
+        hair: 1,
+        skirt: false,
+        coat: false,
+        bag: false,
+        head: 0.98,
+        lean: 0.02,
+    },
+    Build {
+        girth: 1.04,
+        sleeves: true,
+        hair: 0,
+        skirt: false,
+        coat: true,
+        bag: false,
+        head: 1.0,
+        lean: 0.03,
+    },
     // Child: bigger head (the model is scaled down to child height).
-    Build { girth: 1.05, sleeves: false, hair: 0, skirt: false, coat: false, bag: false, head: 1.32, lean: 0.0 },
+    Build {
+        girth: 1.05,
+        sleeves: false,
+        hair: 0,
+        skirt: false,
+        coat: false,
+        bag: false,
+        head: 1.32,
+        lean: 0.0,
+    },
     // Older: a coat, a slight stoop, a bun or short hair.
-    Build { girth: 1.02, sleeves: true, hair: 3, skirt: false, coat: true, bag: false, head: 1.0, lean: 0.12 },
+    Build {
+        girth: 1.02,
+        sleeves: true,
+        hair: 3,
+        skirt: false,
+        coat: true,
+        bag: false,
+        head: 1.0,
+        lean: 0.12,
+    },
 ];
 
 /// Index of the child build.
@@ -215,21 +287,49 @@ pub fn person_model(build: usize, pose: usize, far: bool) -> MeshBuilder {
         let ankle = down(knee, p.hip[i] - p.knee[i], leg_lo);
         if far {
             m.glow(Glow::PersonBottom, 0.0, |m| {
-                limb(m, h0, ankle, Vec2::new(0.085, 0.075) * g, Vec2::new(0.06, 0.055) * g, bottom(0.95))
+                limb(
+                    m,
+                    h0,
+                    ankle,
+                    Vec2::new(0.085, 0.075) * g,
+                    Vec2::new(0.06, 0.055) * g,
+                    bottom(0.95),
+                )
             });
         } else {
             // Thigh in the trousers' (or the skirt's) colour, shins bare
             // under a skirt.
             m.glow(Glow::PersonBottom, 0.0, |m| {
-                limb(m, h0, knee, Vec2::new(0.085, 0.08) * g, Vec2::new(0.065, 0.062) * g, bottom(0.96))
+                limb(
+                    m,
+                    h0,
+                    knee,
+                    Vec2::new(0.085, 0.08) * g,
+                    Vec2::new(0.065, 0.062) * g,
+                    bottom(0.96),
+                )
             });
             if b.skirt {
                 m.glow(Glow::PersonSkin, 0.0, |m| {
-                    limb(m, knee, ankle, Vec2::new(0.05, 0.048) * g, Vec2::new(0.04, 0.04) * g, skin)
+                    limb(
+                        m,
+                        knee,
+                        ankle,
+                        Vec2::new(0.05, 0.048) * g,
+                        Vec2::new(0.04, 0.04) * g,
+                        skin,
+                    )
                 });
             } else {
                 m.glow(Glow::PersonBottom, 0.0, |m| {
-                    limb(m, knee, ankle, Vec2::new(0.063, 0.06) * g, Vec2::new(0.055, 0.052) * g, bottom(0.9))
+                    limb(
+                        m,
+                        knee,
+                        ankle,
+                        Vec2::new(0.063, 0.06) * g,
+                        Vec2::new(0.055, 0.052) * g,
+                        bottom(0.9),
+                    )
                 });
             }
         }
@@ -278,7 +378,11 @@ pub fn person_model(build: usize, pose: usize, far: bool) -> MeshBuilder {
         });
     }
     // Torso (a coat reaches down over the hips).
-    let torso_lo = if b.coat { hip - Vec3::Y * 0.3 } else { waist - Vec3::Y * 0.02 };
+    let torso_lo = if b.coat {
+        hip - Vec3::Y * 0.3
+    } else {
+        waist - Vec3::Y * 0.02
+    };
     m.glow(Glow::PersonTop, 0.0, |m| {
         limb(
             m,
@@ -318,15 +422,36 @@ pub fn person_model(build: usize, pose: usize, far: bool) -> MeshBuilder {
             let elbow = down(sh, p.shoulder[i] + b.lean, 0.28);
             let wrist = down(elbow, p.shoulder[i] + b.lean + p.elbow[i], 0.25);
             m.glow(Glow::PersonTop, 0.0, |m| {
-                limb(m, sh, elbow, Vec2::new(0.052, 0.05) * g, Vec2::new(0.045, 0.044) * g, white(0.95))
+                limb(
+                    m,
+                    sh,
+                    elbow,
+                    Vec2::new(0.052, 0.05) * g,
+                    Vec2::new(0.045, 0.044) * g,
+                    white(0.95),
+                )
             });
             if b.sleeves {
                 m.glow(Glow::PersonTop, 0.0, |m| {
-                    limb(m, elbow, wrist, Vec2::new(0.045, 0.043) * g, Vec2::new(0.04, 0.038) * g, white(0.93))
+                    limb(
+                        m,
+                        elbow,
+                        wrist,
+                        Vec2::new(0.045, 0.043) * g,
+                        Vec2::new(0.04, 0.038) * g,
+                        white(0.93),
+                    )
                 });
             } else {
                 m.glow(Glow::PersonSkin, 0.0, |m| {
-                    limb(m, elbow, wrist, Vec2::new(0.038, 0.036) * g, Vec2::new(0.033, 0.032) * g, skin)
+                    limb(
+                        m,
+                        elbow,
+                        wrist,
+                        Vec2::new(0.038, 0.036) * g,
+                        Vec2::new(0.033, 0.032) * g,
+                        skin,
+                    )
                 });
             }
             let hand = down(wrist, p.shoulder[i] + b.lean + p.elbow[i], 0.08);
@@ -357,7 +482,14 @@ pub fn person_model(build: usize, pose: usize, far: bool) -> MeshBuilder {
     let hs = b.head;
     let head_c = neck + Vec3::Y * (0.06 + 0.115 * hs);
     m.glow(Glow::PersonSkin, 0.0, |m| {
-        limb(m, neck + Vec3::Y * 0.07, neck - Vec3::Y * 0.02, Vec2::splat(0.045), Vec2::splat(0.05), skin)
+        limb(
+            m,
+            neck + Vec3::Y * 0.07,
+            neck - Vec3::Y * 0.02,
+            Vec2::splat(0.045),
+            Vec2::splat(0.05),
+            skin,
+        )
     });
     let hx = 0.1 * hs;
     let hz = 0.088 * hs;

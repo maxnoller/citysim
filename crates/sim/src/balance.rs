@@ -976,10 +976,71 @@ pub const OFFSCREEN_CALENDAR_FACTOR: f32 = 1.0;
 pub const TRIP_DUE_FACTOR: f32 = 3.0;
 pub const MIN_TRIP_H: f32 = 0.5;
 pub const MAX_TRIP_H: f32 = 2.0;
-/// Trips to a place within this straight-line distance (metres) are walked
-/// instead of driven (off screen, about as long as the drive would take),
-/// unless the citizen has the car with them or drives children along.
-pub const WALK_MAX_M: f32 = 100.0;
+/// Who walks: a route along the pavements of up to `WALK_NEAR_M` is walked
+/// by `WALK_SHARE_NEAR` of the people making it, the share falling by `1/e`
+/// every `WALK_DECAY_M` beyond, nobody beyond `WALK_MAX_M`
+/// (`walk::walk_share`); commutes by `WALK_COMMUTE_FACTOR` of that (people
+/// with a car mostly drive to work). Older people walk `WALK_SENIOR_RANGE`
+/// of these distances.
+pub const WALK_MAX_M: f32 = 650.0;
+pub const WALK_NEAR_M: f32 = 120.0;
+pub const WALK_SHARE_NEAR: f32 = 0.75;
+pub const WALK_DECAY_M: f32 = 160.0;
+pub const WALK_COMMUTE_FACTOR: f32 = 0.6;
+pub const WALK_SENIOR_RANGE: f32 = 0.7;
+/// A worker's lunch on foot: venues within this straight-line distance,
+/// at most `LUNCH_WALK_MAX_TRIP_H` in-game hours away on foot.
+pub const WALK_LUNCH_MAX_M: f32 = 260.0;
+pub const LUNCH_WALK_MAX_TRIP_H: f32 = 1.5;
+/// A walk to a venue for leisure takes at most this many in-game hours.
+pub const WALK_TRIP_MAX_H: f32 = 3.0;
+/// Walking pace of an adult, m/s (vehicles move in real time, so do
+/// people; a few blocks take a couple of in-game hours, like a drive across
+/// town), varied by `WALK_SPEED_SPREAD` per person, and by stage of life
+/// (`WALK_STAGE_FACTOR`: children, teens, adults, seniors). A party walks
+/// at its slowest member's pace.
+pub const WALK_SPEED: f32 = 1.75;
+pub const WALK_SPEED_SPREAD: f32 = 0.1;
+pub const WALK_STAGE_FACTOR: [f32; 4] = [0.82, 1.04, 1.0, 0.78];
+/// Pavement widths beside the carriageway (streets, avenues), metres;
+/// people walk along their middle. Highways have none.
+pub const STREET_PAVEMENT_M: f32 = 1.25;
+pub const AVENUE_PAVEMENT_M: f32 = 1.5;
+/// Zebra crossings at junctions: from `ZEBRA_INSET_M` to `ZEBRA_INSET_M +
+/// ZEBRA_WIDTH_M` inside the stop line (in the junction margin), only on
+/// arms whose stop line stands at least `ZEBRA_WIDTH_M + 1` from the node.
+pub const ZEBRA_INSET_M: f32 = 0.4;
+pub const ZEBRA_WIDTH_M: f32 = 1.75;
+/// Mid-block crossings on stretches of road between stop lines at least
+/// this long, one per `MIDBLOCK_SPACING_M` (evenly spaced).
+pub const MIDBLOCK_MIN_M: f32 = 150.0;
+pub const MIDBLOCK_SPACING_M: f32 = 130.0;
+/// Route choice: a crossing costs this many metres of pavement (people
+/// do not cross back and forth for nothing).
+pub const WALK_CROSSING_COST_M: f32 = 6.0;
+/// The door: the middle of a lot's front edge, this far inside the lot.
+pub const DOOR_INSET_M: f32 = 1.5;
+/// People walked in full on the map per 1,000 residents (and at least
+/// `MIN_WALKERS`, at most `MAX_WALKERS`); beyond it walks are timed off
+/// screen as before.
+pub const WALKERS_PER_1000: usize = 300;
+pub const MIN_WALKERS: usize = 200;
+pub const MAX_WALKERS: usize = 8_000;
+/// Crossings without signals: people step onto the zebra in a group (later
+/// arrivals join within `PED_GROUP_S` of the first); once a car has stood
+/// waiting for the crossing `CAR_PATIENCE_S`, people let the cars go for
+/// `CAR_TURN_S` before they step on again.
+pub const PED_GROUP_S: f32 = 2.0;
+/// Without signals people let a moving car that would reach the zebra
+/// within `PED_GAP_S` pass first, for up to `PED_PATIENCE_S` (then they step
+/// out and it stops, if it can).
+pub const PED_GAP_S: f32 = 3.0;
+pub const PED_PATIENCE_S: f32 = 10.0;
+pub const CAR_PATIENCE_S: f32 = 3.0;
+pub const CAR_TURN_S: f32 = 6.0;
+/// A car that cannot stop short of a zebra: its braking distance plus this
+/// margin (people never step in front of it).
+pub const PED_SAFETY_M: f32 = 1.5;
 /// A trip made off screen takes at most this many in-game hours in a city
 /// whose traffic is fine, longer in proportion as it gets worse
 /// (`* max(1, delay_factor / DELAY_OK_FACTOR)`): nobody's trip takes most
