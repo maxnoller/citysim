@@ -494,10 +494,11 @@ pub fn trip_unseen(world: &World, t: &inspect::TripView) -> bool {
 /// Why a trip is not on the map, in words.
 fn unseen_words(t: &inspect::TripView) -> &'static str {
     match t.mode {
-        TravelMode::Walking => "People on foot are not drawn",
-        TravelMode::NoCar => "Not drawn: without a car they go by lift or bus, off the map",
+        TravelMode::Walking => "On foot: the marker on the map shows where they should be by now",
+        TravelMode::NoCar => "Without a car they go by lift or bus: the marker shows where they should be by now",
         _ => {
-            "Not drawn: the map shows up to 125 cars per 1,000 residents, the rest drive in the same traffic off screen"
+            "Off screen: the map shows up to 125 cars per 1,000 residents, the rest drive in the same traffic. The \
+             marker shows where they should be by now"
         }
     }
 }
@@ -689,7 +690,7 @@ fn route_section(
             if !left.is_empty() {
                 sec.line("Still to go", left, Tone::Normal);
             }
-            if r.state == crate::shared::RouteState::Unseen {
+            if r.state == crate::shared::RouteState::Unseen && r.at.is_none() {
                 sec.line(
                     "",
                     "Dashed on the map: the way by road (not drawn under way)",
@@ -767,7 +768,10 @@ pub fn person_sheet(world: &World, id: CitizenId, routes: &mut super::route::Tri
         actions,
         portrait: Some(portrait(c.seed, c.stage)),
         mood: Some(c.happiness.total),
-        at: person_position(world, id),
+        at: routes
+            .person(world, id)
+            .and_then(|t| t.at)
+            .or_else(|| person_position(world, id)),
         vehicle: v.trip.and_then(|t| t.vehicle),
         inside: v.inside,
         ..Default::default()

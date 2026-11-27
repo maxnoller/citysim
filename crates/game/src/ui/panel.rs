@@ -498,6 +498,7 @@ fn follow(
     mut view: ResMut<PeopleView>,
     mut cam: ResMut<CameraFollow>,
     mut highlight: ResMut<WorldHighlight>,
+    mut routes: ResMut<super::route::TripCache>,
     mut owner_of: Local<Option<(citysim_sim::VehicleId, citysim_sim::CitizenId)>>,
 ) {
     let w = &sim.world;
@@ -524,7 +525,11 @@ fn follow(
         }
     }
     let at = match view.current() {
-        Some(Target::Person(c)) => people::person_position(w, c),
+        // Under way off the map: where they should be by now.
+        Some(Target::Person(c)) => routes
+            .person(w, c)
+            .and_then(|t| t.at)
+            .or_else(|| people::person_position(w, c)),
         Some(Target::Place(b)) => w.buildings.get(b).map(|b| b.center()),
         Some(Target::Vehicle(v)) => w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0),
         None => None,

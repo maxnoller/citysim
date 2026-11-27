@@ -31,6 +31,9 @@
 //! * `find-car [MIN]` — window position (logical px) of a slow car (easy to
 //!   click) near the middle of the screen with at least MIN metres (300)
 //!   still to go.
+//! * `find-walker [MIN]` — the cell of a home whose first resident is on
+//!   a trip off the map (on foot preferred) with at least MIN real seconds
+//!   (10) to go: `ok X Y WALKING SECONDS_LEFT`.
 //! * `find-building` — window position (logical px) of the fullest home on
 //!   screen and its residents: `X Y N`.
 //! * `node PREFIX` — window position (logical px) of the first visible UI
@@ -283,6 +286,7 @@ struct Ctx<'w, 's> {
     >,
     kind: Res<'w, RoadChoice>,
     follow: Res<'w, CameraFollow>,
+    route: Res<'w, crate::shared::RouteView>,
 }
 
 fn poll_commands(mut commands: Commands, time: Res<Time<Real>>, mut ctl: ResMut<Control>, mut cx: Ctx) {
@@ -461,12 +465,21 @@ fn run(
             // Tool modes, road kind and camera follow, for scripts that switch
             // them with real keys.
             let extra = format!(
-                "road_mode={:?} zone_mode={:?} bulldoze_mode={:?} road_kind={:?} following={}",
+                "road_mode={:?} zone_mode={:?} bulldoze_mode={:?} road_kind={:?} following={} route={:?} \
+                 route_points={} traveller={} focus={}",
                 cx.modes.road,
                 cx.modes.zone,
                 cx.modes.bulldoze,
                 *cx.kind,
-                cx.follow.focus.is_some()
+                cx.follow.focus.is_some(),
+                cx.route.state,
+                cx.route.points.len(),
+                cx.route
+                    .traveller
+                    .map_or("none".into(), |p| format!("{:.0},{:.0}", p[0], p[1])),
+                cx.follow
+                    .focus
+                    .map_or("none".into(), |p| format!("{:.0},{:.0}", p[0], p[1])),
             );
             ctl.reply(
                 seq,
@@ -624,6 +637,36 @@ fn run(
                 .min_by(|a, b| a.distance(centre).total_cmp(&b.distance(centre)))
                 .ok_or("no car on screen with that far to go")?;
             ctl.reply(seq, true, &format!("{:.0} {:.0}", hit.x, hit.y));
+        }
+        "find-walker" => {
+            // A home whose first resident (the first person its panel
+            // lists) is on a trip off the map (on foot, else any) with at
+            // least MIN real seconds to go: `ok X Y WALKING SECONDS`.
+            let min: f32 = num(args, 0).unwrap_or(10.0);
+            let w = &cx.sim.world;
+            let now = w.time.tick;
+            let left = |c: citysim_sim::CitizenId| {
+                let t = citysim_sim::inspect::citizen(w, c)?.trip?;
+                if t.vehicle.is_some_and(|v| w.vehicles.contains_key(v)) || t.from.is_none() {
+                    return None;
+                }
+                let eta = t.eta_tick?;
+                let s = eta.saturating_sub(now) as f32 / citysim_sim::TICKS_PER_SECOND as f32;
+                (s >= min).then_some((t.mode == citysim_sim::TravelMode::Walking, s))
+            };
+            let best = w
+                .buildings
+                .iter()
+                .filter(|(_, b)| b.kind == citysim_sim::Zone::Residential && b.occupied > 0)
+                .filter_map(|(id, b)| {
+                    let c = citysim_sim::inspect::residents(w, id).next()?;
+                    let (walk, s) = left(c)?;
+                    Some((walk, s, b.center()))
+                })
+                .max_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap_or(std::cmp::Ordering::Equal))
+                .ok_or("nobody under way off the map")?;
+            let c = Cell::from_pos(best.2);
+            ctl.reply(seq, true, &format!("ok {} {} {} {:.0}", c.x, c.y, best.0, best.1));
         }
         "find-building" => {
             // The fullest residential building on screen (clear of the bar
