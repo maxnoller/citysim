@@ -470,6 +470,28 @@ pub fn door(b: &crate::Building) -> [f32; 2] {
 /// away from the node).
 type ArmEnds = (f32, SegmentId, [f32; 2], Option<[u32; 2]>);
 
+/// Where the mid-block zebras of segment `s` are, metres from its `a`
+/// (empty for the highway and stretches shorter than `MIDBLOCK_MIN_M`
+/// between the stop lines): renderers draw them here.
+pub fn midblock_positions(world: &World, s: SegmentId) -> Vec<f32> {
+    let Some(seg) = world.roads.segments.get(s) else {
+        return Vec::new();
+    };
+    if pavement_m(seg.kind) <= 0.0 {
+        return Vec::new();
+    }
+    let (sa, sb) = (
+        crate::junction::setback(world, seg.a, s),
+        crate::junction::setback(world, seg.b, s),
+    );
+    let stretch = seg.length - sa - sb;
+    if stretch < balance::MIDBLOCK_MIN_M {
+        return Vec::new();
+    }
+    let n = ((stretch / balance::MIDBLOCK_SPACING_M) as usize).max(1);
+    (0..n).map(|k| sa + stretch * (k + 1) as f32 / (n + 1) as f32).collect()
+}
+
 /// Build the network for the current roads.
 pub fn build(world: &World) -> WalkNet {
     let roads = &world.roads;
@@ -498,18 +520,8 @@ pub fn build(world: &World) -> WalkNet {
         let da = end_d(seg.a, s).min(len * 0.45);
         let db = len - end_d(seg.b, s).min(len * 0.45);
         // Mid-block crossings between the stop lines.
-        let (sa, sb) = (
-            crate::junction::setback(world, seg.a, s),
-            crate::junction::setback(world, seg.b, s),
-        );
-        let stretch = len - sa - sb;
         let mut stations = vec![da];
-        if stretch >= balance::MIDBLOCK_MIN_M {
-            let n = ((stretch / balance::MIDBLOCK_SPACING_M) as usize).max(1);
-            for k in 0..n {
-                stations.push(sa + stretch * (k + 1) as f32 / (n + 1) as f32);
-            }
-        }
+        stations.extend(midblock_positions(world, s));
         stations.push(db.max(da));
         let flat: [Vec<(f32, [f32; 2])>; 2] = [
             seg.curve.flatten_offset(-off, 0.08),

@@ -34,6 +34,11 @@ fn main() {
             y * 40 + 20
         );
     }
+    if let Some(net) = walk::network(&w) {
+        for c in net.crossings.iter().filter(|c| c.node.is_none()).take(6) {
+            println!("mid-block zebra at {:?}", c.center);
+        }
+    }
     for n in junction::junction_nodes(&w).take(400) {
         if junction::junction_control(&w, n) == Some(JunctionControl::Signal) {
             let p = w.roads.nodes[n].pos;
