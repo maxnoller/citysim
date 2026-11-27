@@ -121,8 +121,13 @@ pub struct UiState {
     pub tray_focus: bool,
     /// The tool to go back to when the bulldozer is switched off.
     pub before_demolish: Option<ActiveTool>,
-    /// The performance panel's size (F3; remembered in the settings).
+    /// The performance panel's form on screen (F3 and the panel's buttons
+    /// set it). Normally the player's choice; the full panel steps down to
+    /// its small form while the city window needs the room
+    /// (`city::perf_room`).
     pub perf: crate::shared::PerfDetail,
+    /// The form the player chose (remembered in the settings).
+    pub perf_choice: crate::shared::PerfDetail,
 }
 
 impl UiState {
@@ -149,6 +154,7 @@ impl Default for UiState {
             tray_focus: false,
             before_demolish: None,
             perf: crate::shared::PerfDetail::Off,
+            perf_choice: crate::shared::PerfDetail::Off,
         }
     }
 }

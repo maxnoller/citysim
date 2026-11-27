@@ -59,7 +59,7 @@ pub(super) fn control_keys(
 ) {
     // F3 works everywhere, the menu included.
     if keys.just_pressed(KeyCode::F3) {
-        out.write(UiAction::Perf(super::perf::next_detail(ui.perf)));
+        out.write(UiAction::Perf(super::perf::next_detail(ui.perf_choice)));
     }
     // Esc in a focused drawer only leaves the focus (`tray::tray_keys`).
     if keys.just_pressed(KeyCode::Escape) && !tools.busy() && !ui.tray_focus {
@@ -273,7 +273,10 @@ fn handle_actions(
             UiAction::UiScale(i) => ui.ui_scale = i,
             UiAction::EdgeScroll(on) => display.edge_scroll = on,
             UiAction::LotMarkers(on) => display.lot_markers = on,
-            UiAction::Perf(d) => ui.perf = d,
+            UiAction::Perf(d) => {
+                ui.perf = d;
+                ui.perf_choice = d;
+            }
             // Handled in tools.rs and people_panel.rs.
             UiAction::Undo
             | UiAction::Person(_)

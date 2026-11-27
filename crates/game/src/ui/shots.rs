@@ -874,6 +874,20 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            // With the side panel open there is no room beside the full
+            // performance panel: it shows as its small strip meanwhile.
+            name: "window-perf-crowded",
+            wait: 3.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                if let Some(b) = building_where(w, |b| b.kind == Zone::Residential && b.occupied > 0) {
+                    w.write_message(UiAction::Place(b));
+                }
+                w.write_message(UiAction::Stats);
+            },
+        },
+        Step {
             name: "route-car",
             wait: 2.0,
             setup: |w| {
