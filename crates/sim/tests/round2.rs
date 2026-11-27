@@ -807,5 +807,6 @@ fn long_scripted_run_has_a_pinned_checksum() {
 /// layout are part of the state), then by extension block 5 (the traffic
 /// losses per booked day), then by the r6 rules: the day (lunch breaks,
 /// midday outings, the late shift, nights out), signals by pressure and
-/// queue, courtesy at arterial give-ways, street headway, pocket lengths.
-const PINNED_CHECKSUM: u64 = 0x05a52eb25a2cc8f9;
+/// queue, courtesy at arterial give-ways, street headway, pocket lengths,
+/// cheaper avenues and money through the day.
+const PINNED_CHECKSUM: u64 = 0x08bdb00bb471b5ef;

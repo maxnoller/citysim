@@ -18,12 +18,14 @@ struct Acc {
     dist: f64,
 }
 
+/// Per car: (purpose, from, to, requested, started, metres, ideal seconds).
+type Live = (TripPurpose, Place, Place, u64, u64, f64, f64);
+
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let mut w = World::load(&std::fs::read(&a[0]).unwrap()).unwrap();
     let hours: u32 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(24);
-    // Per car: (purpose, from, to, requested, started, metres, ideal seconds).
-    let mut live: BTreeMap<VehicleId, (TripPurpose, Place, Place, u64, u64, f64, f64)> = BTreeMap::new();
+    let mut live: BTreeMap<VehicleId, Live> = BTreeMap::new();
     let mut by_hour: BTreeMap<u32, Acc> = BTreeMap::new();
     let dt = 1.0 / TICKS_PER_SECOND as f64;
     let end = w.time.tick + hours as u64 * balance::TICKS_PER_HOUR as u64;

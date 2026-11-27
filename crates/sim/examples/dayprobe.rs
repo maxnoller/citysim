@@ -24,7 +24,7 @@ fn main() {
             break;
         }
         let h = w.time.tick_of_day / balance::TICKS_PER_HOUR;
-        if w.time.tick_of_day % balance::TICKS_PER_HOUR != 0
+        if !w.time.tick_of_day.is_multiple_of(balance::TICKS_PER_HOUR)
             || next_h >= hours.len() as u32
             || h != hours[next_h as usize]
         {
