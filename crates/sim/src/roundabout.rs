@@ -892,6 +892,66 @@ pub(crate) fn set(world: &mut World, n: NodeId, size: Option<RoundaboutSize>) {
     let boxes = [([pos[0] - r, pos[1] - r], [pos[0] + r, pos[1] + r])];
     let doomed = crate::blocks::refresh_boxes(world, &boxes);
     crate::growth::remove_buildings(world, &doomed);
+    // Cars on an arm that now stand past the ring's give-way line (the ring
+    // reaches further out than the junction did) go back to the line, one
+    // behind another (lane by lane, front first).
+    let arms: Vec<SegmentId> = world.roads.nodes[n].segments.clone();
+    let mut on_arms: Vec<(SegmentId, bool, u8, f32, crate::VehicleId)> = world
+        .vehicles
+        .iter()
+        .filter_map(|(id, v)| {
+            let s = v.segment?;
+            let seg = world.roads.segments.get(s)?;
+            // (A turn pocket's cars join the inner lane: a ring has none.)
+            (v.junction.is_none() && arms.contains(&s) && (if v.forward { seg.b } else { seg.a }) == n).then_some((
+                s,
+                v.forward,
+                v.lane.min(seg.lane_count().saturating_sub(1)),
+                v.progress,
+                id,
+            ))
+        })
+        .collect();
+    on_arms.sort_by(|x, y| {
+        (x.0, x.1, x.2)
+            .cmp(&(y.0, y.1, y.2))
+            .then(y.3.total_cmp(&x.3))
+            .then(x.4.cmp(&y.4))
+    });
+    let mut lane: Option<(SegmentId, bool, u8)> = None;
+    let mut room = 0.0f32;
+    let mut lifted = Vec::new();
+    for (s, fwd, l, progress, id) in on_arms {
+        if lane != Some((s, fwd, l)) {
+            lane = Some((s, fwd, l));
+            room = crate::drive::drivable_range(world, s, fwd).map_or(f32::INFINITY, |r| r.1);
+        }
+        if progress > room && room < balance::VEHICLE_SPACING_M * 0.5 {
+            // No room left on the arm: off the road (as when a road goes).
+            lifted.push(id);
+            continue;
+        }
+        let to = progress.min(room).max(0.0);
+        if world.vehicles[id].lane != l {
+            let v = &mut world.vehicles[id];
+            v.lane = l;
+            v.lane_shift = 1.0;
+        }
+        if to < progress {
+            let v = &mut world.vehicles[id];
+            v.progress = to;
+            v.speed = 0.0;
+            crate::traffic::set_pose(&world.roads, v);
+        }
+        room = to - balance::VEHICLE_SPACING_M;
+    }
+    let mut ended = Vec::new();
+    for id in lifted {
+        crate::traffic::remove_vehicle(world, id, crate::traffic::TripEnd::Vanished, &mut ended);
+    }
+    for e in ended {
+        crate::households::trip_ended(world, e);
+    }
 }
 
 // -------------------------------------------------------------- driving ----
@@ -963,6 +1023,14 @@ pub(crate) fn may_enter(
     let Some(points) = ring.points.get(m) else {
         return true;
     };
+    // The start of its own way is free (a car ahead on the same path, or let
+    // in this tick from another lane onto it).
+    if cars
+        .iter()
+        .any(|y| y.movement == m && y.d + d_line < half + y.half + balance::RING_FRONT_GAP_M + 0.5)
+    {
+        return false;
+    }
     let vmax = path_speed(ring, j, m);
     let mut last_entry = 0.0f32;
     for (ci, cp) in points.iter().enumerate() {

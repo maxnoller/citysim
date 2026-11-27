@@ -718,8 +718,17 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 rooms[fi - k] = room;
                 // Let go and too close to stop: keeps going.
                 let committed = f.go_before && f.speed * f.speed / (2.0 * balance::BRAKING) > f.d_line - f.back + 0.3;
+                // A car not in its path's own lane (a turn pocket the ring
+                // has no use for) waits while that lane has a car at the line.
+                let car = &vehicles[cars[f.idx].2];
+                let mv_lane = j.movements[f.movement].from_lane;
+                let lane_busy = mv_lane != car.lane && {
+                    let other = lane_key(car.segment.expect("on a lane"), car.forward, mv_lane);
+                    lane_front[other] > car.progress + f.d_line - stop_back_m(false) - balance::MIN_GAP_M
+                };
                 let ok = committed
                     || (room
+                        && !lane_busy
                         && crate::roundabout::may_enter(&ring, j, f.movement, f.d_line, f.speed, half, &ring_cars));
                 fronts[fi].permit = ok;
                 if ok {
