@@ -208,7 +208,8 @@ impl Plugin for LandPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RoadEdges>()
             .configure_sets(Update, LandUpdate.in_set(GameSet::Render))
-            .add_systems(Update, update_edges.in_set(LandUpdate));
+            .init_resource::<FitCache>()
+            .add_systems(Update, (update_edges, warm_fits).chain().in_set(LandUpdate));
     }
 }
 
@@ -549,13 +550,98 @@ impl CellView {
     }
 }
 
-/// Fitted cell quads and cell land shapes, valid for one roads version.
-#[derive(Default)]
+/// Fitted cell quads and cell land shapes, valid for one roads version:
+/// one cache shared by the zone overlay and the lot markers, filled a few
+/// milliseconds a frame while nothing needs it ([`warm_fits`]), so showing
+/// zones the first time after a load or a road edit finds it ready (a
+/// 10,000-resident city's cells take about 30 ms to fit and cut).
+#[derive(Resource, Default)]
 pub struct FitCache {
     key: Option<(u64, u64)>,
     quads: HashMap<CellRef, Option<[Vec2; 4]>>,
     shapes: Option<citysim_sim::zoning::LandShapes>,
     shape_of: HashMap<CellRef, Option<Vec<Vec2>>>,
+    /// Cells still to fit for this key (`None`: not listed yet).
+    pending: Option<Vec<CellRef>>,
+}
+
+/// Time [`warm_fits`] may spend a frame, milliseconds.
+const WARM_MS: f64 = 1.5;
+
+impl FitCache {
+    /// Forget everything when the roads changed.
+    fn follow(&mut self, world: &World, edges: &RoadEdges) {
+        if self.key != edges.key {
+            self.key = edges.key;
+            self.quads.clear();
+            self.shapes = None;
+            self.shape_of.clear();
+            self.pending = None;
+        }
+        if self.shapes.is_none() && world.zoning.lattices().nth(1).is_some() {
+            self.shapes = Some(citysim_sim::zoning::LandShapes::new(world));
+        }
+    }
+
+    /// The cell's quad fitted clear of the roads (`None`: a road runs
+    /// through it, or only a sliver is left).
+    fn quad(&mut self, l: &Lattice, cell: CellRef, edges: &RoadEdges) -> Option<[Vec2; 4]> {
+        *self.quads.entry(cell).or_insert_with(|| {
+            let lot = cell_lot(l, cell.i, cell.j);
+            let (inset, ok) = fit_checked(lot, edges);
+            (ok && inset.scale.x * inset.scale.z > 0.3).then(|| {
+                if l.is_strip() {
+                    quad_corners(&lot, &inset, l.cell_corners(cell.i, cell.j).map(Vec2::from))
+                } else {
+                    corners(&lot, &inset)
+                }
+            })
+        })
+    }
+
+    /// The cell's land where it differs from its quad (`zoning::cell_shape`).
+    fn shape(&mut self, world: &World, cell: CellRef) -> Option<Vec<Vec2>> {
+        let ls = self.shapes.as_ref()?;
+        self.shape_of
+            .entry(cell)
+            .or_insert_with(|| ls.shape(world, cell).map(|p| p.into_iter().map(Vec2::from).collect()))
+            .clone()
+    }
+}
+
+/// Fill the [`FitCache`] for every usable cell, [`WARM_MS`] a frame.
+fn warm_fits(sim: Res<SimWorld>, edges: Res<RoadEdges>, mut cache: ResMut<FitCache>) {
+    let world = &sim.world;
+    if cache.key == edges.key && cache.pending.as_ref().is_some_and(Vec::is_empty) {
+        return;
+    }
+    let start = std::time::Instant::now();
+    let c = cache.bypass_change_detection();
+    c.follow(world, &edges);
+    let mut pending = c.pending.take().unwrap_or_else(|| {
+        let mut v: Vec<CellRef> = world
+            .zoning
+            .lattices()
+            .flat_map(|(id, l)| {
+                l.cells
+                    .iter()
+                    .filter(|(_, z)| z.usable())
+                    .map(move |(&(i, j), _)| CellRef::new(id, i, j))
+            })
+            .collect();
+        v.sort_by_key(|c| std::cmp::Reverse((c.lattice, c.i, c.j)));
+        v
+    });
+    while start.elapsed().as_secs_f64() * 1000.0 < WARM_MS {
+        let Some(cell) = pending.pop() else { break };
+        let Some(l) = world.zoning.lattice(cell.lattice) else {
+            continue;
+        };
+        if c.quad(l, cell, &edges).is_some() {
+            c.shape(world, cell);
+        }
+    }
+    c.pending = Some(pending);
 }
 
 /// Clip a convex polygon to the side of the line `a -> b` that holds `inner`.
@@ -608,16 +694,7 @@ pub fn cells_by_chunk(
     chunk: f32,
     keep: impl Fn(&ZoneCell) -> bool,
 ) -> HashMap<IVec2, Vec<CellView>> {
-    if cache.key != edges.key {
-        cache.key = edges.key;
-        cache.quads.clear();
-        cache.shapes = None;
-        cache.shape_of.clear();
-    }
-    let multi = world.zoning.lattices().nth(1).is_some();
-    if multi && cache.shapes.is_none() {
-        cache.shapes = Some(citysim_sim::zoning::LandShapes::new(world));
-    }
+    cache.follow(world, edges);
     let mut out: HashMap<IVec2, Vec<CellView>> = HashMap::new();
     let mut shaped: Vec<(IVec2, usize)> = Vec::new();
     for (id, l) in world.zoning.lattices() {
@@ -629,16 +706,7 @@ pub fn cells_by_chunk(
             let cell = CellRef::new(id, i, j);
             // Cells a road runs through, or that only a sliver of is left
             // of, are not drawn as land.
-            let Some(quad) = *cache.quads.entry(cell).or_insert_with(|| {
-                let (inset, ok) = fit_checked(lot, edges);
-                (ok && inset.scale.x * inset.scale.z > 0.3).then(|| {
-                    if l.is_strip() {
-                        quad_corners(&lot, &inset, l.cell_corners(i, j).map(Vec2::from))
-                    } else {
-                        corners(&lot, &inset)
-                    }
-                })
-            }) else {
+            let Some(quad) = cache.quad(l, cell, edges) else {
                 continue;
             };
             let (u, v) = l.axes_at(i as f32 + 0.5);
@@ -646,14 +714,7 @@ pub fn cells_by_chunk(
                 .map(|f| world.zoning.cell_across(cell, f));
             // The cell's land where it differs from its quad, fitted clear
             // of the roads like the quad (on the edges the fit moved).
-            let shape = match &cache.shapes {
-                Some(ls) => cache
-                    .shape_of
-                    .entry(cell)
-                    .or_insert_with(|| ls.shape(world, cell).map(|p| p.into_iter().map(Vec2::from).collect()))
-                    .clone(),
-                None => None,
-            };
+            let shape = cache.shape(world, cell);
             let raw = l.cell_corners(i, j).map(Vec2::from);
             let (poly, edge_nbrs) = match shape {
                 None => (quad.to_vec(), nbrs.map(Some).to_vec()),

@@ -317,7 +317,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   levels' pipelines compile during loading on hidden warm-up cameras, `scene.rs`) and what depends on it (tree density,
   road furniture, shadow cascades, cloud shadows) follows `scene::QualityApplied`, re-meshing a few chunks a frame
   (`QUALITY_REMESH_MS`); a road edit refits only buildings near the changed 64 m buckets of `RoadEdges`
-  (`unchanged_in`); a loaded world's buildings spawn `FILL_PER_FRAME` a frame, nearest the camera first. Time-of-day inputs live in a shared `ShaderBuffer` (`WorldMaterials::day`,
+  (`unchanged_in`); a loaded world's buildings spawn `FILL_PER_FRAME` a frame, nearest the camera first; the zone
+  land (cells fitted clear of the roads and cut where rows meet) is one `land::FitCache` resource shared by the zone
+  overlay and the lot markers, filled 1.5 ms a frame in the background (`warm_fits`), so the overlay's first showing
+  does not fit a whole city in one frame. Time-of-day inputs live in a shared `ShaderBuffer` (`WorldMaterials::day`,
   `DayParams`), brake lights are `MeshTag` bit 0.
 - gfx roads: `road_geom::Frame` samples a segment's curve (two points when straight); everything along a road is a
   ribbon over it between the arm cuts of `junction::junction_shape`. `gfx/land.rs`: one index of drawn road edges per
