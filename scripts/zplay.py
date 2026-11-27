@@ -487,7 +487,7 @@ def launch(exe, size="1920x1080"):
         try:
             play.cmd("ready", timeout=2.0)
             break
-        except RuntimeError:
+        except (RuntimeError, TimeoutError):
             time.sleep(0.2)
     w, h = size.split("x")
     play.cmd(f"window {w} {h}")

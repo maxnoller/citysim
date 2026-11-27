@@ -7,9 +7,10 @@
 //! buildings around it, so recomputing any region gives the same result as
 //! recomputing the whole map.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::curve::{self, Curve, right_of, unit};
+use crate::faces::{self, Half, Plan};
 use crate::roads::{RoadNetwork, SegmentId};
 use crate::zoning::{Block, Blocked, CellRef, Lattice, LatticeId, Side, Strip, Zoning, facing_bit};
 use crate::{BuildingId, CELL_SIZE, Facing, MAP_SIZE_M, World, balance, geom};
@@ -312,8 +313,13 @@ fn place_strip(z: &mut Zoning, roads: &RoadNetwork, s: SegmentId, side: Side, de
     let s1 = joint_shift(z, roads, s, seg.b, [-ed[0], -ed[1]], [n1[0] * sgn, n1[1] * sgn]);
     let st = Strip::new(0, strip_frames(curve, side, s0, s1));
     let rects = strip_rects(&st, 0, st.columns() - 1, sgn, depth);
-    let l = Lattice::bent(st);
-    let id = match z.lattices.iter().position(|x| x.is_none()) {
+    let id = alloc(z, Lattice::bent(st));
+    (id, rects)
+}
+
+/// A new lattice in the lowest free slot.
+fn alloc(z: &mut Zoning, l: Lattice) -> LatticeId {
+    match z.lattices.iter().position(|x| x.is_none()) {
         Some(k) => {
             z.lattices[k] = Some(l);
             LatticeId(k as u16)
@@ -322,8 +328,151 @@ fn place_strip(z: &mut Zoning, roads: &RoadNetwork, s: SegmentId, side: Side, de
             z.lattices.push(Some(l));
             LatticeId((z.lattices.len() - 1) as u16)
         }
+    }
+}
+
+/// The lattice of one band of a block's grid: the existing one with
+/// exactly this strip, else a new one.
+fn face_lattice(z: &mut Zoning, st: &Strip) -> LatticeId {
+    if let Some(&id) = z
+        .face_lattices
+        .iter()
+        .find(|&&id| z.lattice(id).and_then(|l| l.strip.as_ref()) == Some(st))
+    {
+        return id;
+    }
+    let id = alloc(z, Lattice::bent(st.clone()));
+    z.face_lattices.insert(id);
+    id
+}
+
+/// The blocks of one side of a segment as they are: `(lattice, min, max,
+/// front)`, sorted.
+fn side_blocks(z: &Zoning, s: SegmentId, side: Side) -> Vec<(LatticeId, [i32; 2], [i32; 2], u8)> {
+    let mut v: Vec<_> = z
+        .blocks_of(s)
+        .filter(|b| b.side == side)
+        .map(|b| (b.lattice, b.min, b.max, b.front as u8))
+        .collect();
+    v.sort();
+    v
+}
+
+/// Does one side of a segment lie on its face's grid as planned (or, with
+/// no plan, on no block grid at all)?
+fn side_as_planned(z: &Zoning, s: SegmentId, side: Side, plan: Option<&Plan>) -> bool {
+    let have = side_blocks(z, s, side);
+    let Some(plan) = plan else {
+        return have.iter().all(|b| !z.face_lattices.contains(&b.0));
     };
-    (id, rects)
+    let mut want = Vec::new();
+    for &(t, sd, band, (min, max, front)) in &plan.blocks {
+        if t != s || sd != side {
+            continue;
+        }
+        let Some(&id) = z
+            .face_lattices
+            .iter()
+            .find(|&&id| z.lattice(id).and_then(|l| l.strip.as_ref()) == Some(&plan.bands[band]))
+        else {
+            return false;
+        };
+        want.push((id, min, max, front as u8));
+    }
+    want.sort();
+    want == have
+}
+
+/// Faces of the road graph met while regenerating blocks: each half-edge's
+/// face and each face's plan.
+#[derive(Default)]
+struct FacePlans {
+    face_of: BTreeMap<Half, Half>,
+    plans: BTreeMap<Half, (Vec<Half>, Option<Plan>)>,
+}
+
+impl FacePlans {
+    /// Walk the face of `h` (once) and plan it; its key.
+    fn visit(&mut self, roads: &RoadNetwork, h: Half, depth: i32) -> Option<Half> {
+        if let Some(&k) = self.face_of.get(&h) {
+            return Some(k);
+        }
+        let face = faces::walk(roads, h)?;
+        let k = faces::key(&face);
+        for &x in &face {
+            self.face_of.insert(x, k);
+        }
+        let plan = faces::plan(roads, &face, depth);
+        self.plans.insert(k, (face, plan));
+        Some(k)
+    }
+
+    fn plan_of(&self, h: Half) -> Option<&Plan> {
+        self.plans.get(self.face_of.get(&h)?)?.1.as_ref()
+    }
+}
+
+/// Grow the set of segments whose blocks are made again until every face
+/// around them is consistent: a segment whose face got a new grid (or lost
+/// its grid) is redone, and so is every segment on a grid that one of them
+/// leaves.
+fn close_over_faces(z: &Zoning, roads: &RoadNetwork, changed: &mut BTreeSet<SegmentId>, depth: i32) -> FacePlans {
+    let mut fp = FacePlans::default();
+    let first: BTreeSet<SegmentId> = changed.clone();
+    let mut todo: Vec<SegmentId> = changed.iter().copied().collect();
+    // Nodes at the ends of the edited roads (before and after).
+    let mut ends: Vec<[f32; 2]> = Vec::new();
+    for s in &first {
+        if let Some((c, _)) = z.built_for.get(s) {
+            ends.extend([c.start(), c.end()]);
+        }
+        if let Some(seg) = roads.segments.get(*s) {
+            ends.extend([seg.curve.start(), seg.curve.end()]);
+        }
+    }
+    let mut around: Vec<SegmentId> = Vec::new();
+    if !ends.is_empty() {
+        for (_, n) in roads.nodes.iter() {
+            if ends.iter().any(|&p| geom::same_pos(p, n.pos)) {
+                around.extend(n.segments.iter().copied());
+            }
+        }
+    }
+    around.sort();
+    around.dedup();
+    let mut starts: Vec<Half> = around.iter().flat_map(|&s| [(s, true), (s, false)]).collect();
+    while let Some(s) = todo.pop() {
+        // Grids this segment's blocks are on now: all their roads redo.
+        let lats: BTreeSet<LatticeId> = z
+            .blocks_of(s)
+            .filter(|b| z.face_lattices.contains(&b.lattice))
+            .map(|b| b.lattice)
+            .collect();
+        if !lats.is_empty() {
+            for b in &z.blocks {
+                if lats.contains(&b.lattice) && changed.insert(b.segment) {
+                    todo.push(b.segment);
+                }
+            }
+        }
+        if roads.segments.contains_key(s) {
+            starts.extend([(s, true), (s, false)]);
+        }
+        for h in std::mem::take(&mut starts) {
+            if fp.face_of.contains_key(&h) {
+                continue;
+            }
+            let Some(k) = fp.visit(roads, h, depth) else { continue };
+            let (face, plan) = &fp.plans[&k];
+            for &x in face {
+                if !changed.contains(&x.0) && !side_as_planned(z, x.0, faces::side_of(x), plan.as_ref()) {
+                    changed.insert(x.0);
+                    todo.push(x.0);
+                }
+            }
+        }
+    }
+    fp
 }
 
 /// Index of the lattice a draft lives on (an existing one it coincides
@@ -381,17 +530,7 @@ fn place(z: &mut Zoning, d: &Draft) -> (LatticeId, [i32; 2], [i32; 2], Facing) {
                 }
                 u = right_of(u);
             }
-            let l = Lattice::new(d.origin, u);
-            match z.lattices.iter().position(|x| x.is_none()) {
-                Some(k) => {
-                    z.lattices[k] = Some(l);
-                    LatticeId(k as u16)
-                }
-                None => {
-                    z.lattices.push(Some(l));
-                    LatticeId((z.lattices.len() - 1) as u16)
-                }
-            }
+            alloc(z, Lattice::new(d.origin, u))
         }
     };
     let l = z.lattice(id).expect("placed");
@@ -712,6 +851,9 @@ pub(crate) fn sync(world: &mut World) -> Vec<BuildingId> {
     let started = std::time::Instant::now();
     let depth = balance::BLOCK_DEPTH.min(balance::MAX_BLOCK_DEPTH) as i32;
     let mut boxes: Vec<([f32; 2], [f32; 2])> = Vec::new();
+    // Blocks of land enclosed by straight roads share one grid: their
+    // roads are redone together.
+    let fp = close_over_faces(&world.zoning, roads, &mut changed, depth);
     // Old blocks and old road reserves go.
     let z = &mut world.zoning;
     let mut keep = Vec::with_capacity(z.blocks.len());
@@ -735,8 +877,36 @@ pub(crate) fn sync(world: &mut World) -> Vec<BuildingId> {
     for s in order {
         let Some(seg) = roads.segments.get(s) else { continue };
         boxes.push(seg.curve.bounds());
+        // Sides on a block's grid.
+        let mut gridded = [false; 2];
+        for (k, side) in [Side::Right, Side::Left].into_iter().enumerate() {
+            let Some(plan) = fp.plan_of(faces::half(s, side)) else {
+                continue;
+            };
+            gridded[k] = true;
+            for (n, &(t, sd, band, (min, max, front))) in plan.blocks.iter().enumerate() {
+                if t != s || sd != side {
+                    continue;
+                }
+                let lattice = face_lattice(z, &plan.bands[band]);
+                let b = Block {
+                    segment: s,
+                    side,
+                    lattice,
+                    min,
+                    max,
+                    front,
+                    priority: (seg.serial, n as u32),
+                };
+                boxes.push(block_bounds(z, &b));
+                z.blocks.push(b);
+            }
+        }
         if seg.curve.is_straight() {
             for d in drafts(&seg.curve, depth) {
+                if gridded[usize::from(d.side == Side::Left)] {
+                    continue;
+                }
                 let (lattice, min, max, front) = place(z, &d);
                 let b = Block {
                     segment: s,
@@ -751,7 +921,10 @@ pub(crate) fn sync(world: &mut World) -> Vec<BuildingId> {
                 z.blocks.push(b);
             }
         } else {
-            for side in [Side::Right, Side::Left] {
+            for (k, side) in [Side::Right, Side::Left].into_iter().enumerate() {
+                if gridded[k] {
+                    continue;
+                }
                 let (lattice, rects) = place_strip(z, roads, s, side, depth);
                 for (k, (min, max, front)) in rects.into_iter().enumerate() {
                     let b = Block {
@@ -801,6 +974,54 @@ pub(crate) fn renew_all(world: &mut World) {
     world.cache.forget_zoning();
 }
 
+/// After loading a save: find the block grids again (strips under the
+/// blocks of straight roads; not stored), then make the blocks of every
+/// face whose grid is not as planned again (a save from before block
+/// grids): zones move onto the new cells, buildings onto the new lots
+/// under them where those are free. Returns how many segments were redone.
+pub(crate) fn derive_faces(world: &mut World) -> usize {
+    let z = &mut world.zoning;
+    let marks: BTreeSet<LatticeId> = z
+        .blocks
+        .iter()
+        .filter(|b| {
+            z.lattice(b.lattice).is_some_and(|l| l.is_strip())
+                && world
+                    .roads
+                    .segments
+                    .get(b.segment)
+                    .is_some_and(|s| s.curve.is_straight())
+        })
+        .map(|b| b.lattice)
+        .collect();
+    z.face_lattices = marks;
+    let depth = balance::BLOCK_DEPTH.min(balance::MAX_BLOCK_DEPTH) as i32;
+    let mut fp = FacePlans::default();
+    let mut redo: BTreeSet<SegmentId> = BTreeSet::new();
+    for (s, _) in world.roads.segments.iter() {
+        for side in [Side::Right, Side::Left] {
+            let h = faces::half(s, side);
+            fp.visit(&world.roads, h, depth);
+            if !side_as_planned(&world.zoning, s, side, fp.plan_of(h)) {
+                redo.insert(s);
+            }
+        }
+    }
+    if redo.is_empty() {
+        return 0;
+    }
+    for s in &redo {
+        world.zoning.built_for.remove(s);
+    }
+    world.zoning.roads_version = world.versions.roads.wrapping_add(1);
+    let doomed = sync(world);
+    world.cache.forget_zoning();
+    crate::growth::remove_buildings(world, &doomed);
+    crate::growth::reseat(world);
+    world.cache.forget_zoning();
+    redo.len()
+}
+
 /// Recompute every cell whose centre lies in one of the boxes (after
 /// buildings changed there, for example).
 pub(crate) fn refresh_boxes(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId> {
@@ -829,6 +1050,7 @@ fn gc_lattices(z: &mut Zoning) {
             && lat.cells.is_empty()
         {
             *l = None;
+            z.face_lattices.remove(&LatticeId(k as u16));
         }
     }
     while z.lattices.len() > 1 && z.lattices.last().is_some_and(|l| l.is_none()) {

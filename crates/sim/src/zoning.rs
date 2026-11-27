@@ -142,6 +142,19 @@ impl Strip {
         Strip { i0, frames, lo, hi }
     }
 
+    /// A strip whose cells reach `rows` rows out from its kerb line (a
+    /// block-wide strip, see `faces`): its bounds hold the far side too.
+    pub fn spanning(i0: i32, frames: Vec<([f32; 2], [f32; 2])>, rows: f32) -> Strip {
+        let mut st = Strip::new(i0, frames);
+        let reach = rows * CELL_SIZE;
+        for (p, d) in &st.frames {
+            let q = [p[0] + d[0] * reach, p[1] + d[1] * reach];
+            st.lo = [st.lo[0].min(q[0]), st.lo[1].min(q[1])];
+            st.hi = [st.hi[0].max(q[0]), st.hi[1].max(q[1])];
+        }
+        st
+    }
+
     /// Number of columns.
     pub fn columns(&self) -> i32 {
         self.frames.len() as i32 - 1
@@ -206,16 +219,31 @@ impl Strip {
         let n = self.columns() as usize;
         let k0 = best.1.min(n - 1);
         let mut pick: Option<(f32, usize, f32, f32)> = None;
-        for k in k0.saturating_sub(2)..(k0 + 2).min(n) {
+        let try_column = |pick: &mut Option<(f32, usize, f32, f32)>, k: usize| {
             let (t, y) = self.solve(k, p);
             // How far outside the column (0 inside).
             let out = (-t).max(t - 1.0).max(0.0);
             if pick.is_none_or(|b| out < b.0) {
-                pick = Some((out, k, t, y));
+                *pick = Some((out, k, t, y));
+            }
+        };
+        for k in k0.saturating_sub(2)..(k0 + 2).min(n) {
+            try_column(&mut pick, k);
+        }
+        // Deep in a block-wide strip (`faces`) whose columns lean, the
+        // column holding the point can be far from the nearest kerb
+        // point: look at every column.
+        let inside = p[0] >= self.lo[0] && p[0] <= self.hi[0] && p[1] >= self.lo[1] && p[1] <= self.hi[1];
+        if inside && pick.is_some_and(|b| b.0 > 0.0) {
+            for k in 0..n {
+                try_column(&mut pick, k);
             }
         }
         let (_, k, t, y) = pick?;
-        if y.abs() * CELL_SIZE > r {
+        // How far the strip reaches beyond its kerb line (a block-wide
+        // strip's bounds hold its far side too).
+        let span = (self.hi[0] - self.lo[0]).max(self.hi[1] - self.lo[1]);
+        if y.abs() * CELL_SIZE > r + span {
             return None;
         }
         Some([(self.i0 + k as i32) as f32 + t, y])
@@ -468,6 +496,10 @@ pub struct Zoning {
     /// Bumped whenever any cell's zone changes (not when buildings come
     /// and go): growth's candidate lists follow it.
     pub(crate) zones_version: u64,
+    /// Strips that grid a whole block of land enclosed by straight roads
+    /// (see `faces`; derived, not saved: recomputed on load).
+    #[serde(skip)]
+    pub(crate) face_lattices: BTreeSet<LatticeId>,
 }
 
 impl Default for Zoning {
@@ -478,11 +510,20 @@ impl Default for Zoning {
             built_for: BTreeMap::new(),
             roads_version: 0,
             zones_version: 0,
+            face_lattices: BTreeSet::new(),
         }
     }
 }
 
 impl Zoning {
+    /// Is this lattice the grid of a whole block of land enclosed by
+    /// straight roads (one strip per band of rows between two of its
+    /// kerbs; see `faces`)? Its columns run from kerb to kerb across the
+    /// block, its rows are stretched or squeezed to whole cells.
+    pub fn is_block_grid(&self, id: LatticeId) -> bool {
+        self.face_lattices.contains(&id)
+    }
+
     pub fn lattice(&self, id: LatticeId) -> Option<&Lattice> {
         self.lattices.get(id.0 as usize).and_then(|l| l.as_ref())
     }
