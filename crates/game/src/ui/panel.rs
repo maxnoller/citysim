@@ -556,10 +556,15 @@ fn follow(
 
 /// The sheet the panel shows now: a person / place / car, else the
 /// selected road or junction.
-fn panel_sheet(world: &citysim_sim::World, view: &PeopleView, hl: &WorldHighlight) -> Option<Sheet> {
+fn panel_sheet(
+    world: &citysim_sim::World,
+    view: &PeopleView,
+    hl: &WorldHighlight,
+    routes: &mut super::route::TripCache,
+) -> Option<Sheet> {
     if let Some(t) = view.current() {
         return match t {
-            Target::Person(c) => people::person_sheet(world, c),
+            Target::Person(c) => people::person_sheet(world, c, routes),
             Target::Place(b) => people::place_sheet(world, b),
             Target::Vehicle(v) => people::vehicle_sheet(world, v),
         };
@@ -624,6 +629,7 @@ fn draw_sheets(
     ui: Res<UiState>,
     (view, folds): (Res<PeopleView>, Res<Folds>),
     hl: Res<WorldHighlight>,
+    mut routes: ResMut<super::route::TripCache>,
     mut roots: Query<&mut PanelRoot>,
     bodies: Query<(Entity, &Body)>,
     city_body: Query<Entity, With<super::city::CitySheetBody>>,
@@ -639,7 +645,7 @@ fn draw_sheets(
     }
     shown.age = 0.0;
     let w = &sim.world;
-    let panel = panel_sheet(w, &view, &hl).filter(|_| !ui.menu_open);
+    let panel = panel_sheet(w, &view, &hl, &mut routes).filter(|_| !ui.menu_open);
     let city = (ui.window == Some(CityPage::People) && !ui.menu_open).then(|| people::city_sheet(w));
     if let Ok(mut r) = roots.single_mut() {
         r.open = panel.is_some();

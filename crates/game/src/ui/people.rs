@@ -665,8 +665,9 @@ fn route_section(
     id: CitizenId,
     trip: Option<&inspect::TripView>,
     bar: Option<&TripBar>,
+    routes: &mut super::route::TripCache,
 ) -> Option<Section> {
-    let r = super::route::person_trip(world, id)?;
+    let r = routes.person(world, id)?;
     let dest = r.destination?;
     let to = dest
         .building
@@ -725,8 +726,8 @@ fn route_section(
     Some(sec)
 }
 
-/// Everything about one person.
-pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
+/// Everything about one person (`routes`: their trip, traced once).
+pub fn person_sheet(world: &World, id: CitizenId, routes: &mut super::route::TripCache) -> Option<Sheet> {
     let v = inspect::citizen(world, id)?;
     let c = v.citizen;
     let h = v.household;
@@ -796,7 +797,7 @@ pub fn person_sheet(world: &World, id: CitizenId) -> Option<Sheet> {
     }
     s.sections.push(sec);
     // The trip on the map: where to, why, how far and how long.
-    if let Some(sec) = route_section(world, id, v.trip.as_ref(), s.trip.as_ref()) {
+    if let Some(sec) = route_section(world, id, v.trip.as_ref(), s.trip.as_ref(), routes) {
         s.sections.push(sec);
     }
     // Home and work.
@@ -1361,7 +1362,7 @@ mod tests {
             w.step();
         }
         let (id, _) = w.citizens.iter().find(|(_, c)| c.job.is_some()).expect("a worker");
-        let s = person_sheet(&w, id).expect("person");
+        let s = person_sheet(&w, id, &mut Default::default()).expect("person");
         assert!(!s.title.is_empty() && s.portrait.is_some());
         assert!(s.sections.iter().any(|s| s.title == "Life"));
         assert!(s.at.is_some());
