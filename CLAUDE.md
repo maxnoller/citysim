@@ -172,7 +172,11 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   (`readout::loss_lines`; a large loss, over 10 buildings or 100 people, gets a red warning line) and a toast names it.
   Undo puts the zoning the road took back (`plan::Op::ZoneAt`), then the buildings, then refunds the road
   (`Command::Refund { tick, amount }` from `Preview::road_cost`; session only). Undo records are dropped when the
-  world is replaced (new game, load). Contract: `docs/r4-sim-contract.md`, "r7-roadclear".
+  world is replaced (new game, load). Contract: `docs/r4-sim-contract.md`, "r7-roadclear". gfx tints doomed buildings
+  with a blended red copy and outlines their lots in red (`gfx/guides.rs`). Lines through houses in a saved city:
+  `cargo run -p citysim_sim --example clearprobe -- SAVE` (`CLEARPROBE_LINE=x1,y1,x2,y2` lists what one takes);
+  `scripts/cplay.py` draws, builds and undoes them with real input (`view`, `draw`, `curve`, `upgrade`, `build`,
+  `undo`, `shot`; `CPLAY_FRAME=0.9` on a software renderer).
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
 - Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5; version 6 loads, its zoning

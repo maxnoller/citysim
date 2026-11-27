@@ -16,8 +16,11 @@ fn add(a: [f32; 2], b: [f32; 2], k: f32) -> [f32; 2] {
     [a[0] + b[0] * k, a[1] + b[1] * k]
 }
 
+/// Buildings, residents, jobs and cost of a clearing road.
+type Takes = (usize, u32, u32, i64);
+
 /// (buildings, residents, jobs, cost) of a clearing road, if it is allowed.
-fn takes(w: &World, curve: Curve, kind: RoadKind) -> Option<(usize, u32, u32, i64)> {
+fn takes(w: &World, curve: Curve, kind: RoadKind) -> Option<Takes> {
     let p = w
         .preview(&Command::Clearing(Box::new(Command::BuildCurve { curve, kind })))
         .ok()?;
@@ -129,7 +132,7 @@ fn main() {
             }
         }
     }
-    let show = |name: &str, list: &mut Vec<((usize, u32, u32, i64), Curve)>, lo: usize, hi: usize| {
+    let show = |name: &str, list: &mut Vec<(Takes, Curve)>, lo: usize, hi: usize| {
         list.sort_by_key(|(x, c)| (std::cmp::Reverse(x.1), (c.start()[0] * 10.0) as i64));
         list.dedup_by(|a, b| a.1 == b.1);
         println!("-- {name}");
