@@ -111,14 +111,34 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     a + d * t
 }
 
-#[derive(Default)]
 struct SyncState {
     entities: HashMap<(CitizenId, u8), Entity>,
+    timing: bool,
+    spent: f64,
+    frames: u32,
+    spent_since: std::time::Instant,
     last_fixed: f64,
     last_tick: u64,
     generation: u64,
     moving: bool,
     span: u32,
+}
+
+impl Default for SyncState {
+    fn default() -> Self {
+        SyncState {
+            entities: HashMap::new(),
+            timing: std::env::var("CITYSIM_PEOPLE_TIMING").is_ok(),
+            spent: 0.0,
+            frames: 0,
+            spent_since: std::time::Instant::now(),
+            last_fixed: 0.0,
+            last_tick: 0,
+            generation: 0,
+            moving: false,
+            span: 0,
+        }
+    }
 }
 
 fn stage_of(world: &World, id: CitizenId) -> LifeStage {
@@ -140,6 +160,7 @@ fn sync_people(
     cams: Query<&GlobalTransform, With<WorldCamera>>,
     mut q: Query<(&mut PersonVisual, &mut Transform, &mut Mesh3d, &mut Visibility)>,
 ) {
+    let started = std::time::Instant::now();
     let cam = cams.single().map_or(Vec3::ZERO, |c| c.translation());
     let world = &sim.world;
     if state.generation != sim.generation {
@@ -263,6 +284,22 @@ fn sync_people(
         if vis.shown != Some((pose, far)) {
             vis.shown = Some((pose, far));
             mesh.0 = models.mesh(vis.build, pose, far);
+        }
+    }
+    // `CITYSIM_PEOPLE_TIMING=1`: this system's CPU time, logged every 5 s.
+    if state.timing {
+        state.spent += started.elapsed().as_secs_f64();
+        state.frames += 1;
+        if state.spent_since.elapsed().as_secs_f32() > 5.0 {
+            info!(
+                "people: {} walkers, {} figures, sync {:.0} us a frame",
+                walkers.len(),
+                state.entities.len(),
+                state.spent / state.frames.max(1) as f64 * 1e6
+            );
+            state.spent = 0.0;
+            state.frames = 0;
+            state.spent_since = std::time::Instant::now();
         }
     }
 }

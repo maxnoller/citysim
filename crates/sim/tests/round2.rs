@@ -813,4 +813,4 @@ fn long_scripted_run_has_a_pinned_checksum() {
 /// priority junction, a 2.2 s street headway and the late shift an hour
 /// later; then by people on foot (walks chosen by route length and walked
 /// on the map, cars giving way at zebras, extension block 6).
-const PINNED_CHECKSUM: u64 = 0xa7d0465893544a8f;
+const PINNED_CHECKSUM: u64 = 0x69ea187edd9a577e;

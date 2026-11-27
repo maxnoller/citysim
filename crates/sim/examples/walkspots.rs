@@ -39,6 +39,24 @@ fn main() {
             println!("mid-block zebra at {:?}", c.center);
         }
     }
+    for n in junction::junction_nodes(&w) {
+        if junction::junction_control(&w, n) == Some(JunctionControl::Priority) {
+            let p = w.roads.nodes[n].pos;
+            let near = w
+                .walking
+                .walkers
+                .values()
+                .filter(|x| {
+                    (x.pos[0] - p[0]).abs() < 20.0
+                        && (x.pos[1] - p[1]).abs() < 20.0
+                        && x.state != walk::WalkState::Walking
+                })
+                .count();
+            if near > 2 {
+                println!("give-way at {:?}: {near} at or on zebras", p);
+            }
+        }
+    }
     for n in junction::junction_nodes(&w).take(400) {
         if junction::junction_control(&w, n) == Some(JunctionControl::Signal) {
             let p = w.roads.nodes[n].pos;

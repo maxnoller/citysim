@@ -986,7 +986,7 @@ pub const WALK_MAX_M: f32 = 650.0;
 pub const WALK_NEAR_M: f32 = 120.0;
 pub const WALK_SHARE_NEAR: f32 = 0.95;
 pub const WALK_DECAY_M: f32 = 200.0;
-pub const WALK_COMMUTE_FACTOR: f32 = 0.6;
+pub const WALK_COMMUTE_FACTOR: f32 = 1.0;
 /// Nobody walks a way that takes longer than this many in-game hours at
 /// their pace (people walk in real time like the cars drive: 4 h is about
 /// 160 s, some 280 m), to work `WALK_COMMUTE_MAX_H`.
