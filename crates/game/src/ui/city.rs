@@ -44,40 +44,43 @@ impl Plugin for CityPlugin {
             )
             .add_systems(
                 Update,
-                (place_window, update_header, update_tiles, record_losses, update_charts).in_set(GameSet::Render),
+                (
+                    perf_room,
+                    place_window.after(perf_room),
+                    update_header,
+                    update_tiles,
+                    record_losses,
+                    update_charts,
+                )
+                    .in_set(GameSet::Render),
             )
             .add_systems(PostUpdate, window_area.after(bevy::ui::UiSystems::Layout));
     }
 }
 
-/// Business tax lost to traffic per booked day (`Economy::last_day_traffic`
-/// at each midnight). The sim keeps only yesterday's figure, so the
-/// interface collects the days it sees (yesterday's at once).
+/// Business tax lost to traffic per booked day, read from the history
+/// (`DaySummary::traffic`; days booked by older saves have none and are
+/// left out): (day, tax lost, time lost per commute).
 #[derive(Resource, Debug, Default)]
 pub struct LossHistory {
-    generation: Option<u64>,
-    seen: usize,
+    key: Option<(u64, usize)>,
     pub days: Vec<(u32, i64, f32)>,
 }
 
 fn record_losses(sim: Res<SimWorld>, mut h: ResMut<LossHistory>) {
     let e = &sim.world.economy;
-    if h.generation != Some(sim.generation) {
-        h.generation = Some(sim.generation);
-        h.days.clear();
-        h.seen = 0;
+    let key = Some((sim.generation, e.history.len()));
+    if h.key == key {
+        return;
     }
-    if e.history.len() != h.seen {
-        h.seen = e.history.len();
-        if let Some(d) = e.history.last() {
-            let t = e.last_day_traffic;
-            h.days.retain(|x| x.0 != d.day);
-            h.days.push((d.day, t.business_tax, t.per_commute_s()));
-            if h.days.len() > DAYS {
-                h.days.remove(0);
-            }
-        }
-    }
+    h.key = key;
+    h.days = e
+        .history
+        .iter()
+        .filter_map(|d| d.traffic.map(|t| (d.day, t.business_tax, t.per_commute_s())))
+        .collect();
+    let extra = h.days.len().saturating_sub(DAYS);
+    h.days.drain(..extra);
 }
 
 /// Where the window's plate is on screen while it shows, in interface
@@ -758,6 +761,50 @@ fn window_keys(keys: Res<ButtonInput<KeyCode>>, mut ui: ResMut<UiState>) {
     }
 }
 
+/// Room the window needs beside the full performance panel (logical px).
+const BESIDE_PERF_W: f32 = 880.0;
+
+/// The window's right edge (logical px): left of the side panel while it
+/// is open, else the screen's.
+fn right_edge(panel: &super::panel::PanelArea, screen: Vec2) -> f32 {
+    match panel.0 {
+        Some(r) => r.min.x - 14.0,
+        None => screen.x - SIDE,
+    }
+}
+
+/// The performance panel's form on screen: the player's choice, except the
+/// full panel steps down to its small strip while the city window is open
+/// and there is no room for both side by side (the window then sits below
+/// the strip); it comes back full when the window closes. Whatever else
+/// sets `UiState::perf` (F3, the panel's buttons, the settings, the
+/// environment) sets the choice.
+fn perf_room(
+    mut ui: ResMut<UiState>,
+    ui_scale: Res<UiScale>,
+    panel: Res<super::panel::PanelArea>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut written: Local<Option<crate::shared::PerfDetail>>,
+) {
+    use crate::shared::PerfDetail;
+    if *written != Some(ui.perf) && ui.perf_choice != ui.perf {
+        ui.perf_choice = ui.perf;
+    }
+    let Ok(win) = window.single() else { return };
+    let screen = Vec2::new(win.width(), win.height()) / ui_scale.0.max(0.01);
+    let room = right_edge(&panel, screen) - (super::perf::FULL_W + 14.0) >= BESIDE_PERF_W;
+    let crowded = ui.window.is_some() && !ui.menu_open && !room;
+    let shown = if ui.perf_choice == PerfDetail::Full && crowded {
+        PerfDetail::Small
+    } else {
+        ui.perf_choice
+    };
+    if ui.perf != shown {
+        ui.perf = shown;
+    }
+    *written = Some(shown);
+}
+
 /// Size and place the window, slide it in and out, show its page.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn place_window(
@@ -814,10 +861,7 @@ fn place_window(
     // the side panel while it is open, centred when there is room.
     let Ok(win) = window.single() else { return };
     let screen = Vec2::new(win.width(), win.height()) / ui_scale.0.max(0.01);
-    let right_edge = match panel.0 {
-        Some(r) => r.min.x - 14.0,
-        None => screen.x - SIDE,
-    };
+    let right_edge = right_edge(&panel, screen);
     // Beside the full performance panel (docked left) when there is room
     // for a useful window, else over it; below the small one.
     let mut left_edge = SIDE;
@@ -828,7 +872,7 @@ fn place_window(
                 .single()
                 .map(|(r, c)| c.size.x * c.inverse_scale_factor * r.fit)
                 .unwrap_or(super::perf::FULL_W);
-            if right_edge - (w + 14.0) >= 880.0 {
+            if right_edge - (w + 14.0) >= BESIDE_PERF_W {
                 left_edge = w + 14.0;
             }
         }
@@ -1505,7 +1549,7 @@ pub fn chart_data(id: u32, w: &World, losses: &[(u32, i64, f32)]) -> ChartData {
                 } else {
                     String::new()
                 },
-                empty: "Collected at each midnight while you play (a save keeps only yesterday's)".into(),
+                empty: "Booked at each midnight".into(),
                 live_last: false,
                 pick: None,
                 columns,

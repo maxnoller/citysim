@@ -18,7 +18,7 @@ fn a_signalised_lane_passes_about_half_a_car_a_second_on_green() {
     let s = street.green_flow_per_lane.unwrap();
     let a = avenue.green_flow_per_lane.unwrap();
     eprintln!("per lane on green: street {s:.2}/s, avenue {a:.2}/s");
-    assert!((0.35..=0.6).contains(&s), "street {s}");
+    assert!((0.28..=0.5).contains(&s), "street {s}");
     assert!((0.45..=0.75).contains(&a), "avenue {a}");
     // Streets (narrow lanes, driveways) are driven with more distance.
     assert!(a > s);
@@ -81,14 +81,15 @@ fn an_avenue_carries_more_than_twice_a_street_through_a_junction() {
 
 #[test]
 fn a_priority_junction_lets_the_major_road_flow_and_the_side_road_in_on_gaps() {
-    // A T: the through street is major, the side street gives way.
+    // A T: the through street is major, the side street gives way (streets
+    // carry about 1,200 cars an hour per lane).
     let r = bench(
         Bench::crossing(K::Street, K::Street, S::Priority)
             .tee()
             .turning(0.15, 0.15),
     );
     eprintln!("{r:?}");
-    assert!(r.main_per_minute > 35.0, "{}", r.main_per_minute);
+    assert!(r.main_per_minute > 25.0, "{}", r.main_per_minute);
     assert!(r.cross_per_minute > 5.0, "side road starved: {}", r.cross_per_minute);
     assert!(r.main_per_minute > 2.0 * r.cross_per_minute);
 }

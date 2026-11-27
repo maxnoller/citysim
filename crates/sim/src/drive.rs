@@ -194,6 +194,7 @@ pub(crate) fn ensure_tables(world: &mut World) {
     if world.cache.route_delay_key != Some(key) {
         world.cache.route_delay = build_route_delays(&world.roads, &world.traffic.junction_states);
         world.cache.route_turns = build_route_turns(&world.roads, &world.traffic.junction_states);
+        world.cache.route_bound = crate::path::Bound::of(&world.roads);
         world.cache.route_delay_key = Some(key);
     }
 }
@@ -392,6 +393,12 @@ struct Front {
     reaches: bool,
     /// Cars in this lane when it is a turn pocket (0 otherwise).
     pocket_cars: u16,
+    /// A minor-road car let in by courtesy: it has waited
+    /// `COURTESY_WAIT_S` at its line and every conflicting car with
+    /// priority is creeping (a slow queue lets one in).
+    courtesy: bool,
+    /// Cars the pocket of this approach holds (0 without one).
+    pocket_room: u16,
 }
 
 /// Has the front car come to a stop at its line (all-way stops: it stood
@@ -418,6 +425,9 @@ fn class(j: &JunctionState, f: &Front) -> u8 {
             if !j.arms.iter().any(|a| a.major) {
                 // All-way stop: everyone alike.
                 return 1;
+            }
+            if f.courtesy {
+                return 3;
             }
             match (major, left) {
                 (true, false) => 3,
@@ -594,6 +604,10 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             } else {
                 0
             },
+            courtesy: false,
+            pocket_room: pockets
+                .get(key_index(s))
+                .map_or(0, |p| (p[usize::from(!v.forward)] / balance::VEHICLE_SPACING_M) as u16),
         });
     }
     fronts.sort_by_key(|f| (key_index(f.node), f.idx));
@@ -614,7 +628,21 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 && r - f.exit_start < balance::MIN_GAP_M + balance::VEHICLE_SPACING_M)
         })
         .collect();
-    tick_signals(traffic, roads, &fronts, &can_go, &boxed, now);
+    // Cars within detection of the line in each front's lane (a platoon
+    // holds its green; a car or two arriving does not against a queue).
+    let near_cars: Vec<u16> = fronts
+        .iter()
+        .map(|f| {
+            let (k, p, _) = cars[f.idx];
+            let stop = p + f.d_line;
+            cars[f.idx..]
+                .iter()
+                .take_while(|c| c.0 == k && stop - c.1 <= balance::SIGNAL_DETECT_M)
+                .count()
+                .min(u16::MAX as usize) as u16
+        })
+        .collect();
+    tick_signals(traffic, roads, &fronts, &can_go, &near_cars, &boxed, now);
     // Lanes whose front car waits at a red light: waiting there is normal
     // (a red can last a whole cycle), so it does not count towards giving
     // up.
@@ -675,6 +703,30 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             j.clear_at = now;
         }
         let reacted = now >= j.clear_at + secs_to_ticks(balance::ALL_WAY_REACTION_S);
+        // Courtesy: a minor-road car that has waited long at its line is let
+        // in when every conflicting car with priority is creeping (on an
+        // arterial: a queue on a street leaves gaps of its own).
+        let arterial_major = j
+            .arms
+            .iter()
+            .any(|a| a.major && a.kind.rank() >= crate::RoadKind::Avenue.rank());
+        if j.control == JunctionControl::Priority && !all_way && arterial_major {
+            let long = secs_to_ticks(balance::COURTESY_WAIT_S) as u32;
+            for x in k..e {
+                let f = &fronts[x];
+                if f.wait < long || f.d_line > f.back + 1.0 || class(j, f) >= 2 {
+                    continue;
+                }
+                let creeping = (k..e).all(|y| {
+                    let o = &fronts[y];
+                    y == x
+                        || !j.conflict(f.movement, o.movement)
+                        || class(j, o) <= class(j, f)
+                        || o.speed < balance::COURTESY_SPEED
+                });
+                fronts[x].courtesy = creeping;
+            }
+        }
         let mut order: Vec<usize> = (k..e).collect();
         order.sort_by(|&x, &y| {
             let (fx, fy) = (&fronts[x], &fronts[y]);
@@ -1294,6 +1346,7 @@ fn tick_signals(
     roads: &RoadNetwork,
     fronts: &[Front],
     can_go: &[bool],
+    near_cars: &[u16],
     boxed: &[(u32, u16, f32, VehicleId)],
     now: u64,
 ) {
@@ -1341,10 +1394,15 @@ fn tick_signals(
                     }
                     d.through_left = true;
                     d.hold_left |= near;
+                    d.pocket = d.pocket.max(f.pocket_cars);
+                    d.pocket_full |= f.pocket_cars > 0 && f.pocket_cars + 1 >= f.pocket_room;
                 } else {
                     d.through = true;
                     d.hold_through |= near;
+                    d.near = d.near.saturating_add(near_cars[kk]);
                 }
+                d.discharging |= near && f.speed < balance::SIGNAL_DISCHARGE_SPEED;
+                d.wait_s = d.wait_s.max(f.wait as f32 / crate::TICKS_PER_SECOND as f32);
             }
             kk += 1;
         }

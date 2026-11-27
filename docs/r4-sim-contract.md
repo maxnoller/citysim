@@ -635,6 +635,95 @@ The zoning model keeps its parts (lattices, blocks, cells, lots in one lattice);
   grid, curved avenue, rotated grids): 33 lattices instead of 194 for the same roads; the same zone-tool actions
   played in the game zone 2,044 cells instead of 490.
 
+## 2026-11-27 (r6-traffic: traffic, the day and money hit their targets)
+
+Goal: a good layout flows, a bad one hurts, the day looks alive, money rewards a growing well-run city. Charts
+`traffic-01`..`04`, pictures `traffic-05`..`08` in `/home/max/citysim-shots/r6/`, data in `traffic-data/` there.
+
+### Signals (renderers: aspects as before; timings changed)
+
+- **Pressure gap-out.** A through green whose own standing queues have discharged ends (after its minimum) when the
+  cars standing for another phase outnumber twice the cars within `SIGNAL_DETECT_M` of the line on its own lanes, unless
+  a car near the line is still pulling away from a queue (`SIGNAL_DISCHARGE_SPEED`). A trickle of arrivals no longer
+  holds a green against a standing queue (`SIGNAL_SWITCH_QUEUE_CARS`, `SIGNAL_SWITCH_RATIO`, `SIGNAL_DISCHARGED_CARS`).
+  A coordinated avenue keeps its share of the cycle as before.
+- **Queue order.** Signals that are not coordinated serve next the phase with the most cars standing for it (pocket
+  cars count `SIGNAL_POCKET_WEIGHT` times); a phase whose front car has waited `SIGNAL_STARVED_S` goes first; roads take
+  turns (after a through phase, its own road's phases wait while another road has demand); a left phase whose pocket
+  holds `SIGNAL_LEFT_FIRST_CARS` runs before its own through phase (`SIGNAL_BY_QUEUE`). Two-phase plans are unchanged.
+- Pocketed through phases may run `POCKET_MAIN_MAX_GREEN_S` (40 s), but only `POCKET_FULL_MAX_GREEN_S` (30 s) while one
+  of their pockets is full. The all-red no longer waits for the box to empty (`SIGNAL_ALL_RED_WAITS_FOR_BOX`): cars let
+  in yield to those still in it.
+- `junction::ArmDemand` gained `discharging`, `near`, `pocket`, `pocket_full`, `wait_s` (crate-internal).
+
+### Other road rules
+
+- **Courtesy at arterial give-ways** (`COURTESY_WAIT_S` 20 s, `COURTESY_SPEED` 4 m/s): a minor-road car that has stood
+  at its line that long goes as if it had priority while every conflicting car with priority creeps (a slow queue on
+  an avenue lets one in). Streets meeting streets are unchanged.
+- **Residential streets** are driven with `STREET_FOLLOW_HEADWAY_S` 2.6 s (was 2.0): about 1,200 cars an hour per
+  lane; a street crossing with signals passes ~36 cars a minute (was 46).
+- **Turn pockets** are up to `POCKET_LONG_M` (40 m) as before, and up to `POCKET_MAX_M` (60 m) only where they take at
+  most half of a long block's drivable length. `junction::turn_pocket` reports the length; renderers need nothing new.
+- **Routing:** the A* heuristic uses the fastest road that is not a highway, less what the highway stub can save
+  (`path::Bound`); routes are unchanged, searches cheaper.
+
+### The day (inspect panel: read this)
+
+- **Lunch breaks:** on `LUNCH_BREAK_SHARE` of days a worker leaves work at a personal time in `LUNCH_BREAK_H` for the
+  nearest of a few venues within `LUNCH_MAX_TRIP_H`, stays `LUNCH_BREAK_VISIT_H` and drives back to work (trips of
+  purpose `Leisure`; the shift's end and its attendance are unchanged).
+- **Out for lunch:** someone at home with the day free (`MIDDAY_FREE_H`: a day off, or no job) goes out for lunch on
+  `MIDDAY_OUT_SHARE` of days at a personal time in `MIDDAY_OUT_H`, to a venue nearby (`MIDDAY_DIST_SCALE_M`), for
+  `MIDDAY_VISIT_H` plus up to `MIDDAY_VISIT_SPREAD_H`; children at home come along.
+- **Evening:** the late shop shift starts `LATE_SHIFT_OFFSET_H` 3.0 h after the early one with a narrow personal spread
+  (`LATE_SHIFT_SPREAD_H`); nobody sets off for leisure after 19:00 (`LEISURE_CLOSE_H`), venues close at 21:00
+  (`LEISURE_LAST_H`); nights out are planned to be home by `LEISURE_HOME_BY_H` (22:00) in today's traffic (the
+  delay factor on the drive both ways) and end in time for it; after a day's work people go out only when their need
+  is urgent (most go on days off); newcomers arrive 06:00-21:00; deliveries and exports peak between the rush hours.
+  Shopping trips check the arrival time in today's traffic.
+- **`inspect::TripView::reason: TripReason`** (`text()`): `ToWork`, `HomeFromWork`, `MovingIn`, `MovingOut`,
+  `Groceries`, `ShoppingAfterWork`, `HomeFromShopping`, `LunchBreak`, `BackToWork`, `OutForLunch`, `HomeFromLunch`,
+  `NightOut`, `HomeFromNightOut`, `Delivery`. Interface: a `Leisure` trip at midday is a lunch, not "a night out"
+  (`ui/people.rs` `purpose_word` still says so; use the reason). `inspect::plan` while working shows the shift's end
+  (a lunch break is not planned ahead), at lunch the next step is work, and the trip back from lunch ends in `Working`.
+
+### Money
+
+- Business tax is lost only on commute time beyond `TRAFFIC_FREE_FACTOR` 2.0 times free flow (was 1.6).
+- Services: the city-size term is `SERVICES_CITY_SIZE_PER_RESIDENT` 1.5 (was 2.2), half of it at
+  `SERVICES_CITY_SIZE_POP` 12,000 (was 9,000).
+- Avenues cost `AVENUE_COST_PER_CELL` 75 a cell (was 90) and `AVENUE_UPKEEP_PER_CELL_PER_DAY` 6 (was 8).
+- **Money flows through the day:** every in-game hour but midnight the city receives a 24th of yesterday's net
+  (`economy::hourly`, `Economy::advanced_today`); midnight books the day's real `Budget` less what was advanced. The
+  budget lines, `DaySummary` and `last_day` are unchanged; the money figure now moves every in-game hour (the budget
+  page's "booked at midnight" wording is still true for the budget).
+- **`DaySummary::traffic: Option<TrafficLoss>`**: what traffic cost each booked day (`None` for days booked by saves
+  written before it was kept; a version-4 block gives its last day the loss it kept). The budget page's loss chart reads
+  it (`ui/city.rs` `LossHistory`).
+
+### Saves
+
+- Extension block **5** (`ExtensionV5`: block 4 plus the per-day traffic losses and `Economy::advanced_today`). Blocks
+  1-4 load; format 7, version 6, 4 and 3 saves load as before.
+
+### Measured (release, this sandbox, 10 seeds per city; data in `traffic-data/before` and `after`)
+
+See the final report of this round for the table; in short: avenue city 9-11k 2.21x · 0.71 % -> 1.78x · 0.34 %
+(1.70-2.2x across runs; the traffic rules alone at the old money: 2.07x · 0.52 %, part of the gain comes from the
+scripted player building ahead now that cash flows hourly); streets city 6-8k 2.59x -> 2.53x, 7-9k 2.75x -> 2.93x
+(target 3-4x missed); junction bench avenue x avenue 30 % turning 103 -> 117 cars a minute; cars per 1,000 residents
+at 11:00-15:00 11 / 16 -> 24 / 32 (avenue / streets city), 22:00 27 / 43 -> 8 / 33, peaks 60 / 65 -> 50 / 59; net
+income in the avenue city rises up to ~16,000 residents ($34k a day), traffic loss $12k at day 15 against a net of
+$34k (streets city: $20k against $22k); the avenue player's longest wait for money 192-336 s -> 0-80 s real at 2.5x.
+
+### Tools
+
+`examples/dfsplit.rs` (what the delay factor is made of: waiting to pull out, the route at the speed limits, time lost
+on the road; `BY_START=1` by departure hour), `sigcity.rs` (a signal of a saved city second by second, `ARM=n` front
+cars), `dayprobe.rs` (who is where during the day), `midnight.rs` (the steps around midnight in a big city);
+`simint day` takes `SIMINT_FROM=h`; `headless` hourly CSVs have cars on the road by purpose.
+
 ## 2026-11-27 (r6-zoning: one grid per block, greens, clean edges)
 
 Nothing new is stored: the save format stays at 7 (and 6 loads as before). Everything below is derived from the roads

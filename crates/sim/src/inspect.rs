@@ -264,6 +264,91 @@ pub struct TripView {
     /// expected door-to-door time; the car may be late, nobody gets out
     /// before it arrives).
     pub expected_tick: u64,
+    /// Why they are going, in more words than `purpose` (a `Leisure` trip
+    /// at midday is a lunch, not a night out).
+    pub reason: TripReason,
+}
+
+/// Why a trip is made: its purpose with where it comes from and the time
+/// it set off (`text()` for the interface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TripReason {
+    ToWork,
+    HomeFromWork,
+    MovingIn,
+    MovingOut,
+    /// Shopping for the household (from home).
+    Groceries,
+    /// Shopping on the way home from work.
+    ShoppingAfterWork,
+    HomeFromShopping,
+    /// A worker's lunch break, out of work to a venue nearby ...
+    LunchBreak,
+    /// ... and back to work.
+    BackToWork,
+    /// Someone with the day free out for lunch (a midday visit) ...
+    OutForLunch,
+    HomeFromLunch,
+    /// ... and an evening out.
+    NightOut,
+    HomeFromNightOut,
+    /// A truck bringing goods to a shop or taking them out of the city.
+    Delivery,
+}
+
+impl TripReason {
+    /// Short sentence for the interface ("Out for lunch").
+    pub fn text(self) -> &'static str {
+        match self {
+            TripReason::ToWork => "On the way to work",
+            TripReason::HomeFromWork => "Going home from work",
+            TripReason::MovingIn => "Moving into town",
+            TripReason::MovingOut => "Leaving town",
+            TripReason::Groceries => "Shopping for the household",
+            TripReason::ShoppingAfterWork => "Shopping on the way home from work",
+            TripReason::HomeFromShopping => "Home from the shops",
+            TripReason::LunchBreak => "Lunch break",
+            TripReason::BackToWork => "Back to work after lunch",
+            TripReason::OutForLunch => "Out for lunch",
+            TripReason::HomeFromLunch => "Home from lunch",
+            TripReason::NightOut => "A night out",
+            TripReason::HomeFromNightOut => "Home from a night out",
+            TripReason::Delivery => "Delivering goods",
+        }
+    }
+}
+
+/// The reason of a trip of `purpose` from `from` to `to` that set off at
+/// `departed_tick`, made by someone working at `workplace` and living at
+/// `home`.
+fn reason_of(
+    world: &World,
+    purpose: TripPurpose,
+    (from, to): (Option<BuildingId>, BuildingId),
+    departed_tick: u64,
+    (home, workplace): (BuildingId, Option<BuildingId>),
+) -> TripReason {
+    let t = &world.time;
+    let since_midnight = t.tick as i64 - t.tick_of_day as i64;
+    let tod = (departed_tick as i64 - since_midnight).rem_euclid(balance::TICKS_PER_DAY as i64);
+    let hour = tod as f32 / balance::TICKS_PER_HOUR as f32;
+    let at_work = |b: Option<BuildingId>| b.is_some() && b == workplace;
+    match purpose {
+        TripPurpose::ToWork => TripReason::ToWork,
+        TripPurpose::ToHome => TripReason::HomeFromWork,
+        TripPurpose::MoveIn => TripReason::MovingIn,
+        TripPurpose::MoveOut => TripReason::MovingOut,
+        TripPurpose::Goods => TripReason::Delivery,
+        TripPurpose::Shopping if to == home => TripReason::HomeFromShopping,
+        TripPurpose::Shopping if at_work(from) => TripReason::ShoppingAfterWork,
+        TripPurpose::Shopping => TripReason::Groceries,
+        TripPurpose::Leisure if at_work(Some(to)) => TripReason::BackToWork,
+        TripPurpose::Leisure if at_work(from) => TripReason::LunchBreak,
+        TripPurpose::Leisure if to == home && crate::day::midday_visit(hour) => TripReason::HomeFromLunch,
+        TripPurpose::Leisure if to == home => TripReason::HomeFromNightOut,
+        TripPurpose::Leisure if crate::day::midday_visit(hour) => TripReason::OutForLunch,
+        TripPurpose::Leisure => TripReason::NightOut,
+    }
 }
 
 /// Everything about one citizen.
@@ -359,14 +444,32 @@ pub fn plan(world: &World, id: CitizenId) -> Option<DayPlan> {
         (_, Some(t)) => {
             let at = Some(t.expected_tick);
             let next = match t.purpose {
-                TripPurpose::ToWork if Some(t.to) == v.workplace => step(Activity::Working, None, Some(t.to), at),
+                // To work, or back to work from a lunch break.
+                TripPurpose::ToWork | TripPurpose::Leisure if Some(t.to) == v.workplace => {
+                    step(Activity::Working, None, Some(t.to), at)
+                }
                 TripPurpose::Shopping if t.to != home => step(Activity::Shopping, None, Some(t.to), at),
                 TripPurpose::Leisure if t.to != home => step(Activity::Leisure, None, Some(t.to), at),
                 _ => step(Activity::Home, None, Some(home), at),
             };
             (at, next)
         }
-        (Activity::Working | Activity::Shopping | Activity::Leisure, None) => {
+        // At lunch during a shift: back to work after it.
+        (Activity::Leisure, None) if crate::day::on_shift(world, id).is_some() => {
+            let until = Some(c.until_tick.max(now));
+            (until, step(Activity::Working, None, v.workplace, until))
+        }
+        // Working: until the shift ends (a lunch break on the way is not
+        // planned ahead here; its trip says so when it comes).
+        (Activity::Working, None) => {
+            let end = crate::day::on_shift(world, id).map_or(c.until_tick, |e| e.max(0) as u64);
+            let until = Some(end.max(now));
+            (
+                until,
+                step(Activity::Travelling, Some(TripPurpose::ToHome), Some(home), until),
+            )
+        }
+        (Activity::Shopping | Activity::Leisure, None) => {
             let until = Some(c.until_tick.max(now));
             (
                 until,
@@ -537,6 +640,13 @@ pub fn citizen(world: &World, id: CitizenId) -> Option<CitizenView<'_>> {
                 departed_tick: j.departed_tick,
                 eta_tick: j.arrive_tick,
                 expected_tick: j.arrive_tick.unwrap_or(j.due_tick),
+                reason: reason_of(
+                    world,
+                    j.purpose,
+                    (j.from, j.to),
+                    j.departed_tick,
+                    (h.home, c.workplace()),
+                ),
             })
         }
     };
@@ -754,6 +864,7 @@ pub fn planned_route(world: &World, from: BuildingId, to: BuildingId) -> Option<
         &world.cache.route_turns,
         &sources,
         crate::path::Target::Access(end),
+        crate::path::Bound::SAFE,
         &mut budget,
     )?;
     Some(PlannedRoute {

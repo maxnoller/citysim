@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use citysim_sim::command::{NodeChange, PieceChange};
-use citysim_sim::{BuildingId, CellRef, Command, CommandError, Curve, Preview, RoadKind, World, Zone};
+use citysim_sim::{BuildingId, BuildingRecord, CellRef, Command, CommandError, Curve, Preview, RoadKind, World, Zone};
 
 use super::fsnap::dist;
 
@@ -283,8 +283,10 @@ pub enum UndoRecord {
         restore_kinds: Vec<(Curve, RoadKind)>,
         /// Road the action removed, with its kind.
         rebuild: Vec<(Curve, RoadKind)>,
-        /// Buildings the action demolished (cannot come back).
-        lost_buildings: usize,
+        /// Buildings the action demolished (bulldozed, or in the way of a
+        /// road's new land), as they were: undo puts them back after the
+        /// roads (`Command::RestoreBuilding`).
+        buildings: Vec<BuildingRecord>,
     },
     Zones {
         label: String,
@@ -300,9 +302,28 @@ impl UndoRecord {
     }
 }
 
+/// Buildings standing in `before` and gone in `after` (bulldozed, or doomed
+/// by new road land), as records taken from `real` (the world the commands
+/// will be sent to; `before` may be its scratch copy, with the same ids).
+pub fn demolished(real: &World, before: &World, after: &World) -> Vec<BuildingRecord> {
+    before
+        .buildings
+        .keys()
+        .filter(|id| !after.buildings.contains_key(*id))
+        .filter_map(|id| real.building_record(id))
+        .collect()
+}
+
 /// The undo record of a road action (build, change of kind, removal)
-/// checked as `eval` on `before`, leaving `after`.
-pub fn undo_for_roads(before: &World, after: &World, eval: &Evaluated, label: String) -> UndoRecord {
+/// checked as `eval` on `before`, leaving `after`; `buildings`: what it
+/// demolishes ([`demolished`]).
+pub fn undo_for_roads(
+    before: &World,
+    after: &World,
+    eval: &Evaluated,
+    label: String,
+    buildings: Vec<BuildingRecord>,
+) -> UndoRecord {
     let mut restore_kinds = Vec::new();
     for seg in after.roads.segments.values() {
         if seg.serial >= before.roads.next_serial {
@@ -319,7 +340,7 @@ pub fn undo_for_roads(before: &World, after: &World, eval: &Evaluated, label: St
         new_serials: (before.roads.next_serial, after.roads.next_serial),
         restore_kinds,
         rebuild: eval.removed(),
-        lost_buildings: eval.buildings().len(),
+        buildings,
     }
 }
 
@@ -341,6 +362,7 @@ pub fn undo_ops(world: &World, rec: &UndoRecord) -> Vec<Op> {
             new_serials,
             restore_kinds,
             rebuild,
+            buildings,
             ..
         } => {
             let mut ops = Vec::new();
@@ -354,6 +376,9 @@ pub fn undo_ops(world: &World, rec: &UndoRecord) -> Vec<Op> {
             }
             for (c, k) in rebuild {
                 ops.push(Op::Cmd(Command::BuildCurve { curve: *c, kind: *k }));
+            }
+            for b in buildings {
+                ops.push(Op::Cmd(Command::RestoreBuilding(Box::new(b.clone()))));
             }
             ops
         }
@@ -464,7 +489,7 @@ mod tests {
         for c in e.cmds() {
             w.apply(c).unwrap();
         }
-        let rec = undo_for_roads(&before, &after, &e, "road".into());
+        let rec = undo_for_roads(&before, &after, &e, "road".into(), Vec::new());
         let (u, _) = evaluate(&scratch(&w), &undo_ops(&w, &rec));
         assert!(u.ok(), "{:?}", u.first_error());
         for c in u.cmds() {
@@ -487,7 +512,7 @@ mod tests {
             w.apply(c).unwrap();
         }
         assert_eq!(kind_along(&w, &part), Some(RoadKind::Avenue));
-        let rec = undo_for_roads(&before, &after, &e, "avenue".into());
+        let rec = undo_for_roads(&before, &after, &e, "avenue".into(), Vec::new());
         let (u, _) = evaluate(&scratch(&w), &undo_ops(&w, &rec));
         assert!(u.ok(), "{:?}", u.first_error());
         for c in u.cmds() {
@@ -513,13 +538,61 @@ mod tests {
         for c in e.cmds() {
             w.apply(c).unwrap();
         }
-        let rec = undo_for_roads(&before, &after, &e, "removal".into());
+        let rec = undo_for_roads(&before, &after, &e, "removal".into(), Vec::new());
         let (u, _) = evaluate(&scratch(&w), &undo_ops(&w, &rec));
         assert!(u.ok(), "{:?}", u.first_error());
         for c in u.cmds() {
             w.apply(c).unwrap();
         }
         assert_eq!(kind_along(&w, &part), Some(RoadKind::Avenue));
+    }
+
+    #[test]
+    fn undo_of_an_area_demolition_brings_road_and_buildings_back() {
+        let mut w = World::new(5);
+        citysim_sim::scenarios::prebuilt(&mut w, |w| citysim_sim::scenarios::two_districts(w, true));
+        while w.time.tick < citysim_sim::balance::TICKS_PER_DAY as u64 {
+            w.step();
+        }
+        let (home, b) = w
+            .buildings
+            .iter()
+            .filter(|(id, b)| {
+                b.kind == Zone::Residential && w.people.places.get(*id).is_some_and(|p| !p.households.is_empty())
+            })
+            .map(|(id, b)| (id, b.clone()))
+            .next()
+            .expect("a home");
+        let (s, _, _) = w.roads.nearest_segment(b.center(), 40.0).unwrap();
+        let p = w.roads.segments[s].nearest(b.center()).2;
+        let c = b.center();
+        let (lo, hi) = (
+            [p[0].min(c[0]) - 6.0, p[1].min(c[1]) - 6.0],
+            [p[0].max(c[0]) + 6.0, p[1].max(c[1]) + 6.0],
+        );
+        let quad = [[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]];
+        let before = scratch(&w);
+        let (e, after) = evaluate(&before, &[Op::Cmd(Command::BulldozeArea { quad })]);
+        assert!(e.ok(), "{:?}", e.first_error());
+        let lost = demolished(&w, &before, &after);
+        assert!(lost.iter().any(|r| r.residents() > 0));
+        let people = w.citizens.len();
+        let rec = undo_for_roads(&before, &after, &e, "demolition".into(), lost.clone());
+        for c in e.cmds() {
+            w.apply(c).unwrap();
+        }
+        assert!(!w.buildings.contains_key(home));
+        assert!(w.citizens.len() < people);
+        let (u, _) = evaluate(&scratch(&w), &undo_ops(&w, &rec));
+        assert!(u.ok(), "{:?}", u.first_error());
+        for c in u.cmds() {
+            w.apply(c).unwrap();
+        }
+        assert_eq!(w.citizens.len(), people, "everyone is back");
+        for r in &lost {
+            assert!(w.buildings.values().any(|b| b.seed == r.building.seed));
+        }
+        w.check_sim_invariants().unwrap();
     }
 
     #[test]

@@ -73,7 +73,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `CameraFollow`), `CameraFollow { focus }` (gfx keeps the focus there), `CameraGoTo` message (move / zoom once).
 - Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`, `zone_cell_corners`.
 - Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B (bulldozer on / off) J Esc/right-click, Space 1 2 3
-  4, O, T, G, F5/F9, F3 (performance panel), F6 (keyboard into the city window or the open drawer: arrows, Enter, Esc),
+  4, O, T (traffic map on / off in every state), G, F5/F9, F3 (performance panel), F6 (keyboard through the city
+  window, the open drawer and the side panel, Shift+F6 back: arrows, Enter, Esc; long pages scroll to the focus),
   Tab (tool mode; city window page), Alt, Enter, Backspace, [ ], Ctrl+Z, P, U, F, arrows + Enter in menus.
 - Tool feedback (ui writes with `set_if_neq`, gfx draws): `RoadChoice`, `ToolModes { road, zone, bulldoze }`
   (`RoadMode::{Straight, Curve, Continuous, Grid, Upgrade, Junction}`, `ZoneMode::{Paint, Frontage, Fill, Marquee}`,
@@ -87,8 +88,12 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   car or person is selected, only when it changes meaningfully: a new route, the car 2.5 m further on; gfx draws it in
   `gfx/route.rs`): `points` in sim metres along the lanes (lane offsets, left-turn pockets and junction turn paths included) from the car
   (or the trip's start when `Planned` / `Unseen`) to where it stops; `RouteEnd { pos, building }` at both ends (gfx
-  rings both, glows the destination building and floats a pin over it). Traced in `ui/route.rs`
-  (`vehicle_path`, `planned_path`, `person_trip`).
+  rings both, glows the destination building and floats a pin over it). `traveller: Option<[f32; 2]>`: a person under
+  way off the map (`Unseen`: on foot, a lift, a car beyond those drawn) is placed along the way by the share of the
+  trip's time gone; `points` then start there, gfx draws the line as a car's and marks the spot (selection rings and
+  diamond, gliding between updates); the camera follows it. Traced in `ui/route.rs` (`vehicle_path`, `planned_path`,
+  `person_trip`); a selected person's planned / off-map trip is traced once per change of roads, trip or next step
+  (`route::TripCache`, shared by the panel and `RouteView`; `CITYSIM_ROUTE_STATS=1` logs searches per second).
 - `DisplaySettings { edge_scroll, lot_markers }`: edge panning (default off); empty zoned lots are marked only while
   zoning unless the player picks "Always" (persisted as `lot_markers_always`).
 - `PerfProbe { detail: PerfDetail::{Off, Small, Full}, render: Option<RenderStats> }`: ui writes `detail` (the
@@ -119,14 +124,16 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   services }` with `income()`, `expenses()` (upkeep + services), `net()`; `economy::budget_now(world)` = today so far;
   `economy.history[i].budget` per finished day (`DaySummary`); cost breakdown `economy::running_costs(world)` /
   `economy.last_day_costs`. Shops and works pay tax on the shift time actually worked (`economy.attendance`).
-- Money: start 30,000, street 65 / avenue 90 per cell to build (`balance::ROAD_COST_PER_CELL`,
-  `AVENUE_COST_PER_CELL`; roads are priced by the metre), upkeep 4 / 8 per cell per day, $80 per signalled junction
+- Money: start 30,000, street 65 / avenue 75 per cell to build (`balance::ROAD_COST_PER_CELL`,
+  `AVENUE_COST_PER_CELL`; roads are priced by the metre), upkeep 4 / 6 per cell per day, $80 per signalled junction
   per day, services per resident growing with size and density. Business tax lost to traffic:
   `economy.last_day_traffic` / `economy::traffic_loss_now(world)` (`TrafficLoss`; the commercial and industrial tax
-  lines are already net of it; the budget page shows it as its own line and, per day seen, as a chart). Why people
+  lines are already net of it; per booked day `DaySummary::traffic`; the budget page shows it as a line and a chart).
+  Money flows hourly: a 24th of yesterday's net each in-game hour (`Economy::advanced_today`), midnight books the rest. Why people
   are jobless: `demand::jobs_view(world)` (`JobsView`, `JoblessReason::text()`; shown under the statistics tiles). Bulldozing is never refused for lack of money. Money
   may go negative.
-- People: individual citizens in households (`world.citizens`, `inspect::*`); every car trip is a car on the road up
+- People: individual citizens in households (`world.citizens`, `inspect::*`; why a trip is made:
+  `TripView::reason.text()`, e.g. a midday `Leisure` trip is a lunch); every car trip is a car on the road up
   to `traffic::vehicle_budget` (125 per 1,000 residents), the rest happen off screen; commutes off screen take
   `traffic::delay_factor` times their free-flow time (what the roads do to real cars).
 - Zoning is on lattices of blocks along each road side (`world.zoning`; `world.grid_view()` answers world-cell
@@ -143,9 +150,16 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   (`zoning::cell_shape`, drawn by `gfx/zones.rs`, `gfx/lots.rs`); lots' yards are drawn by `gfx/yards.rs`. Test bed of
   hand-drawn blocks in the real game: `scripts/bplay.py` (`launch EXE [load]`, `roads`, `zone`, `grow`, `shots`,
   `owner`, `paint`, `guide`, `video`).
+- Undo of demolitions: before sending a plan the tool records every building it will take down
+  (`World::building_record` -> `restore::BuildingRecord`: building, lot cells with centres, households with members,
+  staff); undo sends `Command::RestoreBuilding(record)` after the roads: the same building (new id) with its households
+  (they had left the city) and staff still jobless, members get old jobs back where there is room, the demolition cost
+  is refunded. Refused with `CommandError::CannotRestore(RestoreProblem::{LandChanged, BuiltOn, Rezoned, NoRoad})`;
+  a rebuilt lattice is matched by cell centres. Session-only (nothing saved).
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
-- Saves: format version 7 (strips in extension block 4; version 6 loads, its zoning is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
+- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5; version 6 loads, its zoning
+  is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
   `crates/sim/tests/data/round1_town.citysave`), version 5 is refused; `World::load` rejects structurally damaged
   saves. Round-1 saves keep their old second-row buildings until they are rebuilt.
 - Scenarios: `scenarios::{GridPlayer, two_districts, add_connections, overbuilt, organic, upgrade_to_hierarchy}`;
@@ -210,7 +224,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `CITYSIM_SHOT_DELAY=25` (s, default 3), `CITYSIM_SHOT_OVERLAY=none|zones|traffic`. Without a demo it builds
   a small sample city. Example: `CITYSIM_DEMO=town CITYSIM_AUTOSHOT=/tmp/t.png CITYSIM_SHOT_DELAY=25 cargo run -p citysim`.
 - `CITYSIM_PERF=off|small|full`: the performance panel's starting size (over the saved one; for `CITYSIM_BENCH` runs
-  of its cost). `ui/perf.rs` measures frames, the game update, sim steps and the process (`sysinfo`, a worker
+  of its cost). `UiState::perf` is the form on screen, `perf_choice` the player's: the full panel shows as its strip
+  while the city window is open and fewer than 880 px remain beside it (`city::perf_room`).
+  `CITYSIM_UI_SCALE=0..3` picks the interface size (85 / 100 / 115 / 130 %) over the saved one (captures at every size). `ui/perf.rs` measures frames, the game update, sim steps and the process (`sysinfo`, a worker
   thread, once a second); its graph is a `UiMaterial` (`assets/ui/shaders/perf_graph.wesl`).
 - `CITYSIM_LOG_FPS=1` logs FPS (meaningless under Xvfb: use `CITYSIM_BENCH`). `CITYSIM_SEED=n`
   world seed (the `hierarchy` demo reaches 10,000 fastest with seed 3). `CITYSIM_CONFIG_DIR` overrides the settings
@@ -218,9 +234,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `CITYSIM_CONTROL=dir` + `scripts/play.py` (see its docstring): `launch`, `start`, `grow --until-pop N`, `road`, `zone`,
   `bulldoze`, `curve`, `follow`, `checks`, `look`, `shot`, `stats`, `counts`, `cmd 'until-day N'` (`launch` waits for
   the `ready` reply: shaders built). `launch --env K=V` passes extra variables. The channel only reads numbers, frames
-  the camera, fast-forwards (`turbo`, `until-*`; they fail while paused), finds things (`find-home`, `find-car [MIN]` = a slow car on screen with MIN m to go, `node NAME` = a
-  named UI node's position) and takes screenshots; all play goes through real input. `stats` includes the tool modes
-  (`road_mode=...`); `play.py` switches modes with Tab. `play.py checks` (right after `launch`, new game) runs eight
+  the camera, fast-forwards (`turbo`, `until-*`; they fail while paused), finds things (`find-home`, `find-car [MIN]` = a slow car on screen with MIN m to go, `find-building` = the
+  fullest home on screen, `find-walker [S]` = a home whose first resident is under way off the map with S real seconds
+  to go, `node NAME` = a named UI node's position) and takes screenshots; all play goes through real input. `stats` includes the tool modes
+  (`road_mode=...`) and the published route (`route=`, `route_points=`, `traveller=`, `focus=`); `play.py` switches modes with Tab. `play.py checks` (right after `launch`, new game) runs eight
   awkward real-input cases (fast clicks, drag off the window, UI to map, two snaps, a self-crossing loop, zoom and
   rotate mid-draw, curve and undo, step back) and prints PASS / FAIL.
 - UI capture: `CITYSIM_UI_SHOTS=dir` (interface states, best on `CITYSIM_DEMO=organic`; `CITYSIM_SAVE_DIR` for the
@@ -257,9 +274,11 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `context.rs` (cursor readout tag and the card builders), `menu.rs` (pause menu, `MenuFocus`, first-run plate),
   `settings.rs` (settings and keys plates). `UiState::tray: Option<InfoTray>` (maps only; a tool's tray replaces
   it); `tray::TrayExtent` is the drawer's height (the side panel and the cursor readout stay above it);
-  `UiState::tray_focus` while F6 keyboard focus is in the window or a drawer. The cursor readout never overlaps the
+  `UiState::tray_focus` while F6 keyboard focus is in the window, a drawer or the side panel (`UiState::focus`:
+  `tray::FocusArea`; controls are the plate's descendant `UiButton`s). The cursor readout never overlaps the
   window or a drawer (it flips, else hides). The interface is designed at 1920x1080 (`UiScale` 1.0) and compacts below a logical
-  width of 1660 (`UiState::compact`).
+  width of 1660 (`UiState::compact`); the compact bar needs `theme::MIN_LAYOUT` (1380 px), larger interface sizes are
+  held back to it, and the bar's figure columns only ever widen (proportional digits).
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`), `CITYSIM_GFX_HOUR=h` (pin the drawn time of

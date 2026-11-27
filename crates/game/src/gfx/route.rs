@@ -9,8 +9,14 @@
 //! the car. A trip not under way yet (or off the map) is dashed and paler.
 //! Everything is unlit, so it keeps its colours at night.
 //!
+//! A person under way off the map (`RouteView::traveller`: on foot, a lift,
+//! a car beyond those drawn) gets the line of a car from where they should
+//! be by now, and the selection's marker there: white and accent rings on
+//! the ground and a floating diamond, gliding along as ui moves the
+//! estimate.
+//!
 //! The mesh is rebuilt only when `RouteView` changes (ui republishes a
-//! moving car's line every few metres); the pin only moves.
+//! moving car's line every few metres); the pin and the marker only move.
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
@@ -26,8 +32,10 @@ pub struct RoutePlugin;
 
 impl Plugin for RoutePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup)
-            .add_systems(Update, (draw_route, move_pin).chain().in_set(GameSet::Render));
+        app.add_systems(Startup, setup).add_systems(
+            Update,
+            (draw_route, move_pin, move_traveller).chain().in_set(GameSet::Render),
+        );
     }
 }
 
@@ -58,6 +66,11 @@ struct RouteLine {
 /// The pin above the destination (moved every frame).
 #[derive(Component)]
 struct RoutePin;
+
+/// The marker of a person under way off the map: the rings on the ground
+/// (`false`) and the diamond above (`true`).
+#[derive(Component)]
+struct Traveller(bool);
 
 #[derive(Resource)]
 struct RouteMaterials {
@@ -115,7 +128,117 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         Visibility::Hidden,
         NotShadowCaster,
     ));
+    let (rings, diamond) = traveller_meshes();
+    commands.spawn((
+        Name::new("Route traveller rings"),
+        Traveller(false),
+        Mesh3d(meshes.add(rings.build())),
+        MeshMaterial3d(overlay_for_marker(&mut materials)),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
+    commands.spawn((
+        Name::new("Route traveller"),
+        Traveller(true),
+        Mesh3d(meshes.add(diamond.build())),
+        MeshMaterial3d(overlay_for_marker(&mut materials)),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
     commands.insert_resource(RouteMaterials { glow });
+}
+
+fn overlay_for_marker(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        depth_bias: 80.0,
+        cull_mode: None,
+        double_sided: true,
+        ..default()
+    })
+}
+
+/// The selection's look (as a selected car's): a white inner and an accent
+/// outer ring over a faint accent disc, and a diamond.
+fn traveller_meshes() -> (MeshBuilder, MeshBuilder) {
+    let mut rings = MeshBuilder::new();
+    let white = lin(Color::srgb(1.0, 1.0, 1.0).with_alpha(0.95));
+    let accent = lin(ACCENT.with_alpha(0.95));
+    ring(&mut rings, Vec2::ZERO, 2.6, 0.4, 0.0, white);
+    ring(&mut rings, Vec2::ZERO, 3.4, 0.45, 0.0, accent);
+    disc(
+        &mut rings,
+        Vec2::ZERO,
+        2.5,
+        -0.01,
+        [accent[0], accent[1], accent[2], 0.25],
+    );
+    disc(&mut rings, Vec2::ZERO, 0.8, 0.01, white);
+    let mut diamond = MeshBuilder::new();
+    let (top, bot) = (Vec3::new(0.0, 1.4, 0.0), Vec3::new(0.0, -1.6, 0.0));
+    let rim: Vec<Vec3> = (0..4)
+        .map(|i| {
+            let a = i as f32 * std::f32::consts::FRAC_PI_2;
+            Vec3::new(a.cos(), 0.0, a.sin())
+        })
+        .collect();
+    let light = lin(Color::srgb(0.78, 0.72, 1.0));
+    for i in 0..4 {
+        let (p, q) = (rim[i], rim[(i + 1) % 4]);
+        let shade = if i % 2 == 0 { accent } else { light };
+        diamond.tri_c(top, q, p, [shade; 3]);
+        diamond.tri_c(bot, p, q, [accent; 3]);
+    }
+    (rings, diamond)
+}
+
+/// Glide the marker to where ui estimates the person is (it republishes
+/// every few metres); jumps of a new selection are not glided.
+fn move_traveller(
+    time: Res<Time<Real>>,
+    route: Res<RouteView>,
+    camera: Query<&GlobalTransform, With<WorldCamera>>,
+    mut q: Query<(&Traveller, &mut Transform, &mut Visibility)>,
+    mut at: Local<Option<Vec2>>,
+) {
+    let target = route
+        .traveller
+        .filter(|_| route.state != RouteState::None)
+        .map(Vec2::from);
+    let Some(target) = target else {
+        *at = None;
+        for (_, _, mut vis) in &mut q {
+            vis.set_if_neq(Visibility::Hidden);
+        }
+        return;
+    };
+    let p = match *at {
+        Some(p) if p.distance(target) < 40.0 => p.lerp(target, 1.0 - (-time.delta_secs() * 6.0).exp()),
+        _ => target,
+    };
+    *at = Some(p);
+    let base = Vec3::new(p.x, 0.0, p.y);
+    let k = camera
+        .single()
+        .map(|c| (c.translation().distance(base) / 120.0).clamp(1.0, 8.0))
+        .unwrap_or(1.0);
+    let e = time.elapsed_secs();
+    for (which, mut t, mut vis) in &mut q {
+        if which.0 {
+            t.translation = base + Vec3::Y * (5.5 + 2.2 * k + 0.35 * k * (e * 2.6).sin());
+            t.rotation = Quat::from_rotation_y(e * 0.9);
+            t.scale = Vec3::splat(k);
+        } else {
+            t.translation = base + Vec3::Y * (heights::HIGHLIGHT + 0.12);
+            t.rotation = Quat::IDENTITY;
+            t.scale = Vec3::new(k.min(3.0), 1.0, k.min(3.0));
+        }
+        vis.set_if_neq(Visibility::Inherited);
+    }
 }
 
 /// A map pin: a bead on a slim spike pointing down at the destination, with
@@ -275,7 +398,8 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> (MeshBui
     let mut soft = MeshBuilder::new();
     let mut m = MeshBuilder::new();
     let y = heights::HIGHLIGHT + 0.06;
-    let planned = route.state != RouteState::Driving;
+    // Off the map under way: drawn as a car's line, from the estimate on.
+    let planned = route.state != RouteState::Driving && route.traveller.is_none();
     let pts: Vec<Vec2> = route.points.iter().map(|&p| Vec2::from(p)).collect();
     if pts.len() >= 2 {
         let mut cum = Vec::with_capacity(pts.len());

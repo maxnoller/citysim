@@ -216,8 +216,10 @@ fn two_workers_make_two_commutes_to_their_own_workplaces() {
         .households
         .iter()
         .find(|(_, h)| {
+            // (Not one whose rush-hour departures keep failing on this one
+            // busy street: it may leave town.)
             let jobs: Vec<BuildingId> = h.citizens.iter().filter_map(|&c| w.citizens[c].workplace()).collect();
-            jobs.len() >= 2 && jobs[0] != jobs[1]
+            jobs.len() >= 2 && jobs[0] != jobs[1] && h.citizens.iter().all(|&c| w.citizens[c].hopeless_commutes == 0)
         })
         .map(|(id, _)| id)
         .expect("a two-earner household with two workplaces");
