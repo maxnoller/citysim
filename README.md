@@ -133,3 +133,8 @@ checksum), and builds and tests the game crate in all three feature sets.
 Performance (GTX 1080, 1920x1080, windowless benchmark `CITYSIM_BENCH`, a ~10,000-resident city with about 850 cars on
 the road): about 110 fps on High (99th-percentile frame 11 ms) and 220 fps on Low at 1x, and still above 100 fps on
 High at 12x.
+
+## Licence
+
+The source is published to be read. No licence is granted for now: all rights reserved. The bundled fonts keep their
+own licences (`THIRD_PARTY_NOTICES.md`).
