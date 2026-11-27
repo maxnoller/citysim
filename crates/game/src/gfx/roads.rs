@@ -140,7 +140,7 @@ fn rebuild_roads(
         return;
     }
     // Only the quality changed (street furniture): a few chunks per frame.
-    let quality_only = state.key == Some(key);
+    let whole = state.chunks.is_empty() || state.key.is_none_or(|k| k.0.0 != roads_key.0);
     state.key = Some(key);
     state.quality = Some(quality);
     let furniture: f32 = match quality {
@@ -208,7 +208,10 @@ fn rebuild_roads(
         if state.chunks.get(&c).is_some_and(|(h, _, _)| *h == hash) {
             continue;
         }
-        if quality_only && rebuilt > 0 && start.elapsed().as_secs_f64() * 1000.0 > QUALITY_REMESH_MS {
+        // A quality change or a road edit: a few chunks a frame (the rest
+        // next frame; a plan built in parts appears piece by piece anyway).
+        // A new world (no chunks yet, or another one loaded): all at once.
+        if !whole && rebuilt > 0 && start.elapsed().as_secs_f64() * 1000.0 > QUALITY_REMESH_MS {
             // The rest next frame.
             state.quality = None;
             break;

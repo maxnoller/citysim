@@ -394,14 +394,17 @@ fn plan_by_chunk(view: &CurveToolView) -> HashMap<IVec2, CurveToolView> {
     out
 }
 
+/// Content hash of a square of the plan. Positions are rounded to a
+/// centimetre: a plan checked again (a grid one block deeper) gives the same
+/// pieces with float noise in their ends, which must not re-mesh them.
 fn chunk_hash(v: &CurveToolView, k: f32) -> u64 {
     let mut h = DefaultHasher::new();
+    let q = |x: f32| (x * 100.0).round() as i64;
     k.to_bits().hash(&mut h);
     v.kind.hash(&mut h);
     let curve = |c: &Curve, h: &mut DefaultHasher| {
         for p in c.p {
-            p[0].to_bits().hash(h);
-            p[1].to_bits().hash(h);
+            (q(p[0]), q(p[1])).hash(h);
         }
     };
     for (c, ch) in &v.pieces {
@@ -413,11 +416,9 @@ fn chunk_hash(v: &CurveToolView, k: f32) -> u64 {
         curve(c, &mut h);
     }
     for (p, ch) in &v.nodes {
-        p[0].to_bits().hash(&mut h);
-        p[1].to_bits().hash(&mut h);
-        (*ch as u8).hash(&mut h);
+        (q(p[0]), q(p[1]), *ch as u8).hash(&mut h);
     }
-    v.error_at.map(|p| (p[0].to_bits(), p[1].to_bits())).hash(&mut h);
+    v.error_at.map(|p| (q(p[0]), q(p[1]))).hash(&mut h);
     h.finish()
 }
 
