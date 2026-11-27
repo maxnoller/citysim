@@ -26,11 +26,18 @@ fn rings(csv: Option<String>) {
         ("medium", S::Priority, Some(R::Medium)),
         ("large", S::Priority, Some(R::Large)),
     ];
+    // `JBENCH_WALKERS=n`: people a minute walking past every junction.
+    let walkers: f32 = std::env::var("JBENCH_WALKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
     let mut out = String::from("roads,turning,control,saturated_per_min,cross_share,gave_up,moderate_wait_s\n");
     for (name, main, cross, (rm, rc)) in roads {
         for turning in [0.1f32, 0.3, 0.5] {
             for (cname, setting, ring) in controls {
-                let mut b = Bench::crossing(main, cross, setting).turning(turning * 0.5, turning * 0.5);
+                let mut b = Bench::crossing(main, cross, setting)
+                    .turning(turning * 0.5, turning * 0.5)
+                    .walkers(walkers);
                 if let Some(r) = ring {
                     let (w, n) = citysim_sim::capacity::build(&Bench::crossing(main, cross, setting));
                     if n.is_some_and(|n| citysim_sim::roundabout::sizes(&w, n)[r as usize].1.is_err()) {

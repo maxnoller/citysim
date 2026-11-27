@@ -1087,6 +1087,20 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 if let Some(h) = hold {
                     target = target.min(stop_speed(h));
                 }
+                // People on the zebra of its exit: stop between the ring and
+                // the zebra, a car length out (walk.rs).
+                if crate::walk::ring_exit_held(walking, roads, jm.node, jm.to) {
+                    let half = if truck {
+                        balance::TRUCK_BODY_M[0]
+                    } else {
+                        balance::CAR_BODY_M[0]
+                    } * 0.5;
+                    let stop =
+                        m.length + balance::RING_ZEBRA_M - balance::ZEBRA_WIDTH_M * 0.5 - balance::STOP_LINE_M - half;
+                    if jm.distance <= stop + 0.05 {
+                        target = target.min(stop_speed(stop - jm.distance));
+                    }
+                }
                 if rear[ek].is_finite() {
                     let hw = headway_of(exit_seg.kind);
                     target = target.min(follow_speed(m.length - jm.distance + rear[ek] - exit_start, hw));

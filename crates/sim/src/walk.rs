@@ -68,6 +68,10 @@ pub struct Crossing {
     pub ends: [[f32; 2]; 2],
     /// Network points of `ends`.
     pub points: [u32; 2],
+    /// A roundabout's arm zebra (one car length out from its give-way
+    /// line; cars treat it as a mid-block zebra, people also watch the cars
+    /// leaving the ring for it).
+    pub ring: Option<NodeId>,
 }
 
 impl Crossing {
@@ -456,6 +460,18 @@ pub fn zebra_line(setback: f32) -> f32 {
     (setback - balance::ZEBRA_INSET_M - balance::ZEBRA_WIDTH_M * 0.5).max(0.0)
 }
 
+/// The line people cross arm `s` of node `n` on, metres from the node: a
+/// junction's zebra just inside its stop line, a roundabout's one car length
+/// out from its give-way line (`RING_ZEBRA_M`), else the stop line.
+pub fn zebra_line_at(world: &World, n: NodeId, s: SegmentId) -> f32 {
+    let sb = crate::junction::setback(world, n, s);
+    if crate::roundabout::roundabout(world, n).is_some() {
+        return sb + balance::RING_ZEBRA_M;
+    }
+    let deg = world.roads.nodes.get(n).map_or(0, |x| x.segments.len());
+    if deg >= 3 { zebra_line(sb) } else { sb }
+}
+
 /// Where people step out of a building: the middle of the lot's front
 /// edge, `DOOR_INSET_M` inside it.
 pub fn door(b: &crate::Building) -> [f32; 2] {
@@ -504,11 +520,7 @@ pub fn build(world: &World) -> WalkNet {
     net.node_cross = vec![Vec::new(); roads.nodes.slot_count()];
     // Pavement end points per segment slot: [at a, at b][side].
     let mut ends: Vec<Option<[[u32; 2]; 2]>> = vec![None; nseg];
-    let end_d = |n: NodeId, s: SegmentId| -> f32 {
-        let deg = roads.nodes[n].segments.len();
-        let sb = crate::junction::setback(world, n, s);
-        if deg >= 3 { zebra_line(sb) } else { sb }
-    };
+    let end_d = |n: NodeId, s: SegmentId| -> f32 { zebra_line_at(world, n, s) };
     for (s, seg) in roads.segments.iter() {
         let wk = pavement_m(seg.kind);
         if wk <= 0.0 {
@@ -568,6 +580,7 @@ pub fn build(world: &World) -> WalkNet {
                 half_width: h,
                 ends: [net.points[p0 as usize], net.points[p1 as usize]],
                 points: [p0, p1],
+                ring: None,
             });
             net.add_edge(
                 p0,
@@ -619,6 +632,15 @@ pub fn build(world: &World) -> WalkNet {
                 pts.push(net.points[l as usize]);
                 net.add_edge(r, l, EdgeKind::Corner, pts);
             }
+            continue;
+        }
+        if let Some(ring) = world
+            .traffic
+            .junction_states
+            .get(n)
+            .and_then(|j| j.ring_geom.0.as_deref())
+        {
+            ring_walks(world, &mut net, n, ring, &arms);
             continue;
         }
         let k = arms.len();
@@ -704,6 +726,7 @@ pub fn build(world: &World) -> WalkNet {
                 half_width: seg.kind.half_width_m(),
                 ends: [net.points[p0 as usize], net.points[p1 as usize]],
                 points: [p0, p1],
+                ring: None,
             });
             net.add_edge(
                 p0,
@@ -761,6 +784,86 @@ pub fn build(world: &World) -> WalkNet {
         }
     }
     net
+}
+
+/// A roundabout's walks: the pavement round the outside of the ring (from
+/// each arm's right-hand pavement in to the ring, round it, out along the
+/// next arm's left-hand one) and a zebra across each arm one car length
+/// out from its give-way line.
+fn ring_walks(world: &World, net: &mut WalkNet, n: NodeId, ring: &crate::roundabout::Ring, arms: &[ArmEnds]) {
+    let roads = &world.roads;
+    let c = ring.center;
+    let rp = ring.dims.outer_r + ring.dims.pavement_m * 0.5;
+    let k = arms.len();
+    // Where an arm's pavement on `side` (+1 right, -1 left, looking away
+    // from the node) meets the ring's pavement.
+    let inner = |s: SegmentId, dir: [f32; 2], side: f32| -> [f32; 2] {
+        let seg = &roads.segments[s];
+        let off = seg.kind.half_width_m() + pavement_m(seg.kind) * 0.5;
+        let sb = crate::junction::setback(world, n, s);
+        let p = seg.pose_dir(seg.a == n, sb, 0.0).pos;
+        let r = crate::junction::right_of(dir);
+        [p[0] + r[0] * off * side, p[1] + r[1] * off * side]
+    };
+    let ang = |p: [f32; 2]| libm::atan2f(p[1] - c[1], p[0] - c[0]);
+    for i in 0..k {
+        let (a, b) = (arms[i], arms[(i + 1) % k]);
+        let (Some(pa), Some(pb)) = (a.3, b.3) else { continue };
+        let (p, q) = (net.points[pa[1] as usize], net.points[pb[0] as usize]);
+        let (ia, ib) = (inner(a.1, a.2, 1.0), inner(b.1, b.2, -1.0));
+        let a0 = ang(ia);
+        let mut a1 = ang(ib);
+        while a1 <= a0 {
+            a1 += std::f32::consts::TAU;
+        }
+        let steps = (((a1 - a0) * rp) / 2.0).ceil().max(1.0) as usize;
+        let mut pts = vec![p, ia];
+        for t in 0..=steps {
+            let x = a0 + (a1 - a0) * t as f32 / steps as f32;
+            pts.push([c[0] + rp * libm::cosf(x), c[1] + rp * libm::sinf(x)]);
+        }
+        pts.push(ib);
+        pts.push(q);
+        net.add_edge(pa[1], pb[0], EdgeKind::Corner, pts);
+    }
+    for arm in arms {
+        let Some(pts) = arm.3 else { continue };
+        let s = arm.1;
+        let seg = &roads.segments[s];
+        if seg.kind == RoadKind::Highway {
+            continue;
+        }
+        let at_a = seg.a == n;
+        let d = zebra_line_at(world, n, s);
+        let from_a = if at_a { d } else { seg.length - d };
+        let pose = seg.pose(from_a, 0.0);
+        let (p0, p1) = if at_a { (pts[0], pts[1]) } else { (pts[1], pts[0]) };
+        let key = CrossingKey {
+            segment: s,
+            at: if at_a { 0 } else { 1 },
+        };
+        let ci = net.crossings.len() as u32;
+        net.crossings.push(Crossing {
+            key,
+            node: None,
+            arm: None,
+            from_a,
+            center: pose.pos,
+            dir: pose.dir,
+            kind: seg.kind,
+            half_width: seg.kind.half_width_m(),
+            ends: [net.points[p0 as usize], net.points[p1 as usize]],
+            points: [p0, p1],
+            ring: Some(n),
+        });
+        net.add_edge(
+            p0,
+            p1,
+            EdgeKind::Crossing(ci),
+            vec![net.points[p0 as usize], net.points[p1 as usize]],
+        );
+        net.seg_cross[key_index(s)].push(ci);
+    }
 }
 
 /// Control point of a kerb corner from `p` (arm direction `da`, away from
@@ -849,6 +952,10 @@ pub struct Walker {
     /// The crossing of the current leg, resolved (not saved).
     #[serde(skip)]
     ci: CiCache,
+    /// A walker of the junction bench (`capacity`): nobody behind it, gone
+    /// on arrival (never in a city; not saved).
+    #[serde(skip)]
+    pub(crate) bench: bool,
 }
 
 /// A walker's current crossing as an index into the network: (network's
@@ -1282,10 +1389,58 @@ pub(crate) fn start(
         leg_len: 0.0,
         next_mark: u16::MAX,
         ci: CiCache::default(),
+        bench: false,
     };
     w.enter_leg();
     w.update_pose();
     world.walking.walkers.insert(leader, w);
+}
+
+/// The junction bench's pedestrians (`capacity`): someone walking the
+/// pavements and zebras from `from` to `to` (points near pavements), with no
+/// citizen behind them, gone on arrival. `n` names them (distinct per
+/// walker). False when there is no way.
+pub fn bench_walk(world: &mut World, from: [f32; 2], to: [f32; 2], n: u32) -> bool {
+    ensure_net(world);
+    let Some(route) = world.walking.net.route(from, to, 2_000.0) else {
+        return false;
+    };
+    // (The bench world has no citizens: small ids, reused once they are
+    // long gone.)
+    let id = CitizenId::from(slotmap::KeyData::from_ffi((1u64 << 32) | (1 + n % 4_000) as u64));
+    if world.walking.walkers.contains_key(&id) || world.citizens.contains_key(id) {
+        return false;
+    }
+    let h = crate::people::hash(n as u64 ^ 0x0FF5E7) as u32;
+    let mut w = Walker {
+        party: Vec::new(),
+        from: None,
+        to: BuildingId::default(),
+        route: Box::new(route),
+        leg: 0,
+        along: 0.0,
+        speed: balance::WALK_SPEED * (0.9 + 0.2 * (h % 1000) as f32 / 1000.0),
+        offset: -0.25 + 0.6 * ((h >> 10) % 1000) as f32 / 1000.0,
+        seed: h,
+        pos: [0.0, 0.0],
+        heading: 0.0,
+        state: WalkState::Walking,
+        walked_m: 0.0,
+        leg_start_m: 0.0,
+        started_tick: world.time.tick,
+        waited_ticks: 0,
+        kerb_ticks: 0,
+        leg_a: [0.0, 0.0],
+        leg_d: [1.0, 0.0],
+        leg_len: 0.0,
+        next_mark: u16::MAX,
+        ci: CiCache::default(),
+        bench: true,
+    };
+    w.enter_leg();
+    w.update_pose();
+    world.walking.walkers.insert(id, w);
+    true
 }
 
 /// After a road edit: everyone on foot finds their way again from where
@@ -1424,6 +1579,27 @@ pub(crate) fn held_at(walking: &Walking, roads: &crate::RoadNetwork, n: NodeId, 
         .now
         .get(ci as usize)
         .is_some_and(|s| s.held[usize::from(forward)])
+}
+
+/// Is the zebra across roundabout `n`'s arm `s` held for cars leaving the
+/// ring by it (someone on the half they drive on)?
+pub(crate) fn ring_exit_held(walking: &Walking, roads: &crate::RoadNetwork, n: NodeId, s: SegmentId) -> bool {
+    let Some(seg) = roads.segments.get(s) else {
+        return false;
+    };
+    let at_a = seg.a == n;
+    let key = CrossingKey {
+        segment: s,
+        at: if at_a { 0 } else { 1 },
+    };
+    let Some((ci, c)) = walking.net.crossing(key) else {
+        return false;
+    };
+    c.ring == Some(n)
+        && walking
+            .now
+            .get(ci as usize)
+            .is_some_and(|st| st.held[usize::from(at_a)])
 }
 
 /// Must a car about to enter junction `n` from arm `from` towards arm `to`
@@ -1629,6 +1805,22 @@ fn eval_crossing(world: &World, ci: u32) -> (bool, f32, bool) {
         let hi = lo + bx[lo..].iter().take_while(|x| x.0 == slot).count();
         &bx[lo..hi]
     });
+    // A roundabout's arm zebra: the cars in the ring leaving by its arm.
+    if let Some(n) = c.ring {
+        let bx = &world.cache.walk_boxed;
+        let slot = key_index(n) as u32;
+        let lo = bx.partition_point(|x| x.0 < slot);
+        let away = usize::from(roads.segments.get(c.key.segment).is_some_and(|x| x.a == n));
+        for &(_, id) in bx[lo..].iter().take_while(|x| x.0 == slot) {
+            let Some(v) = world.vehicles.get(id) else { continue };
+            let Some(jm) = v.junction.filter(|jm| jm.to == c.key.segment) else {
+                continue;
+            };
+            let l = balance::TRUCK_BODY_M[0];
+            let near = jm.length + balance::RING_ZEBRA_M - zw * 0.5;
+            check(v, l, near, jm.distance + l * 0.5, jm.distance - l, away);
+        }
+    }
     // Every car once: those on its road, on the junction's other arms, in
     // the box.
     let cars = on(key_index(c.key.segment))
@@ -1773,8 +1965,10 @@ pub(crate) fn tick(world: &mut World) {
         // Still on this walk? (Looked at now and then, and on arrival: the
         // citizens are big and far apart in memory.)
         let to = w.to;
+        let bench = w.bench;
         let still = |world: &World| {
-            world.citizens.get(id).is_some_and(|c| {
+            bench
+                || world.citizens.get(id).is_some_and(|c| {
                 matches!(c.location, Location::Travelling(j) if j.mode == TravelMode::Walking && j.to == to && j.arrive_tick.is_none())
             })
         };
@@ -1793,7 +1987,7 @@ pub(crate) fn tick(world: &mut World) {
         loop {
             let leg = w.leg as usize;
             if leg + 1 >= w.route.pts.len() {
-                if still(world) {
+                if still(world) && !bench {
                     arrived.push((id, w.party.clone()));
                 } else {
                     lost.push(id);

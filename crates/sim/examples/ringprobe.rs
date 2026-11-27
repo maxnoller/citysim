@@ -31,7 +31,14 @@ fn main() {
     if let Some(s) = size {
         b = b.roundabout(s);
     }
+    let walkers: f32 = std::env::var("RING_WALKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    b = b.walkers(walkers);
     let mut overlaps = 0u32;
+    let mut people_hits = 0u32;
+    let mut crossing_ticks = 0u32;
     let mut worst = 0.0f32;
     let mut max_in_box = 0usize;
     let mut still: std::collections::BTreeMap<citysim_sim::VehicleId, u32> = Default::default();
@@ -97,6 +104,32 @@ fn main() {
                 }
             }
         }
+        {
+            let people = citysim_sim::walk::people_on_crossings(w);
+            crossing_ticks += people.len() as u32;
+            if !people.is_empty() {
+                let bodies = traffic::car_bodies(w);
+                for &(p, r) in &people {
+                    for (_, q) in &bodies {
+                        // Circle against the body's quad.
+                        let c = [(q[0][0] + q[2][0]) * 0.5, (q[0][1] + q[2][1]) * 0.5];
+                        let ax = citysim_sim::geom::sub(q[0], q[3]);
+                        let ay = citysim_sim::geom::sub(q[1], q[0]);
+                        let (la, lb) = (
+                            citysim_sim::geom::dot(ax, ax).sqrt(),
+                            citysim_sim::geom::dot(ay, ay).sqrt(),
+                        );
+                        let d = citysim_sim::geom::sub(p, c);
+                        let u = (citysim_sim::geom::dot(d, ax) / la).abs() - la * 0.5;
+                        let v = (citysim_sim::geom::dot(d, ay) / lb).abs() - lb * 0.5;
+                        let out = (u.max(0.0).powi(2) + v.max(0.0).powi(2)).sqrt();
+                        if out < r {
+                            people_hits += 1;
+                        }
+                    }
+                }
+            }
+        }
         if t % 5 == 0 {
             let bodies = traffic::car_bodies(w);
             let o = traffic::overlapping_bodies(&bodies, 0.05);
@@ -144,6 +177,10 @@ fn main() {
             max_in_box = max_in_box.max(w.vehicles.values().filter(|v| v.junction.is_some()).count());
         }
     });
+    println!(
+        "walkers {walkers}/min: person-ticks on zebras {crossing_ticks}, car bodies over people {people_hits}, wait {:.1} s",
+        r.mean_wait_s
+    );
     println!(
         "{:?} x {:?} {:?} left {left} right {right}: {:.1} cars/min (by arm {:?}), gave up {}, overlap samples {overlaps} worst {worst:.2} m, most in box {max_in_box}, by turn {:?}",
         main, cross, size, r.per_minute, r.by_arm, r.gave_up, r.by_turn

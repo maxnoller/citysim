@@ -1269,6 +1269,9 @@ pub const RING_LOOKAHEAD_M: f32 = 22.0;
 pub const RING_FRONT_GAP_M: f32 = 1.0;
 /// Room it keeps to its sides, metres.
 pub const RING_SIDE_GAP_M: f32 = 0.3;
+/// A roundabout's zebra across an arm: its middle this far out from the
+/// give-way line (a car length: a car leaving stops between ring and zebra).
+pub const RING_ZEBRA_M: f32 = 6.2;
 /// Trucks go round a ring at this share of a car's speed.
 pub const RING_TRUCK_SPEED: f32 = 0.85;
 /// Routing: expected wait at a roundabout's give-way line, seconds.
