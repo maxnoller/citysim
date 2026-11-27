@@ -544,8 +544,9 @@ fn follow(
         let car = v.trip.and_then(|t| t.vehicle).filter(|c| w.vehicles.contains_key(*c));
         let sel = match (car, v.trip, v.inside) {
             (Some(car), _, _) => Some(WorldTarget::Vehicle(car)),
-            // On the way where the map draws nothing: mark where they go.
-            (None, Some(t), _) => Some(WorldTarget::Building(t.to)),
+            // On the way where the map draws nothing: the route's marker
+            // shows where they should be (and the destination glows).
+            (None, Some(_), _) => None,
             (None, None, Some(b)) => Some(WorldTarget::Building(b)),
             _ => None,
         };
@@ -1804,13 +1805,15 @@ fn leader(
     view: Res<PeopleView>,
     hl: Res<WorldHighlight>,
     sim: Res<SimWorld>,
+    route: Res<crate::shared::RouteView>,
     ui_scale: Res<UiScale>,
     cameras: Query<(&Camera, &GlobalTransform), With<crate::shared::WorldCamera>>,
     mut parts: Query<(&Leader, &mut Node, &mut UiTransform, &mut Visibility)>,
 ) {
     let w = &sim.world;
     let at = match view.current() {
-        Some(Target::Person(c)) => people::person_position(w, c),
+        // Under way off the map: to the marker of where they should be.
+        Some(Target::Person(c)) => route.traveller.or_else(|| people::person_position(w, c)),
         Some(Target::Place(b)) => w.buildings.get(b).map(|b| b.center()),
         Some(Target::Vehicle(v)) => w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0),
         None => match &hl.selected {
