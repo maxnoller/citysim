@@ -104,21 +104,22 @@ impl VModel {
     }
 }
 
-/// A private car body for a seed (the household's): mostly saloons,
-/// hatchbacks, estates and SUVs, some vans and pickups.
+/// A private car body for a seed (the household's): mostly compact
+/// hatchbacks and estates, some saloons, small vans and SUVs, few pickups
+/// (a European town's car park).
 pub(super) fn car_for(seed: u32) -> VModel {
     let h = hash(seed ^ 0x51ED_270B);
-    let shape = match h % 12 {
-        0..=2 => 0,
-        3..=5 => 1,
-        6 | 7 => 4,
-        8 | 9 => 5,
-        10 => 2,
+    let shape = match h % 20 {
+        0..=6 => 1,
+        7..=10 => 4,
+        11..=13 => 0,
+        14..=16 => 2,
+        17 | 18 => 5,
         _ => 3,
     };
     VModel::Car {
         shape,
-        paint: vehicle_gen::paint(h / 16) as u8,
+        paint: vehicle_gen::paint(h / 32) as u8,
     }
 }
 

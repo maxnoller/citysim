@@ -83,15 +83,118 @@ pub fn octa_blob(m: &mut MeshBuilder, c: Vec3, r: Vec3, color: Color, yaw: f32) 
     }
 }
 
-/// Broadleaf tree: trunk and one or two canopy blobs. `s` scales it
-/// (1.0 is about 7 m tall).
-pub fn round_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32) {
-    m.cylinder(base, 0.18 * s, 2.6 * s, 5, palette::TRUNK, palette::TRUNK);
-    blob(m, base + Vec3::Y * 4.4 * s, Vec3::new(2.3, 2.2, 2.3) * s, canopy, yaw);
+/// A tree crown: an icosahedron lit from above (a sunny highlight on the
+/// top faces, the body, a shaded underside).
+pub fn crown(m: &mut MeshBuilder, c: Vec3, r: Vec3, color: Color, yaw: f32) {
+    let (v, f) = icosahedron();
+    let q = Quat::from_rotation_y(yaw);
+    let top = lin(super::palette::mix(color, Color::srgb_u32(0xC8D86A), 0.22));
+    let mid = lin(color);
+    let low = lin(shade(color, 0.72));
+    for tri in f {
+        let p = tri.map(|i| c + q * (v[i] * r));
+        let cols = tri.map(|i| {
+            if v[i].y > 0.75 {
+                top
+            } else if v[i].y > -0.2 {
+                mid
+            } else {
+                low
+            }
+        });
+        m.tri_c(p[0], p[1], p[2], cols);
+    }
 }
 
-/// A garden or street tree of a `species` (0 round, 1 tall oval, 2 birch,
-/// 3 conifer), `s` scales it (1.0 is about 7 m tall).
+/// Broadleaf species by a tree's yaw (so every caller gets the mix): 0 a
+/// round crown with a lobe, 1 a tall oval (lime, poplar), 2 a birch, 3 a
+/// wide spreading crown (plane, oak).
+pub fn species_of(yaw: f32) -> u32 {
+    ((yaw * 7.31).fract().abs() * 4.0) as u32 % 4
+}
+
+/// Broadleaf tree of the species `species_of(yaw)`. `s` scales it (1.0 is
+/// about 7 m tall).
+pub fn round_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32) {
+    let side = Vec3::new(yaw.cos(), 0.0, yaw.sin());
+    match species_of(yaw) {
+        1 => {
+            m.cylinder(base, 0.16 * s, 2.0 * s, 5, palette::TRUNK, palette::TRUNK);
+            crown(
+                m,
+                base + Vec3::Y * 4.6 * s,
+                Vec3::new(1.5, 3.0, 1.5) * s,
+                shade(canopy, 0.9),
+                yaw,
+            );
+        }
+        2 => {
+            let bark = Color::srgb_u32(0xE6E1D6);
+            m.cylinder(base, 0.11 * s, 4.2 * s, 4, bark, bark);
+            m.cylinder(
+                base + Vec3::Y * 1.2 * s,
+                0.115 * s,
+                0.15 * s,
+                4,
+                Color::srgb_u32(0x3A3833),
+                bark,
+            );
+            let light = super::palette::mix(canopy, Color::srgb_u32(0xA9C25A), 0.45);
+            crown(
+                m,
+                base + Vec3::Y * 4.4 * s + side * 0.3 * s,
+                Vec3::new(1.4, 1.7, 1.4) * s,
+                light,
+                yaw,
+            );
+            octa_blob(
+                m,
+                base + Vec3::Y * 3.4 * s - side * 0.7 * s,
+                Vec3::new(1.0, 1.0, 1.0) * s,
+                light,
+                yaw + 0.5,
+            );
+        }
+        3 => {
+            m.cylinder(base, 0.24 * s, 3.0 * s, 5, palette::TRUNK, palette::TRUNK);
+            crown(m, base + Vec3::Y * 4.6 * s, Vec3::new(3.0, 1.9, 2.7) * s, canopy, yaw);
+            octa_blob(
+                m,
+                base + Vec3::Y * 4.0 * s + side * 2.0 * s,
+                Vec3::new(1.4, 1.2, 1.4) * s,
+                shade(canopy, 0.95),
+                yaw,
+            );
+        }
+        _ => {
+            m.cylinder(base, 0.18 * s, 2.6 * s, 5, palette::TRUNK, palette::TRUNK);
+            crown(m, base + Vec3::Y * 4.4 * s, Vec3::new(2.3, 2.2, 2.3) * s, canopy, yaw);
+            octa_blob(
+                m,
+                base + Vec3::Y * 3.9 * s + side * 1.6 * s,
+                Vec3::new(1.3, 1.2, 1.3) * s,
+                shade(canopy, 1.05),
+                yaw + 0.7,
+            );
+        }
+    }
+}
+
+/// The distant version of `round_tree`: an eight-sided crown of the
+/// species' shape on a three-sided trunk.
+pub fn round_tree_far(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32) {
+    let (c, r) = match species_of(yaw) {
+        1 => (4.6, Vec3::new(1.6, 3.0, 1.6)),
+        2 => (4.0, Vec3::new(1.6, 1.9, 1.6)),
+        3 => (4.5, Vec3::new(3.1, 2.0, 2.9)),
+        _ => (4.0, Vec3::new(2.4, 2.6, 2.4)),
+    };
+    octa_blob(m, base + Vec3::Y * c * s, r * s, canopy, yaw);
+    m.cylinder(base, 0.22 * s, 1.6 * s, 3, palette::TRUNK, palette::TRUNK);
+}
+
+/// A garden or street tree of a `species` (0..=2 broadleaf by yaw, 3
+/// conifer), `s` scales it (1.0 is about 7 m tall).
 pub fn garden_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32, species: u32) {
     match species % 4 {
         3 => pine_tree(m, base, s, canopy, yaw),
@@ -99,12 +202,27 @@ pub fn garden_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: 
     }
 }
 
-/// Conifer: trunk and two stacked cones.
+/// Conifer: trunk and three stacked cones, each tier a little darker below.
 pub fn pine_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32) {
     let phase = yaw / std::f32::consts::TAU;
     m.cylinder(base, 0.16 * s, 1.4 * s, 5, palette::TRUNK, palette::TRUNK);
-    m.cone(base + Vec3::Y * 1.0 * s, 1.9 * s, 4.2 * s, 7, shade(canopy, 0.9), phase);
-    m.cone(base + Vec3::Y * 3.4 * s, 1.35 * s, 3.6 * s, 7, canopy, phase + 0.07);
+    m.cone(
+        base + Vec3::Y * 0.9 * s,
+        2.0 * s,
+        3.2 * s,
+        6,
+        shade(canopy, 0.86),
+        phase,
+    );
+    m.cone(
+        base + Vec3::Y * 2.6 * s,
+        1.55 * s,
+        3.0 * s,
+        6,
+        shade(canopy, 0.94),
+        phase + 0.08,
+    );
+    m.cone(base + Vec3::Y * 4.3 * s, 1.05 * s, 2.9 * s, 6, canopy, phase + 0.03);
 }
 
 /// Low garden bush.

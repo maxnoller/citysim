@@ -27,7 +27,7 @@ pub fn patch(m: &mut MeshBuilder, x0: f32, z0: f32, x1: f32, z1: f32, y: f32, co
 /// A parked car (no lights lit) centred at `c` heading along `yaw`.
 pub fn parked_car(m: &mut MeshBuilder, rng: &mut Stream, c: Vec3, yaw: f32) {
     let body = palette::CAR_BODIES[vehicle_gen::paint(rng.next_u32())];
-    let shape = [0, 1, 4, 5, 0, 1, 2, 5][rng.below(8) as usize];
+    let shape = [1, 1, 4, 0, 1, 4, 2, 5][rng.below(8) as usize];
     let lod = if m.lod {
         super::building_gen::Lod::Far
     } else if m.fine {

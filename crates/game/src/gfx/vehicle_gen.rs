@@ -770,6 +770,17 @@ pub fn car_model(body: Color, shape: u32, lod: Lod) -> MeshBuilder {
                 Vec3::X * sgn,
                 col,
             );
+            // The EU band at the left end of the plate.
+            m.quad_facing(
+                [
+                    Vec3::new(x + sgn * 0.002, y + 0.01, -0.25 * sgn),
+                    Vec3::new(x + sgn * 0.002, y + 0.01, -0.19 * sgn),
+                    Vec3::new(x + sgn * 0.002, y + 0.11, -0.19 * sgn),
+                    Vec3::new(x + sgn * 0.002, y + 0.11, -0.25 * sgn),
+                ],
+                Vec3::X * sgn,
+                Color::srgb_u32(0x2D4FA0),
+            );
         }
         // Roof rails on SUVs and estates.
         if shape == 5 || shape == 4 {

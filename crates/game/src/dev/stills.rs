@@ -28,7 +28,7 @@ use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_dis
 use bevy::ui::IsDefaultUiCamera;
 
 use super::{DemoKind, ShotView};
-use crate::shared::{CameraOverride, CameraPose, GameSet, OverlayMode, SceneReady, SimCommand, WorldCamera};
+use crate::shared::{CameraOverride, CameraPose, GameSet, OverlayMode, SceneReady, SimCommand, SimWorld, WorldCamera};
 
 /// `CITYSIM_STILLS` is set: the app runs windowless (see `main.rs`).
 pub fn enabled() -> bool {
@@ -41,6 +41,10 @@ enum View {
     Pose([f32; 5]),
     /// A named view of the model sheet (`sheet::view`).
     Sheet(CameraPose),
+    /// Close behind a vehicle on a kind of trip (`trip:movein`,
+    /// `trip:moveout`, `trip:lorry`, `trip:delivery`), picked when the shot
+    /// is taken: a moving household nearest its new home, else the first.
+    Trip(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +74,7 @@ fn parse_list(s: &str) -> Vec<Still> {
                 "street" => View::Preset(ShotView::Street),
                 "close" => View::Preset(ShotView::Close),
                 name if super::sheet::view(name).is_some() => View::Sheet(super::sheet::view(name)?),
+                name if name.starts_with("trip:") => View::Trip(name[5..].to_string()),
                 pose => {
                     let v: Vec<f32> = pose.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                     if v.len() != 5 {
@@ -154,6 +159,47 @@ impl Plugin for StillsPlugin {
 #[derive(Component)]
 struct StillShot;
 
+/// A pose close to a vehicle on a `kind` of trip (see `View::Trip`).
+fn trip_pose(world: &citysim_sim::World, kind: &str) -> Option<CameraPose> {
+    use citysim_sim::{Place, TripPurpose};
+    let mut best: Option<(f32, [f32; 2], f32)> = None;
+    for (id, v) in world.vehicles.iter() {
+        let Some(t) = world.traffic.trips.get(id) else { continue };
+        let long = t.from == Place::Entry || t.to == Place::Entry;
+        let wanted = match kind {
+            "movein" => t.purpose == TripPurpose::MoveIn,
+            "moveout" => t.purpose == TripPurpose::MoveOut,
+            "lorry" => t.purpose == TripPurpose::Goods && long,
+            "delivery" => t.purpose == TripPurpose::Goods && !long,
+            _ => false,
+        };
+        if !wanted || v.speed < 0.5 && kind == "lorry" {
+            continue;
+        }
+        // Nearest its destination building (arriving), else anywhere off
+        // the highway stub.
+        let score = match t.to_building.and_then(|b| world.buildings.get(b)) {
+            Some(b) => {
+                let c = b.center();
+                ((v.pos[0] - c[0]).powi(2) + (v.pos[1] - c[1]).powi(2)).sqrt()
+            }
+            None => 1000.0 - v.pos[0].min(900.0),
+        };
+        if v.pos[0] < 110.0 || best.is_some_and(|b| b.0 <= score) {
+            continue;
+        }
+        best = Some((score, v.pos, v.heading));
+    }
+    let (_, p, h) = best?;
+    Some(CameraPose {
+        focus: Vec3::new(p[0], 0.0, p[1]),
+        // Looking along the vehicle from behind and to one side.
+        yaw: std::f32::consts::FRAC_PI_2 - h + 0.9,
+        pitch: 0.62,
+        distance: 30.0,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_stills(
     mut commands: Commands,
@@ -167,6 +213,7 @@ fn run_stills(
     in_flight: Query<(), With<StillShot>>,
     mut out: MessageWriter<SimCommand>,
     mut exit: MessageWriter<AppExit>,
+    sim: Res<SimWorld>,
 ) {
     if !st.sent_sample && st.demo.is_none() {
         st.sent_sample = true;
@@ -202,6 +249,17 @@ fn run_stills(
             distance,
         },
         View::Sheet(pose) => pose,
+        View::Trip(kind) => match trip_pose(&sim.world, &kind) {
+            Some(p) => p,
+            None => {
+                if st.frames == 0 && st.since == 0.0 {
+                    warn!("stills: no vehicle on a {kind} trip yet");
+                }
+                camera
+                    .0
+                    .unwrap_or_else(|| super::autoshot::view_pose(ShotView::Street, st.demo))
+            }
+        },
     };
     camera.0 = Some(pose);
     overlay.set_if_neq(still.overlay);
