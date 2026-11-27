@@ -1196,13 +1196,15 @@ pub fn site(key: ModelKey, stage: u8) -> MeshBuilder {
         if len < 0.1 {
             return;
         }
-        m.box_yaw(
-            Vec3::new(mid.x, 0.0, mid.y),
-            Vec3::new(len, 1.9, 0.06),
-            yaw,
-            white,
-            white,
-        );
+        m.surface(Glow::Cladding, |m| {
+            m.box_yaw(
+                Vec3::new(mid.x, 0.0, mid.y),
+                Vec3::new(len, 1.9, 0.06),
+                yaw,
+                white,
+                white,
+            )
+        });
         m.box_yaw(
             Vec3::new(mid.x, 1.3, mid.y),
             Vec3::new(len + 0.01, 0.25, 0.08),
@@ -1220,12 +1222,26 @@ pub fn site(key: ModelKey, stage: u8) -> MeshBuilder {
     let cabin = Color::srgb_u32(0x3F7FB8);
     let cx = if rng.chance(0.5) { lot.x0 + 1.9 } else { lot.x1 - 1.9 };
     if key.cells.0 >= 2 || stage == 0 {
-        m.cuboid2(
-            Vec3::new(cx - 1.3, 0.0, lot.z1 - 2.0),
-            Vec3::new(cx + 1.3, 2.4, lot.z1 - 0.6),
-            cabin,
-            shade(cabin, 1.2),
-        );
+        m.surface(Glow::Cladding, |m| {
+            m.cuboid2(
+                Vec3::new(cx - 1.3, 0.0, lot.z1 - 2.0),
+                Vec3::new(cx + 1.3, 2.4, lot.z1 - 0.6),
+                cabin,
+                shade(cabin, 1.2),
+            )
+        });
+        // Windows and a door on the cabin's long side.
+        let f = Face::of(
+            Rect {
+                x0: cx - 1.3,
+                x1: cx + 1.3,
+                z0: lot.z1 - 2.0,
+                z1: lot.z1 - 0.6,
+            },
+            0.0,
+        )[2];
+        f.lit_rect(&mut m, Glow::Window, 0.3, 1.1, 1.1, 1.8, 0.02, palette::WINDOW);
+        f.rect(&mut m, 1.6, 2.2, 0.1, 2.0, 0.02, shade(cabin, 0.7));
     }
     let sand = Color::srgb_u32(0xD8C08A);
     m.cone(
@@ -1342,6 +1358,17 @@ pub fn site(key: ModelKey, stage: u8) -> MeshBuilder {
                 c + Vec3::new(mast * 0.5, y + 0.08, mast * 0.5),
                 yellow,
             );
+            // Diagonal bracing on two faces of the mast.
+            for (dir, n) in [(Vec3::X, Vec3::Z), (Vec3::Z, Vec3::X)] {
+                let o = c + n * (mast * 0.5 + 0.01) - dir * mast * 0.5 + Vec3::Y * (y - 1.5);
+                let (a, b) = (o, o + dir * mast + Vec3::Y * 1.5);
+                let side = n * 0.04;
+                m.quad_facing(
+                    [a - side, b - side, b + side + Vec3::Y * 0.08, a + side + Vec3::Y * 0.08],
+                    n,
+                    yellow,
+                );
+            }
             y += 1.5;
         }
         // Jib over the building, counter-jib with its weight, the cab.
