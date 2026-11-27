@@ -637,8 +637,8 @@ The zoning model keeps its parts (lattices, blocks, cells, lots in one lattice);
 
 ## 2026-11-27 (r6-traffic: traffic, the day and money hit their targets)
 
-Goal: a good layout flows, a bad one hurts, the day looks alive, money rewards a growing well-run city. Charts
-`traffic-01`..`04`, pictures `traffic-05`..`08` in `/home/max/citysim-shots/r6/`, data in `traffic-data/` there.
+Goal: a good layout flows, a bad one hurts, the day looks alive, money rewards a growing well-run city. The charts,
+pictures and run data of this work are kept outside the repository.
 
 ### Signals (renderers: aspects as before; timings changed)
 
@@ -658,11 +658,12 @@ Goal: a good layout flows, a bad one hurts, the day looks alive, money rewards a
 
 ### Other road rules
 
-- **Courtesy at arterial give-ways** (`COURTESY_WAIT_S` 20 s, `COURTESY_SPEED` 4 m/s): a minor-road car that has stood
-  at its line that long goes as if it had priority while every conflicting car with priority creeps (a slow queue on
-  an avenue lets one in). Streets meeting streets are unchanged.
-- **Residential streets** are driven with `STREET_FOLLOW_HEADWAY_S` 2.6 s (was 2.0): about 1,200 cars an hour per
-  lane; a street crossing with signals passes ~36 cars a minute (was 46).
+- **Courtesy at give-ways** (`COURTESY_WAIT_S` 20 s, `COURTESY_SPEED` 4 m/s): at any priority junction a minor-road
+  car that has stood at its line that long goes as if it had priority while every conflicting car with priority
+  creeps (a slow queue on an avenue or a main street lets one in).
+- **Residential streets** are driven with `STREET_FOLLOW_HEADWAY_S` 2.2 s (was 2.0): about 1,350 cars an hour per
+  lane. (2.6 s was tried: it hardly slowed the streets-only city, but a small town of streets gave up trips at its T
+  junctions, where queues backed up across them.)
 - **Turn pockets** are up to `POCKET_LONG_M` (40 m) as before, and up to `POCKET_MAX_M` (60 m) only where they take at
   most half of a long block's drivable length. `junction::turn_pocket` reports the length; renderers need nothing new.
 - **Routing:** the A* heuristic uses the fastest road that is not a highway, less what the highway stub can save
@@ -670,23 +671,32 @@ Goal: a good layout flows, a bad one hurts, the day looks alive, money rewards a
 
 ### The day (inspect panel: read this)
 
+- **Lunch out gives way to slow roads:** the shares below are taken in full while commutes take at most
+  `LUNCH_DELAY[0]` (2.0) times their free-flow time (`traffic::delay_factor`), not at all from `LUNCH_DELAY[1]` (3.0),
+  linearly between (`day::lunch_room`); a lunch (a `Leisure` trip at midday, there or back) is a drawn car at most at
+  the big city's share `LUNCH_CAR_SHARE` (0.4, `traffic::drawn_lunch`) whatever the town's size, the rest happen off
+  screen. So a small town whose roads are already slow is not loaded further at midday.
 - **Lunch breaks:** on `LUNCH_BREAK_SHARE` of days a worker leaves work at a personal time in `LUNCH_BREAK_H` for the
   nearest of a few venues within `LUNCH_MAX_TRIP_H`, stays `LUNCH_BREAK_VISIT_H` and drives back to work (trips of
   purpose `Leisure`; the shift's end and its attendance are unchanged).
 - **Out for lunch:** someone at home with the day free (`MIDDAY_FREE_H`: a day off, or no job) goes out for lunch on
   `MIDDAY_OUT_SHARE` of days at a personal time in `MIDDAY_OUT_H`, to a venue nearby (`MIDDAY_DIST_SCALE_M`), for
   `MIDDAY_VISIT_H` plus up to `MIDDAY_VISIT_SPREAD_H`; children at home come along.
-- **Evening:** the late shop shift starts `LATE_SHIFT_OFFSET_H` 3.0 h after the early one with a narrow personal spread
-  (`LATE_SHIFT_SPREAD_H`); nobody sets off for leisure after 19:00 (`LEISURE_CLOSE_H`), venues close at 21:00
+- **Evening:** the late shop shift starts `LATE_SHIFT_OFFSET_H` 4.0 h after the early one (after the lunch hour; 3.0 h
+  put its commute into a busy small town's midday) with a narrow personal spread (`LATE_SHIFT_SPREAD_H`), ending soon
+  after the shops close; nobody sets off for leisure after 19:00 (`LEISURE_CLOSE_H`), venues close at 21:00
   (`LEISURE_LAST_H`); nights out are planned to be home by `LEISURE_HOME_BY_H` (22:00) in today's traffic (the
   delay factor on the drive both ways) and end in time for it; after a day's work people go out only when their need
   is urgent (most go on days off); newcomers arrive 06:00-21:00; deliveries and exports peak between the rush hours.
   Shopping trips check the arrival time in today's traffic.
 - **`inspect::TripView::reason: TripReason`** (`text()`): `ToWork`, `HomeFromWork`, `MovingIn`, `MovingOut`,
   `Groceries`, `ShoppingAfterWork`, `HomeFromShopping`, `LunchBreak`, `BackToWork`, `OutForLunch`, `HomeFromLunch`,
-  `NightOut`, `HomeFromNightOut`, `Delivery`. Interface: a `Leisure` trip at midday is a lunch, not "a night out"
-  (`ui/people.rs` `purpose_word` still says so; use the reason). `inspect::plan` while working shows the shift's end
-  (a lunch break is not planned ahead), at lunch the next step is work, and the trip back from lunch ends in `Working`.
+  `NightOut`, `HomeFromNightOut`, `Delivery`. A trip home counts as home first (someone off duty may lunch where they
+  work). The same reason is on `inspect::VehicleView::reason` (judged from the owner's home and workplace) and on a
+  planned trip, `inspect::NextStep::reason` (`Some` for a `Travelling` step: the way home from a lunch is
+  `HomeFromLunch`, though its `purpose` says `ToHome`). The interface names every trip by its reason
+  (`ui/people.rs` `reason_word`). `inspect::plan` while working shows the shift's end (a lunch break is not planned
+  ahead), at lunch the next step is work, and the trip back from lunch ends in `Working`.
 
 ### Money
 
@@ -696,8 +706,9 @@ Goal: a good layout flows, a bad one hurts, the day looks alive, money rewards a
 - Avenues cost `AVENUE_COST_PER_CELL` 75 a cell (was 90) and `AVENUE_UPKEEP_PER_CELL_PER_DAY` 6 (was 8).
 - **Money flows through the day:** every in-game hour but midnight the city receives a 24th of yesterday's net
   (`economy::hourly`, `Economy::advanced_today`); midnight books the day's real `Budget` less what was advanced. The
-  budget lines, `DaySummary` and `last_day` are unchanged; the money figure now moves every in-game hour (the budget
-  page's "booked at midnight" wording is still true for the budget).
+  budget lines, `DaySummary` and `last_day` are unchanged; the money figure moves every in-game hour. The interface
+  says so: the bar shows what each hour pays in ("+$208 / hour"), the budget page that midnight books the day and
+  settles the rest.
 - **`DaySummary::traffic: Option<TrafficLoss>`**: what traffic cost each booked day (`None` for days booked by saves
   written before it was kept; a version-4 block gives its last day the loss it kept). The budget page's loss chart reads
   it (`ui/city.rs` `LossHistory`).
@@ -707,9 +718,10 @@ Goal: a good layout flows, a bad one hurts, the day looks alive, money rewards a
 - Extension block **5** (`ExtensionV5`: block 4 plus the per-day traffic losses and `Economy::advanced_today`). Blocks
   1-4 load; format 7, version 6, 4 and 3 saves load as before.
 
-### Measured (release, this sandbox, 10 seeds per city; data in `traffic-data/before` and `after`)
+### Measured (release, an 8-core cloud machine, 10 seeds per city)
 
-See the final report of this round for the table; in short: avenue city 9-11k 2.21x · 0.71 % -> 1.78x · 0.34 %
+As first measured (street headway 2.6 s, late shift at 3.0 h; the run data are kept outside the repository): avenue
+city 9-11k 2.21x · 0.71 % -> 1.78x · 0.34 %
 (1.70-2.2x across runs; the traffic rules alone at the old money: 2.07x · 0.52 %, part of the gain comes from the
 scripted player building ahead now that cash flows hourly); streets city 6-8k 2.59x -> 2.53x, 7-9k 2.75x -> 2.93x
 (target 3-4x missed); junction bench avenue x avenue 30 % turning 103 -> 117 cars a minute; cars per 1,000 residents
@@ -717,12 +729,36 @@ at 11:00-15:00 11 / 16 -> 24 / 32 (avenue / streets city), 22:00 27 / 43 -> 8 / 
 income in the avenue city rises up to ~16,000 residents ($34k a day), traffic loss $12k at day 15 against a net of
 $34k (streets city: $20k against $22k); the avenue player's longest wait for money 192-336 s -> 0-80 s real at 2.5x.
 
+With the rules as they now stand (street headway 2.2 s, late shift at 4.0 h, lunch giving way to slow roads, courtesy
+at every priority junction), 10 seeds: the small good town (`two_grid`, final day) 3.52x commute over free flow, 5.0 %
+of trips given up, 84 cars per 1,000 at 11:00-15:00 (before this round 3.54x, 5.0 %, 72; with the first r6 rules 3.87x,
+5.7 %, 101); the avenue city at 9-11k 1.48x, 0.28 % given up, 24 per 1,000 at midday and 20 at 22:00 on days 8-10; the
+streets city 2.61x at 6-8k, 2.97x at 7-9k.
+
 ### Tools
 
 `examples/dfsplit.rs` (what the delay factor is made of: waiting to pull out, the route at the speed limits, time lost
 on the road; `BY_START=1` by departure hour), `sigcity.rs` (a signal of a saved city second by second, `ARM=n` front
 cars), `dayprobe.rs` (who is where during the day), `midnight.rs` (the steps around midnight in a big city);
 `simint day` takes `SIMINT_FROM=h`; `headless` hourly CSVs have cars on the road by purpose.
+
+## 2026-11-27 (r6-ui: undo brings demolished buildings back)
+
+- `World::building_record(id) -> Option<restore::BuildingRecord>`: everything needed to put a building back (the
+  building, its lot's cells with their centres, its households with their members, its staff). The interface takes
+  one for every building a plan will demolish, before sending it.
+- `Command::RestoreBuilding(Box<BuildingRecord>)`: the same building (kind, level, footprint, facing, seed, age) under a
+  new id, with its households (they had left the city) and its staff who are still jobless; members get their old jobs
+  back where there is room; the demolition cost is refunded. Refused with `CommandError::CannotRestore(RestoreProblem)`:
+  `LandChanged` (the land under the lot is gone or has another shape; a lattice made anew is matched by cell
+  centres), `BuiltOn`, `Rezoned`, `NoRoad`. `preview` agrees with `apply`. Nothing is saved (undo is per session).
+- Lots stay clear of road reserves, so a road that stood can always be put back while nothing else changed (undo
+  rebuilds the roads first): lots are chosen by cell centres, and on a curved road side the straight rectangle over
+  curved cells reached up to about a metre into the reserve on the inside of a bend, so the identical road was refused
+  ("a building is in the way"). Growth and restore move such a footprint away from the road until it is clear
+  (`growth::placed`, `build::reserve_intrusion`); rectangles on straight lattices are unchanged. Test: every road of a
+  grown organic town can be removed and built again (`tests/restore.rs`); `examples/rebuildprobe.rs` counts refusals
+  and overlapping buildings.
 
 ## 2026-11-27 (r6-zoning: one grid per block, greens, clean edges)
 
@@ -745,8 +781,8 @@ and blocks, found again on load.
   bands of one grid the next band's cell; `BandLink { prev, next, rows }`), `Strip::spanning(i0, frames, rows)`.
 - A road edit that closes, opens or reshapes a face redoes the blocks of every road around it (the closure is
   computed in `blocks::sync`); zones move onto the new cells as on any re-zoning. Block regeneration after one edit in
-  the 10,000-resident city: 0.24-0.70 ms (release, this 8-core sandbox; the same run of the previous code: 0.16-0.47
-  ms). Loading a version-7 save made before block grids remakes the faces' blocks (`blocks::derive_faces`): zones move,
+  the 10,000-resident city: 0.24-0.70 ms (release, an 8-core cloud machine; the same run of the previous code:
+  0.16-0.47 ms). Loading a version-7 save made before block grids remakes the faces' blocks (`blocks::derive_faces`): zones move,
   buildings move onto the lots under them where those are free, the rest stay. Fixture
   `tests/data/hand_blocks_v7.citysave`.
 
@@ -764,7 +800,7 @@ and blocks, found again on load.
   the land a usable cell holds where it differs from its quadrilateral. Where the rows of two roads meet at an angle,
   cells are cut along the line where the two roads' rows are equally deep, and a cell takes the land of the cells
   behind it that the other road's rows took, up to that line. A convex polygon (empty: nothing left). Renderers draw
-  zones and lot markers with it. Land of different lattices overlaps only along the line by rounding (property test:
+  zones, lot markers, the hovered-cell frame and the zone tool's preview with it. Land of different lattices overlaps only along the line by rounding (property test:
   at most 1 in 50 cut cells over 4 m², never 32 m²). Growth still uses whole cells (a lot's building stands on its
   front rows, well inside the line).
 

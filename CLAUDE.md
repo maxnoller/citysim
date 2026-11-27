@@ -71,7 +71,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   keyboard in a drawer), `HoveredCell` / `HoveredPoint` (shared computes from the `WorldCamera` ray).
 - `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose; beats
   `CameraFollow`), `CameraFollow { focus }` (gfx keeps the focus there), `CameraGoTo` message (move / zoom once).
-- Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `zone_cell_corners`.
+- Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell` (zoning cells: `world.zoning.cell_corners`,
+  their land where two roads' rows meet: `zoning::cell_shape` / `LandShapes`).
 - Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B (bulldozer on / off) J Esc/right-click, Space 1 2 3
   4, O, T (traffic map on / off in every state), G, F5/F9, F3 (performance panel), F6 (keyboard through the city
   window, the open drawer and the side panel, Shift+F6 back: arrows, Enter, Esc; long pages scroll to the focus),
@@ -83,7 +84,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   points, handles, tightest bend, planned nodes; written only when it changes), `ToolPreview::{kind, area,
   zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, doomed buildings,
   `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells` and
-  `shared::cell_corners` are gone: nothing wrote or used them any more.)
+  `shared::cell_corners` / `zone_cell_corners` are gone: nothing wrote or used them any more.)
 - `RouteView { state: RouteState::{None, Driving, Planned, Unseen}, points, origin, destination }` (ui writes while a
   car or person is selected, only when it changes meaningfully: a new route, the car 2.5 m further on; gfx draws it in
   `gfx/route.rs`): `points` in sim metres along the lanes (lane offsets, left-turn pockets and junction turn paths included) from the car
@@ -133,7 +134,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   are jobless: `demand::jobs_view(world)` (`JobsView`, `JoblessReason::text()`; shown under the statistics tiles). Bulldozing is never refused for lack of money. Money
   may go negative.
 - People: individual citizens in households (`world.citizens`, `inspect::*`; why a trip is made:
-  `TripView::reason.text()`, e.g. a midday `Leisure` trip is a lunch); every car trip is a car on the road up
+  `TripView::reason.text()`, also `VehicleView::reason` and a planned trip's `NextStep::reason`, e.g. a midday `Leisure`
+  trip is a lunch; ui names every trip by it, `people::reason_word`). Lunch out gives way to slow roads
+  (`balance::LUNCH_DELAY` by `traffic::delay_factor`) and is drawn at most at the big city's car share
+  (`LUNCH_CAR_SHARE`); every other car trip is a car on the road up
   to `traffic::vehicle_budget` (125 per 1,000 residents), the rest happen off screen; commutes off screen take
   `traffic::delay_factor` times their free-flow time (what the roads do to real cars).
 - Zoning is on lattices of blocks along each road side (`world.zoning`; `world.grid_view()` answers world-cell
@@ -155,7 +159,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   staff); undo sends `Command::RestoreBuilding(record)` after the roads: the same building (new id) with its households
   (they had left the city) and staff still jobless, members get old jobs back where there is room, the demolition cost
   is refunded. Refused with `CommandError::CannotRestore(RestoreProblem::{LandChanged, BuiltOn, Rezoned, NoRoad})`;
-  a rebuilt lattice is matched by cell centres. Session-only (nothing saved).
+  a rebuilt lattice is matched by cell centres. Session-only (nothing saved). Lots stay clear of every road's reserve
+  (`growth::placed` moves a rectangle over curved cells off the road), so a road that stood can always be built again;
+  `--example rebuildprobe` checks a grown town.
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
 - Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5; version 6 loads, its zoning
@@ -251,7 +257,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   rotate mid-draw, curve and undo, step back) and prints PASS / FAIL.
 - UI capture: `CITYSIM_UI_SHOTS=dir` (interface states, best on `CITYSIM_DEMO=organic`; `CITYSIM_SAVE_DIR` for the
   save/load step; `CITYSIM_SHOT_SIZE=WxH` sets the window), `CITYSIM_UI_TOUR=1`.
-  `CITYSIM_UI_SHOTS_ONLY=road-curve,people-person,...` picks states (names in `ui/shots.rs`).
+  `CITYSIM_UI_SHOTS_ONLY=road-curve,people-person,...` picks states (names in `ui/shots.rs`; `zone-cut` hovers a cut
+  cell with the fill tool, `people-lunch` (with `CITYSIM_DEMO_HOUR=12`) a driver on a lunch trip).
 - ui tools: plain modules know nothing of layout: `ui/fsnap.rs` (snapping: nodes, T onto roads, angles from the start
   road and 15° steps, whole-cell lengths, zoning lattices, parallel at a set distance, extensions, line meetings),
   `ui/shapes.rs` (`Draft` chains of straight / curve / continuous pieces, `GridFrame`, `Stretch` of road between
@@ -296,7 +303,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   it removes, 3 zoning a marquee, 7 de-zoning; `4|5|6` the free-form road tool from real previews), `CITYSIM_DEMO_AVENUES=1` (demo main road upgraded
   to an avenue), `CITYSIM_GFX_SHOWCASE_SITES=x,z` (building sites with cranes at a spot).
 - gfx tool feedback: `gfx/cursor.rs` draws the hovered-cell frame and a faint cell grid around the cursor for the road
-  and zone tools only (never for Inspect or the bulldozer, which marks what it would remove in red);
+  and zone tools only (never for Inspect or the bulldozer, which marks what it would remove in red); the frame and the
+  zone tool's preview cells are the cells' land (`zoning::cell_shape`, cut where two roads' rows meet);
   `gfx/route.rs` draws `RouteView` (accent ribbon with a dark edge and white chevrons, dashed when planned / unseen,
   rings at both ends, a glowing destination building and a pin), rebuilt only when `RouteView` changes.
 - gfx shaders: `assets/gfx/shaders/city.wesl` (the shared `CityMaterial`: night glow by the vertex `uv.x` tag

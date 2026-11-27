@@ -25,9 +25,11 @@ working hours and empty out the city's purse.
 - **Zoning** in blocks up to six rows deep along each side of each road: straight roads on grids that follow their
   angle, curved roads on rows of lots bent along the kerb, so the inside and outside of every bend are continuous
   building land. Paint, along a road (drag to follow it through bends and junctions; 1, 2, 4 rows or the full block),
-  fill the land enclosed by roads, or a rectangle; the land that can be zoned shows while zoning. Buildings grow by
-  demand on lots one or two wide, with a yard behind on deep lots, always facing their road, and level up from
-  houses, small shops and sheds to apartment blocks, offices and works.
+  fill the land enclosed by roads, or a rectangle; the land that can be zoned shows while zoning. A block drawn street
+  by street (square, oblong, trapezoid or L) gets one grid of lots between its kerbs; where the rows of two roads meet
+  at an angle the land is cut cleanly along the line between them; enclosed land no lot can reach becomes a small
+  park. Buildings grow by demand on lots one or two wide, always facing their road, with gardens, car parks or storage
+  yards behind on deep lots, and level up from houses, small shops and sheds to apartment blocks, offices and works.
 - **Traffic** in real time: cars drive on the right in lanes, choose lanes before turns and wait at junctions with
   real rules — actuated traffic lights with protected left turns, priority junctions where side streets give way, and
   all-way stops. Junctions pick their control by road type and traffic; the junction tool shows each approach's
@@ -40,11 +42,13 @@ working hours and empty out the city's purse.
   The city window's People page shows the whole city: the age pyramid, households, work, what everyone is doing right
   now, trips by hour, happiness and its reasons, day by day.
 - **Money**: taxes per zone (businesses pay on the hours their staff actually work, so jams cost money), road upkeep
-  by kind, traffic lights, and city services that cost more per resident as the city grows and densifies. The budget
+  by kind, traffic lights, and city services that cost more per resident as the city grows and densifies. Money comes
+  in every hour (a share of yesterday's result) and midnight books the day and settles the rest. The budget
   page shows yesterday, today so far, where the running costs go, income and costs day by day and the tax rate. Debt
   cuts city services; demand falls and people leave until the budget is fixed, and the page says what would fix it.
 - **Day and night** on a 16-minute day: the sun and moon cross the sky, street lamps, windows, headlights and brake
-  lights come on at dusk, rush hours fill the roads.
+  lights come on at dusk; rush hours fill the roads, workers take lunch breaks and people with the day free go out for
+  lunch (fewer when the roads are slow), and the evening winds down by ten.
 - **A game HUD docked to the screen edges**: money, residents, jobless and demand on the left of the bottom bar, the
   tools and the bulldozer's switch in the middle, the clock and five-step speed switch on the right; a drawer that
   rises from the bar for the active tool and the maps; a city window for statistics, people and the budget with
