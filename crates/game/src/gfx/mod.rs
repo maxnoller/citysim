@@ -224,3 +224,185 @@ mod reload_tests {
         assert_eq!(snapshot(&mut loaded), want);
     }
 }
+
+/// Following a car: the systems as the game runs them, on a scripted clock
+/// (uneven frame times, 1x and 12x, a pause): the ring and the diamond sit
+/// on the drawn body every frame, and the followed body holds still in the
+/// camera's view once the camera has glided onto it.
+#[cfg(test)]
+mod follow_tests {
+    use std::time::Duration;
+
+    use bevy::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
+    use citysim_sim::{VehicleId, World, Zone};
+
+    use super::scene::WorldMaterials;
+    use crate::shared::{
+        CameraFollow, DrawnPoses, FollowOn, GraphicsQuality, SharedPlugin, SimClock, SimWorld, WorldCamera,
+        WorldHighlight, WorldTarget,
+    };
+
+    fn town() -> World {
+        let mut w = World::new(3);
+        let mut player =
+            citysim_sim::scenarios::GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+        while w.stats.population < 1_000 && w.time.day < 30 {
+            player.act(&mut w);
+            w.step();
+        }
+        // The morning rush.
+        let rush = citysim_sim::balance::TICKS_PER_DAY / 3;
+        while w.time.tick_of_day != rush {
+            w.step();
+        }
+        w
+    }
+
+    fn app(w: World) -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            bevy::input::InputPlugin,
+            bevy::transform::TransformPlugin,
+        ))
+        .init_asset::<Mesh>()
+        .init_asset::<StandardMaterial>()
+        .init_asset::<super::city_material::CityMaterial>()
+        .add_plugins(SharedPlugin)
+        .insert_resource(SimWorld {
+            world: w,
+            generation: 0,
+        })
+        .insert_resource(GraphicsQuality::Low)
+        .add_plugins((
+            super::land::LandPlugin,
+            super::buildings::BuildingsPlugin,
+            super::vehicles::VehiclesPlugin,
+            super::camera::CameraPlugin,
+            super::guides::GuidesPlugin,
+        ));
+        let lit = app
+            .world_mut()
+            .resource_mut::<Assets<super::city_material::CityMaterial>>()
+            .add(super::city_material::city_material(
+                StandardMaterial::default(),
+                Handle::default(),
+            ));
+        app.insert_resource(WorldMaterials {
+            lit: lit.clone(),
+            ground: lit,
+            sky: Handle::default(),
+            day: Handle::default(),
+        });
+        app
+    }
+
+    fn named(app: &mut App, name: &str) -> (Vec3, bool) {
+        let w = app.world_mut();
+        let mut q = w.query::<(&Name, &GlobalTransform, &Visibility)>();
+        q.iter(w)
+            .find(|(n, ..)| n.as_str() == name)
+            .map(|(_, t, v)| (t.translation(), *v != Visibility::Hidden))
+            .expect(name)
+    }
+
+    /// The camera's view of a ground point (camera space).
+    fn in_view(app: &mut App, p: Vec3) -> Vec3 {
+        let w = app.world_mut();
+        let mut q = w.query_filtered::<&GlobalTransform, With<WorldCamera>>();
+        let cam = q.single(w).expect("camera");
+        cam.affine().inverse().transform_point3(p)
+    }
+
+    /// Follow a moving car for `frames` frames of alternating 8 and 25 ms
+    /// at sim speed index `speed` (paused over `pause`): (frames checked,
+    /// largest marker offset, largest frame-to-frame movement in view).
+    fn follow(speed: usize, frames: usize, pause: std::ops::Range<usize>) -> (usize, f32, f32) {
+        let mut app = app(town());
+        app.world_mut().resource_mut::<SimClock>().speed = speed;
+        let step = |app: &mut App, i: usize| {
+            let dt = if i % 2 == 0 { 0.008 } else { 0.025 };
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(dt)));
+            app.update();
+        };
+        for i in 0..30 {
+            step(&mut app, i);
+        }
+        // A car that is moving and will keep going for a while.
+        let w = &app.world().resource::<SimWorld>().world;
+        let id: VehicleId = w
+            .vehicles
+            .iter()
+            .filter(|(_, v)| v.speed > 3.0)
+            .max_by_key(|(_, v)| v.route.len())
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no moving car: pop {}, day {}, {} vehicles, hour tick {}",
+                    w.stats.population,
+                    w.time.day,
+                    w.vehicles.len(),
+                    w.time.tick_of_day
+                )
+            });
+        let (mut checked, mut worst_mark, mut worst_move) = (0, 0.0f32, 0.0f32);
+        let mut last_view: Option<Vec3> = None;
+        for i in 0..frames {
+            // As ui does: pin it, follow it (the sim's point as the fallback).
+            let world = app.world_mut();
+            let Some(focus) = world
+                .resource::<SimWorld>()
+                .world
+                .vehicles
+                .get(id)
+                .map(|v| citysim_sim::drive::vehicle_pose(&world.resource::<SimWorld>().world, v).0)
+            else {
+                break;
+            };
+            world.resource_mut::<WorldHighlight>().selected = Some(WorldTarget::Vehicle(id));
+            *world.resource_mut::<CameraFollow>() = CameraFollow {
+                focus: Some(focus),
+                on: FollowOn::Vehicle(id),
+            };
+            world.resource_mut::<SimClock>().paused = pause.contains(&i);
+            step(&mut app, i);
+            let Some(d) = app.world().resource::<DrawnPoses>().vehicle(id) else {
+                last_view = None;
+                continue;
+            };
+            let body = Vec3::new(d.pos[0], 0.0, d.pos[1]);
+            let (ring, ring_shown) = named(&mut app, "Vehicle ring");
+            let (dia, dia_shown) = named(&mut app, "Vehicle marker");
+            assert!(ring_shown && dia_shown, "frame {i}: marks hidden");
+            let mark = body
+                .with_y(0.0)
+                .distance(ring.with_y(0.0))
+                .max(body.distance(dia.with_y(0.0)));
+            worst_mark = worst_mark.max(mark);
+            // After the glide in (2 s of frames), the body holds still in
+            // the camera's view.
+            let view = in_view(&mut app, body);
+            if i > 120
+                && let Some(last) = last_view
+            {
+                worst_move = worst_move.max(view.distance(last));
+                checked += 1;
+            }
+            last_view = Some(view);
+        }
+        (checked, worst_mark, worst_move)
+    }
+
+    #[test]
+    fn a_followed_car_holds_still_with_its_marks_on_it() {
+        for (speed, pause) in [(0, 200..260), (3, 0..0)] {
+            let (checked, mark, moved) = follow(speed, 400, pause);
+            println!("speed {speed}: {checked} frames, marks {mark:.5} m off, body moved {moved:.5} m in view");
+            assert!(checked > 100, "speed {speed}: only {checked} frames followed");
+            assert!(mark < 1e-3, "speed {speed}: a mark is {mark} m off the body");
+            assert!(moved < 2e-3, "speed {speed}: the body moved {moved} m in the view");
+        }
+    }
+}

@@ -1841,6 +1841,7 @@ fn leader(
     ui_scale: Res<UiScale>,
     cameras: Query<(&Camera, &Transform), With<WorldCamera>>,
     mut parts: Query<(&Leader, &mut Node, &mut UiTransform, &mut Visibility)>,
+    mut held: Local<Option<Vec2>>,
 ) {
     let w = &sim.world;
     // A car where it is drawn this frame (the sim's point is its front, up
@@ -1875,7 +1876,16 @@ fn leader(
         // The camera has no parent: its transform of this frame (its global
         // transform is propagated later in the frame).
         let tf = GlobalTransform::from(*tf);
-        let p = cam.world_to_viewport(&tf, crate::shared::sim_to_world(at?, 1.5)).ok()? / scale;
+        let p = cam.world_to_viewport(&tf, crate::shared::sim_to_world(at?, 1.5)).ok()?;
+        // On whole pixels, held while it moves less than one (a followed car
+        // stands still on screen give or take rounding noise: the dot must
+        // not flicker between two pixels).
+        let p = match *held {
+            Some(h) if (p - h).abs().max_element() < 0.75 => h,
+            _ => p.round(),
+        };
+        *held = Some(p);
+        let p = p / scale;
         if p.x > rect.min.x - 30.0 || p.x < 0.0 || p.y < 0.0 {
             return None;
         }

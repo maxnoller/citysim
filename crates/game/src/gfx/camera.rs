@@ -314,11 +314,11 @@ fn camera_controls(
     }
 }
 
-/// How fast the camera glides onto a new followed target (1/s, as the
-/// camera's easing).
+/// How fast the camera glides onto a new followed target (rad/s of a
+/// critically damped spring, about the camera's easing).
 const FOLLOW_GLIDE: f32 = 9.0;
 /// A followed point that moves further than this in a frame jumped (a new
-/// building, a car handing over to its owner): glide there.
+/// building): glide there.
 const FOLLOW_JUMP_M: f32 = 12.0;
 
 /// What the camera follows and how far it still is from it.
@@ -326,15 +326,31 @@ const FOLLOW_JUMP_M: f32 = 12.0;
 struct FollowState {
     /// What was followed last frame, and whether it was drawn.
     on: Option<(FollowOn, bool)>,
+    /// The followed point last frame.
     last: Vec3,
-    /// The camera's focus minus the followed point; dies away.
+    /// The camera's focus minus the followed point, and how fast that
+    /// changes: a critically damped spring brings both to zero.
     offset: Vec3,
+    offset_vel: Vec3,
+    /// The target's own speed is not known yet (its first frame).
+    target_unknown: bool,
+    /// The shown focus last frame and its velocity (following or not).
+    focus: Option<Vec3>,
+    focus_vel: Vec3,
+}
+
+/// One step of `dt` s of a critically damped spring of rate `w`:
+/// (offset, its velocity) -> the same `dt` later (exact for any `dt`).
+fn spring(e: Vec3, v: Vec3, w: f32, dt: f32) -> (Vec3, Vec3) {
+    let k = (-w * dt).exp();
+    let c = v + e * w;
+    ((e + c * dt) * k, (v - c * (w * dt)) * k)
 }
 
 /// Keep the camera on the followed thing as it is drawn this frame: the
 /// focus is the drawn point plus an offset that dies away (a glide onto a
-/// new target, never a snap), so once settled the followed body stays put
-/// on screen.
+/// new target that starts at the camera's own speed: never a snap or a
+/// lurch), so once settled the followed body stays put on screen.
 #[allow(clippy::too_many_arguments)]
 fn follow_drawn(
     time: Res<Time<Real>>,
@@ -346,6 +362,7 @@ fn follow_drawn(
     mut rigs: Query<(&mut CameraRig, &mut Transform)>,
     mut state: Local<FollowState>,
 ) {
+    let dt = time.delta_secs().min(0.1);
     let scripted = tour.0 || gfx_pose.0.is_some() || overridden.0.is_some();
     // The point, and whether it is a drawn one (moving continuously).
     let point = follow.focus.filter(|_| !scripted).map(|f| {
@@ -361,22 +378,32 @@ fn follow_drawn(
         );
         (p, (follow.on, drawn))
     });
-    let Some((p, source)) = point else {
-        state.on = None;
+    let Ok((mut rig, mut tf)) = rigs.single_mut() else {
         return;
     };
-    let dt = time.delta_secs().min(0.1);
-    for (mut rig, mut tf) in &mut rigs {
+    if let Some((p, source)) = point {
         // A new target (or the same one drawn / not drawn any more), or a
-        // point that jumped: glide from where the camera is.
+        // point that jumped: glide from where the camera is, as fast as it
+        // moves.
         let fresh = state.on != Some(source) || (!source.1 && p.distance(state.last) > FOLLOW_JUMP_M);
-        state.offset = if fresh {
-            rig.current.focus - p
+        if fresh {
+            state.offset = rig.current.focus - p;
+            state.offset_vel = state.focus_vel;
+            state.target_unknown = true;
         } else {
-            state.offset * (-dt * FOLLOW_GLIDE).exp()
-        };
-        if state.offset.length() < 1e-4 {
+            if state.target_unknown && dt > 1e-5 {
+                // Now the target's speed is known: the camera keeps its own.
+                let target_vel = (p - state.last) / dt;
+                state.offset_vel -= target_vel;
+                state.target_unknown = false;
+            }
+            let (e, v) = spring(state.offset, state.offset_vel, FOLLOW_GLIDE, dt);
+            state.offset = e;
+            state.offset_vel = v;
+        }
+        if state.offset.length() < 1e-4 && state.offset_vel.length() < 1e-3 {
             state.offset = Vec3::ZERO;
+            state.offset_vel = Vec3::ZERO;
         }
         rig.target.focus = p;
         rig.current.focus = p + state.offset;
@@ -384,9 +411,18 @@ fn follow_drawn(
         if *tf != new {
             *tf = new;
         }
+        state.on = Some(source);
+        state.last = p;
+    } else {
+        state.on = None;
     }
-    state.on = Some(source);
-    state.last = p;
+    let focus = rig.current.focus;
+    if let Some(last) = state.focus
+        && dt > 1e-5
+    {
+        state.focus_vel = (focus - last) / dt;
+    }
+    state.focus = Some(focus);
 }
 
 fn apply_rig(mut q: Query<(&CameraRig, &mut Transform)>) {
