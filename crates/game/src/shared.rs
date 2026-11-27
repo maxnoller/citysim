@@ -474,7 +474,8 @@ pub struct WorldHighlight {
     pub hovered: Option<WorldTarget>,
     /// Pinned by a click with Inspect (its card stays open).
     pub selected: Option<WorldTarget>,
-    /// Bulldozer preview: buildings that would be removed (tint red).
+    /// Buildings that would be removed: the bulldozer's, or those in the
+    /// way of the road being drawn (tint red).
     pub doomed_buildings: Vec<BuildingId>,
     /// Bulldozer preview: the parts of roads that would be removed (centre
     /// lines and kinds; tint red over the road's width).
