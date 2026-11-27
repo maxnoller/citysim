@@ -477,11 +477,16 @@ pub(crate) fn fit(
         };
         // Room before the next junction: its own box (as a ring too, if
         // it is one), and a stretch of road with room for a car or two.
+        // (A junction not rebuilt yet after a road edit: its geometry now.)
+        let far_degree_now = roads.nodes[other].segments.len();
         let far_setback = states
             .get(other)
-            .filter(|j| j.arms.len() >= 2)
+            .filter(|j| j.arms.len() == far_degree_now)
             .and_then(|j| j.arm_of(s).map(|a| j.arms[a].setback))
-            .unwrap_or(0.0);
+            .unwrap_or_else(|| {
+                let (arms, _) = crate::junction::build_geometry(roads, other);
+                arms.iter().find(|a| a.segment == s).map_or(0.0, |a| a.setback)
+            });
         let far_degree = roads.nodes[other].segments.len();
         let need = balance::RING_MIN_ARM_M + if far_degree >= 3 { far_setback } else { 0.0 };
         if seg.length - setback < need {
@@ -592,8 +597,10 @@ fn lane_plan(lanes: u8, arms: &[Arm], i: usize, j: usize, k: usize, turn: Turn) 
                 && (matches!(turn, Turn::Left | Turn::UTurn) || no >= 2);
             (1, pref)
         };
-        let ring = if k == 1 { 0 } else { ring };
-        let to = if ring == 1 && no >= 2 { 1 } else { 0 };
+        // The first exit, and any road with one lane out, from the outer
+        // lane: nobody crosses the outer lane to squeeze into one lane.
+        let ring = if k == 1 || no < 2 { 0 } else { ring };
+        let to = if ring == 1 { 1 } else { 0 };
         out.push((l, ring, to, pref));
     }
     // Every turn has a preferred lane.
@@ -1034,6 +1041,16 @@ pub(crate) fn free_ahead(ring: &Ring, j: &crate::junction::JunctionState, cars: 
                     let over = (k - last) as f32 * SAMPLE_M;
                     ([e[0] + d[0] * over, e[1] + d[1] * over], d)
                 };
+                // A car behind this one (its centre behind this one's rear
+                // at that point) is not in the way.
+                if geom::dot(geom::sub(y.pos, c), d) < -x.half && geom::dot(y.dir, d) > 0.0 {
+                    return false;
+                }
+                // Oncoming: a car leaving by the arm this one enters by (or
+                // the other way round) keeps to its own lane.
+                if geom::dot(y.dir, d) < -0.5 {
+                    return false;
+                }
                 let c = [c[0] + d[0] * ahead * 0.5, c[1] + d[1] * ahead * 0.5];
                 boxes_overlap(
                     (c, d, x.half + ahead * 0.5, CAR_HALF_W + side),
@@ -1064,13 +1081,24 @@ pub(crate) fn free_ahead(ring: &Ring, j: &crate::junction::JunctionState, cars: 
             if yi < xi || !ways[yi].iter().any(|w| w.1 == xi) {
                 continue;
             }
-            // Each in the other's way: room without any margin decides.
-            let (tx, ty) = (hit(xi, yi, 0.2, 0.0), hit(yi, xi, 0.2, 0.0));
-            let (goes, other, room) = if tx > ty || (tx == ty && xi < yi) {
-                (xi, yi, tx)
-            } else {
-                (yi, xi, ty)
+            // Each in the other's way: the one whose front is further
+            // ahead goes, as far as it can without touching the other
+            // (real widths, no margin); if it cannot move at all, the other.
+            let (x, y) = (&cars[xi], &cars[yi]);
+            let along = geom::add2(x.dir, y.dir);
+            let front = |c: &RingCar| geom::dot(geom::add2(c.pos, geom::scale2(c.dir, c.half)), along);
+            let (tx, ty) = (hit(xi, yi, 0.1, -0.1), hit(yi, xi, 0.1, -0.1));
+            let x_first = match front(x).total_cmp(&front(y)) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => xi < yi,
             };
+            let x_first = if x_first {
+                tx > 0.05 || ty <= 0.05
+            } else {
+                ty <= 0.05 && tx > 0.05
+            };
+            let (goes, other, room) = if x_first { (xi, yi, tx) } else { (yi, xi, ty) };
             let rest = ways[goes]
                 .iter()
                 .filter(|w| w.1 != other)
@@ -1082,7 +1110,7 @@ pub(crate) fn free_ahead(ring: &Ring, j: &crate::junction::JunctionState, cars: 
     free
 }
 
-/// Half a car's width (trucks alike), metres.
+/// Half a car's width (trucks a little more), metres.
 const CAR_HALF_W: f32 = 1.05;
 
 /// Do two oriented rectangles `(centre, unit dir, half length, half
@@ -1119,7 +1147,8 @@ pub(crate) fn crossing_hold(
             continue;
         }
         let to_point = cp.s - x.d - x.half - 0.5;
-        if to_point < -x.half {
+        if to_point < 0.0 {
+            // Its front is in the lane already: it goes on.
             continue;
         }
         if x.speed > 1.0 && to_point < x.speed * x.speed / (2.0 * balance::BRAKING) {

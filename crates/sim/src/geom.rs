@@ -150,3 +150,11 @@ pub fn on_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> bool {
 pub fn on_segment_interior(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> bool {
     on_segment(p, a, b) && !same_pos(p, a) && !same_pos(p, b)
 }
+
+pub fn add2(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
+pub fn scale2(a: [f32; 2], k: f32) -> [f32; 2] {
+    [a[0] * k, a[1] * k]
+}
