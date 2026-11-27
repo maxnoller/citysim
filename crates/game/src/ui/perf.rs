@@ -286,9 +286,12 @@ pub fn graph_scale(max: f32) -> f32 {
 #[derive(Resource, Default)]
 struct Proc {
     system: Option<sysinfo::System>,
-    task: Option<Task<(sysinfo::System, ProcSample)>>,
+    task: Option<Task<Result<(sysinfo::System, ProcSample), sysinfo::Error>>>,
     last: Option<ProcSample>,
     at: Option<f32>,
+    /// The system information could not be had (`sysinfo::System::new`
+    /// failed): the panel leaves those figures out and stops asking.
+    unavailable: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -298,15 +301,19 @@ struct ProcSample {
     cores: Option<f32>,
     /// Logical cores of the machine.
     threads: usize,
-    /// Resident memory of the game (bytes).
-    memory: u64,
-    /// Used and total system memory (bytes).
-    system: (u64, u64),
+    /// Resident memory of the game (bytes), if the process was found.
+    memory: Option<u64>,
+    /// Used and total system memory (bytes), if reported.
+    system: Option<(u64, u64)>,
     cpu_name: String,
 }
 
-fn take_sample(mut sys: sysinfo::System, first: bool) -> (sysinfo::System, ProcSample) {
+fn take_sample(sys: Option<sysinfo::System>, first: bool) -> Result<(sysinfo::System, ProcSample), sysinfo::Error> {
     use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate};
+    let mut sys = match sys {
+        Some(s) => s,
+        None => sysinfo::System::new()?,
+    };
     // The CPU list first: refreshing it later would reset the baseline the
     // process CPU figure is measured against.
     if first {
@@ -325,15 +332,15 @@ fn take_sample(mut sys: sysinfo::System, first: bool) -> (sysinfo::System, ProcS
     let sample = ProcSample {
         cores: process.filter(|_| !first).map(|p| p.cpu_usage() / 100.0),
         threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
-        memory: process.map_or(0, |p| p.memory()),
-        system: (sys.used_memory(), sys.total_memory()),
+        memory: process.map(|p| p.memory()),
+        system: (sys.total_memory() > 0).then(|| (sys.used_memory(), sys.total_memory())),
         cpu_name: sys
             .cpus()
             .first()
             .map(|c| c.brand().trim().to_string())
             .unwrap_or_default(),
     };
-    (sys, sample)
+    Ok((sys, sample))
 }
 
 fn sample_process(time: Res<Time<Real>>, mut p: ResMut<Proc>) {
@@ -343,22 +350,29 @@ fn sample_process(time: Res<Time<Real>>, mut p: ResMut<Proc>) {
             return;
         }
         if let Some(task) = p.task.take() {
-            let (sys, mut s) = block_on(task);
-            if s.cpu_name.is_empty()
-                && let Some(prev) = &p.last
-            {
-                s.cpu_name = prev.cpu_name.clone();
+            match block_on(task) {
+                Ok((sys, mut s)) => {
+                    if s.cpu_name.is_empty()
+                        && let Some(prev) = &p.last
+                    {
+                        s.cpu_name = prev.cpu_name.clone();
+                    }
+                    p.system = Some(sys);
+                    p.last = Some(s);
+                }
+                Err(e) => {
+                    warn!("performance panel: no system information ({e}); its process figures are left out");
+                    p.unavailable = true;
+                }
             }
-            p.system = Some(sys);
-            p.last = Some(s);
         }
     }
-    if p.at.is_some_and(|a| now - a < PROC_S) {
+    if p.unavailable || p.at.is_some_and(|a| now - a < PROC_S) {
         return;
     }
     p.at = Some(now);
     let first = p.system.is_none();
-    let sys = p.system.take().unwrap_or_default();
+    let sys = p.system.take();
     p.task = Some(AsyncComputeTaskPool::get().spawn(async move { take_sample(sys, first) }));
 }
 
@@ -1311,19 +1325,30 @@ fn figures(
                 ),
                 None => put(Txt::ProcCpu, dash(), t::TEXT_MUTED),
             }
-            put(Txt::ProcMem, bytes_text(p.memory), t::TEXT);
-            put(
-                Txt::SysMem,
-                format!("{} of {}", bytes_text(p.system.0), bytes_text(p.system.1)),
-                t::TEXT,
-            );
+            match p.memory {
+                Some(m) => put(Txt::ProcMem, bytes_text(m), t::TEXT),
+                None => put(Txt::ProcMem, dash(), t::TEXT_MUTED),
+            }
+            match p.system {
+                Some((used, total)) => put(
+                    Txt::SysMem,
+                    format!("{} of {}", bytes_text(used), bytes_text(total)),
+                    t::TEXT,
+                ),
+                None => put(Txt::SysMem, dash(), t::TEXT_MUTED),
+            }
             if !p.cpu_name.is_empty() {
                 put(Txt::Cpu, cpu_name(&p.cpu_name), t::TEXT);
             }
         }
         None => {
+            let (text, color) = if proc_.unavailable {
+                ("not available".to_string(), t::TEXT_FAINT)
+            } else {
+                (dash(), t::TEXT_MUTED)
+            };
             for tag in [Txt::ProcCpu, Txt::ProcMem, Txt::SysMem] {
-                put(tag, dash(), t::TEXT_MUTED);
+                put(tag, text.clone(), color);
             }
         }
     }
