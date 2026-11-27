@@ -82,8 +82,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `BulldozeMode::{Road, Area}`), `SnapFeedback` (snapped point, `SnapTarget`, `Guide`s in sim metres, spacing),
   `CurveToolView` (the free-form road being drawn: pieces with `PieceChange`, refused curves, `error_at`, control
   points, handles, tightest bend, planned nodes; written only when it changes), `ToolPreview::{kind, area,
-  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, doomed buildings,
-  `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells` and
+  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, doomed buildings (the bulldozer's and those a
+  road being drawn takes), `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells` and
   `shared::cell_corners` / `zone_cell_corners` are gone: nothing wrote or used them any more.)
 - `RouteView { state: RouteState::{None, Driving, Planned, Unseen}, points, origin, destination }` (ui writes while a
   car or person is selected, only when it changes meaningfully: a new route, the car 2.5 m further on; gfx draws it in
@@ -164,6 +164,15 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   a rebuilt lattice is matched by cell centres. Session-only (nothing saved). Lots stay clear of every road's reserve
   (`growth::placed` moves a rectangle over curved cells off the road), so a road that stood can always be built again;
   `--example rebuildprobe` checks a grown town.
+- Roads through buildings: the road tool sends every road as `Command::Clearing(Box<BuildCurve | SetRoadKind>)`, which
+  takes down the grown buildings in the new road's reserve (`Building::gives_way_to_roads`, the one rule: every grown
+  building; `World::buildings_in_reserve`) as the bulldozer would, paid at its price (`Preview::demolition_cost`,
+  part of `cost`; `Preview::buildings` lists them, exactly what goes). Plain road commands still refuse
+  (`BuildingInTheWay`). ui marks them in `WorldHighlight::doomed_buildings`, the cursor card says what goes
+  (`readout::loss_lines`; a large loss, over 10 buildings or 100 people, gets a red warning line) and a toast names it.
+  Undo puts the zoning the road took back (`plan::Op::ZoneAt`), then the buildings, then refunds the road
+  (`Command::Refund { tick, amount }` from `Preview::road_cost`; session only). Undo records are dropped when the
+  world is replaced (new game, load). Contract: `docs/r4-sim-contract.md`, "r7-roadclear".
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
 - Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5; version 6 loads, its zoning
