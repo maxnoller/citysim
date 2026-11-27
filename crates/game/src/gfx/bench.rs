@@ -3,7 +3,8 @@
 //! The game runs without a window (`main.rs` drops winit and runs the app
 //! loop itself); the world camera renders to an off-screen image
 //! (`CITYSIM_BENCH_SIZE`, default 1920x1080) along a fixed camera path over
-//! the city, frame by frame (`CITYSIM_BENCH_FRAMES`, default 1500, after
+//! the city (or a fixed `CITYSIM_BENCH_POSE=x,z,yaw,pitch,distance`),
+//! frame by frame (`CITYSIM_BENCH_FRAMES`, default 1500, after
 //! `CITYSIM_BENCH_WARMUP` frames, default 240), with the simulation running
 //! at 1x (`CITYSIM_BENCH_SPEED=i`: speed index, 3 = the top speed). Use it with a demo city (`CITYSIM_DEMO=town|city|hierarchy`) and
 //! `CITYSIM_GFX_QUALITY=low|medium|high`. `CITYSIM_BENCH_UI=1` draws the
@@ -104,6 +105,15 @@ impl Plugin for BenchPlugin {
             },
             paused: env::<u32>("CITYSIM_BENCH_PAUSED") == Some(1),
             speed: env::<usize>("CITYSIM_BENCH_SPEED").unwrap_or(0),
+            fixed_pose: std::env::var("CITYSIM_BENCH_POSE").ok().and_then(|s| {
+                let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                (v.len() == 5).then(|| CameraPose {
+                    focus: Vec3::new(v[0], 0.0, v[1]),
+                    yaw: v[2],
+                    pitch: v[3],
+                    distance: v[4],
+                })
+            }),
             ui: env::<u32>("CITYSIM_BENCH_UI") == Some(1),
             ..default()
         })
@@ -359,6 +369,9 @@ struct Bench {
     keys: Keys,
     /// The script's camera pose for this frame (else the path's).
     pose: Option<CameraPose>,
+    /// `CITYSIM_BENCH_POSE=x,z,yaw,pitch,distance`: a fixed camera instead
+    /// of the path (to measure one view).
+    fixed_pose: Option<CameraPose>,
     /// `quality` script: the switches so far.
     switches: Vec<Switch>,
     /// `actions` script: next action (`quality`: next level in the order),
@@ -393,6 +406,9 @@ struct Bench {
 #[derive(Default, Clone, Copy, Debug)]
 struct Sums {
     visible: f64,
+    /// Triangles of the visible mesh entities (in any view: the camera or
+    /// a shadow cascade), thousands.
+    visible_tris: f64,
     main_draws: f64,
     shadow_draws: f64,
     shadow_views: f64,
@@ -401,6 +417,7 @@ struct Sums {
 impl Sums {
     fn max(&mut self, o: &Sums) {
         self.visible = self.visible.max(o.visible);
+        self.visible_tris = self.visible_tris.max(o.visible_tris);
         self.main_draws = self.main_draws.max(o.main_draws);
         self.shadow_draws = self.shadow_draws.max(o.shadow_draws);
         self.shadow_views = self.shadow_views.max(o.shadow_views);
@@ -509,7 +526,13 @@ fn drive(
         Phase::Measure => bench.frame as f32 / total as f32,
         _ => 0.0,
     };
-    camera.0 = Some(bench.pose.take().unwrap_or_else(|| path_pose(u, centre, radius)));
+    camera.0 = Some(
+        bench
+            .pose
+            .take()
+            .or(bench.fixed_pose)
+            .unwrap_or_else(|| path_pose(u, centre, radius)),
+    );
 
     match bench.phase {
         Phase::Loading => {
@@ -579,13 +602,22 @@ fn drive(
             }
             let c = counts.0.lock().map(|c| c.last).unwrap_or_default();
             let visible = queries.1.iter().filter(|(_, v)| v.get()).count();
+            let visible_tris: usize = queries
+                .1
+                .iter()
+                .filter(|(_, v)| v.get())
+                .filter_map(|(m, _)| assets.0.get(&m.0))
+                .map(|m| m.indices().map_or(0, |i| i.len() / 3))
+                .sum();
             let frame = Sums {
                 visible: visible as f64,
+                visible_tris: visible_tris as f64 / 1e3,
                 main_draws: c.main as f64,
                 shadow_draws: c.shadow as f64,
                 shadow_views: c.shadow_views as f64,
             };
             bench.sums.visible += frame.visible;
+            bench.sums.visible_tris += frame.visible_tris;
             bench.sums.main_draws += frame.main_draws;
             bench.sums.shadow_draws += frame.shadow_draws;
             bench.sums.shadow_views += frame.shadow_views;
@@ -652,14 +684,20 @@ fn report(
     let w = &sim.world;
     let secs = bench.times.iter().sum::<f64>() / 1000.0;
     let sim_rate = (bench.sim_ticks.1 - bench.sim_ticks.0) as f64 / secs.max(1e-6);
+    // Geometry held by every mesh asset (vertex and index buffers).
+    let (mut mesh_bytes, mut mesh_tris) = (0usize, 0usize);
+    for (_, m) in assets.0.iter() {
+        mesh_bytes += m.get_vertex_buffer_size() + m.get_index_buffer_bytes().map_or(0, <[u8]>::len);
+        mesh_tris += m.indices().map_or(0, |i| i.len() / 3);
+    }
     format!(
         "{{\n  \"quality\": \"{:?}\",\n  \"ui\": {},\n  \"sim_paused\": {},\n  \"sim_speed\": {},\n  \"size\": [{}, {}],\n  \"frames\": {},\n  \
          \"population\": {},\n  \"buildings\": {},\n  \"vehicles\": {},\n  \"sim_ticks_per_s\": {:.1},\n  \"sim_step_ms\": {{ \"avg\": {:.3}, \"p99\": {:.3}, \"max\": {:.3}, \"per_frame\": {:.3} }},\n  \
          \"frame_ms\": {{ \"avg\": {:.3}, \"median\": {:.3}, \"p99\": {:.3}, \"worst_1pct\": {:.3}, \"max\": {:.3} }},\n  \
          \"fps_avg\": {:.1},\n  \
          \"gpu_ms_per_frame\": {{\n{}\n  }},\n  \"triangles_per_frame\": {{\n{}\n  }},\n  \
-         \"entities\": {},\n  \"mesh_entities\": {},\n  \"visible_mesh_entities\": {{ \"avg\": {:.0}, \"max\": {:.0} }},\n  \
-         \"mesh_assets\": {},\n  \"materials\": {},\n  \"lights\": {},\n  \
+         \"entities\": {},\n  \"mesh_entities\": {},\n  \"visible_mesh_entities\": {{ \"avg\": {:.0}, \"max\": {:.0} }},\n  \"visible_triangles_k\": {:.0},\n  \
+         \"mesh_assets\": {},\n  \"mesh_mb\": {:.1},\n  \"mesh_triangles_k\": {:.0},\n  \"materials\": {},\n  \"lights\": {},\n  \
          \"draw_calls\": {{ \"main_avg\": {:.0}, \"main_max\": {:.0}, \"shadow_avg\": {:.0}, \"shadow_max\": {:.0}, \
          \"shadow_views\": {:.0} }},\n{}}}\n",
         bench.quality,
@@ -689,7 +727,10 @@ fn report(
         queries.1.iter().count(),
         bench.sums.visible / frames,
         bench.max.visible,
+        bench.sums.visible_tris / frames,
         assets.0.len(),
+        mesh_bytes as f64 / 1e6,
+        mesh_tris as f64 / 1e3,
         assets.1.len() + assets.2.len(),
         queries.2.iter().count(),
         bench.sums.main_draws / frames,

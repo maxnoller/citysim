@@ -1765,6 +1765,16 @@ pub fn site(key: ModelKey, stage: u8) -> MeshBuilder {
 
 // ------------------------------------------------------------------ entry
 
+/// The model for `key` at a level of detail (0 detailed, 1 middle, 2
+/// distant), for the model sheet; `None` where that level does not exist.
+pub fn generate_lod(key: ModelKey, lod: usize) -> Option<MeshBuilder> {
+    match lod {
+        0 => Some(generate(key, false)),
+        2 => Some(generate(key, true)),
+        _ => None,
+    }
+}
+
 /// Build the model for `key`.
 pub fn generate(key: ModelKey, lod: bool) -> MeshBuilder {
     let mut m = MeshBuilder::with_ground_ao(0.32);

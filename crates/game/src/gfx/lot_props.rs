@@ -306,3 +306,8 @@ pub fn solar_panels(m: &mut MeshBuilder, origin: Vec3, u: Vec3, v: Vec3, n: Vec3
         }
     }
 }
+
+/// Further props for the model sheet (each centred on the origin).
+pub fn sheet_extras() -> Vec<MeshBuilder> {
+    Vec::new()
+}

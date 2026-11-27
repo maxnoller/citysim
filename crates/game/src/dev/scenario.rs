@@ -41,6 +41,7 @@ pub fn focus(kind: DemoKind) -> (Cell, f32) {
         DemoKind::Hierarchy => (Cell::new(70, 128), 1100.0),
         DemoKind::Organic => (Cell::new(88, 118), 1000.0),
         DemoKind::Shapes => (Cell::new(80, 125), 1000.0),
+        DemoKind::Models => (Cell::new(100, 70), 1000.0),
         _ => (Cell::new(45, 128), 560.0),
     }
 }
@@ -51,6 +52,7 @@ pub fn street(kind: DemoKind) -> Cell {
         DemoKind::Jam => Cell::new(22, 126),
         DemoKind::Organic => Cell::new(68, 119),
         DemoKind::Shapes => Cell::new(52, 115),
+        DemoKind::Models => Cell::new(60, 30),
         _ => Cell::new(30, 128),
     }
 }
@@ -73,6 +75,9 @@ fn run_to_hour(w: &mut World, hour: f32, mut each: impl FnMut(&mut World)) {
 
 /// Build and fast-forward the scenario world.
 pub fn build(kind: DemoKind, seed: u64) -> World {
+    if kind == DemoKind::Models {
+        return super::sheet::world(seed);
+    }
     let mut w = World::new(seed);
     let hour = env::<f32>("CITYSIM_DEMO_HOUR").unwrap_or(8.0);
     let started = Instant::now();
@@ -175,6 +180,12 @@ impl Plugin for ScenarioPlugin {
 
 fn load_scenario(pending: Res<Pending>, mut sim: ResMut<SimWorld>, mut clock: ResMut<SimClock>) {
     let seed = sim.world.seed;
+    if pending.0 == DemoKind::Models {
+        // Built in no time; held still so nothing moves between shots.
+        sim.replace(super::sheet::world(seed));
+        clock.paused = true;
+        return;
+    }
     sim.replace(cached_build(pending.0, seed));
     clock.paused = false;
 }

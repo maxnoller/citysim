@@ -16,6 +16,7 @@ mod loading;
 mod lot_props;
 mod lots;
 mod mesh_util;
+mod model_sheet;
 mod noise;
 mod overlay;
 mod palette;
@@ -77,6 +78,7 @@ impl Plugin for GfxPlugin {
             route::RoutePlugin,
             yards::YardsPlugin,
             greens::GreensPlugin,
+            model_sheet::ModelSheetPlugin,
         ));
     }
 }

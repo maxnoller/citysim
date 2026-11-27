@@ -9,9 +9,11 @@
 //!
 //! `CITYSIM_STILLS_LIST="name=view;name=view+overlay;..."` (default
 //! `wide=wide`) names the shots; each is saved as `dir/name.png`. A view is
-//! `wide`, `street`, `close` (the autoshot presets for the demo) or an
-//! exact pose `x,z,yaw,pitch,distance` (sim metres, radians, metres, as
-//! `CITYSIM_GFX_POSE`); `+zones` / `+traffic` shows that overlay. The time
+//! `wide`, `street`, `close` (the autoshot presets for the demo), a named
+//! view of the model sheet (`CITYSIM_DEMO=models`, `sheet::view`: `sheet`,
+//! `res`, `r1`, `cars`, ...) or an exact pose `x,z,yaw,pitch,distance` (sim
+//! metres, radians, metres, as `CITYSIM_GFX_POSE`); `+zones` / `+traffic`
+//! shows that overlay. `CITYSIM_STILLS_HUD=0` leaves the interface out. The time
 //! of day is the demo's (`CITYSIM_DEMO_HOUR`) or pinned with
 //! `CITYSIM_GFX_HOUR`. `CITYSIM_STILLS_SETTLE=s` seconds between moving the
 //! camera and the capture (default 0.75, and at least 20 frames: overlays
@@ -37,6 +39,8 @@ pub fn enabled() -> bool {
 enum View {
     Preset(ShotView),
     Pose([f32; 5]),
+    /// A named view of the model sheet (`sheet::view`).
+    Sheet(CameraPose),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +69,7 @@ fn parse_list(s: &str) -> Vec<Still> {
                 "wide" => View::Preset(ShotView::Wide),
                 "street" => View::Preset(ShotView::Street),
                 "close" => View::Preset(ShotView::Close),
+                name if super::sheet::view(name).is_some() => View::Sheet(super::sheet::view(name)?),
                 pose => {
                     let v: Vec<f32> = pose.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                     if v.len() != 5 {
@@ -104,6 +109,8 @@ struct Stills {
     /// Shots handed to the screenshot system and not yet written.
     pending: u32,
     sent_sample: bool,
+    /// Draw the interface (`CITYSIM_STILLS_HUD=0`: the 3D scene alone).
+    hud: bool,
 }
 
 pub struct StillsPlugin {
@@ -138,6 +145,7 @@ impl Plugin for StillsPlugin {
             started: false,
             pending: 0,
             sent_sample: false,
+            hud: std::env::var("CITYSIM_STILLS_HUD").map_or(true, |v| v != "0"),
         })
         .add_systems(Update, run_stills.in_set(GameSet::Input));
     }
@@ -170,9 +178,10 @@ fn run_stills(
         if !matches!(target, Some(RenderTarget::Image(_))) {
             let (w, h) = st.size;
             let image = images.add(Image::new_target_texture(w, h, TextureFormat::Bgra8UnormSrgb, None));
-            commands
-                .entity(cam)
-                .insert((RenderTarget::Image(image.clone().into()), IsDefaultUiCamera));
+            commands.entity(cam).insert(RenderTarget::Image(image.clone().into()));
+            if st.hud {
+                commands.entity(cam).insert(IsDefaultUiCamera);
+            }
             st.image = Some(image);
         }
     }
@@ -192,6 +201,7 @@ fn run_stills(
             pitch,
             distance,
         },
+        View::Sheet(pose) => pose,
     };
     camera.0 = Some(pose);
     overlay.set_if_neq(still.overlay);

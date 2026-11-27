@@ -281,7 +281,36 @@ impl Ghost {
 /// Whether a tree may stand at `p`: away from the drawn roads and the road
 /// being drawn, and not on zoned or built land.
 fn open(taken: &Taken, edges: &RoadEdges, ghost: &Ghost, p: Vec2) -> bool {
-    !taken.contains(p) && edges.clearance(p) > 2.5 && !ghost.covers(p)
+    !taken.contains(p) && edges.clearance(p) > 2.5 && !ghost.covers(p) && !super::model_sheet::covers(p)
+}
+
+/// Every kind of tree, bush and rock for the model sheet: (detailed,
+/// distant) at a few sizes.
+pub fn sheet_models() -> Vec<(MeshBuilder, MeshBuilder)> {
+    let mut out = Vec::new();
+    for small in [0u8, 1, 2] {
+        for pine in [false, true] {
+            if small > 0 && pine {
+                continue;
+            }
+            for (k, scale) in [0.75f32, 1.0, 1.25].into_iter().enumerate() {
+                let t = Tree {
+                    pos: Vec3::ZERO,
+                    scale,
+                    pine,
+                    canopy: palette::CANOPIES[k % palette::CANOPIES.len()],
+                    yaw: k as f32,
+                    small,
+                };
+                let (mut near, mut far) = (MeshBuilder::new(), MeshBuilder::new());
+                far.lod = true;
+                draw_tree(&mut near, &t, false);
+                draw_tree(&mut far, &t, true);
+                out.push((near, far));
+            }
+        }
+    }
+    out
 }
 
 /// What a tree chunk depends on: zoning cells with a zone or building whose

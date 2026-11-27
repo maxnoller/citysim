@@ -368,6 +368,26 @@ pub fn truck_model(cab: Color, cargo: Color, stripe: Color, lod: bool) -> MeshBu
     m
 }
 
+/// Every vehicle model for the model sheet, one row per body type (a few
+/// paints each), the trucks last: (detailed, distant).
+pub fn sheet_models() -> Vec<Vec<(MeshBuilder, MeshBuilder)>> {
+    let mut rows: Vec<Vec<(MeshBuilder, MeshBuilder)>> = (0..SHAPES)
+        .map(|shape| {
+            palette::CAR_BODIES[..6]
+                .iter()
+                .map(|&c| (car_model(c, shape, false), car_model(c, shape, true)))
+                .collect()
+        })
+        .collect();
+    rows.push(
+        palette::TRUCK_LIVERIES
+            .iter()
+            .map(|&(a, b, c)| (truck_model(a, b, c, false), truck_model(a, b, c, true)))
+            .collect(),
+    );
+    rows
+}
+
 /// Glass strips on both sides of the cabin between `x1` (front) and `x0`.
 fn side_windows(m: &mut MeshBuilder, x1: f32, x0: f32, y0: f32, y1: f32, z: f32) {
     if m.lod {
