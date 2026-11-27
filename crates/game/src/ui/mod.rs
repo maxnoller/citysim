@@ -22,6 +22,7 @@ mod city;
 mod context;
 mod controls;
 mod fiscal;
+mod follow_demo;
 mod format;
 mod fsnap;
 mod loading;
@@ -194,6 +195,9 @@ impl Plugin for UiPlugin {
             ))
             .add_systems(PostStartup, fallback_ui_camera)
             .add_systems(PreUpdate, scale_ui);
+        if follow_demo::FollowDemoPlugin::wanted() {
+            app.add_plugins(follow_demo::FollowDemoPlugin);
+        }
         if let Some(dir) = std::env::var_os("CITYSIM_UI_SHOTS").filter(|d| !d.is_empty()) {
             app.add_plugins(shots::ShotsPlugin { dir: dir.into() });
         } else if std::env::var("CITYSIM_UI_TOUR").is_ok_and(|v| !v.is_empty() && v != "0") {

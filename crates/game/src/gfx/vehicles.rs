@@ -167,9 +167,12 @@ fn place(world: &World, v: &Vehicle, half: f32) -> (Vec2, f32) {
     (Vec2::from(v.pos) - dir * half, v.heading)
 }
 
+/// The entity drawing each vehicle.
+#[derive(Resource, Default)]
+pub(super) struct VehicleEntities(pub HashMap<VehicleId, Entity>);
+
 #[derive(Default)]
 struct SyncState {
-    entities: HashMap<VehicleId, Entity>,
     last_fixed: f64,
     last_tick: u64,
     generation: u64,
@@ -183,7 +186,8 @@ pub struct VehiclesPlugin;
 
 impl Plugin for VehiclesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup)
+        app.init_resource::<VehicleEntities>()
+            .add_systems(Startup, setup)
             .add_systems(Update, sync_vehicles.in_set(GameSet::Render));
     }
 }
@@ -288,19 +292,20 @@ fn sync_vehicles(
     models: Res<VehicleModels>,
     mats: Res<WorldMaterials>,
     mut state: Local<SyncState>,
+    mut entities: ResMut<VehicleEntities>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
     mut q: Query<(&mut VehicleVisual, &mut Transform, &mut Mesh3d, &mut MeshTag)>,
 ) {
     let cam = cams.single().map_or(Vec3::ZERO, |c| c.translation());
     let world = &sim.world;
     if state.generation != sim.generation {
-        for (_, e) in state.entities.drain() {
+        for (_, e) in entities.0.drain() {
             commands.entity(e).despawn();
         }
         state.generation = sim.generation;
     }
     let vehicles = &world.vehicles;
-    state.entities.retain(|id, e| {
+    entities.0.retain(|id, e| {
         let keep = vehicles.contains_key(*id);
         if !keep {
             commands.entity(*e).despawn();
@@ -332,7 +337,7 @@ fn sync_vehicles(
     let tick_now = stepped && advanced;
     for (id, v) in vehicles.iter() {
         let kind = kind_of(world, id);
-        match state.entities.get(&id) {
+        match entities.0.get(&id) {
             Some(&e) => {
                 let Ok((mut vis, _, _, _)) = q.get_mut(e) else {
                     continue;
@@ -358,7 +363,7 @@ fn sync_vehicles(
                         Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(-h)),
                     ))
                     .id();
-                state.entities.insert(id, e);
+                entities.0.insert(id, e);
             }
         }
     }

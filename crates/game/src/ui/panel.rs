@@ -1763,6 +1763,11 @@ fn spawn_leader(mut commands: Commands) {
     ));
     for (which, size) in [(Leader::Dot, 7.0), (Leader::Tip, 10.0)] {
         commands.spawn((
+            Name::new(if which == Leader::Dot {
+                "Leader dot"
+            } else {
+                "Leader tip"
+            }),
             layout(Node {
                 position_type: PositionType::Absolute,
                 width: px(size),
