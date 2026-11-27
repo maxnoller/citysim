@@ -166,11 +166,11 @@ mod reload_tests {
         let (mut roads, mut zones) = (0, 0);
         // Hidden entities keep their last mesh (Mesh3d is never removed).
         for (name, mesh, _) in q.iter(w).filter(|(_, _, v)| v.is_none_or(|v| *v != Visibility::Hidden)) {
-            let n = meshes.get(&mesh.0).map_or(0, |m| m.count_vertices());
+            let n = || meshes.get(&mesh.0).map_or(0, |m| m.count_vertices());
             if name.as_str().starts_with("Roads") {
-                roads += n;
+                roads += n();
             } else if name.as_str() == "Zones" {
-                zones += n;
+                zones += n();
             }
         }
         let buildings = w

@@ -409,6 +409,9 @@ struct Sums {
     /// Triangles of the visible mesh entities (in any view: the camera or
     /// a shadow cascade), thousands.
     visible_tris: f64,
+    /// Triangles of the meshes the world camera itself draws (after
+    /// frustum culling and level-of-detail ranges), thousands.
+    camera_tris: f64,
     main_draws: f64,
     shadow_draws: f64,
     shadow_views: f64,
@@ -418,6 +421,7 @@ impl Sums {
     fn max(&mut self, o: &Sums) {
         self.visible = self.visible.max(o.visible);
         self.visible_tris = self.visible_tris.max(o.visible_tris);
+        self.camera_tris = self.camera_tris.max(o.camera_tris);
         self.main_draws = self.main_draws.max(o.main_draws);
         self.shadow_draws = self.shadow_draws.max(o.shadow_draws);
         self.shadow_views = self.shadow_views.max(o.shadow_views);
@@ -488,6 +492,7 @@ fn drive(
     mut camera: ResMut<CameraOverride>,
     mut images: ResMut<Assets<Image>>,
     cams: Query<(Entity, Option<&RenderTarget>), With<WorldCamera>>,
+    cam_vis: Query<&bevy::camera::visibility::VisibleEntities, With<WorldCamera>>,
     store: Res<DiagnosticsStore>,
     counts: Res<super::perf::RenderShared>,
     mut sim_timing: ResMut<SimTiming>,
@@ -606,18 +611,35 @@ fn drive(
                 .1
                 .iter()
                 .filter(|(_, v)| v.get())
-                .filter_map(|(m, _)| assets.0.get(&m.0))
-                .map(|m| m.indices().map_or(0, |i| i.len() / 3))
+                .filter_map(|(m, _)| {
+                    assets
+                        .0
+                        .get(&m.0)
+                        .map(|mesh| super::mesh_util::mesh_triangles(m.0.id(), mesh))
+                })
+                .sum();
+            let camera_tris: usize = cam_vis
+                .iter()
+                .flat_map(|v| v.get(std::any::TypeId::of::<Mesh3d>()).iter().copied())
+                .filter_map(|e| queries.1.get(e).ok())
+                .filter_map(|(m, _)| {
+                    assets
+                        .0
+                        .get(&m.0)
+                        .map(|mesh| super::mesh_util::mesh_triangles(m.0.id(), mesh))
+                })
                 .sum();
             let frame = Sums {
                 visible: visible as f64,
                 visible_tris: visible_tris as f64 / 1e3,
+                camera_tris: camera_tris as f64 / 1e3,
                 main_draws: c.main as f64,
                 shadow_draws: c.shadow as f64,
                 shadow_views: c.shadow_views as f64,
             };
             bench.sums.visible += frame.visible;
             bench.sums.visible_tris += frame.visible_tris;
+            bench.sums.camera_tris += frame.camera_tris;
             bench.sums.main_draws += frame.main_draws;
             bench.sums.shadow_draws += frame.shadow_draws;
             bench.sums.shadow_views += frame.shadow_views;
@@ -687,16 +709,22 @@ fn report(
     // Geometry held by every mesh asset (vertex and index buffers).
     let (mut mesh_bytes, mut mesh_tris) = (0usize, 0usize);
     for (_, m) in assets.0.iter() {
-        mesh_bytes += m.get_vertex_buffer_size() + m.get_index_buffer_bytes().map_or(0, <[u8]>::len);
-        mesh_tris += m.indices().map_or(0, |i| i.len() / 3);
+        // Meshes kept only on the GPU are counted from `gpu_mesh_stats`.
+        if let Ok(i) = m.try_indices_option() {
+            mesh_bytes += m.get_vertex_buffer_size() + m.get_index_buffer_bytes().map_or(0, <[u8]>::len);
+            mesh_tris += i.map_or(0, |i| i.len() / 3);
+        }
     }
+    let (gpu_tris, gpu_bytes) = super::mesh_util::gpu_mesh_stats();
+    mesh_bytes += gpu_bytes;
+    mesh_tris += gpu_tris;
     format!(
         "{{\n  \"quality\": \"{:?}\",\n  \"ui\": {},\n  \"sim_paused\": {},\n  \"sim_speed\": {},\n  \"size\": [{}, {}],\n  \"frames\": {},\n  \
          \"population\": {},\n  \"buildings\": {},\n  \"vehicles\": {},\n  \"sim_ticks_per_s\": {:.1},\n  \"sim_step_ms\": {{ \"avg\": {:.3}, \"p99\": {:.3}, \"max\": {:.3}, \"per_frame\": {:.3} }},\n  \
          \"frame_ms\": {{ \"avg\": {:.3}, \"median\": {:.3}, \"p99\": {:.3}, \"worst_1pct\": {:.3}, \"max\": {:.3} }},\n  \
          \"fps_avg\": {:.1},\n  \
          \"gpu_ms_per_frame\": {{\n{}\n  }},\n  \"triangles_per_frame\": {{\n{}\n  }},\n  \
-         \"entities\": {},\n  \"mesh_entities\": {},\n  \"visible_mesh_entities\": {{ \"avg\": {:.0}, \"max\": {:.0} }},\n  \"visible_triangles_k\": {:.0},\n  \
+         \"entities\": {},\n  \"mesh_entities\": {},\n  \"visible_mesh_entities\": {{ \"avg\": {:.0}, \"max\": {:.0} }},\n  \"visible_triangles_k\": {:.0},\n  \"camera_triangles_k\": {:.0},\n  \
          \"mesh_assets\": {},\n  \"mesh_mb\": {:.1},\n  \"mesh_triangles_k\": {:.0},\n  \"materials\": {},\n  \"lights\": {},\n  \
          \"draw_calls\": {{ \"main_avg\": {:.0}, \"main_max\": {:.0}, \"shadow_avg\": {:.0}, \"shadow_max\": {:.0}, \
          \"shadow_views\": {:.0} }},\n{}}}\n",
@@ -728,6 +756,7 @@ fn report(
         bench.sums.visible / frames,
         bench.max.visible,
         bench.sums.visible_tris / frames,
+        bench.sums.camera_tris / frames,
         assets.0.len(),
         mesh_bytes as f64 / 1e6,
         mesh_tris as f64 / 1e3,

@@ -28,12 +28,12 @@ pub fn patch(m: &mut MeshBuilder, x0: f32, z0: f32, x1: f32, z1: f32, y: f32, co
 pub fn parked_car(m: &mut MeshBuilder, rng: &mut Stream, c: Vec3, yaw: f32) {
     let body = palette::CAR_BODIES[vehicle_gen::paint(rng.next_u32())];
     let shape = [1, 1, 4, 0, 1, 4, 2, 5][rng.below(8) as usize];
-    let lod = if m.lod {
-        super::building_gen::Lod::Far
-    } else if m.fine {
+    // The middle building model takes the simple car (it is a few pixels
+    // there); up close the detailed one.
+    let lod = if m.fine {
         super::building_gen::Lod::Near
     } else {
-        super::building_gen::Lod::Mid
+        super::building_gen::Lod::Far
     };
     let car = vehicle_gen::car_model(body, shape, lod);
     let start = m.pos.len();

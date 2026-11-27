@@ -1267,7 +1267,12 @@ fn balcony(m: &mut MeshBuilder, f: &Face, a: f32, base: f32, wall: Color, accent
         palette::METAL_DARK
     };
     let top = base - 0.2;
-    if glass || !m.fine {
+    if !m.fine {
+        // Middle model: the front panel with its rail.
+        f.slab_out(m, a0, a1, y1, top + 0.07, 0.95, 1.02, if glass { rail } else { accent });
+        return;
+    }
+    if glass {
         // A panel along the front and the two sides.
         f.slab_out(m, a0, a1, y1, top, 0.95, 1.0, rail);
         f.slab_out(m, a0, a0 + 0.05, y1, top, 0.0, 0.95, rail);

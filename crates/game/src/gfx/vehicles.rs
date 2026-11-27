@@ -35,6 +35,7 @@ use citysim_sim::Place;
 
 use super::building_gen::Lod;
 use super::city_material::TAG_BRAKE;
+use super::mesh_util::add_gpu;
 use super::noise::hash;
 use super::palette;
 use super::road_geom::{ROAD_Y, lane_offset};
@@ -47,8 +48,8 @@ const TELEPORT_M: f32 = 30.0;
 
 /// Camera distance beyond which vehicles use the distant model (with a
 /// little hysteresis so they do not flicker between models).
-const LOD_FAR: f32 = 480.0;
-const LOD_NEAR: f32 = 440.0;
+const LOD_FAR: f32 = 340.0;
+const LOD_NEAR: f32 = 310.0;
 /// Hysteresis at the near / middle switch, metres.
 const NEAR_HYST: f32 = 8.0;
 
@@ -100,7 +101,7 @@ impl VModel {
                 vehicle_gen::lorry_model(a, b, c, kind as u32, lod)
             }
         }
-        .build()
+        .build_gpu()
     }
 }
 
@@ -192,7 +193,8 @@ impl VehicleModels {
             }
         });
         for (k, [a, b, c]) in built {
-            self.meshes.insert(k, [meshes.add(a), meshes.add(b), meshes.add(c)]);
+            self.meshes
+                .insert(k, [add_gpu(meshes, a), add_gpu(meshes, b), add_gpu(meshes, c)]);
         }
     }
 

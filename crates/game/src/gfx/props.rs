@@ -91,8 +91,10 @@ pub fn crown(m: &mut MeshBuilder, c: Vec3, r: Vec3, color: Color, yaw: f32) {
     let top = lin(super::palette::mix(color, Color::srgb_u32(0xC8D86A), 0.22));
     let mid = lin(color);
     let low = lin(shade(color, 0.72));
+    // Lumpy: each vertex in or out a little, by the yaw.
+    let k = |i: usize| 0.86 + 0.28 * ((yaw * 3.7 + i as f32 * 1.93).sin() * 0.5 + 0.5);
     for tri in f {
-        let p = tri.map(|i| c + q * (v[i] * r));
+        let p = tri.map(|i| c + q * (v[i] * r * k(i)));
         let cols = tri.map(|i| {
             if v[i].y > 0.75 {
                 top
@@ -116,10 +118,9 @@ pub fn species_of(yaw: f32) -> u32 {
 /// Broadleaf tree of the species `species_of(yaw)`. `s` scales it (1.0 is
 /// about 7 m tall).
 pub fn round_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32) {
-    let side = Vec3::new(yaw.cos(), 0.0, yaw.sin());
     match species_of(yaw) {
         1 => {
-            m.cylinder(base, 0.16 * s, 2.0 * s, 5, palette::TRUNK, palette::TRUNK);
+            m.cylinder(base, 0.16 * s, 2.0 * s, 4, palette::TRUNK, palette::TRUNK);
             crown(
                 m,
                 base + Vec3::Y * 4.6 * s,
@@ -130,52 +131,17 @@ pub fn round_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f
         }
         2 => {
             let bark = Color::srgb_u32(0xE6E1D6);
-            m.cylinder(base, 0.11 * s, 4.2 * s, 4, bark, bark);
-            m.cylinder(
-                base + Vec3::Y * 1.2 * s,
-                0.115 * s,
-                0.15 * s,
-                4,
-                Color::srgb_u32(0x3A3833),
-                bark,
-            );
+            m.cylinder(base, 0.11 * s, 3.2 * s, 4, bark, bark);
             let light = super::palette::mix(canopy, Color::srgb_u32(0xA9C25A), 0.45);
-            crown(
-                m,
-                base + Vec3::Y * 4.4 * s + side * 0.3 * s,
-                Vec3::new(1.4, 1.7, 1.4) * s,
-                light,
-                yaw,
-            );
-            octa_blob(
-                m,
-                base + Vec3::Y * 3.4 * s - side * 0.7 * s,
-                Vec3::new(1.0, 1.0, 1.0) * s,
-                light,
-                yaw + 0.5,
-            );
+            crown(m, base + Vec3::Y * 4.3 * s, Vec3::new(1.5, 2.0, 1.5) * s, light, yaw);
         }
         3 => {
-            m.cylinder(base, 0.24 * s, 3.0 * s, 5, palette::TRUNK, palette::TRUNK);
+            m.cylinder(base, 0.24 * s, 3.0 * s, 4, palette::TRUNK, palette::TRUNK);
             crown(m, base + Vec3::Y * 4.6 * s, Vec3::new(3.0, 1.9, 2.7) * s, canopy, yaw);
-            octa_blob(
-                m,
-                base + Vec3::Y * 4.0 * s + side * 2.0 * s,
-                Vec3::new(1.4, 1.2, 1.4) * s,
-                shade(canopy, 0.95),
-                yaw,
-            );
         }
         _ => {
-            m.cylinder(base, 0.18 * s, 2.6 * s, 5, palette::TRUNK, palette::TRUNK);
+            m.cylinder(base, 0.18 * s, 2.6 * s, 4, palette::TRUNK, palette::TRUNK);
             crown(m, base + Vec3::Y * 4.4 * s, Vec3::new(2.3, 2.2, 2.3) * s, canopy, yaw);
-            octa_blob(
-                m,
-                base + Vec3::Y * 3.9 * s + side * 1.6 * s,
-                Vec3::new(1.3, 1.2, 1.3) * s,
-                shade(canopy, 1.05),
-                yaw + 0.7,
-            );
         }
     }
 }
@@ -205,24 +171,15 @@ pub fn garden_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: 
 /// Conifer: trunk and three stacked cones, each tier a little darker below.
 pub fn pine_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32) {
     let phase = yaw / std::f32::consts::TAU;
-    m.cylinder(base, 0.16 * s, 1.4 * s, 5, palette::TRUNK, palette::TRUNK);
-    m.cone(
-        base + Vec3::Y * 0.9 * s,
-        2.0 * s,
-        3.2 * s,
-        6,
-        shade(canopy, 0.86),
-        phase,
-    );
-    m.cone(
-        base + Vec3::Y * 2.6 * s,
-        1.55 * s,
-        3.0 * s,
-        6,
-        shade(canopy, 0.94),
-        phase + 0.08,
-    );
-    m.cone(base + Vec3::Y * 4.3 * s, 1.05 * s, 2.9 * s, 6, canopy, phase + 0.03);
+    m.cylinder(base, 0.16 * s, 1.4 * s, 4, palette::TRUNK, palette::TRUNK);
+    let tiers = [
+        (0.9, 2.0, 3.2, 0.86, 0.0),
+        (2.6, 1.55, 3.0, 0.94, 0.1),
+        (4.3, 1.05, 2.9, 1.0, 0.05),
+    ];
+    for (y, r, h, k, dp) in tiers {
+        m.cone(base + Vec3::Y * y * s, r * s, h * s, 5, shade(canopy, k), phase + dp);
+    }
 }
 
 /// Low garden bush.

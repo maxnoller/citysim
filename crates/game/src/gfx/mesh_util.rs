@@ -8,6 +8,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::palette::lin;
 
@@ -374,12 +375,71 @@ impl MeshBuilder {
     }
 
     pub fn build(self) -> Mesh {
-        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        self.build_with(RenderAssetUsages::default())
+    }
+
+    /// The mesh for the GPU only: Bevy drops its CPU copy once uploaded
+    /// (it keeps the bounding box for culling). Use for models nothing
+    /// reads back (buildings, vehicles); [`gpu_mesh_stats`] still counts
+    /// them.
+    pub fn build_gpu(self) -> Mesh {
+        let tris = self.idx.len() / 3;
+        let bytes = self.pos.len() * (12 + 12 + 16 + 8) + self.idx.len() * 4;
+        GPU_ONLY_TRIS.fetch_add(tris, Ordering::Relaxed);
+        GPU_ONLY_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        self.build_with(RenderAssetUsages::RENDER_WORLD)
+    }
+
+    fn build_with(self, usage: RenderAssetUsages) -> Mesh {
+        Mesh::new(PrimitiveTopology::TriangleList, usage)
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.pos)
             .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.nrm)
             .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.col)
             .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uv)
             .with_inserted_indices(Indices::U32(self.idx))
+    }
+}
+
+static GPU_ONLY_TRIS: AtomicUsize = AtomicUsize::new(0);
+static GPU_ONLY_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Triangles and bytes of every mesh built with
+/// [`MeshBuilder::build_gpu`] so far (their CPU copies are gone; for the
+/// benchmark's geometry totals).
+pub fn gpu_mesh_stats() -> (usize, usize) {
+    (
+        GPU_ONLY_TRIS.load(Ordering::Relaxed),
+        GPU_ONLY_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+fn gpu_registry() -> &'static std::sync::Mutex<std::collections::HashMap<AssetId<Mesh>, usize>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<AssetId<Mesh>, usize>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Add a mesh built with [`MeshBuilder::build_gpu`], noting its triangle
+/// count (its index data is gone from the main world once uploaded).
+pub fn add_gpu(meshes: &mut Assets<Mesh>, mesh: Mesh) -> Handle<Mesh> {
+    let tris = mesh.try_indices_option().ok().flatten().map_or(0, |i| i.len() / 3);
+    let h = meshes.add(mesh);
+    if let Ok(mut r) = gpu_registry().lock() {
+        r.insert(h.id(), tris);
+    }
+    h
+}
+
+/// Triangles of a mesh: from its data, or from the registry when it is a
+/// GPU-only mesh.
+pub fn mesh_triangles(id: AssetId<Mesh>, mesh: &Mesh) -> usize {
+    match mesh.try_indices_option() {
+        Ok(i) => i.map_or(0, |i| i.len() / 3),
+        Err(_) => gpu_registry()
+            .lock()
+            .ok()
+            .and_then(|r| r.get(&id).copied())
+            .unwrap_or(0),
     }
 }
 

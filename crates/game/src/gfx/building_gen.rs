@@ -191,9 +191,25 @@ impl Face {
             });
             return;
         }
-        // Frame, then the glass just proud of it.
-        self.rect(m, a0 - f, a1 + f, b - f, b + h + f, 0.03, st.frame);
-        m.glow(Glow::Window, r, |m| self.rect(m, a0, a1, b, b + h, 0.045, st.glass));
+        if m.fine {
+            // Frame, then the glass just proud of it.
+            self.rect(m, a0 - f, a1 + f, b - f, b + h + f, 0.03, st.frame);
+            m.glow(Glow::Window, r, |m| self.rect(m, a0, a1, b, b + h, 0.045, st.glass));
+        } else {
+            // Middle model: the frame is under a pixel; one framed-looking
+            // pane.
+            m.glow(Glow::Window, r, |m| {
+                self.rect(
+                    m,
+                    a0 - f * 0.5,
+                    a1 + f * 0.5,
+                    b - f * 0.5,
+                    b + h + f * 0.5,
+                    0.04,
+                    mix(st.glass, st.frame, 0.18),
+                )
+            });
+        }
         if let Some(s) = st.shutters {
             let sw = (w * 0.48).min(0.6);
             for (x0, x1) in [(a0 - f - sw, a0 - f), (a1 + f, a1 + f + sw)] {
@@ -232,6 +248,10 @@ impl Face {
         let (p0, p1) = (self.at(a0, b1, 0.0), self.at(a1, b1, 0.0));
         let (q0, q1) = (self.at(a0, b1, out), self.at(a1, b1, out));
         m.quad_facing([p0, p1, q1, q0], Vec3::Y, top);
+        if !m.fine && b1 - b0 < 0.15 {
+            // Middle model: a thin ledge is its top alone.
+            return;
+        }
         self.rect(m, a0, a1, b0, b1, out, color);
         if m.fine {
             let (r0, r1) = (self.at(a0, b0, 0.0), self.at(a1, b0, 0.0));
@@ -290,6 +310,10 @@ impl Face {
             return;
         }
         self.rect(m, a - hw - 0.1, a + hw + 0.1, y0, y0 + h + 0.1, 0.03, frame);
+        if !m.fine {
+            self.rect(m, a - hw, a + hw, y0, y0 + h - 0.06, 0.05, leaf);
+            return;
+        }
         let fan = 0.38;
         self.rect(m, a - hw, a + hw, y0, y0 + h - fan, 0.05, leaf);
         self.lit_rect(
@@ -1011,6 +1035,22 @@ fn fence_inner(m: &mut MeshBuilder, a: Vec2, b: Vec2) {
         return;
     }
     let dir = (b - a) / len;
+    if !m.fine {
+        // Middle model: one panel each way; the cladding pattern draws the
+        // pickets.
+        let n = Vec3::new(-dir.y, 0.0, dir.x);
+        let q = [
+            Vec3::new(a.x, 0.05, a.y),
+            Vec3::new(b.x, 0.05, b.y),
+            Vec3::new(b.x, 0.8, b.y),
+            Vec3::new(a.x, 0.8, a.y),
+        ];
+        m.surface(Glow::Cladding, |m| {
+            m.quad_facing(q, n, palette::FENCE);
+            m.quad_facing(q, -n, shade(palette::FENCE, 0.92));
+        });
+        return;
+    }
     // Posts every 1.2 m (mid), pickets between them (near).
     let n = ((len / 1.2).ceil() as usize).max(1);
     for i in 0..=n {
