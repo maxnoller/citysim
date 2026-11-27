@@ -167,7 +167,7 @@ impl Cars {
     fn get(&mut self, body: usize, shape: u32) -> &MeshBuilder {
         self.0
             .entry((body, shape))
-            .or_insert_with(|| vehicle_gen::car_model(palette::CAR_BODIES[body], shape, false))
+            .or_insert_with(|| vehicle_gen::car_model(palette::CAR_BODIES[body], shape, super::building_gen::Lod::Mid))
     }
 }
 
@@ -466,10 +466,10 @@ fn tree(m: &mut MeshBuilder, f: &mut MeshBuilder, rng: &mut Stream, p: Vec2) {
     let yaw = rng.range(0.0, std::f32::consts::TAU);
     if rng.chance(0.75) {
         props::round_tree(m, v3(p, 0.0), s, canopy, yaw);
-        props::round_tree(f, v3(p, 0.0), s, canopy, yaw);
+        props::round_tree_far(f, v3(p, 0.0), s, canopy, yaw);
     } else {
         props::pine_tree(m, v3(p, 0.0), s * 0.9, canopy, yaw);
-        props::pine_tree(f, v3(p, 0.0), s * 0.9, canopy, yaw);
+        f.cone(v3(p, 0.0), 1.9 * s * 0.9, 7.5 * s * 0.9, 5, canopy, yaw);
     }
 }
 
@@ -595,8 +595,8 @@ fn car_park(
                 continue;
             }
             let x = xs + (k as f32 + 0.5) * bay;
-            let body = rng.below(palette::CAR_BODIES.len() as u32) as usize;
-            let shape = [0, 1, 4, 2, 0, 1][rng.below(6) as usize];
+            let body = vehicle_gen::paint(rng.next_u32());
+            let shape = [1, 1, 4, 0, 1, 4, 2, 5][rng.below(8) as usize];
             let yaw = if fwd { 0.0 } else { std::f32::consts::PI } + rng.range(-0.04, 0.04);
             let car = cars.get(body, shape);
             let start = m.pos.len();
@@ -692,7 +692,7 @@ fn storage(m: &mut MeshBuilder, rng: &mut Stream, level: u8, r: (f32, f32, f32, 
     if level >= 2 && rest > 9.0 && w > 5.0 && rng.chance(0.5) {
         let l = lorry.get_or_insert_with(|| {
             let (cab, cargo, stripe) = palette::TRUCK_LIVERIES[0];
-            vehicle_gen::truck_model(cab, cargo, stripe, false)
+            vehicle_gen::truck_model(cab, cargo, stripe, 0, super::building_gen::Lod::Mid)
         });
         let start = m.pos.len();
         m.append(

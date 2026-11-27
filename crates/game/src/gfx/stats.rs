@@ -4,7 +4,6 @@
 //! `CITYSIM_GFX_QUALITY=low|medium|high` sets the starting `GraphicsQuality`
 //! (dev aid for measuring; at runtime ui owns that resource).
 
-use bevy::mesh::Indices;
 use bevy::prelude::*;
 
 use super::buildings::BuildingModels;
@@ -73,11 +72,7 @@ fn log_stats(
         }
         visible += 1;
         if let Some(mesh) = meshes.get(&m.0) {
-            tris += match mesh.indices() {
-                Some(Indices::U32(i)) => i.len() / 3,
-                Some(Indices::U16(i)) => i.len() / 3,
-                None => 0,
-            };
+            tris += super::mesh_util::mesh_triangles(m.0.id(), mesh);
         }
     }
     info!(

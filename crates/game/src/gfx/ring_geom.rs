@@ -369,20 +369,14 @@ fn rnd(seed: u32, k: u32) -> f32 {
     (x & 0xFFFF) as f32 / 65535.0
 }
 
-/// A round deciduous tree: trunk and two stacked canopies.
+/// A tree of the city's own kinds (`props`): broadleaf of a species by the
+/// seed, now and then a conifer.
 fn tree(m: &mut MeshBuilder, p: Vec2, scale: f32, tint: u32) {
     let base = lift(p, ISLAND_Y);
-    m.cylinder(base, 0.16 * scale, 1.8 * scale, 7, palette::TRUNK, palette::TRUNK);
     let col = palette::CANOPIES[tint as usize % palette::CANOPIES.len()];
-    m.cone(base + Vec3::Y * 1.3 * scale, 1.6 * scale, 2.6 * scale, 9, col, 0.1);
-    m.cone(
-        base + Vec3::Y * 2.5 * scale,
-        1.2 * scale,
-        2.1 * scale,
-        9,
-        shade(col, 1.08),
-        0.35,
-    );
+    let yaw = rnd(tint, 3) * TAU;
+    let species = if tint % 5 == 4 { 3 } else { tint % 3 };
+    super::props::garden_tree(m, base, scale * 0.85, col, yaw, species);
 }
 
 /// The island's planting or feature, by size and seed.
@@ -456,16 +450,9 @@ const fn c_rgb(hex: u32) -> Color {
 fn ring_of_shrubs(m: &mut MeshBuilder, c: Vec2, rad: f32, n: u32, seed: u32) {
     for i in 0..n {
         let a = i as f32 / n as f32 * TAU;
-        let s = 0.45 + 0.2 * rnd(seed, 50 + i);
+        let s = 0.6 + 0.3 * rnd(seed, 50 + i);
         let p = c + dir(a) * rad;
-        m.cone(
-            lift(p, ISLAND_Y - 0.05),
-            s * 1.1,
-            s * 1.4,
-            7,
-            palette::HEDGE,
-            rnd(seed, 70 + i),
-        );
+        super::props::bush(m, lift(p, ISLAND_Y - 0.05), s, palette::HEDGE, rnd(seed, 70 + i) * TAU);
     }
 }
 

@@ -3,7 +3,8 @@
 //!
 //! Environment variables:
 //! * `CITYSIM_DEMO=town|city|hierarchy|organic|shapes|jam` — a real town built by the sim's scripted
-//!   players and fast-forwarded before the first frame (see `scenario`).
+//!   players and fast-forwarded before the first frame (see `scenario`); `models` = the model sheet
+//!   (`sheet`: every generated model lined up, named views for `CITYSIM_STILLS_LIST`).
 //! * `CITYSIM_AUTOSHOT=out.png` (or `--autoshot out.png`) — screenshot and
 //!   exit; `CITYSIM_SHOT_VIEW=wide|street|close`, `CITYSIM_SHOT_DELAY=secs`,
 //!   `CITYSIM_SHOT_OVERLAY=none|zones|traffic`, `CITYSIM_SHOT_SIZE=1920x1080`.
@@ -18,6 +19,7 @@ mod control;
 mod rings;
 mod scenario;
 mod shapes;
+pub mod sheet;
 mod stills;
 
 use bevy::prelude::*;
@@ -42,6 +44,8 @@ pub enum DemoKind {
     Shapes,
     /// A town with roundabouts of every size (`rings`).
     Rings,
+    /// The model sheet (`sheet`): every generated model lined up.
+    Models,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,9 +97,12 @@ impl DevConfig {
             Some("organic") => Some(DemoKind::Organic),
             Some("shapes") => Some(DemoKind::Shapes),
             Some("rings") => Some(DemoKind::Rings),
+            Some("models") => Some(DemoKind::Models),
             Some("" | "0") | None => None,
             Some(other) => {
-                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy, organic, shapes, rings or jam)");
+                eprintln!(
+                    "unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy, organic, shapes, rings, models or jam)"
+                );
                 None
             }
         };
