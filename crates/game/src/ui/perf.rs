@@ -358,7 +358,7 @@ fn sample_process(time: Res<Time<Real>>, mut p: ResMut<Proc>) {
     }
     p.at = Some(now);
     let first = p.system.is_none();
-    let sys = p.system.take().unwrap_or_default();
+    let sys = p.system.take().unwrap_or_else(sysinfo::System::new);
     p.task = Some(AsyncComputeTaskPool::get().spawn(async move { take_sample(sys, first) }));
 }
 
