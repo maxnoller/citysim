@@ -6,7 +6,7 @@
 
 use citysim_sim::citizens::{Activity, CitizenId, HappinessPart, JobTier, LifeEvent, LifeStage, TravelMode};
 use citysim_sim::households::HouseholdKind;
-use citysim_sim::inspect::{self, AGE_BANDS};
+use citysim_sim::inspect::{self, AGE_BANDS, TripReason};
 use citysim_sim::{BuildingId, Place, TripPurpose, VehicleId, World, Zone, balance};
 
 use super::format;
@@ -203,16 +203,30 @@ pub fn activity_word(a: Activity) -> &'static str {
     }
 }
 
-pub fn purpose_word(p: TripPurpose) -> &'static str {
-    match p {
-        TripPurpose::ToWork => "to work",
-        TripPurpose::ToHome => "home",
-        TripPurpose::MoveIn => "moving in",
-        TripPurpose::MoveOut => "leaving town",
-        TripPurpose::Shopping => "shopping",
-        TripPurpose::Goods => "delivering goods",
-        TripPurpose::Leisure => "for a night out",
+/// Why a trip is made, after a word of going ("Driving out for lunch",
+/// "on the way home from work"); `TripReason::text()` is the sentence.
+pub fn reason_word(r: TripReason) -> &'static str {
+    match r {
+        TripReason::ToWork => "to work",
+        TripReason::HomeFromWork => "home from work",
+        TripReason::MovingIn => "to move in",
+        TripReason::MovingOut => "out of town",
+        TripReason::Groceries => "to the shops",
+        TripReason::ShoppingAfterWork => "to the shops after work",
+        TripReason::HomeFromShopping => "home from the shops",
+        TripReason::LunchBreak => "to lunch on a break",
+        TripReason::BackToWork => "back to work after lunch",
+        TripReason::OutForLunch => "out for lunch",
+        TripReason::HomeFromLunch => "home from lunch",
+        TripReason::NightOut => "for a night out",
+        TripReason::HomeFromNightOut => "home from a night out",
+        TripReason::Delivery => "with goods",
     }
+}
+
+/// The reason of the trip a citizen is on, if any.
+fn trip_reason(world: &World, id: CitizenId) -> Option<TripReason> {
+    inspect::citizen(world, id).and_then(|v| v.trip).map(|t| t.reason)
 }
 
 pub fn purpose_title(p: TripPurpose) -> &'static str {
@@ -517,6 +531,22 @@ fn doing(world: &World, id: CitizenId) -> (String, String) {
         return (String::new(), String::new());
     };
     let now = world.time.tick;
+    // Leisure at midday is a lunch: on the way there, or there now (then
+    // back to work or home from lunch).
+    let lunch_trip = p
+        .trip
+        .is_some_and(|t| matches!(t.reason, TripReason::LunchBreak | TripReason::OutForLunch));
+    let at_lunch = p.trip.is_none()
+        && p.activity == Activity::Leisure
+        && p.next
+            .is_some_and(|n| n.activity == Activity::Working || n.reason == Some(TripReason::HomeFromLunch));
+    let activity = |a: Activity, lunch: bool| {
+        if lunch && a == Activity::Leisure {
+            "At lunch"
+        } else {
+            activity_word(a)
+        }
+    };
     let doing = match p.trip {
         Some(t) => {
             let how = match t.mode {
@@ -527,13 +557,13 @@ fn doing(world: &World, id: CitizenId) -> (String, String) {
             };
             format!(
                 "{how} {} · {} so far",
-                purpose_word(t.purpose),
+                reason_word(t.reason),
                 span(now.saturating_sub(t.departed_tick))
             )
         }
         None => match p.until_tick {
-            Some(u) if u > now => format!("{} until {}", activity_word(p.activity), tick_clock(world, u)),
-            _ => activity_word(p.activity).to_string(),
+            Some(u) if u > now => format!("{} until {}", activity(p.activity, at_lunch), tick_clock(world, u)),
+            _ => activity(p.activity, at_lunch).to_string(),
         },
     };
     let next = match p.next {
@@ -552,13 +582,23 @@ fn doing(world: &World, id: CitizenId) -> (String, String) {
                     Some(t) => format!(
                         "Expected about {}, then {}",
                         tick_clock(world, t),
-                        activity_word(n.activity).to_lowercase()
+                        activity(n.activity, lunch_trip).to_lowercase()
                     ),
-                    None => format!("Then {}", activity_word(n.activity).to_lowercase()),
+                    None => format!("Then {}", activity(n.activity, lunch_trip).to_lowercase()),
                 },
                 (Activity::Travelling, Some(TripPurpose::ToWork), _) => format!("Leaves for work{when}{place}"),
-                (Activity::Travelling, Some(TripPurpose::ToHome), _) => format!("Heads home{when}"),
-                (Activity::Travelling, Some(pp), _) => format!("Sets off {}{when}", purpose_word(pp)),
+                (Activity::Travelling, Some(TripPurpose::ToHome), _) => match n.reason {
+                    Some(
+                        r @ (TripReason::HomeFromLunch | TripReason::HomeFromNightOut | TripReason::HomeFromShopping),
+                    ) => {
+                        format!("Heads {}{when}", reason_word(r))
+                    }
+                    _ => format!("Heads home{when}"),
+                },
+                (Activity::Travelling, Some(_), _) if let Some(r) = n.reason => {
+                    format!("Sets off {}{when}", reason_word(r))
+                }
+                (Activity::Travelling, Some(_), _) => format!("Sets off{when}"),
                 (Activity::Sleeping, _, _) => format!("Bed{when}"),
                 // "Sleeping until 07:06" already says when they get up.
                 (Activity::Home, _, _) if p.activity == Activity::Sleeping => String::new(),
@@ -632,7 +672,7 @@ fn trip_bar(world: &World, t: &inspect::TripView) -> TripBar {
         )
     };
     TripBar {
-        title: format!("{how} {}", purpose_word(t.purpose)),
+        title: format!("{how} {}", reason_word(t.reason)),
         left,
         late,
         progress,
@@ -679,7 +719,7 @@ fn route_section(
         (Some(t), _) => {
             sec = Section::new("Route");
             sec.jump("Going to", to);
-            sec.line("Why", purpose_title(t.purpose), Tone::Normal);
+            sec.line("Why", t.reason.text(), Tone::Normal);
             let time = bar.filter(|b| !b.late).map(|b| format!("about {}", b.left));
             let left = match (km, time) {
                 (Some(k), Some(t)) => format!("{k} · {t}"),
@@ -703,7 +743,9 @@ fn route_section(
             let next = p.next?;
             sec = Section::new("Next trip");
             sec.jump("Going to", to);
-            if let Some(pp) = next.purpose {
+            if let Some(r) = next.reason {
+                sec.line("Why", r.text(), Tone::Normal);
+            } else if let Some(pp) = next.purpose {
                 sec.line("Why", purpose_title(pp), Tone::Normal);
             }
             if let Some(at) = next.at_tick {
@@ -867,8 +909,8 @@ pub fn person_sheet(world: &World, id: CitizenId, routes: &mut super::route::Tri
         }
         if let Some(mc) = world.citizens.get(m) {
             let what = match (&mc.location, mc.activity) {
-                (citysim_sim::citizens::Location::Travelling(j), _) => {
-                    format!("on the way {}", purpose_word(j.purpose))
+                (citysim_sim::citizens::Location::Travelling(_), _) => {
+                    trip_reason(world, m).map_or("on the way".into(), |r| format!("on the way {}", reason_word(r)))
                 }
                 (_, a) => activity_word(a).to_lowercase(),
             };
@@ -1028,7 +1070,9 @@ pub fn place_sheet(world: &World, id: BuildingId) -> Option<Sheet> {
                 let Some(c) = world.citizens.get(m) else { continue };
                 let here = c.location.building() == Some(id);
                 let what = match &c.location {
-                    citysim_sim::citizens::Location::Travelling(j) => format!("out, {}", purpose_word(j.purpose)),
+                    citysim_sim::citizens::Location::Travelling(_) => {
+                        trip_reason(world, m).map_or("out".into(), |r| format!("out, {}", reason_word(r)))
+                    }
                     _ if here => format!("in · {}", activity_word(c.activity).to_lowercase()),
                     _ => format!("out · {}", activity_word(c.activity).to_lowercase()),
                 };
@@ -1101,7 +1145,7 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
         headline: if truck {
             "Delivering goods".to_string()
         } else {
-            format!("Going {} · {} aboard", purpose_word(v.purpose), v.occupants)
+            format!("Going {} · {} aboard", reason_word(v.reason), v.occupants)
         },
         trip: driver_trip.map(|t| trip_bar(world, &t)),
         actions,
@@ -1136,7 +1180,7 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
             None => sec.line(label, text, Tone::Normal),
         }
     }
-    sec.line("Why", purpose_title(v.purpose), Tone::Normal);
+    sec.line("Why", v.reason.text(), Tone::Normal);
     if let Some(pts) = super::route::vehicle_path(world, id) {
         let left = s.trip.as_ref().map(|t| t.left.clone());
         sec.line(

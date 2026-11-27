@@ -347,6 +347,8 @@ fn lunch_breaks_go_back_to_work_and_the_day_free_go_out_for_lunch() {
         w.step();
     }
     let (mut breaks, mut outings, mut back) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    // Cars and plans name the trip as the traveller's own view does.
+    let (mut lunch_cars, mut home_from_lunch_plans) = (0, 0);
     // From 10:00 to 15:00.
     for t in 0..5 * balance::TICKS_PER_HOUR {
         w.step();
@@ -366,8 +368,36 @@ fn lunch_breaks_go_back_to_work_and_the_day_free_go_out_for_lunch() {
                 }
                 _ => {}
             }
+            let Some(p) = inspect::plan(&w, id) else { continue };
+            if p.trip.is_none()
+                && p.activity == Activity::Leisure
+                && day::on_shift(&w, id).is_none()
+                && let Some(n) = p.next
+                && n.activity == Activity::Travelling
+            {
+                let r = n.reason.expect("a planned trip has a reason");
+                assert!(
+                    matches!(r, TripReason::HomeFromLunch | TripReason::HomeFromNightOut),
+                    "{r:?}"
+                );
+                home_from_lunch_plans += usize::from(r == TripReason::HomeFromLunch);
+            }
+        }
+        for (vid, _) in w.vehicles.iter() {
+            let Some(v) = inspect::vehicle(&w, vid) else { continue };
+            if let Some(trip) = v.driver.and_then(|d| inspect::citizen(&w, d)).and_then(|c| c.trip)
+                && trip.vehicle == Some(vid)
+            {
+                assert_eq!(v.reason, trip.reason, "car {vid:?}");
+            }
+            lunch_cars += usize::from(matches!(
+                v.reason,
+                TripReason::LunchBreak | TripReason::BackToWork | TripReason::OutForLunch | TripReason::HomeFromLunch
+            ));
         }
     }
+    assert!(lunch_cars > 0, "no car named a lunch trip");
+    assert!(home_from_lunch_plans > 0, "nobody at lunch plans to go home from lunch");
     w.check_sim_invariants().unwrap();
     assert!(breaks.len() >= 3, "lunch breaks: {}", breaks.len());
     assert!(outings.len() >= 3, "out for lunch: {}", outings.len());

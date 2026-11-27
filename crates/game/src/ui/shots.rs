@@ -1105,6 +1105,39 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            // Someone driving on a midday trip (demo hour 12): the panel names
+            // it by its reason ("Driving out for lunch").
+            name: "people-lunch",
+            wait: 1.5,
+            setup: |w| {
+                use citysim_sim::inspect::{self, TripReason};
+                reset(w);
+                let s = sim(w);
+                let f = town_focus(w);
+                let who = s
+                    .vehicles
+                    .iter()
+                    .filter(|(_, v)| v.segment.is_some())
+                    .filter_map(|(id, v)| {
+                        let x = inspect::vehicle(s, id)?;
+                        let lunch = matches!(
+                            x.reason,
+                            TripReason::LunchBreak
+                                | TripReason::BackToWork
+                                | TripReason::OutForLunch
+                                | TripReason::HomeFromLunch
+                        );
+                        lunch.then_some((x.driver?, citysim_sim::drive::vehicle_pose(s, v).0))
+                    })
+                    .min_by(|a, b| dist(a.1, f).total_cmp(&dist(b.1, f)));
+                w.resource_mut::<SimClock>().paused = true;
+                if let Some((id, at)) = who {
+                    w.write_message(UiAction::Person(id));
+                    look(w, add(at, [1.0, 0.0], 30.0), 140.0);
+                }
+            },
+        },
+        Step {
             name: "people-city",
             wait: 1.5,
             setup: |w| {
