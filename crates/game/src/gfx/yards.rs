@@ -406,7 +406,7 @@ fn draw_yard(
 fn tree(m: &mut MeshBuilder, f: &mut MeshBuilder, rng: &mut Stream, p: Vec2) {
     let canopy = rng.pick(&palette::CANOPIES);
     let s = rng.range(0.5, 0.78);
-    let yaw = rng.range(0.0, 6.28);
+    let yaw = rng.range(0.0, std::f32::consts::TAU);
     if rng.chance(0.75) {
         props::round_tree(m, v3(p, 0.0), s, canopy, yaw);
         props::round_tree(f, v3(p, 0.0), s, canopy, yaw);

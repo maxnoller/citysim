@@ -134,6 +134,8 @@ mod reload_tests {
                 super::buildings::BuildingsPlugin,
                 super::vehicles::VehiclesPlugin,
                 super::trees::TreesPlugin,
+                super::greens::GreensPlugin,
+                super::yards::YardsPlugin,
             ));
         let lit = app
             .world_mut()

@@ -266,6 +266,104 @@ def guide(out, k, suffix):
     play.select_tool("inspect")
 
 
+def owner_views(out, k, suffix):
+    """The places of the owner's three screenshots: the hand-drawn grid
+    seen at an angle with the zone tool open (rectangle mode), closer on one
+    block, and with the traffic overlay."""
+    play.focus()
+    play.cmd("camera off")
+    zone_tool("r")
+    zmode("Marquee")
+    shots = [
+        ("grid", (33.0, 119.0, 175.0, 0.25, 0.95)),
+        ("block", (24.0, 112.0, 105.0, 0.2, 0.9)),
+    ]
+    for name, (x, y, d, yaw, pitch) in shots:
+        look(x, y, d, yaw, pitch)
+        play.wait_frames(5)
+        play.shot(os.path.join(out, f"zone-{k:02d}-{suffix}-owner-{name}.png"))
+        k += 1
+    for _ in range(4):
+        if play.stats()["overlay"] == "Traffic":
+            break
+        play.key("o")
+    look(33.0, 119.0, 175.0, 0.25, 0.95)
+    play.wait_frames(5)
+    play.shot(os.path.join(out, f"zone-{k:02d}-{suffix}-owner-traffic.png"))
+    for _ in range(4):
+        if play.stats()["overlay"] == "None":
+            break
+        play.key("o")
+    play.select_tool("inspect")
+    return k + 1
+
+
+def video_play():
+    """Real play for the video on a new map: a block drawn street by street
+    by hand, zoned with one fill, growing; then a small ring the same way.
+    The camera stays put while drawing (clicks land where they are aimed)."""
+    play.focus()
+    play.cmd("money 2000000")
+    look(35, 124, 400, 0.15, 1.05)
+    play.wait_frames(8)
+
+    def draw(pts, mode="Straight"):
+        play.road_mode(mode)
+        before = play.stats()["segments"]
+        for p in pts:
+            click_at(*p)
+        play.key("Return")
+        play.wait_frames(3)
+        play.log(f"{mode} {pts}: segments {before} -> {play.stats()['segments']}")
+
+    # The trunk, then a block of three streets off it, each on its own, a
+    # little off true and not on whole cells.
+    draw([(11, 128), (60, 128)])
+    draw([(17.3, 128), (17.1, 117.4)])
+    draw([(29.6, 128), (29.95, 117.1)])
+    draw([(17.1, 117.4), (29.95, 117.1)])
+    esc()
+    play.wait_frames(4)
+    # The whole block with one click; shops along the trunk's far side.
+    zone_tool("r")
+    zmode("Fill")
+    click_at(23.5, 122.6)
+    zone_tool("c")
+    zmode("Frontage")
+    click_at(22.0, 129.4)
+    zone_tool("i")
+    click_at(40.0, 126.6)
+    play.select_tool("inspect")
+    play.wait_frames(4)
+    play.key("space")
+    play.key("4")
+    play.log(play.cmd("until-day 3 10", timeout=3000))
+    play.key("space")
+    # A small ring on a stem south of the trunk, its middle filled.
+    look(50, 142, 300, 0.15, 1.15)
+    play.wait_frames(6)
+    draw([(50, 128), (50, 131)])
+    cx, cy, r = 50.0, 137.5, 6.5
+    draw([(cx, cy - r), (cx + r, cy - r), (cx + r, cy)], "Curve")
+    draw([(cx + r, cy), (cx + r, cy + r), (cx, cy + r)], "Curve")
+    draw([(cx, cy + r), (cx - r, cy + r), (cx - r, cy)], "Curve")
+    draw([(cx - r, cy), (cx - r, cy - r), (cx, cy - r)], "Curve")
+    esc()
+    zone_tool("r")
+    zmode("Fill")
+    click_at(cx, cy)
+    zmode("Frontage")
+    click_at(cx + r + 1.2, cy)
+    play.select_tool("inspect")
+    play.wait_frames(4)
+    play.key("space")
+    play.key("4")
+    play.log(play.cmd("until-day 5 10", timeout=3000))
+    play.key("space")
+    look(36, 130, 260, 0.6, 0.75)
+    play.wait_frames(12)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctl", default="/tmp/ctl")
@@ -295,6 +393,10 @@ def main():
         print(shots(a.args[0], a.args[1], int(a.args[2]), a.args[3], names))
     elif a.phase == "guide":
         guide(a.args[0], int(a.args[1]), a.args[2])
+    elif a.phase == "video":
+        video_play()
+    elif a.phase == "owner":
+        print(owner_views(a.args[0], int(a.args[1]), a.args[2]))
     elif a.phase == "paint":
         paint(a.args[0], int(a.args[1]), a.args[2])
     elif a.phase == "site":

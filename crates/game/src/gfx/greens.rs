@@ -44,11 +44,14 @@ impl Greens {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GreensUpdate;
 
+/// A face of the road graph and its signature (see `faces::leftover_faces`).
+type FaceKey = ((citysim_sim::SegmentId, bool), u64);
+
 #[derive(Default)]
 struct GreenState {
     key: Option<(u64, u64)>,
-    /// (face, signature) -> leftover and its entity.
-    by_face: HashMap<((citysim_sim::SegmentId, bool), u64), (Option<Leftover>, Option<Entity>)>,
+    /// Face -> its leftover and the green's entity.
+    by_face: HashMap<FaceKey, (Option<Leftover>, Option<Entity>)>,
 }
 
 pub struct GreensPlugin;
@@ -292,7 +295,7 @@ fn park_mesh(l: &Leftover) -> Option<(Mesh, Vec3)> {
         }
         trees.push(q);
         let canopy = rng.pick(&palette::CANOPIES);
-        let yaw = rng.range(0.0, 6.28);
+        let yaw = rng.range(0.0, std::f32::consts::TAU);
         let sc = rng.range(0.6, 0.95);
         if rng.chance(0.8) {
             props::round_tree(&mut m, Vec3::new(q.x, 0.0, q.y), sc, canopy, yaw);
@@ -326,7 +329,7 @@ fn park_mesh(l: &Leftover) -> Option<(Mesh, Vec3)> {
     }
     // Low bushes around the edge.
     for (i, &v) in f.iter().enumerate() {
-        if (s * 0.9..=s * 1.1).contains(&v) && (i % w + i / w) % 4 == 0 && rng.chance(0.4) {
+        if (s * 0.9..=s * 1.1).contains(&v) && (i % w + i / w).is_multiple_of(4) && rng.chance(0.4) {
             let p = pos(i);
             props::bush(
                 &mut m,
