@@ -54,9 +54,9 @@ impl Default for DayLight {
     }
 }
 
-/// Pinned hour from `CITYSIM_GFX_HOUR`.
+/// Pinned hour from `CITYSIM_GFX_HOUR` (the benchmark's script moves it).
 #[derive(Resource)]
-struct PinnedHour(Option<f32>);
+pub(super) struct PinnedHour(pub Option<f32>);
 
 pub struct DayNightPlugin;
 

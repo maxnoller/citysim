@@ -2,6 +2,7 @@
 //! game only through `crate::shared` (never import from `crate::ui`).
 
 mod bench;
+mod bench_script;
 mod building_gen;
 mod buildings;
 mod camera;

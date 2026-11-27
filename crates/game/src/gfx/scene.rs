@@ -91,6 +91,7 @@ impl Plugin for ScenePlugin {
             })
             .insert_resource(DirectionalLightShadowMap { size: 4096 })
             .init_resource::<PendingPipelines>()
+            .init_resource::<QualityApplied>()
             .add_systems(PreStartup, init_materials)
             .add_systems(Startup, setup_scene)
             .add_systems(
@@ -427,6 +428,10 @@ fn count_pending_pipelines(cache: Res<PipelineCache>, pending: Res<PendingPipeli
     pending.0.store(cache.waiting_pipelines().count(), Ordering::Relaxed);
 }
 
+/// The quality the world camera shows now (the benchmark waits for it).
+#[derive(Resource, Default)]
+pub(super) struct QualityApplied(pub Option<GraphicsQuality>);
+
 /// Hidden camera that renders the scene with the requested quality into a
 /// small image so its pipelines compile before the main camera switches.
 #[derive(Component)]
@@ -503,6 +508,7 @@ fn apply_quality(
     mut images: ResMut<Assets<Image>>,
     time: Res<Time<Real>>,
     mut state: Local<QualityState>,
+    mut applied: ResMut<QualityApplied>,
 ) {
     let Ok((cam, cam_tf, proj)) = cams.single() else {
         return;
@@ -523,6 +529,7 @@ fn apply_quality(
             apply(&mut commands, &mut shadow_map, want);
         }
         state.applied = Some(want);
+        applied.0 = Some(want);
         return;
     }
     if state.applied == Some(want) {
@@ -574,6 +581,7 @@ fn apply_quality(
         commands.entity(entity).despawn();
         apply(&mut commands, &mut shadow_map, want);
         state.applied = Some(want);
+        applied.0 = Some(want);
     }
 }
 
