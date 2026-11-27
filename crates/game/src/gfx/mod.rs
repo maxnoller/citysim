@@ -127,6 +127,11 @@ mod reload_tests {
             .insert_resource(GraphicsQuality::Low)
             .insert_resource(OverlayMode::Zones)
             .insert_resource(ActiveTool::Inspect)
+            // What the vehicles read to publish their drawn poses.
+            .init_resource::<crate::shared::WorldHighlight>()
+            .init_resource::<crate::shared::CameraFollow>()
+            .init_resource::<crate::shared::RouteView>()
+            .init_resource::<crate::shared::DrawnPoses>()
             .add_plugins((
                 super::land::LandPlugin,
                 super::roads::RoadsPlugin,
