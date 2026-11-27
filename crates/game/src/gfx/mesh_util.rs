@@ -148,6 +148,7 @@ impl MeshBuilder {
         }
     }
 
+    #[cfg(test)]
     pub fn triangle_count(&self) -> usize {
         self.idx.len() / 3
     }

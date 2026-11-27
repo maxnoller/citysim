@@ -136,7 +136,7 @@ pub fn near_distance(q: GraphicsQuality) -> f32 {
     match q {
         GraphicsQuality::Low => 0.0,
         GraphicsQuality::Medium => 120.0,
-        GraphicsQuality::High => 180.0,
+        GraphicsQuality::High => 160.0,
     }
 }
 

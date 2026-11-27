@@ -119,18 +119,6 @@ pub(super) struct Win {
     pub shutters: Option<Color>,
 }
 
-impl Win {
-    pub fn plain(frame: Color, glass: Color) -> Win {
-        Win {
-            frame,
-            glass,
-            sill: None,
-            bars: 0,
-            shutters: None,
-        }
-    }
-}
-
 /// One side of an axis-aligned body, for putting things on walls.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Face {
@@ -191,12 +179,6 @@ impl Face {
         );
     }
 
-    /// Framed window centred at `a`, sill at `b` (the old plain look).
-    #[allow(clippy::too_many_arguments)]
-    pub fn window(&self, m: &mut MeshBuilder, a: f32, b: f32, w: f32, h: f32, frame: Color, glass: Color) {
-        self.window_s(m, a, b, w, h, &Win::plain(frame, glass));
-    }
-
     /// Dressed window centred at `a`, glass from `b` up `h`.
     #[allow(clippy::too_many_arguments)]
     pub fn window_s(&self, m: &mut MeshBuilder, a: f32, b: f32, w: f32, h: f32, st: &Win) {
@@ -214,17 +196,9 @@ impl Face {
         m.glow(Glow::Window, r, |m| self.rect(m, a0, a1, b, b + h, 0.045, st.glass));
         if let Some(s) = st.shutters {
             let sw = (w * 0.48).min(0.6);
-            let dark = shade(s, 0.78);
             for (x0, x1) in [(a0 - f - sw, a0 - f), (a1 + f, a1 + f + sw)] {
-                self.rect(m, x0, x1, b - 0.02, b + h + 0.02, 0.035, s);
-                m.fine_only(|m| {
-                    // Louvre lines.
-                    let mut y = b + 0.12;
-                    while y < b + h - 0.05 {
-                        self.rect(m, x0 + 0.05, x1 - 0.05, y, y + 0.035, 0.045, dark);
-                        y += 0.17;
-                    }
-                });
+                // Louvres: the siding pattern draws the slats.
+                m.surface(Glow::Siding, |m| self.rect(m, x0, x1, b - 0.02, b + h + 0.02, 0.035, s));
             }
         }
         if let Some(sill) = st.sill {
@@ -940,11 +914,6 @@ fn roof_details_inner(m: &mut MeshBuilder, rng: &mut Stream, r: Rect, top: f32) 
     });
 }
 
-/// Brick chimney stack from `y0` to `y1` with a cap and pots (near).
-pub(super) fn chimney(m: &mut MeshBuilder, x: f32, z: f32, y0: f32, y1: f32) {
-    chimney_c(m, x, z, y0, y1, mix(palette::BRICK, Color::srgb_u32(0x7A6A60), 0.45), 1);
-}
-
 /// Chimney stack in `brick` with `pots` pots.
 pub(super) fn chimney_c(m: &mut MeshBuilder, x: f32, z: f32, y0: f32, y1: f32, brick: Color, pots: u32) {
     let hw = 0.24 + 0.17 * (pots.max(1) - 1) as f32;
@@ -1062,16 +1031,21 @@ fn fence_inner(m: &mut MeshBuilder, a: Vec2, b: Vec2) {
         );
     }
     m.fine_only(|m| {
-        let k = ((len / 0.2).floor() as usize).max(1);
+        // Pickets: thin boards facing both ways, every 0.25 m.
+        let k = ((len / 0.25).floor() as usize).max(1);
+        let n = Vec3::new(-dir.y, 0.0, dir.x);
+        let col = shade(palette::FENCE, 0.96);
         for i in 0..k {
-            let p = a + dir * (len * (i as f32 + 0.5) / k as f32);
-            let side = Vec2::new(-dir.y, dir.x) * 0.035;
-            let q = p + side;
-            m.cuboid(
-                Vec3::new(q.x - 0.035, 0.08, q.y - 0.035),
-                Vec3::new(q.x + 0.035, 0.75, q.y + 0.035),
-                shade(palette::FENCE, 0.96),
-            );
+            let p = a + dir * (len * (i as f32 + 0.5) / k as f32) + Vec2::new(n.x, n.z) * 0.04;
+            let (l, r) = (p - dir * 0.04, p + dir * 0.04);
+            let q = [
+                Vec3::new(l.x, 0.08, l.y),
+                Vec3::new(r.x, 0.08, r.y),
+                Vec3::new(r.x, 0.78, r.y),
+                Vec3::new(l.x, 0.78, l.y),
+            ];
+            m.quad_facing(q, n, col);
+            m.quad_facing(q, -n, col);
         }
     });
 }

@@ -11,6 +11,9 @@
 //! `r1`..`i2`, `cars`, `green`, `props`, `sites`, `junction`, the `-far` /
 //! `-mid` variants of the building views, ...): see [`view`].
 
+// The layout is read by gfx: a ui-only build uses only the views.
+#![cfg_attr(not(feature = "gfx"), allow(dead_code))]
+
 use bevy::prelude::*;
 use citysim_sim::{Cell, Command, RoadKind, World, Zone, scenarios};
 

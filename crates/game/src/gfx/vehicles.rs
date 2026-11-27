@@ -143,7 +143,7 @@ pub(super) fn model_for(world: &World, id: VehicleId, v: &Vehicle) -> VModel {
                 }
             } else {
                 VModel::Delivery {
-                    kind: if h % 5 == 0 { 2 } else { 0 },
+                    kind: if h.is_multiple_of(5) { 2 } else { 0 },
                     livery: ((h / 8) as usize % palette::TRUCK_LIVERIES.len()) as u8,
                 }
             }

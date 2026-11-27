@@ -130,7 +130,6 @@ pub const ROOF_DETAIL: Color = c(0x8F959A);
 pub const PAVING: Color = c(0xC4BEB0);
 
 // ------------------------------------------------------------ industry
-pub const INDUSTRY_WALLS: Color = c(0xC9C4BA);
 pub const INDUSTRY_ROOF: Color = c(0x7D868C);
 pub const INDUSTRY_STRIPE: Color = c(0xD98F3E);
 pub const BRICK: Color = c(0x8E3B34);

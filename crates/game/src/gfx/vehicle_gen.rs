@@ -313,12 +313,6 @@ fn across(m: &mut MeshBuilder, a: Vec2, b: Vec2, wa: f32, wb: f32, out: Vec3, co
     );
 }
 
-/// A car centred at `c`, rotated `yaw` about +y, into `out`.
-pub fn car(out: &mut MeshBuilder, c: Vec3, yaw: f32, body: Color, shape: u32) {
-    let m = car_model(body, shape, Lod::Mid);
-    out.append(&m, c, yaw, Vec3::ONE, [1.0; 4]);
-}
-
 /// Car model of body type `shape` in its local frame.
 pub fn car_model(body: Color, shape: u32, lod: Lod) -> MeshBuilder {
     let mut m = lod.builder(0.0);
@@ -1181,7 +1175,7 @@ fn truck_body(
                     shade(stripe, 0.9),
                 );
             }
-            let pipes = (cab.to_srgba().red * 10.0) as u32 % 2 == 0;
+            let pipes = ((cab.to_srgba().red * 10.0) as u32).is_multiple_of(2);
             if pipes {
                 let pc = Color::srgb_u32(0x6E7378);
                 for (k, z) in [-0.55f32, 0.0, 0.55].into_iter().enumerate() {

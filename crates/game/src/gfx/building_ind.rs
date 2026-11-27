@@ -179,7 +179,7 @@ pub(super) fn works(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8)
                 Vec3::new(x0, h + rh, body_r.z1),
                 Vec3::new(x0, h + rh, body_r.z0),
             );
-            m.glow(Glow::Window, (t as f32 * 0.37).fract(), |m| {
+            m.glow(Glow::Shop, (t as f32 * 0.37).fract(), |m| {
                 m.quad(a, b, c, d, palette::GLASS)
             });
             m.surface(Glow::Cladding, |m| {
@@ -233,7 +233,7 @@ pub(super) fn works(m: &mut MeshBuilder, rng: &mut Stream, lot: Rect, level: u8)
                     let y0 = super::building_gen::roof_height(body_r, h, body_r.d() * pitch, true, x, z0) + 0.04;
                     let y1 = super::building_gen::roof_height(body_r, h, body_r.d() * pitch, true, x, z1) + 0.04;
                     let n = Vec3::new(0.0, 1.0, if z0 > body_r.cz() { pitch * 2.0 } else { -pitch * 2.0 }).normalize();
-                    m.glow(Glow::Window, 0.9, |m| {
+                    m.glow(Glow::Shop, 0.9, |m| {
                         m.quad_facing(
                             [
                                 Vec3::new(x - 0.5, y0, z0),
