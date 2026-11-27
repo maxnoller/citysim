@@ -969,9 +969,14 @@ fn subtitle(w: &World, page: CityPage) -> String {
             format::group(w.people.stats.population as u64),
             format::group(w.people.stats.households as u64)
         ),
-        CityPage::Budget => format!(
-            "{name} · {} in the bank · booked at midnight",
+        CityPage::Budget if w.economy.history.is_empty() => format!(
+            "{name} · {} in the bank · the first day is booked at midnight",
             format::money(w.economy.money)
+        ),
+        CityPage::Budget => format!(
+            "{name} · {} in the bank · {} an hour, settled at midnight",
+            format::money(w.economy.money),
+            format::signed_money(w.economy.last_day.net() / 24)
         ),
     }
 }

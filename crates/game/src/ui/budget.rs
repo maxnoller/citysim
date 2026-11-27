@@ -815,7 +815,10 @@ fn balance_note(money: i64, yesterday: Option<i64>, today: i64) -> (String, Colo
             t::NEGATIVE,
         )
     } else if yesterday.is_none() {
-        ("Taxes and costs are booked at midnight".into(), t::TEXT_MUTED)
+        (
+            "Taxes and costs are booked at midnight; from then on money comes in every hour".into(),
+            t::TEXT_MUTED,
+        )
     } else if today < 0 {
         (
             "Today's costs outrun taxes: grow the city or raise taxes".into(),
@@ -823,7 +826,14 @@ fn balance_note(money: i64, yesterday: Option<i64>, today: i64) -> (String, Colo
         )
     } else {
         let net = yesterday.unwrap_or(0);
-        (format!("{} yesterday", format::signed_money(net)), signed_color(net))
+        (
+            format!(
+                "{} yesterday: {} comes in each hour, midnight books today and settles the rest",
+                format::signed_money(net),
+                format::signed_money(net / 24)
+            ),
+            signed_color(net),
+        )
     }
 }
 
