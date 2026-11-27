@@ -959,6 +959,13 @@ cars a minute per street approach, 18-20 per avenue approach; 10 / 30 / 50 % tur
 
 \* give-way on an avenue lets 0-4 % of the cars in from the side street; rings serve every arm (22-51 %).
 
+With 12 people a minute walking past every junction (`JBENCH_WALKERS=12`; saturated cars a minute / moderate wait in
+seconds, 10 / 30 / 50 % turning): street x street give-way 24 / 21 / 20 (13.6 / 37.1 / 33.2 s), signals 27 / 23 / 23
+(3.1 / 7.5 / 15.0 s), mini 32 / 32 / 32 (2.0 / 1.7 / 2.0 s), small 36 / 37 / 35 (0.9 / 1.2 / 1.1 s), medium 40 / 41 / 41,
+large 43 / 43 / 44 (0.4-0.5 s); avenue x street signals 103 / 69 / 52 (10.4 / 13.7 / 25.7 s), medium 60 / 54 / 56
+(2.3 / 3.3 / 9.7 s), large 72 / 60 / 58 (1.7 / 2.5 / 5.0 s); avenue x avenue signals 132 / 109 / 104 (7.0 / 15.7 /
+19.7 s), large 91 / 86 / 81 (9.8 / 16.9 / 9.8 s). Car bodies over people at the bench rings: none.
+
 Scripted cities (10 seeds, 15 days; commute over free flow / car trips given up, by residents): avenue city 9-11k
 1.47x / 0.25 %, with two-lane rings on its avenue junctions 1.71x / 0.28 %, with mini rings at its street junctions
 1.59x / 0.40 %; streets city 9-11k 3.22x / 2.18 %, with small/mini rings everywhere 3.34x / 1.97 %, with mini rings
@@ -966,6 +973,10 @@ everywhere 2.82x / 1.58 %. On these 80 x 40 m blocks a two-lane ring leaves 10 m
 23 % of the zoned land (final residents 16.3k vs 18.2k); mini rings take 1-9 %. Step time (`bench`, 20,000 citizens,
 no rings): unchanged (808-851 us mean against 815-846 us). Overlapping car bodies over a 07:00-09:00 rush: avenue city
 with rings 1 pair-tick (0.05 m), streets city with minis 7 (at most 0.09 m).
+
+With people walking (r7-walk merged; 10 seeds, 15 days; commute over free flow / trips given up at 9-11k residents):
+avenue city 1.90x / 0.43 %, with two-lane rings 2.13x / 0.52 %, with mini rings 1.89x / 0.42 %; streets city 3.43x /
+2.25 %, with small/mini rings 3.56x / 2.67 %, with mini rings everywhere 2.86x / 2.10 %.
 
 ## 2026-11-27 (r7-walk: people walk)
 
