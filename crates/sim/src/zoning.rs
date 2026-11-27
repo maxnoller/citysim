@@ -1094,6 +1094,57 @@ pub fn frontage(world: &World, segment: SegmentId, side: Side, depth: u8) -> Vec
     frontage_walk(world, &stretch_walk(world, segment), side, depth)
 }
 
+/// The land a usable cell holds, where it differs from its quadrilateral:
+/// where the rows of two roads meet at an angle, each cell is cut along the
+/// line where the two roads' rows are equally deep (instead of a staircase
+/// of whole cells), and a cell whose neighbour behind it lost the place to
+/// the other road's rows takes that neighbour's land up to the line. The
+/// land of all usable cells then tiles the zoned area up to clean edges.
+/// A convex polygon (empty when nothing is left); `None` when the cell is
+/// exactly its quadrilateral. Renderers draw zones, lot markers and yards
+/// with it. See [`cell_shapes`] for all at once.
+pub fn cell_shape(world: &World, c: CellRef) -> Option<Vec<[f32; 2]>> {
+    LandShapes::new(world).shape(world, c)
+}
+
+/// [`cell_shape`] for many cells: the blocks indexed once (valid while the
+/// roads, and so the blocks, stay as they are).
+pub struct LandShapes {
+    idx: crate::blocks::BlockIndex,
+}
+
+impl LandShapes {
+    pub fn new(world: &World) -> LandShapes {
+        LandShapes {
+            idx: crate::blocks::BlockIndex::new(&world.zoning),
+        }
+    }
+
+    pub fn shape(&self, world: &World, c: CellRef) -> Option<Vec<[f32; 2]>> {
+        crate::blocks::cell_shape(&world.zoning, &self.idx, c, &mut Vec::new())
+    }
+}
+
+/// [`cell_shape`] of every usable cell whose land differs from its
+/// quadrilateral.
+pub fn cell_shapes(world: &World) -> BTreeMap<CellRef, Vec<[f32; 2]>> {
+    let z = &world.zoning;
+    let mut out = BTreeMap::new();
+    if z.lattices().nth(1).is_none() {
+        return out;
+    }
+    let idx = crate::blocks::BlockIndex::new(z);
+    let mut scratch = Vec::new();
+    for (c, x) in z.cells() {
+        if x.usable()
+            && let Some(s) = crate::blocks::cell_shape(z, &idx, c, &mut scratch)
+        {
+            out.insert(c, s);
+        }
+    }
+    out
+}
+
 /// The building standing at a world position, if any.
 pub fn building_at(world: &World, pos: [f32; 2]) -> Option<BuildingId> {
     for (_, l) in world.zoning.lattices() {

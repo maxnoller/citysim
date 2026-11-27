@@ -1328,3 +1328,229 @@ fn resolve(world: &mut World, boxes: &[([f32; 2], [f32; 2])]) -> Vec<BuildingId>
     doomed.dedup();
     doomed
 }
+
+// ------------------------------------------------------------ land shapes ----
+
+/// Rows from a block's road to the point at lattice coordinates `q`
+/// (continuous; 0 on the kerb line), if `q` lies in the block's rectangle.
+fn depth_in(b: &Block, q: [f32; 2], tol: f32) -> Option<f32> {
+    let (x0, y0, x1, y1) = (
+        b.min[0] as f32,
+        b.min[1] as f32,
+        (b.max[0] + 1) as f32,
+        (b.max[1] + 1) as f32,
+    );
+    if q[0] < x0 - tol || q[0] > x1 + tol || q[1] < y0 - tol || q[1] > y1 + tol {
+        return None;
+    }
+    Some(match b.front {
+        Facing::MinusY => q[1] - y0,
+        Facing::PlusY => y1 - q[1],
+        Facing::MinusX => q[0] - x0,
+        Facing::PlusX => x1 - q[0],
+    })
+}
+
+/// Rows from a block's road to `q` whether or not `q` is in it.
+fn depth_of_point(b: &Block, q: [f32; 2]) -> f32 {
+    depth_in(b, q, f32::INFINITY).unwrap_or(f32::INFINITY)
+}
+
+/// Clip a convex polygon to where `g <= 0` (`g` linear along each edge).
+fn clip_poly(poly: &[[f32; 2]], g: &dyn Fn([f32; 2]) -> f32) -> Vec<[f32; 2]> {
+    let n = poly.len();
+    let vals: Vec<f32> = poly.iter().map(|&p| g(p)).collect();
+    let mut out = Vec::with_capacity(n + 2);
+    for k in 0..n {
+        let (a, b) = (poly[k], poly[(k + 1) % n]);
+        let (ga, gb) = (vals[k], vals[(k + 1) % n]);
+        if ga <= 0.0 {
+            out.push(a);
+        }
+        if (ga <= 0.0) != (gb <= 0.0) {
+            // Where g changes sign along the edge (refined: on a strip g is
+            // not quite linear).
+            let at = |t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            let mut t = (ga / (ga - gb)).clamp(0.0, 1.0);
+            for _ in 0..8 {
+                let v = g(at(t));
+                if (v <= 0.0) == (ga <= 0.0) {
+                    lo = t;
+                } else {
+                    hi = t;
+                }
+                t = (lo + hi) * 0.5;
+            }
+            out.push(at(t));
+        }
+    }
+    out
+}
+
+/// Blocks by 32 m tiles, for the land-shape queries.
+pub(crate) struct BlockIndex {
+    tiles: Tiles,
+    bounds: Vec<([f32; 2], [f32; 2])>,
+}
+
+impl BlockIndex {
+    pub(crate) fn new(z: &Zoning) -> BlockIndex {
+        let mut tiles = Tiles::new();
+        let mut bounds = Vec::with_capacity(z.blocks.len());
+        for (k, b) in z.blocks.iter().enumerate() {
+            let (lo, hi) = block_bounds(z, b);
+            tiles.add(k as u32, lo, hi);
+            bounds.push((lo, hi));
+        }
+        BlockIndex { tiles, bounds }
+    }
+
+    fn near(&self, lo: [f32; 2], hi: [f32; 2], out: &mut Vec<u32>) {
+        self.tiles.query(lo, hi, out);
+        out.retain(|&k| {
+            let (blo, bhi) = self.bounds[k as usize];
+            blo[0] <= hi[0] && bhi[0] >= lo[0] && blo[1] <= hi[1] && bhi[1] >= lo[1]
+        });
+    }
+}
+
+/// The land a usable cell holds (see `zoning::cell_shape`), or `None` when
+/// it is exactly its own quadrilateral.
+pub(crate) fn cell_shape(
+    z: &Zoning,
+    idx: &BlockIndex,
+    c: crate::zoning::CellRef,
+    scratch: &mut Vec<u32>,
+) -> Option<Vec<[f32; 2]>> {
+    use crate::zoning::CellRef;
+    let cell = z.cell(c)?;
+    if !cell.usable() {
+        return None;
+    }
+    let l = z.lattice(c.lattice)?;
+    let quad = l.cell_corners(c.i, c.j);
+    let (lo, hi) = bounds_of(&quad);
+    let m = CELL_SIZE * 1.5;
+    idx.near([lo[0] - m, lo[1] - m], [hi[0] + m, hi[1] + m], scratch);
+    // Own blocks holding the cell; the nearest road's decides "behind".
+    let own: Vec<&Block> = scratch
+        .iter()
+        .map(|&k| &z.blocks[k as usize])
+        .filter(|b| b.contains(c))
+        .collect();
+    let front_block = own.iter().min_by_key(|b| (b.depth_of(c), b.priority))?;
+    // The cells behind it that another road's rows took: their land on
+    // this side of the line where the two meet joins this cell.
+    let mut back = c;
+    loop {
+        let n = back.step(opposite(front_block.front));
+        let lost = z
+            .cell(n)
+            .is_some_and(|x| x.covered && x.blocked == Some(crate::zoning::Blocked::Contested) && x.building.is_none())
+            && front_block.contains(n);
+        if !lost {
+            break;
+        }
+        back = n;
+    }
+    let merge = back != c;
+    let (a, b) = ([c.i.min(back.i), c.j.min(back.j)], [c.i.max(back.i), c.j.max(back.j)]);
+    let (x0, y0, x1, y1) = (a[0] as f32, a[1] as f32, (b[0] + 1) as f32, (b[1] + 1) as f32);
+    let mut poly = vec![
+        l.world_at(x0, y0),
+        l.world_at(x1, y0),
+        l.world_at(x1, y1),
+        l.world_at(x0, y1),
+    ];
+    // Other lattices' blocks around all of it.
+    let (plo, phi) = bounds_of(&[poly[0], poly[1], poly[2], poly[3]]);
+    idx.near([plo[0] - m, plo[1] - m], [phi[0] + m, phi[1] + m], scratch);
+    let rivals: Vec<&Block> = scratch
+        .iter()
+        .map(|&k| &z.blocks[k as usize])
+        .filter(|b| b.lattice != c.lattice)
+        .collect();
+    if rivals.is_empty() && !merge {
+        return None;
+    }
+    let d_own = |p: [f32; 2]| {
+        let q = l.local(p);
+        own.iter().map(|b| depth_of_point(b, q)).fold(f32::INFINITY, f32::min)
+    };
+    let ctr = |poly: &[[f32; 2]]| {
+        let n = poly.len().max(1) as f32;
+        let s = poly.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0], a[1] + p[1]]);
+        [s[0] / n, s[1] / n]
+    };
+    let mut clipped = false;
+    for r in rivals {
+        let Some(rl) = z.lattice(r.lattice) else { continue };
+        // Only where the rival's rows reach this land.
+        let p0 = ctr(&poly);
+        let loc: Vec<[f32; 2]> = poly.iter().map(|&p| rl.local(p)).collect();
+        let rect = [
+            r.min[0] as f32,
+            r.min[1] as f32,
+            (r.max[0] + 1) as f32,
+            (r.max[1] + 1) as f32,
+        ];
+        if !poly_meets_rect(&loc, rect) {
+            continue;
+        }
+        // Not where the rival's own cell there is under a road (its rows
+        // running on across a road).
+        let (ri, rj) = rl.cell_of(p0);
+        if z.cell(CellRef::new(r.lattice, ri, rj))
+            .is_some_and(|x| x.blocked == Some(crate::zoning::Blocked::Road))
+        {
+            continue;
+        }
+        let g = |p: [f32; 2]| d_own(p) - depth_of_point(r, rl.local(p));
+        let before = poly.len();
+        let vals: Vec<f32> = poly.iter().map(|&p| g(p)).collect();
+        if vals.iter().all(|&v| v <= 0.0) {
+            continue;
+        }
+        poly = clip_poly(&poly, &g);
+        clipped |= poly.len() != before || vals.iter().any(|&v| v > 0.0);
+        if poly.len() < 3 || poly_area_abs(&poly) < 0.5 {
+            return Some(Vec::new());
+        }
+    }
+    (merge || clipped).then_some(poly)
+}
+
+fn poly_area_abs(p: &[[f32; 2]]) -> f32 {
+    let n = p.len();
+    ((0..n).map(|k| geom::cross(p[k], p[(k + 1) % n])).sum::<f32>() * 0.5).abs()
+}
+
+/// Do a convex polygon (lattice coordinates) and the rectangle `[x0, y0,
+/// x1, y1]` overlap (separating axes)?
+fn poly_meets_rect(p: &[[f32; 2]], r: [f32; 4]) -> bool {
+    if p.len() < 3 {
+        return false;
+    }
+    let (lo, hi) = bounds_of(p);
+    if hi[0] <= r[0] || lo[0] >= r[2] || hi[1] <= r[1] || lo[1] >= r[3] {
+        return false;
+    }
+    let rect = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
+    let n = p.len();
+    for k in 0..n {
+        let e = geom::sub(p[(k + 1) % n], p[k]);
+        let ax = [-e[1], e[0]];
+        let proj = |q: &[[f32; 2]]| {
+            q.iter()
+                .map(|v| geom::dot(*v, ax))
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), x| (a.min(x), b.max(x)))
+        };
+        let (a0, a1) = proj(p);
+        let (b0, b1) = proj(&rect);
+        if a1 <= b0 + 1e-4 || b1 <= a0 + 1e-4 {
+            return false;
+        }
+    }
+    true
+}

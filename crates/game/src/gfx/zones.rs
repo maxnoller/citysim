@@ -80,13 +80,13 @@ fn chunk_hash(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> u64 {
     for c in cells {
         c.cell.hash(&mut h);
         c.zone.hash(&mut h);
-        for p in c.quad {
+        for p in &c.poly {
             p.x.to_bits().hash(&mut h);
             p.y.to_bits().hash(&mut h);
         }
         // Outlines depend on the neighbours.
-        for n in c.nbrs {
-            zones.get(&n).hash(&mut h);
+        for n in &c.edge_nbrs {
+            n.and_then(|n| zones.get(&n)).hash(&mut h);
         }
     }
     h.finish()
@@ -98,14 +98,22 @@ fn chunk_mesh(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> Option<Mesh
     let (fill_a, line_a) = (0.4, 1.0);
     let line_w = 0.6;
     for c in cells {
+        let n = c.poly.len();
+        let centre = c.poly_center();
         let Some(z) = c.zone else {
             // Empty zoneable land (shown while zoning): a faint cell.
-            let centre = c.center();
             let shrink = |p: Vec2| p + (centre - p).normalize_or_zero() * 0.45;
-            let q = c.quad.map(shrink);
-            m.quad_up(q.map(|p| Vec3::new(p.x, y, p.y)), lin(Color::WHITE.with_alpha(0.07)));
-            for k in 0..4 {
-                let (a, b) = (q[k], q[(k + 1) % 4]);
+            let q: Vec<Vec2> = c.poly.iter().map(|&p| shrink(p)).collect();
+            for k in 1..n - 1 {
+                m.tri_up(
+                    Vec3::new(q[0].x, y, q[0].y),
+                    Vec3::new(q[k].x, y, q[k].y),
+                    Vec3::new(q[k + 1].x, y, q[k + 1].y),
+                    lin(Color::WHITE.with_alpha(0.07)),
+                );
+            }
+            for k in 0..n {
+                let (a, b) = (q[k], q[(k + 1) % n]);
                 let inward = ((a + b) * 0.5 - centre).normalize_or_zero() * -0.22;
                 m.quad_up(
                     [a, b, b + inward, a + inward].map(|p| Vec3::new(p.x, y + 0.005, p.y)),
@@ -117,14 +125,20 @@ fn chunk_mesh(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> Option<Mesh
         let base = zone_color(z);
         let fill = lin(base.with_alpha(fill_a));
         let line = lin(palette::mix(base, Color::WHITE, 0.45).with_alpha(line_a));
-        m.quad_up(c.quad.map(|p| Vec3::new(p.x, y, p.y)), fill);
-        // Outline on edges where the neighbour shows a different zone.
-        let centre = c.center();
-        for (k, n) in c.nbrs.into_iter().enumerate() {
-            if zones.get(&n) == Some(&z) {
+        for k in 1..n - 1 {
+            m.tri_up(
+                Vec3::new(c.poly[0].x, y, c.poly[0].y),
+                Vec3::new(c.poly[k].x, y, c.poly[k].y),
+                Vec3::new(c.poly[k + 1].x, y, c.poly[k + 1].y),
+                fill,
+            );
+        }
+        // Outline on edges where the land beyond shows a different zone.
+        for k in 0..n {
+            if c.edge_nbrs[k].and_then(|nb| zones.get(&nb)) == Some(&z) {
                 continue;
             }
-            let (a, b) = (c.quad[k], c.quad[(k + 1) % 4]);
+            let (a, b) = (c.poly[k], c.poly[(k + 1) % n]);
             let inward = ((a + b) * 0.5 - centre).normalize_or_zero() * -line_w;
             m.quad_up(
                 [a, b, b + inward, a + inward].map(|p| Vec3::new(p.x, y + 0.01, p.y)),

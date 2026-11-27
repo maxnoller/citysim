@@ -297,3 +297,103 @@ fn an_older_save_of_hand_drawn_blocks_loads_onto_block_grids() {
     assert_eq!(again.zoning, w.zoning);
     assert_eq!(again.buildings.len(), w.buildings.len());
 }
+
+/// Area of the overlap of two convex polygons.
+fn overlap_area(a: &[[f32; 2]], b: &[[f32; 2]]) -> f32 {
+    let mut poly: Vec<[f32; 2]> = a.to_vec();
+    let n = b.len();
+    // Orientation of b.
+    let area = |p: &[[f32; 2]]| {
+        (0..p.len())
+            .map(|k| {
+                let (x, y) = (p[k], p[(k + 1) % p.len()]);
+                x[0] * y[1] - x[1] * y[0]
+            })
+            .sum::<f32>()
+            * 0.5
+    };
+    let s = area(b).signum();
+    for k in 0..n {
+        let (p, q) = (b[k], b[(k + 1) % n]);
+        let side = |x: [f32; 2]| s * ((q[0] - p[0]) * (x[1] - p[1]) - (q[1] - p[1]) * (x[0] - p[0]));
+        let mut out = Vec::new();
+        for m in 0..poly.len() {
+            let (u, v) = (poly[m], poly[(m + 1) % poly.len()]);
+            let (su, sv) = (side(u), side(v));
+            if su >= 0.0 {
+                out.push(u);
+            }
+            if (su >= 0.0) != (sv >= 0.0) {
+                let t = su / (su - sv);
+                out.push([u[0] + (v[0] - u[0]) * t, u[1] + (v[1] - u[1]) * t]);
+            }
+        }
+        poly = out;
+        if poly.len() < 3 {
+            return 0.0;
+        }
+    }
+    area(&poly).abs()
+}
+
+#[test]
+fn land_cut_where_rows_meet_never_overlaps_another_lattices_land() {
+    let mut w = world();
+    scenarios::organic(&mut w);
+    w.check_invariants().unwrap();
+    let shapes = zoning::cell_shapes(&w);
+    assert!(
+        shapes.len() > 100,
+        "rows meet at angles in the organic town: {}",
+        shapes.len()
+    );
+    // Every usable cell's land: its shape or its quad.
+    let land: Vec<(CellRef, Vec<[f32; 2]>)> = w
+        .zoning
+        .cells()
+        .filter(|(_, x)| x.usable())
+        .map(|(c, _)| {
+            (
+                c,
+                shapes
+                    .get(&c)
+                    .cloned()
+                    .unwrap_or_else(|| w.zoning.cell_corners(c).unwrap().to_vec()),
+            )
+        })
+        .filter(|(_, p)| p.len() >= 3)
+        .collect();
+    let key = |p: [f32; 2]| ((p[0] / 16.0).floor() as i32, (p[1] / 16.0).floor() as i32);
+    let mut buckets: std::collections::HashMap<(i32, i32), Vec<usize>> = std::collections::HashMap::new();
+    for (k, (_, p)) in land.iter().enumerate() {
+        buckets.entry(key(p[0])).or_default().push(k);
+    }
+    let mut worst = 0.0f32;
+    let mut over = 0usize;
+    for (k, (c, p)) in land.iter().enumerate() {
+        let (bx, by) = key(p[0]);
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                for &o in buckets.get(&(bx + dx, by + dy)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    let (oc, op) = &land[o];
+                    if o > k && oc.lattice != c.lattice {
+                        let a = overlap_area(p, op);
+                        if a > 4.0 {
+                            over += 1;
+                        }
+                        worst = worst.max(a);
+                    }
+                }
+            }
+        }
+    }
+    // Usable cells of different lattices never overlap; their cut land
+    // only by rounding along the line between them, except in a few spots
+    // where a strip's end meets a straight lattice (under half a cell).
+    assert!(
+        over * 50 <= shapes.len(),
+        "{over} overlaps over 4 m² of {} cut cells",
+        shapes.len()
+    );
+    assert!(worst < 32.0, "overlap {worst} m²");
+}
