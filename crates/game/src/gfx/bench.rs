@@ -426,6 +426,8 @@ struct Bench {
     tool_act: Option<(ToolAct, u32)>,
     tool_pose: Option<CameraPose>,
     pointer_at: Option<Vec2>,
+    /// The image the world camera renders to.
+    image: Option<Handle<Image>>,
     /// `Pan`: the pointer's window position, held still.
     pointer_px: Option<Vec2>,
     tool_log_at: u32,
@@ -511,6 +513,15 @@ fn path_pose(u: f32, centre: Vec2, radius: f32) -> CameraPose {
     }
 }
 
+/// Where `CITYSIM_BENCH_SHOTS` saves measured frame `frame`, if it does.
+fn shot_at(frame: u32) -> Option<String> {
+    let list = std::env::var("CITYSIM_BENCH_SHOTS").ok()?;
+    list.split(';').find_map(|e| {
+        let (f, p) = e.split_once('=')?;
+        (f.trim().parse::<u32>().ok()? == frame).then(|| p.trim().to_string())
+    })
+}
+
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -556,6 +567,7 @@ fn drive(
         if !matches!(target, Some(RenderTarget::Image(_))) {
             let (w, h) = bench.size;
             let image = images.add(Image::new_target_texture(w, h, TextureFormat::Bgra8UnormSrgb, None));
+            bench.image = Some(image.clone());
             commands.entity(cam).insert(RenderTarget::Image(image.into()));
             if bench.ui {
                 commands.entity(cam).insert(bevy::ui::IsDefaultUiCamera);
@@ -614,6 +626,16 @@ fn drive(
             }
         }
         Phase::Measure => {
+            // `CITYSIM_BENCH_SHOTS="frame=path;..."`: save the image at
+            // those measured frames.
+            if let Some(path) = shot_at(bench.frame)
+                && let Some(image) = bench.image.clone()
+            {
+                info!("bench: frame {} saved to {path}", bench.frame);
+                commands
+                    .spawn(bevy::render::view::screenshot::Screenshot::image(image))
+                    .observe(bevy::render::view::screenshot::save_to_disk(path));
+            }
             if let Some(dt) = dt
                 && bench.frame > 0
             {

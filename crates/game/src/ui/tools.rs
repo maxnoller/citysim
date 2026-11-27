@@ -384,7 +384,10 @@ impl ToolState {
             .is_none_or(|(k, _, w)| *k != key || clock && w.time != sim.world.time);
         if stale {
             self.scratch_made += 1;
-            self.scratch = Some((key, self.scratch_made, std::sync::Arc::new(plan::scratch(&sim.world))));
+            let new = (key, self.scratch_made, std::sync::Arc::new(plan::scratch(&sim.world)));
+            if let Some(old) = self.scratch.replace(new) {
+                planner::drop_later(old);
+            }
         }
         let (_, id, w) = self.scratch.as_ref().expect("just set");
         (*id, w.clone())
@@ -1054,7 +1057,7 @@ fn refresh_plan(state: &mut ToolState, sim: &SimWorld, pending: Pending, now: f3
         planner::WAIT
     };
     state.waited = Some(key.clone());
-    if let Some(done) = state.planner.request(id, &base, key.0.ops(), wait) {
+    if let Some(done) = state.planner.request(id, &base, key.0.ops(), false, wait) {
         if done.ms > 8.0 {
             debug!("tool plan took {:.1} ms ({} steps)", done.ms, done.eval.steps.len());
         }
@@ -1086,7 +1089,7 @@ fn drive_job(state: &mut ToolState, sim: &SimWorld, toasts: &mut MessageWriter<T
             Job::Undo { ops, .. } => ops.clone(),
         };
         let (id, base) = state.scratch_for(sim, true);
-        if state.planner.request(id, &base, &ops, planner::WAIT).is_none() {
+        if state.planner.request(id, &base, &ops, true, planner::WAIT).is_none() {
             state.job = Some(job);
             return;
         }
@@ -1204,6 +1207,8 @@ fn commit(state: &mut ToolState, sim: &SimWorld, pending: &Pending, done: Done) 
         step_ms,
         ..
     } = done;
+    let after = planner::FreeLater::new(after.expect("asked for with the world after it"));
+    let after: &World = &after;
     let base: &World = &base;
     if eval.steps.is_empty() {
         return (pending.hint().map(|h| Toast::new(ToastKind::Info, h)), false);
@@ -1214,7 +1219,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, pending: &Pending, done: Done) 
     let mut toast = None;
     // Buildings the plan takes down (bulldozed, or on land a new road now
     // needs), recorded from the real world so undo can put them back.
-    let lost = || plan::demolished(&sim.world, base, &after);
+    let lost = || plan::demolished(&sim.world, base, after);
     match pending {
         Pending::Road { curves, grid, .. } => {
             let label = if grid.is_some() {
@@ -1226,7 +1231,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, pending: &Pending, done: Done) 
             };
             let lost = lost();
             toast = road_toast(&lost, "Road built");
-            push_undo(state, plan::undo_for_roads(base, &after, &eval, label, lost));
+            push_undo(state, plan::undo_for_roads(base, after, &eval, label, lost));
         }
         Pending::Upgrade { kind, .. } => {
             let label = if *kind == RoadKind::Avenue {
@@ -1236,7 +1241,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, pending: &Pending, done: Done) 
             };
             let lost = lost();
             toast = road_toast(&lost, "Road changed");
-            push_undo(state, plan::undo_for_roads(base, &after, &eval, label.into(), lost));
+            push_undo(state, plan::undo_for_roads(base, after, &eval, label.into(), lost));
         }
         Pending::Bulldoze { .. } => {
             let removed = eval.removed().len();
@@ -1250,10 +1255,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, pending: &Pending, done: Done) 
                 } else {
                     "demolition of buildings"
                 };
-                push_undo(
-                    state,
-                    plan::undo_for_roads(base, &after, &eval, label.into(), buildings),
-                );
+                push_undo(state, plan::undo_for_roads(base, after, &eval, label.into(), buildings));
             }
             if removed == 0 && n > 0 {
                 let what = if n == 1 {
@@ -1372,6 +1374,7 @@ fn finish_undo(
         UndoRecord::Roads { buildings, .. } => buildings.len(),
         UndoRecord::Zones { .. } => 0,
     };
+    let _after = done.after.map(planner::FreeLater::new);
     let eval = done.eval;
     if let Some(e) = eval.first_error() {
         if let CommandError::BuildingInTheWay { at, building } = e {
