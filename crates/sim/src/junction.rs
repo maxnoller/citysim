@@ -1411,8 +1411,11 @@ pub(crate) fn pocket_lengths(
     let (mut want_b, sb_b, rank_b) = end(seg.b);
     let (mut want_a, sb_a, rank_a) = end(seg.a);
     let drivable = seg.length - sb_a - sb_b;
+    // Up to `POCKET_LONG_M`; longer, up to `POCKET_MAX_M`, only on a long
+    // block (half its drivable length at most).
+    let cap = balance::POCKET_MAX_M.min(balance::POCKET_LONG_M.max(drivable * 0.5));
     let fit = |len: f32| -> f32 {
-        let len = len.min(balance::POCKET_MAX_M);
+        let len = len.min(cap);
         if len >= balance::POCKET_MIN_M { len } else { 0.0 }
     };
     // Room for one alone: all but the stretch behind the box where

@@ -328,7 +328,10 @@ pub const NEIGHBOUR_CLEARANCE_M: f32 = 2.2;
 /// behind the box it follows. Left turners move into it from the inner
 /// lane; one that finds it full waits at its entry, `POCKET_ENTRY_M` in,
 /// so the queue spills back into the inner lane.
-pub const POCKET_MAX_M: f32 = 40.0;
+pub const POCKET_MAX_M: f32 = 60.0;
+/// (Pockets longer than this only where they take at most half the
+/// block's drivable length.)
+pub const POCKET_LONG_M: f32 = 40.0;
 pub const POCKET_MIN_M: f32 = 11.0;
 pub const POCKET_GAP_M: f32 = 6.0;
 pub const POCKET_ENTRY_M: f32 = 4.0;
