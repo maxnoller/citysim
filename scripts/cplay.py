@@ -22,6 +22,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import play  # noqa: E402
 
+# Seconds per input step (CPLAY_FRAME): slower on a software renderer.
+play.FRAME = float(os.environ.get("CPLAY_FRAME", play.FRAME))
+
 
 def px(x, y):
     sx, sy, where = play.cmd(f"screenm {x} {y}").split()

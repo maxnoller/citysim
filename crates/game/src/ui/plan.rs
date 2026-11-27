@@ -372,7 +372,8 @@ pub fn demolished(real: &World, before: &World, after: &World) -> Vec<BuildingRe
 }
 
 /// The undo record of a road action (build, change of kind, removal)
-/// checked as `eval` on `before`, leaving `after`; `buildings`: what it
+/// checked as `eval` on `before` (at the real world's tick: road payments
+/// are refunded by it), leaving `after`; `buildings`: what it
 /// demolishes ([`demolished`]).
 pub fn undo_for_roads(
     before: &World,

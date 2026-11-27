@@ -964,7 +964,10 @@ fn refresh_plan(state: &mut ToolState, sim: &SimWorld, pending: Pending) {
 /// toast to show, and whether it was sent.
 fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimCommand>) -> (Option<Toast>, bool) {
     let pending = state.plan.pending.clone();
-    let base = state.scratch_for(sim).clone();
+    let mut base = state.scratch_for(sim).clone();
+    // The cached copy's clock may be behind: the commands are applied at
+    // the real world's tick, and road payments are refunded by it.
+    base.time = sim.world.time.clone();
     let (eval, after) = plan::evaluate(&base, pending.ops());
     if eval.steps.is_empty() {
         return (pending.hint().map(|h| Toast::new(ToastKind::Info, h)), false);
