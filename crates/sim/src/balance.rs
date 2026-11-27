@@ -294,6 +294,12 @@ pub const MERGE_MIN_LINE_M: f32 = 8.0;
 /// give-way approach this much to the major road.
 pub const PERMISSIVE_GAP_S: f32 = 2.5;
 pub const GIVE_WAY_GAP_S: f32 = 3.5;
+/// Courtesy at a priority junction: a minor-road car that has stood this
+/// long at its line goes as if it had priority while every conflicting car
+/// with priority is slower than [`COURTESY_SPEED`] (a creeping queue lets
+/// one in), seconds and m/s.
+pub const COURTESY_WAIT_S: f32 = 20.0;
+pub const COURTESY_SPEED: f32 = 4.0;
 /// A car not moving inside a junction box for this long is taken off the
 /// road (deadlock breaker; only road edits can cause it).
 pub const BOX_DEADLOCK_S: f32 = 20.0;
@@ -461,8 +467,9 @@ pub const ROUTE_RIGHT_S: f32 = 1.0;
 /// that ends at a junction, multiplied by that direction's congestion.
 pub const ROUTE_QUEUE_COST_S: f32 = 2.0;
 
-/// A car that reaches its destination stands at the kerb this long before
-/// it is gone (parking), seconds.
+/// A car that reaches its destination on a one-lane street stands in the
+/// lane this long before it is gone (parking, turning into a driveway):
+/// everyone behind waits. On wider roads it pulls in at once. Seconds.
 pub const PARK_DWELL_S: f32 = 0.0;
 /// A car slower than this counts as waiting.
 pub const WAIT_SPEED: f32 = 0.5;

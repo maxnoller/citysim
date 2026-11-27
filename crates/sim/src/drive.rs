@@ -392,6 +392,10 @@ struct Front {
     reaches: bool,
     /// Cars in this lane when it is a turn pocket (0 otherwise).
     pocket_cars: u16,
+    /// A minor-road car let in by courtesy: it has waited
+    /// `COURTESY_WAIT_S` at its line and every conflicting car with
+    /// priority is creeping (a slow queue lets one in).
+    courtesy: bool,
 }
 
 /// Has the front car come to a stop at its line (all-way stops: it stood
@@ -418,6 +422,9 @@ fn class(j: &JunctionState, f: &Front) -> u8 {
             if !j.arms.iter().any(|a| a.major) {
                 // All-way stop: everyone alike.
                 return 1;
+            }
+            if f.courtesy {
+                return 3;
             }
             match (major, left) {
                 (true, false) => 3,
@@ -594,6 +601,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             } else {
                 0
             },
+            courtesy: false,
         });
     }
     fronts.sort_by_key(|f| (key_index(f.node), f.idx));
@@ -689,6 +697,30 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             j.clear_at = now;
         }
         let reacted = now >= j.clear_at + secs_to_ticks(balance::ALL_WAY_REACTION_S);
+        // Courtesy: a minor-road car that has waited long at its line is let
+        // in when every conflicting car with priority is creeping (on an
+        // arterial: a queue on a street leaves gaps of its own).
+        let arterial_major = j
+            .arms
+            .iter()
+            .any(|a| a.major && a.kind.rank() >= crate::RoadKind::Avenue.rank());
+        if j.control == JunctionControl::Priority && !all_way && arterial_major {
+            let long = secs_to_ticks(balance::COURTESY_WAIT_S) as u32;
+            for x in k..e {
+                let f = &fronts[x];
+                if f.wait < long || f.d_line > f.back + 1.0 || class(j, f) >= 2 {
+                    continue;
+                }
+                let creeping = (k..e).all(|y| {
+                    let o = &fronts[y];
+                    y == x
+                        || !j.conflict(f.movement, o.movement)
+                        || class(j, o) <= class(j, f)
+                        || o.speed < balance::COURTESY_SPEED
+                });
+                fronts[x].courtesy = creeping;
+            }
+        }
         let mut order: Vec<usize> = (k..e).collect();
         order.sort_by(|&x, &y| {
             let (fx, fy) = (&fronts[x], &fronts[y]);
