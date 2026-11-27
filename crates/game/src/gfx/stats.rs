@@ -232,7 +232,7 @@ fn showcase_sites(
         for (row, stage) in [(0, Some(0u8)), (1, Some(1)), (2, None)] {
             let mesh = match stage {
                 Some(s) => models.site(key, s, &mut meshes),
-                None => models.get(key, &mut meshes).0,
+                None => models.get(key, &mut meshes)[1].clone(),
             };
             let p = at + Vec2::new(k as f32 * 22.0, row as f32 * 22.0);
             commands.spawn((

@@ -536,7 +536,7 @@ fn draw_highlight(
                 let pts = b.corners().map(Vec2::from);
                 outline(&mut m, &pts, if selected { 0.55 } else { 0.4 }, y, col);
                 if let Some(&(parent, key, model_tf)) = index.0.get(id) {
-                    let (detail, _) = models.get(key, &mut meshes);
+                    let [_, detail, _] = models.get(key, &mut meshes);
                     let mut tf = model_tf;
                     tf.scale *= Vec3::new(1.015, 1.01, 1.015);
                     let copy = commands
@@ -602,7 +602,7 @@ fn draw_highlight(
     }
     for id in &hl.doomed_buildings {
         if let Some(&(parent, key, model_tf)) = index.0.get(id) {
-            let (detail, _) = models.get(key, &mut meshes);
+            let [_, detail, _] = models.get(key, &mut meshes);
             let mut tf = model_tf;
             tf.scale *= Vec3::new(1.015, 1.01, 1.015);
             let copy = commands

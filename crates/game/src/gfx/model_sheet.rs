@@ -90,13 +90,18 @@ fn spawn_sheet(
     // Vehicles: one row per body, detailed then distant; every other one
     // with its brake lights on.
     for (row, models) in vehicle_gen::sheet_models().into_iter().enumerate() {
-        for (i, (near, far)) in models.into_iter().enumerate() {
+        for (i, lods) in models.into_iter().enumerate() {
             let p = sheet::VEHICLES + Vec2::new(i as f32 * sheet::VEH_COL, row as f32 * sheet::VEH_ROW);
             let brake = if i % 2 == 1 { TAG_BRAKE } else { 0 };
             // Noses towards +z (the views look from there).
             let yaw = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
-            put(near, at(p).with_rotation(yaw), brake);
-            put(far, at(p + Vec2::X * sheet::VEH_FAR_DX).with_rotation(yaw), brake);
+            for (l, m) in lods.into_iter().enumerate() {
+                put(
+                    m,
+                    at(p + Vec2::X * sheet::VEH_FAR_DX * l as f32).with_rotation(yaw),
+                    brake,
+                );
+            }
         }
     }
     // Trees and green.

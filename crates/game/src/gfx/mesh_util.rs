@@ -38,6 +38,18 @@ pub enum Glow {
     /// on a faint warm glow by the share of lit windows, so a town zoomed
     /// all the way out (windows a pixel or less) still reads as lit.
     Body = 9,
+    // Surfaces (not lights): a faint procedural pattern in the shader,
+    // faded out with distance. Only the detailed models carry them.
+    /// Roof tiles: courses along the slope, a little variation per tile.
+    Roof = 10,
+    /// Weatherboard / siding: horizontal boards.
+    Siding = 11,
+    /// Brick: courses and staggered joints.
+    Brick = 12,
+    /// Profiled metal cladding: vertical ribs.
+    Cladding = 13,
+    /// Flat roof membrane / concrete: faint panel seams.
+    Membrane = 14,
 }
 
 /// Flat-shaded, vertex-coloured triangle soup.
@@ -57,6 +69,9 @@ pub struct MeshBuilder {
     pub ground_ao: f32,
     /// Building the distant level of detail: generators skip small things.
     pub lod: bool,
+    /// Building the near level of detail: generators add fine trim (sills,
+    /// glazing bars, door panels, small props). Never set with `lod`.
+    pub fine: bool,
     /// Smoke emitters (chimney tops) in model space, for `smoke`.
     pub emitters: Vec<Vec3>,
     /// Driveways meeting the lot's front edge (`+z`): their model-space x
@@ -113,7 +128,26 @@ impl MeshBuilder {
         }
     }
 
-    #[cfg(test)]
+    /// Run `f`, keeping its geometry only in the near model (`fine`).
+    /// Random numbers are drawn either way.
+    pub fn fine_only(&mut self, f: impl FnOnce(&mut MeshBuilder)) {
+        let mark = self.mark();
+        f(self);
+        if !self.fine {
+            self.rollback(mark);
+        }
+    }
+
+    /// Run `f` with its surfaces tagged `kind` (a pattern in the shader),
+    /// except in the distant model, which keeps its `Body` tag.
+    pub fn surface(&mut self, kind: Glow, f: impl FnOnce(&mut MeshBuilder)) {
+        if self.lod {
+            f(self);
+        } else {
+            self.glow(kind, 0.0, f);
+        }
+    }
+
     pub fn triangle_count(&self) -> usize {
         self.idx.len() / 3
     }

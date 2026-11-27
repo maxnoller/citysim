@@ -90,6 +90,15 @@ pub fn round_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f
     blob(m, base + Vec3::Y * 4.4 * s, Vec3::new(2.3, 2.2, 2.3) * s, canopy, yaw);
 }
 
+/// A garden or street tree of a `species` (0 round, 1 tall oval, 2 birch,
+/// 3 conifer), `s` scales it (1.0 is about 7 m tall).
+pub fn garden_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32, species: u32) {
+    match species % 4 {
+        3 => pine_tree(m, base, s, canopy, yaw),
+        _ => round_tree(m, base, s, canopy, yaw),
+    }
+}
+
 /// Conifer: trunk and two stacked cones.
 pub fn pine_tree(m: &mut MeshBuilder, base: Vec3, s: f32, canopy: Color, yaw: f32) {
     let phase = yaw / std::f32::consts::TAU;

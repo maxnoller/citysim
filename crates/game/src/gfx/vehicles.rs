@@ -1,6 +1,16 @@
 //! Vehicles: one entity per `world.vehicles` entry with a shared low-poly
-//! model (saloon, hatchback, estate, van, pickup in realistic paints, or a
-//! delivery truck for goods trips).
+//! model that tells the trip (`model_for`):
+//! * a household's own car (saloon, hatchback, estate, SUV, van, pickup in
+//!   realistic paints) for commuting, shopping and leisure, chosen by the
+//!   household's seed, so a family keeps its car all day;
+//! * a hired moving van for a household moving in or out;
+//! * goods between the highway and the town (imports, exports): a
+//!   long-distance lorry (box, curtain-side, tipper, flatbed, tanker);
+//!   goods from industry to a shop in town: a delivery truck.
+//!
+//! The sim spaces goods vehicles by the truck length and everything else
+//! by the car length (`drive::stop_back_m`): moving vans are car length,
+//! lorries and delivery trucks within the truck length.
 //!
 //! Placement follows the sim exactly. Its point for a vehicle is the front
 //! of the car (the sim stops that point at the stop line and lets the car
@@ -19,31 +29,145 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use citysim_sim::{RoadKind, TripPurpose, Vehicle, VehicleId, World};
 
+use bevy::mesh::MeshTag;
+use bevy::tasks::{ComputeTaskPool, TaskPool};
+use citysim_sim::Place;
+
+use super::building_gen::Lod;
 use super::city_material::TAG_BRAKE;
 use super::noise::hash;
 use super::palette;
 use super::road_geom::{ROAD_Y, lane_offset};
-use super::scene::WorldMaterials;
-use super::vehicle_gen::{self, SHAPES};
-use crate::shared::{GameSet, SimWorld, WorldCamera};
-use bevy::mesh::MeshTag;
+use super::scene::{QualityApplied, WorldMaterials, drawn_quality};
+use super::vehicle_gen;
+use crate::shared::{GameSet, GraphicsQuality, SimWorld, WorldCamera};
 
 /// If a vehicle moves further than this in one tick it teleported.
 const TELEPORT_M: f32 = 30.0;
 
-/// Camera distance beyond which vehicles use the simplified model (with a
+/// Camera distance beyond which vehicles use the distant model (with a
 /// little hysteresis so they do not flicker between models).
 const LOD_FAR: f32 = 480.0;
 const LOD_NEAR: f32 = 440.0;
+/// Hysteresis at the near / middle switch, metres.
+const NEAR_HYST: f32 = 8.0;
 
-/// Number of car models (shape x colour); truck models follow them.
-const CAR_MODELS: usize = SHAPES as usize * palette::CAR_BODIES.len();
+/// Distance up to which vehicles show their near model, per quality.
+fn near_distance(q: GraphicsQuality) -> f32 {
+    match q {
+        GraphicsQuality::Low => 0.0,
+        GraphicsQuality::Medium => 60.0,
+        GraphicsQuality::High => 90.0,
+    }
+}
 
-#[derive(Resource)]
+/// Which model a vehicle shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) enum VModel {
+    /// A private car: body type and paint.
+    Car { shape: u8, paint: u8 },
+    /// A hired moving van (livery).
+    Mover(u8),
+    /// A delivery truck from industry to a shop (body, livery).
+    Delivery { kind: u8, livery: u8 },
+    /// A long-distance lorry to or from the highway (body, livery).
+    Lorry { kind: u8, livery: u8 },
+}
+
+impl VModel {
+    /// Length and width, metres.
+    pub fn size(self) -> (f32, f32) {
+        match self {
+            VModel::Car { shape, .. } => vehicle_gen::car_size(shape as u32),
+            VModel::Mover(_) => vehicle_gen::MOVING_VAN_SIZE,
+            VModel::Delivery { .. } => (vehicle_gen::TRUCK_LEN, vehicle_gen::TRUCK_WIDTH),
+            VModel::Lorry { .. } => (vehicle_gen::LORRY_LEN, vehicle_gen::LORRY_WIDTH),
+        }
+    }
+
+    fn build(self, lod: Lod) -> Mesh {
+        match self {
+            VModel::Car { shape, paint } => {
+                vehicle_gen::car_model(palette::CAR_BODIES[paint as usize], shape as u32, lod)
+            }
+            VModel::Mover(l) => vehicle_gen::moving_van(l as usize, lod),
+            VModel::Delivery { kind, livery } => {
+                let (a, b, c) = palette::TRUCK_LIVERIES[livery as usize];
+                vehicle_gen::truck_model(a, b, c, kind as u32, lod)
+            }
+            VModel::Lorry { kind, livery } => {
+                let (a, b, c) = vehicle_gen::LORRY_LIVERIES[livery as usize];
+                vehicle_gen::lorry_model(a, b, c, kind as u32, lod)
+            }
+        }
+        .build()
+    }
+}
+
+/// A private car body for a seed (the household's): mostly saloons,
+/// hatchbacks, estates and SUVs, some vans and pickups.
+pub(super) fn car_for(seed: u32) -> VModel {
+    let h = hash(seed ^ 0x51ED_270B);
+    let shape = match h % 12 {
+        0..=2 => 0,
+        3..=5 => 1,
+        6 | 7 => 4,
+        8 | 9 => 5,
+        10 => 2,
+        _ => 3,
+    };
+    VModel::Car {
+        shape,
+        paint: vehicle_gen::paint(h / 16) as u8,
+    }
+}
+
+/// The model that tells a vehicle's trip (see the module docs).
+pub(super) fn model_for(world: &World, id: VehicleId, v: &Vehicle) -> VModel {
+    let trip = world.traffic.trips.get(id);
+    let h = hash(v.seed ^ 0x2C1B_3C6D);
+    match trip {
+        Some(t) if t.purpose == TripPurpose::Goods => {
+            let export = t.to == Place::Entry;
+            if export || t.from == Place::Entry {
+                // Exports leave in anything; imports come boxed or
+                // curtained (or on a flatbed).
+                let kind = if export {
+                    h % vehicle_gen::LORRY_KINDS
+                } else {
+                    [0, 3, 3, 0, 2][h as usize % 5]
+                };
+                VModel::Lorry {
+                    kind: kind as u8,
+                    livery: ((h / 8) as usize % vehicle_gen::LORRY_LIVERIES.len()) as u8,
+                }
+            } else {
+                VModel::Delivery {
+                    kind: if h % 5 == 0 { 2 } else { 0 },
+                    livery: ((h / 8) as usize % palette::TRUCK_LIVERIES.len()) as u8,
+                }
+            }
+        }
+        Some(t) if matches!(t.purpose, TripPurpose::MoveIn | TripPurpose::MoveOut) => {
+            let seed = household_seed(world, t).unwrap_or(v.seed);
+            VModel::Mover((hash(seed) % vehicle_gen::MOVING_LIVERIES.len() as u32) as u8)
+        }
+        Some(t) => car_for(household_seed(world, t).unwrap_or(v.seed)),
+        None => car_for(v.seed),
+    }
+}
+
+/// Seed of the household a trip belongs to (its driver's or owner's).
+fn household_seed(world: &World, trip: &citysim_sim::traffic::Trip) -> Option<u32> {
+    let c = trip.citizen.or(trip.owner)?;
+    let hh = world.citizens.get(c)?.household;
+    world.households.get(hh).map(|h| h.seed)
+}
+
+#[derive(Resource, Default)]
 pub struct VehicleModels {
-    /// Cars (`[shape * colours + colour]`), then trucks (one per livery):
-    /// (detailed, distant).
-    meshes: Vec<(Handle<Mesh>, Handle<Mesh>)>,
+    /// Every model shown so far: (near, mid, far).
+    meshes: HashMap<VModel, [Handle<Mesh>; 3]>,
 }
 
 impl VehicleModels {
@@ -51,16 +175,29 @@ impl VehicleModels {
         self.meshes.len()
     }
 
-    fn mesh(&self, model: usize, lod: bool) -> Handle<Mesh> {
-        let (near, far) = &self.meshes[model];
-        if lod { far.clone() } else { near.clone() }
+    /// Build the models of `wanted` not built yet (side by side on the
+    /// compute threads).
+    fn prepare(&mut self, wanted: impl IntoIterator<Item = VModel>, meshes: &mut Assets<Mesh>) {
+        let mut todo: Vec<VModel> = wanted.into_iter().filter(|m| !self.meshes.contains_key(m)).collect();
+        todo.sort();
+        todo.dedup();
+        if todo.is_empty() {
+            return;
+        }
+        let pool = ComputeTaskPool::get_or_init(TaskPool::default);
+        let built: Vec<(VModel, [Mesh; 3])> = pool.scope(|s| {
+            for m in todo {
+                s.spawn(async move { (m, Lod::ALL.map(|l| m.build(l))) });
+            }
+        });
+        for (k, [a, b, c]) in built {
+            self.meshes.insert(k, [meshes.add(a), meshes.add(b), meshes.add(c)]);
+        }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Car,
-    Truck,
+    fn mesh(&self, model: VModel, level: usize) -> Handle<Mesh> {
+        self.meshes[&model][level.min(2)].clone()
+    }
 }
 
 #[derive(Component)]
@@ -69,11 +206,11 @@ pub(super) struct VehicleVisual {
     prev: (Vec2, f32),
     cur: (Vec2, f32),
     seed: u32,
-    kind: Kind,
-    model: usize,
-    /// The model the entity's mesh shows.
-    mesh_model: Option<usize>,
-    lod: bool,
+    model: VModel,
+    /// The model and level of detail the entity's mesh shows.
+    mesh_model: Option<(VModel, usize)>,
+    /// Level of detail: 0 near, 1 middle, 2 far.
+    lod: usize,
     /// Speed at the last sample, and whether the brake lights are on.
     speed: f32,
     brake: bool,
@@ -87,17 +224,16 @@ fn braking(v: &Vehicle) -> bool {
 }
 
 impl VehicleVisual {
-    fn new(world: &World, v: &Vehicle, kind: Kind) -> Self {
-        let model = model_index(v.seed, kind);
-        let now = place(world, v, model_size(model).0 * 0.5);
+    fn new(world: &World, id: VehicleId, v: &Vehicle) -> Self {
+        let model = model_for(world, id, v);
+        let now = place(world, v, model.size().0 * 0.5);
         VehicleVisual {
             prev: now,
             cur: now,
             seed: v.seed,
-            kind,
             model,
             mesh_model: None,
-            lod: false,
+            lod: 1,
             speed: v.speed,
             brake: braking(v),
             shown_brake: None,
@@ -105,21 +241,18 @@ impl VehicleVisual {
     }
 
     /// Take the sim's newest state of the vehicle (once per sim tick).
-    fn step(&mut self, world: &World, v: &Vehicle, kind: Kind) {
+    fn step(&mut self, world: &World, id: VehicleId, v: &Vehicle) {
         if self.seed != v.seed {
             *self = VehicleVisual {
                 lod: self.lod,
                 mesh_model: self.mesh_model,
                 shown_brake: self.shown_brake,
-                ..VehicleVisual::new(world, v, kind)
+                ..VehicleVisual::new(world, id, v)
             };
             return;
         }
-        if kind != self.kind {
-            self.kind = kind;
-            self.model = model_index(v.seed, kind);
-        }
-        let now = place(world, v, model_size(self.model).0 * 0.5);
+        self.model = model_for(world, id, v);
+        let now = place(world, v, self.model.size().0 * 0.5);
         self.brake = braking(v);
         self.speed = v.speed;
         self.prev = self.cur;
@@ -183,60 +316,8 @@ pub struct VehiclesPlugin;
 
 impl Plugin for VehiclesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup)
+        app.init_resource::<VehicleModels>()
             .add_systems(Update, sync_vehicles.in_set(GameSet::Render));
-    }
-}
-
-fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
-    let mut handles = Vec::new();
-    for shape in 0..SHAPES {
-        for &c in &palette::CAR_BODIES {
-            handles.push((
-                meshes.add(vehicle_gen::car_model(c, shape, false).build()),
-                meshes.add(vehicle_gen::car_model(c, shape, true).build()),
-            ));
-        }
-    }
-    for &(cab, cargo, stripe) in &palette::TRUCK_LIVERIES {
-        handles.push((
-            meshes.add(vehicle_gen::truck_model(cab, cargo, stripe, false).build()),
-            meshes.add(vehicle_gen::truck_model(cab, cargo, stripe, true).build()),
-        ));
-    }
-    commands.insert_resource(VehicleModels { meshes: handles });
-}
-
-fn kind_of(world: &World, id: VehicleId) -> Kind {
-    match world.traffic.trips.get(id).map(|t| t.purpose) {
-        Some(TripPurpose::Goods) => Kind::Truck,
-        _ => Kind::Car,
-    }
-}
-
-fn model_index(seed: u32, kind: Kind) -> usize {
-    let h = hash(seed ^ 0x51ED_270B);
-    if kind == Kind::Truck {
-        return CAR_MODELS + (h / 16) as usize % palette::TRUCK_LIVERIES.len();
-    }
-    // Mostly saloons, hatchbacks and estates, some vans and pickups.
-    let shape = match h % 12 {
-        0..=3 => 0,
-        4..=6 => 1,
-        7 | 8 => 4,
-        9 => 2,
-        _ => 3,
-    };
-    let colours = palette::CAR_BODIES.len();
-    shape * colours + (h / 16) as usize % colours
-}
-
-/// Length and width of a vehicle model, metres.
-fn model_size(model: usize) -> (f32, f32) {
-    if model >= CAR_MODELS {
-        (vehicle_gen::TRUCK_LEN, vehicle_gen::TRUCK_WIDTH)
-    } else {
-        vehicle_gen::car_size((model / palette::CAR_BODIES.len()) as u32)
     }
 }
 
@@ -285,7 +366,9 @@ fn sync_vehicles(
     mut commands: Commands,
     sim: Res<SimWorld>,
     fixed: Res<Time<Fixed>>,
-    models: Res<VehicleModels>,
+    mut models: ResMut<VehicleModels>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    quality: (Option<Res<QualityApplied>>, Res<GraphicsQuality>),
     mats: Res<WorldMaterials>,
     mut state: Local<SyncState>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
@@ -330,24 +413,45 @@ fn sync_vehicles(
         1.0
     };
     let tick_now = stepped && advanced;
+    let near_m = near_distance(drawn_quality(quality.0.as_deref(), *quality.1));
+    let level_at = |d: f32, was: usize| {
+        let far = if was == 2 { d > LOD_NEAR } else { d > LOD_FAR };
+        let near = if was == 0 {
+            d < near_m + NEAR_HYST
+        } else {
+            d < near_m - NEAR_HYST
+        };
+        if far {
+            2
+        } else if near && near_m > 0.0 {
+            0
+        } else {
+            1
+        }
+    };
+    // Models of new vehicles (and of trips that changed), built side by
+    // side before they are needed.
+    if tick_now || state.entities.len() != vehicles.len() {
+        models.prepare(vehicles.iter().map(|(id, v)| model_for(world, id, v)), &mut meshes);
+    }
     for (id, v) in vehicles.iter() {
-        let kind = kind_of(world, id);
         match state.entities.get(&id) {
             Some(&e) => {
                 let Ok((mut vis, _, _, _)) = q.get_mut(e) else {
                     continue;
                 };
                 if tick_now {
-                    vis.step(world, v, kind);
+                    vis.step(world, id, v);
                 } else if stepped {
                     vis.prev = vis.cur;
                 }
             }
             None => {
-                let mut vis = VehicleVisual::new(world, v, kind);
+                let mut vis = VehicleVisual::new(world, id, v);
                 let (p, h) = vis.cur;
                 let pos = Vec3::new(p.x, ROAD_Y, p.y);
-                vis.lod = cam.distance(pos) > LOD_FAR;
+                vis.lod = level_at(cam.distance(pos), 1);
+                vis.mesh_model = Some((vis.model, vis.lod));
                 let mesh = models.mesh(vis.model, vis.lod);
                 let e = commands
                     .spawn((
@@ -376,10 +480,10 @@ fn sync_vehicles(
             *t = new;
         }
         let d = cam.distance(new.translation);
-        let lod = if vis.lod { d > LOD_NEAR } else { d > LOD_FAR };
-        if lod != vis.lod || vis.mesh_model != Some(vis.model) {
+        let lod = level_at(d, vis.lod);
+        if vis.mesh_model != Some((vis.model, lod)) {
             vis.lod = lod;
-            vis.mesh_model = Some(vis.model);
+            vis.mesh_model = Some((vis.model, lod));
             mesh.0 = models.mesh(vis.model, lod);
         }
     }
@@ -454,8 +558,7 @@ mod tests {
                 .vehicles
                 .iter()
                 .map(|(id, v)| {
-                    let model = model_index(v.seed, kind_of(world, id));
-                    let (l, w) = model_size(model);
+                    let (l, w) = model_for(world, id, v).size();
                     let (p, h) = place(world, v, l * 0.5);
                     (id, (p, h, l * 0.5, w * 0.5))
                 })

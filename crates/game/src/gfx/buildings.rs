@@ -10,10 +10,13 @@ use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 use citysim_sim::{Building, BuildingId, CELL_SIZE};
 
-use super::building_gen::{self, ModelKey, VARIANTS};
+use bevy::ecs::hierarchy::ChildSpawnerCommands;
+use bevy::tasks::{ComputeTaskPool, TaskPool};
+
+use super::building_gen::{self, Lod, ModelKey, VARIANTS};
 use super::land::{self, Inset, Lot, RoadEdges};
-use super::scene::WorldMaterials;
-use crate::shared::{GameSet, SimWorld, WorldCamera};
+use super::scene::{QualityApplied, WorldMaterials};
+use crate::shared::{GameSet, GraphicsQuality, SimWorld, WorldCamera};
 
 const GROW_SECS: f32 = 0.75;
 const SHRINK_SECS: f32 = 0.35;
@@ -28,17 +31,38 @@ pub const SITE_TICKS: u64 = 3 * citysim_sim::balance::TICKS_PER_HOUR as u64;
 /// Camera distance (m) where buildings cross-fade to their simplified model.
 pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
 
-/// Cache of generated building models: `(detailed, distant)` per key.
+/// Cache of generated building models: `[near, mid, far]` per key.
 #[derive(Resource, Default)]
 pub struct BuildingModels {
-    meshes: HashMap<ModelKey, (Handle<Mesh>, Handle<Mesh>)>,
+    meshes: HashMap<ModelKey, [Handle<Mesh>; 3]>,
     emitters: HashMap<ModelKey, Vec<Vec3>>,
     driveways: HashMap<ModelKey, Vec<(f32, f32)>>,
     sites: HashMap<(ModelKey, u8), Handle<Mesh>>,
 }
 
+/// One generated model: its three levels of detail, smoke emitters and
+/// driveways.
+type Generated = (ModelKey, [Mesh; 3], Vec<Vec3>, Vec<(f32, f32)>);
+
+fn generate_all(key: ModelKey) -> Generated {
+    let mut near = building_gen::generate(key, Lod::Near);
+    let emitters = std::mem::take(&mut near.emitters);
+    let driveways = std::mem::take(&mut near.driveways);
+    (
+        key,
+        [
+            near.build(),
+            building_gen::generate(key, Lod::Mid).build(),
+            building_gen::generate(key, Lod::Far).build(),
+        ],
+        emitters,
+        driveways,
+    )
+}
+
 impl BuildingModels {
-    /// Number of distinct building models (each has two levels of detail).
+    /// Number of distinct building models (each has three levels of
+    /// detail).
     pub fn count(&self) -> usize {
         self.meshes.len()
     }
@@ -55,21 +79,36 @@ impl BuildingModels {
             .clone()
     }
 
-    pub fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
-        let emitters = &mut self.emitters;
-        let driveways = &mut self.driveways;
-        self.meshes
-            .entry(key)
-            .or_insert_with(|| {
-                let mut detail = building_gen::generate(key, false);
-                emitters.insert(key, std::mem::take(&mut detail.emitters));
-                driveways.insert(key, std::mem::take(&mut detail.driveways));
-                (
-                    meshes.add(detail.build()),
-                    meshes.add(building_gen::generate(key, true).build()),
-                )
+    /// Generate the models of `keys` not yet cached, side by side on the
+    /// compute threads (a loaded city needs hundreds at once).
+    pub fn prepare(&mut self, keys: impl IntoIterator<Item = ModelKey>, meshes: &mut Assets<Mesh>) {
+        let mut todo: Vec<ModelKey> = keys.into_iter().filter(|k| !self.meshes.contains_key(k)).collect();
+        todo.sort_by_key(|k| (k.kind as u8, k.cells, k.level, k.variant));
+        todo.dedup();
+        if todo.is_empty() {
+            return;
+        }
+        let built: Vec<Generated> = if todo.len() == 1 {
+            vec![generate_all(todo[0])]
+        } else {
+            let pool = ComputeTaskPool::get_or_init(TaskPool::default);
+            pool.scope(|s| {
+                for k in todo {
+                    s.spawn(async move { generate_all(k) });
+                }
             })
-            .clone()
+        };
+        for (key, [near, mid, far], emitters, driveways) in built {
+            self.emitters.insert(key, emitters);
+            self.driveways.insert(key, driveways);
+            self.meshes
+                .insert(key, [meshes.add(near), meshes.add(mid), meshes.add(far)]);
+        }
+    }
+
+    pub fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> [Handle<Mesh>; 3] {
+        self.prepare([key], meshes);
+        self.meshes[&key].clone()
     }
 
     /// Driveway x ranges at the lot front, in model space (after `get`).
@@ -81,6 +120,110 @@ impl BuildingModels {
     pub fn emitters(&self, key: ModelKey) -> &[Vec3] {
         self.emitters.get(&key).map_or(&[], Vec::as_slice)
     }
+}
+
+/// Which level of detail a building's child entity shows (the near and
+/// middle ranges follow the graphics quality).
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BuildingPart {
+    Near,
+    Mid,
+}
+
+/// Camera distance (m) up to which buildings show their near model, per
+/// quality (Low: never).
+pub fn near_distance(q: GraphicsQuality) -> f32 {
+    match q {
+        GraphicsQuality::Low => 0.0,
+        GraphicsQuality::Medium => 120.0,
+        GraphicsQuality::High => 180.0,
+    }
+}
+
+/// Cross-fade half width at the near / middle switch, metres.
+const NEAR_FADE: f32 = 12.0;
+
+fn part_range(part: BuildingPart, near: f32) -> (VisibilityRange, Visibility) {
+    let fade = (near - NEAR_FADE).max(0.0)..near + NEAR_FADE;
+    match part {
+        BuildingPart::Near => (
+            VisibilityRange {
+                start_margin: 0.0..0.0,
+                end_margin: fade,
+                use_aabb: false,
+            },
+            if near > 0.0 {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            },
+        ),
+        BuildingPart::Mid => (
+            VisibilityRange {
+                start_margin: if near > 0.0 { fade } else { 0.0..0.0 },
+                end_margin: LOD_DISTANCE,
+                use_aabb: false,
+            },
+            Visibility::Inherited,
+        ),
+    }
+}
+
+/// Spawn a finished building's three models under its entity.
+fn spawn_models(
+    p: &mut ChildSpawnerCommands,
+    model_tf: Transform,
+    handles: &[Handle<Mesh>; 3],
+    mats: &WorldMaterials,
+    near: f32,
+) {
+    for (part, mesh) in [(BuildingPart::Near, &handles[0]), (BuildingPart::Mid, &handles[1])] {
+        let (range, vis) = part_range(part, near);
+        p.spawn((
+            model_tf,
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(mats.lit.clone()),
+            range,
+            vis,
+            part,
+        ));
+    }
+    p.spawn((
+        model_tf,
+        Mesh3d(handles[2].clone()),
+        MeshMaterial3d(mats.lit.clone()),
+        VisibilityRange {
+            start_margin: LOD_DISTANCE,
+            end_margin: 1e6..1e6,
+            use_aabb: false,
+        },
+    ));
+}
+
+/// A quality switch moves the near / middle boundary of every building.
+fn apply_quality(
+    applied: Res<QualityApplied>,
+    mut shown: Local<Option<GraphicsQuality>>,
+    mut parts: Query<(&BuildingPart, &mut VisibilityRange, &mut Visibility)>,
+) {
+    let Some(q) = applied.0 else { return };
+    if *shown == Some(q) {
+        return;
+    }
+    *shown = Some(q);
+    let near = near_distance(q);
+    for (part, mut range, mut vis) in &mut parts {
+        let (r, v) = part_range(*part, near);
+        if *range != r {
+            *range = r;
+        }
+        vis.set_if_neq(v);
+    }
+}
+
+/// The near distance for buildings spawned now.
+fn current_near(applied: &QualityApplied, requested: GraphicsQuality) -> f32 {
+    near_distance(super::scene::drawn_quality(Some(applied), requested))
 }
 
 #[derive(Component)]
@@ -218,7 +361,12 @@ impl Plugin for BuildingsPlugin {
             .init_resource::<DrivewayMouths>()
             .add_systems(
                 Update,
-                (sync_buildings.in_set(BuildingsSync), advance_sites, animate_buildings)
+                (
+                    apply_quality,
+                    sync_buildings.in_set(BuildingsSync),
+                    advance_sites,
+                    animate_buildings,
+                )
                     .chain()
                     .in_set(GameSet::Render)
                     .after(super::land::LandUpdate),
@@ -271,7 +419,9 @@ fn sync_buildings(
     edges: Res<RoadEdges>,
     mut mouths: ResMut<DrivewayMouths>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
+    quality: (Res<QualityApplied>, Res<GraphicsQuality>),
 ) {
+    let near = current_near(&quality.0, *quality.1);
     let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
     if spawned.key == Some(key) && !spawned.filling {
         return;
@@ -353,6 +503,8 @@ fn sync_buildings(
         }
         missing.truncate(FILL_PER_FRAME);
     }
+    // New models for this frame, generated side by side.
+    models.prepare(missing.iter().map(|(_, b)| model_key(b)), &mut meshes);
     for (id, b) in missing {
         let mk = model_key(b);
         let young = world.time.tick.saturating_sub(b.created_tick) < ANIMATE_IF_YOUNGER && !fresh;
@@ -383,30 +535,9 @@ fn sync_buildings(
             sp.entities.insert(id, (ec.id(), mk, pose_key(b), inset));
             continue;
         }
-        let (detail, far) = models.get(mk, &mut meshes);
+        let handles = models.get(mk, &mut meshes);
         let mut ec = commands.spawn((BuildingVisual, Visibility::default()));
-        ec.with_children(|p| {
-            p.spawn((
-                model_tf,
-                Mesh3d(detail),
-                MeshMaterial3d(mats.lit.clone()),
-                VisibilityRange {
-                    start_margin: 0.0..0.0,
-                    end_margin: LOD_DISTANCE,
-                    use_aabb: false,
-                },
-            ));
-            p.spawn((
-                model_tf,
-                Mesh3d(far),
-                MeshMaterial3d(mats.lit.clone()),
-                VisibilityRange {
-                    start_margin: LOD_DISTANCE,
-                    end_margin: 1e6..1e6,
-                    use_aabb: false,
-                },
-            ));
-        });
+        ec.with_children(|p| spawn_models(p, model_tf, &handles, &mats, near));
         if young {
             ec.insert((tf.with_scale(Vec3::new(0.9, 0.01, 0.9)), Growing { start: now }));
         } else {
@@ -452,7 +583,9 @@ fn advance_sites(
     mut models: ResMut<BuildingModels>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sites: Query<(Entity, &mut Site, &mut Transform, &Children), Without<Shrinking>>,
+    quality: (Res<QualityApplied>, Res<GraphicsQuality>),
 ) {
+    let near = current_near(&quality.0, *quality.1);
     let world = &sim.world;
     for (e, mut site, mut tf, children) in &mut sites {
         if !world.buildings.contains_key(site.id) {
@@ -475,7 +608,7 @@ fn advance_sites(
                 });
             }
             None => {
-                let (detail, far) = models.get(site.key, &mut meshes);
+                let handles = models.get(site.key, &mut meshes);
                 tf.scale = Vec3::new(0.9, 0.01, 0.9);
                 commands
                     .entity(e)
@@ -483,28 +616,7 @@ fn advance_sites(
                     .insert(Growing {
                         start: time.elapsed_secs(),
                     })
-                    .with_children(|p| {
-                        p.spawn((
-                            model_tf,
-                            Mesh3d(detail),
-                            MeshMaterial3d(mats.lit.clone()),
-                            VisibilityRange {
-                                start_margin: 0.0..0.0,
-                                end_margin: LOD_DISTANCE,
-                                use_aabb: false,
-                            },
-                        ));
-                        p.spawn((
-                            model_tf,
-                            Mesh3d(far),
-                            MeshMaterial3d(mats.lit.clone()),
-                            VisibilityRange {
-                                start_margin: LOD_DISTANCE,
-                                end_margin: 1e6..1e6,
-                                use_aabb: false,
-                            },
-                        ));
-                    });
+                    .with_children(|p| spawn_models(p, model_tf, &handles, &mats, near));
             }
         }
     }

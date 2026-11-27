@@ -541,7 +541,7 @@ fn draw_route(
         if let Some(b) = dest
             && let Some(&(parent, model, model_tf)) = index.0.get(&b)
         {
-            let (detail, _) = models.get(model, &mut meshes);
+            let [_, detail, _] = models.get(model, &mut meshes);
             let mut tf = model_tf;
             tf.scale *= Vec3::new(1.02, 1.012, 1.02);
             let copy = commands

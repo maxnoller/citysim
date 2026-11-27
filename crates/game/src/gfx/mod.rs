@@ -3,7 +3,10 @@
 
 mod bench;
 mod bench_script;
+mod building_com;
 mod building_gen;
+mod building_ind;
+mod building_res;
 mod buildings;
 mod camera;
 mod city_material;
