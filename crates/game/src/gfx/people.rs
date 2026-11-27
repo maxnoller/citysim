@@ -49,9 +49,6 @@ impl PeopleModels {
         if far { distant.clone() } else { near.clone() }
     }
 
-    pub fn count(&self) -> usize {
-        self.meshes.len()
-    }
 }
 
 /// One drawn person.
