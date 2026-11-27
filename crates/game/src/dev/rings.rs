@@ -1,9 +1,10 @@
-//! `CITYSIM_DEMO=rings`: a town with roundabouts of every size, built
-//! through ordinary commands: two avenues crossing at a large ring, a
-//! street crossing an avenue at a medium one, a grid of streets with a
-//! small ring and a mini ring among the houses, a five-arm junction of
-//! streets as a small ring; the streets' T junctions on the avenue are
-//! left as give-way junctions (to compare, and to upgrade in play).
+// `CITYSIM_DEMO=rings` (also included by the sim's `ringjam` example).
+// `CITYSIM_DEMO=rings`: a town with roundabouts of every size, built
+// through ordinary commands: two avenues crossing at a large ring, a
+// street crossing an avenue at a medium one, a grid of streets with a
+// small ring and a mini ring among the houses, a five-arm junction of
+// streets as a small ring; the streets' T junctions on the avenue are
+// left as give-way junctions (to compare, and to upgrade in play).
 
 use citysim_sim::roundabout::RoundaboutSize as R;
 use citysim_sim::{Cell, Command, Curve, RoadKind, World, Zone};

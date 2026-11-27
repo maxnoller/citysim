@@ -638,6 +638,35 @@ fn run(
                 .ok_or("no car on screen with that far to go")?;
             ctl.reply(seq, true, &format!("{:.0} {:.0}", hit.x, hit.y));
         }
+        "find-ring-car" => {
+            // A car on screen driving towards the junction at cell X Y with
+            // its route going on through it: its window position.
+            let (x, y): (i32, i32) = (num(args, 0)?, num(args, 1)?);
+            let w = &cx.sim.world;
+            let node = w.roads.node_at(Cell::new(x, y).center()).ok_or("no junction there")?;
+            let win = cx.window.single().map_err(|_| "no window".to_string())?;
+            let (cam, tf) = cx.cams.single().map_err(|_| "no camera".to_string())?;
+            let size = Vec2::new(win.width(), win.height());
+            let hit = w
+                .vehicles
+                .iter()
+                .filter(|(_, v)| v.junction.is_none() && v.route.len() >= 2)
+                .filter_map(|(_, v)| {
+                    let s = w.roads.segments.get(v.segment?)?;
+                    let towards = if v.forward { s.b } else { s.a };
+                    let left = s.length - v.progress;
+                    if towards != node || !(25.0..90.0).contains(&left) {
+                        return None;
+                    }
+                    let pos = citysim_sim::drive::vehicle_pose(w, v).0;
+                    let p = cam.world_to_viewport(tf, crate::shared::sim_to_world(pos, 0.5)).ok()?;
+                    let inside = p.x > 120.0 && p.x < size.x - 460.0 && p.y > 110.0 && p.y < size.y - 170.0;
+                    inside.then_some((left, p))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .ok_or("no car heading through it on screen")?;
+            ctl.reply(seq, true, &format!("{:.0} {:.0}", hit.1.x, hit.1.y));
+        }
         "find-walker" => {
             // A home whose first resident (the first person its panel
             // lists) is on a trip off the map (on foot, else any) with at
