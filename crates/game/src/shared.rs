@@ -70,8 +70,10 @@ impl SimWorld {
 
     /// Swap in a different world (load / new game).
     pub fn replace(&mut self, world: World) {
-        self.world = world;
+        let old = std::mem::replace(&mut self.world, world);
         self.generation += 1;
+        // Freeing a big city takes milliseconds: not in this frame.
+        std::thread::spawn(move || drop(old));
     }
 }
 
