@@ -68,7 +68,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   keyboard in a drawer), `HoveredCell` / `HoveredPoint` (shared computes from the `WorldCamera` ray).
 - `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose; beats
   `CameraFollow`), `CameraFollow { focus }` (gfx keeps the focus there), `CameraGoTo` message (move / zoom once).
-- Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `cell_corners`, `zone_cell_corners`.
+- Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell`, `zone_cell_corners`.
 - Keys: gfx = WASD/arrows, Q/E, wheel, middle drag. ui = I R Z B (bulldozer on / off) J Esc/right-click, Space 1 2 3
   4, O, T, G, F5/F9, F3 (performance panel), F6 (keyboard into the city window or the open drawer: arrows, Enter, Esc),
   Tab (tool mode; city window page), Alt, Enter, Backspace, [ ], Ctrl+Z, P, U, F, arrows + Enter in menus.
@@ -78,8 +78,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `CurveToolView` (the free-form road being drawn: pieces with `PieceChange`, refused curves, `error_at`, control
   points, handles, tightest bend, planned nodes; written only when it changes), `ToolPreview::{kind, area,
   zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, doomed buildings,
-  `doomed_roads`). Legacy, never written any more (gfx still draws them for its `CITYSIM_GFX_TOOLDEMO` samples):
-  `PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells`.
+  `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells` and
+  `shared::cell_corners` are gone: nothing wrote or used them any more.)
 - `RouteView { state: RouteState::{None, Driving, Planned, Unseen}, points, origin, destination }` (ui writes while a
   car or person is selected, only when it changes meaningfully: a new route, the car 2.5 m further on; gfx draws it in
   `gfx/route.rs`): `points` in sim metres along the lanes (lane offsets, left-turn pockets and junction turn paths included) from the car
@@ -186,6 +186,15 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `CITYSIM_BENCH_WARMUP` (240), sim running (`CITYSIM_BENCH_PAUSED=1` stops it), two GPU frames in flight; writes
   frame-time avg / median / p99 / worst 1 %, GPU ms per pass, triangles, entities, meshes, materials, draw calls, sim
   step time. Use with a demo and `CITYSIM_GFX_QUALITY`; `CITYSIM_BENCH_SPEED=3` runs the sim at the top speed.
+  Hitches: every frame is recorded (main-world parts, render-thread parts, GPU wait, meshes / materials changed,
+  pipelines created, tags for what happened); the report lists the 20 slowest frames with their tags, every frame goes
+  to `<out>.frames.csv`. `CITYSIM_BENCH_SCRIPT=quality` switches the quality ten times (`CITYSIM_BENCH_SWITCHES=n`),
+  `=actions` plays a fixed round of player actions through real commands, resources and keys during the camera path
+  (build / zone / bulldoze a street, signals, overlays, day and night, city window, select a car, 12x, a fast zoom,
+  save / load only with `CITYSIM_SAVE_DIR` set; `gfx/bench_script.rs`; `CITYSIM_BENCH_SCRIPT_SCALE=0.1` shortens it
+  for a software renderer). **`scripts/perf-check.sh [dir]`** builds the release game and runs both scripts on the
+  10,000- and 20,000-resident cities plus 1x / 12x: one table (quality switch <= 50 ms, any action <= 33 ms, 60 fps at
+  20,000, 12x < 2 ms over 1x; about 4.5 min on the owner's desktop; `PERF_CHECK_ONLY=quality,actions10k`).
   `CITYSIM_BENCH_UI=1` draws the interface into the image too (else there is no UI without a window; with
   `CITYSIM_PERF=off|small|full` it measures the performance panel's cost); `CITYSIM_BENCH_GPU=0` leaves GPU pass timing
   to the panel, as in a game (on only while it is full). Tail
@@ -253,8 +262,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`), `CITYSIM_GFX_HOUR=h` (pin the drawn time of
-  day), `CITYSIM_GFX_TOOLDEMO=1|2|3` (gfx-only build: sample road-tool feedback; `4|5|6` the free-form road tool
-  from real previews and `7` de-zoning, on `CITYSIM_DEMO=shapes`), `CITYSIM_DEMO_AVENUES=1` (demo main road upgraded
+  day), `CITYSIM_GFX_TOOLDEMO=1|2|3|7` (gfx-only build, on `CITYSIM_DEMO=shapes`
+  round `CITYSIM_GFX_TOOLDEMO_AT=x,z`: 1 a hovered junction and a selected building, 2 the bulldozer's area with what
+  it removes, 3 zoning a marquee, 7 de-zoning; `4|5|6` the free-form road tool from real previews), `CITYSIM_DEMO_AVENUES=1` (demo main road upgraded
   to an avenue), `CITYSIM_GFX_SHOWCASE_SITES=x,z` (building sites with cranes at a spot).
 - gfx tool feedback: `gfx/cursor.rs` draws the hovered-cell frame and a faint cell grid around the cursor for the road
   and zone tools only (never for Inspect or the bulldozer, which marks what it would remove in red);
@@ -266,7 +276,11 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   are generated in code (`building_gen`, `vehicle_gen`, `props`) and cached; LOD via `VisibilityRange` (mesh origin
   must be near the geometry: the cross-fade dither is measured from the entity origin).
 - gfx performance rule: never change a material asset that many meshes use (Bevy re-extracts and re-specialises every
-  mesh using it: 30-60 ms frames). Time-of-day inputs live in a shared `ShaderBuffer` (`WorldMaterials::day`,
+  mesh using it: 30-60 ms frames). No frame rebuilds the whole city: a quality switch applies at once (the other
+  levels' pipelines compile during loading on hidden warm-up cameras, `scene.rs`) and what depends on it (tree density,
+  road furniture, shadow cascades, cloud shadows) follows `scene::QualityApplied`, re-meshing a few chunks a frame
+  (`QUALITY_REMESH_MS`); a road edit refits only buildings near the changed 64 m buckets of `RoadEdges`
+  (`unchanged_in`); a loaded world's buildings spawn `FILL_PER_FRAME` a frame, nearest the camera first. Time-of-day inputs live in a shared `ShaderBuffer` (`WorldMaterials::day`,
   `DayParams`), brake lights are `MeshTag` bit 0.
 - gfx roads: `road_geom::Frame` samples a segment's curve (two points when straight); everything along a road is a
   ribbon over it between the arm cuts of `junction::junction_shape`. `gfx/land.rs`: one index of drawn road edges per

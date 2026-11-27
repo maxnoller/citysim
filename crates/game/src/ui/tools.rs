@@ -1627,7 +1627,6 @@ fn publish(
         hovered: hover.1.clone(),
         selected: highlight.selected.clone(),
         doomed_buildings,
-        doomed_road_cells: Vec::new(),
         doomed_roads,
     };
     if let Some(points) = stretch_hl.filter(|p| p.len() >= 2) {

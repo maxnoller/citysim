@@ -22,7 +22,6 @@ mod perf;
 mod props;
 mod record;
 mod road_geom;
-mod road_ghost;
 mod road_tool;
 mod roads;
 mod route;

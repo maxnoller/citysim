@@ -96,18 +96,21 @@ fn log_stats(
     );
 }
 
-/// Dev aid (`CITYSIM_GFX_TOOLDEMO=1`, best with the sample city and a
-/// gfx-only build): fills the ui-owned construction feedback resources with
-/// a fixed example so their drawing can be checked without input.
+/// Dev aid (`CITYSIM_GFX_TOOLDEMO=1|2|3|7`, a gfx-only build): fills the
+/// ui-owned tool feedback with a fixed example so its drawing can be checked
+/// without input, around `CITYSIM_GFX_TOOLDEMO_AT=x,z` (sim metres; by
+/// default a spot of the `shapes` demo town). 1: Inspect, a junction hovered
+/// and the nearest building selected; 2: the bulldozer's area (marquee) with
+/// the roads and buildings it would remove; 3: zoning a marquee
+/// commercial; 7: de-zoning the zoned cells round the spot. The free-form
+/// road tool's samples 4-6 are in `road_tool`.
 fn tool_demo(
     sim: Res<crate::shared::SimWorld>,
     mut tool: ResMut<crate::shared::ActiveTool>,
     mut preview: ResMut<crate::shared::ToolPreview>,
-    mut path: ResMut<crate::shared::PathPreview>,
-    mut snap: ResMut<crate::shared::SnapFeedback>,
     mut hl: ResMut<crate::shared::WorldHighlight>,
 ) {
-    use citysim_sim::Cell;
+    use citysim_sim::{Command, Zone};
 
     use crate::shared::*;
     let world = &sim.world;
@@ -115,122 +118,87 @@ fn tool_demo(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
-    // 4-6: the free-form road tool (`road_tool`).
     if (4..=6).contains(&case) {
         return;
     }
-    // 7: de-zoning the zoned cells round a spot (on whatever lattices).
-    if case == 7 {
-        tool.set_if_neq(ActiveTool::Zone(None));
-        let at = std::env::var("CITYSIM_GFX_TOOLDEMO_AT")
-            .ok()
-            .and_then(|s| {
-                let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                (v.len() == 2).then(|| Vec2::new(v[0], v[1]))
-            })
-            .unwrap_or(Vec2::new(900.0, 1150.0));
-        let zone_cells: Vec<citysim_sim::CellRef> = world
-            .zoning
-            .cells()
-            .filter(|(c, z)| {
-                z.zone.is_some()
-                    && world
-                        .zoning
-                        .cell_center(*c)
-                        .is_some_and(|p| Vec2::from(p).distance(at) < 60.0)
-            })
-            .map(|(c, _)| c)
-            .collect();
-        preview.set_if_neq(ToolPreview {
-            kind: PreviewKind::Zone(None),
-            zone_cells,
-            ..default()
-        });
-        return;
+    let at = std::env::var("CITYSIM_GFX_TOOLDEMO_AT")
+        .ok()
+        .and_then(|s| {
+            let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (v.len() == 2).then(|| Vec2::new(v[0], v[1]))
+        })
+        .unwrap_or(Vec2::new(900.0, 1150.0));
+    // A marquee 90 x 60 m round the spot.
+    let quad = [[-45.0, -30.0], [45.0, -30.0], [45.0, 30.0], [-45.0, 30.0]].map(|[x, y]| [at.x + x, at.y + y]);
+    match case {
+        2 => {
+            tool.set_if_neq(ActiveTool::Bulldoze);
+            let p = world.preview(&Command::BulldozeArea { quad });
+            let (roads, buildings) = match &p {
+                Ok(p) => (
+                    p.removed
+                        .iter()
+                        .map(|c| {
+                            let kind = world
+                                .roads
+                                .nearest_segment(c.point_t(0.5), 4.0)
+                                .and_then(|(s, _, _)| world.roads.segments.get(s))
+                                .map_or(citysim_sim::RoadKind::Street, |s| s.kind);
+                            (*c, kind)
+                        })
+                        .collect(),
+                    p.buildings.clone(),
+                ),
+                Err(_) => (Vec::new(), Vec::new()),
+            };
+            preview.set_if_neq(ToolPreview {
+                kind: PreviewKind::Bulldoze,
+                area: Some(quad),
+                error: p.as_ref().err().cloned(),
+                cost: p.as_ref().map_or(0, |p| p.cost),
+                ..default()
+            });
+            hl.set_if_neq(WorldHighlight {
+                doomed_buildings: buildings,
+                doomed_roads: roads,
+                ..default()
+            });
+        }
+        3 | 7 => {
+            let zone = (case == 3).then_some(Zone::Commercial);
+            tool.set_if_neq(ActiveTool::Zone(zone));
+            let p = world.preview(&Command::ZoneArea { quad, zone });
+            preview.set_if_neq(ToolPreview {
+                kind: PreviewKind::Zone(zone),
+                area: (case == 3).then_some(quad),
+                zone_cells: p.as_ref().map(|p| p.zone_cells.clone()).unwrap_or_default(),
+                error: p.as_ref().err().cloned(),
+                cost: p.as_ref().map_or(0, |p| p.cost),
+            });
+        }
+        _ => {
+            tool.set_if_neq(ActiveTool::Inspect);
+            let building = world
+                .buildings
+                .iter()
+                .min_by(|a, b| {
+                    let d = |c: [f32; 2]| Vec2::from(c).distance(at);
+                    d(a.1.center()).total_cmp(&d(b.1.center()))
+                })
+                .map(|(id, _)| id);
+            let junction = citysim_sim::junction::junction_nodes(world)
+                .min_by(|a, b| {
+                    let d = |n| Vec2::from(world.roads.nodes[n].pos).distance(at);
+                    d(*a).total_cmp(&d(*b))
+                })
+                .map(|n| (n, world.roads.nodes[n].pos));
+            hl.set_if_neq(WorldHighlight {
+                hovered: junction.map(|(node, pos)| WorldTarget::Junction { node, pos }),
+                selected: building.map(WorldTarget::Building),
+                ..default()
+            });
+        }
     }
-    tool.set_if_neq(ActiveTool::Road);
-    let leg = |a: (i32, i32), b: (i32, i32), ok: bool| PathLeg {
-        from: Cell::new(a.0, a.1),
-        to: Cell::new(b.0, b.1),
-        error: (!ok).then_some(citysim_sim::CommandError::OutOfBounds),
-        upgrade_cells: vec![],
-    };
-    // 1: a street from a dead end; 2: an avenue from a street to the main
-    // avenue (two T junctions); 3: a path whose last leg is refused.
-    let (kind, pts, legs): (RoadChoice, Vec<(i32, i32)>, Vec<PathLeg>) = match case {
-        2 => (
-            RoadChoice::Avenue,
-            vec![(45, 140), (58, 140), (58, 128)],
-            vec![leg((45, 140), (58, 140), true), leg((58, 140), (58, 128), true)],
-        ),
-        3 => (
-            RoadChoice::Street,
-            vec![(60, 150), (70, 150), (76, 144)],
-            vec![leg((60, 150), (70, 150), true), leg((70, 150), (76, 144), false)],
-        ),
-        _ => (
-            RoadChoice::Street,
-            vec![(30, 156), (30, 166), (40, 176)],
-            vec![leg((30, 156), (30, 166), true), leg((30, 166), (40, 176), true)],
-        ),
-    };
-    let last = *pts.last().expect("points");
-    let error = legs.iter().find_map(|l| l.error.clone());
-    preview.set_if_neq(ToolPreview {
-        kind: PreviewKind::Road,
-        line: Some((
-            Cell::new(pts[pts.len() - 2].0, pts[pts.len() - 2].1),
-            Cell::new(last.0, last.1),
-        )),
-        error: error.clone(),
-        ..default()
-    });
-    path.set_if_neq(PathPreview {
-        kind,
-        points: pts.iter().map(|p| Cell::new(p.0, p.1)).collect(),
-        placed: pts.len() - 1,
-        legs,
-        length_m: 120.0,
-        cost: 10_000,
-        error: error.clone(),
-    });
-    let end = Cell::new(last.0, last.1);
-    let prev = pts[pts.len() - 2];
-    snap.set_if_neq(SnapFeedback {
-        point: Some(end.center()),
-        cell: Some(end),
-        target: if case == 2 { SnapTarget::Road } else { SnapTarget::Angle },
-        matched: vec![SnapTarget::Angle, SnapTarget::Grid],
-        guides: vec![Guide {
-            from: Cell::new(prev.0, prev.1).center(),
-            to: Cell::new(last.0 + (last.0 - prev.0), last.1 + (last.1 - prev.1)).center(),
-            kind: GuideKind::Angle,
-        }],
-        spacing_cells: None,
-        suspended: false,
-    });
-    let at = Vec2::new(250.0, 1040.0);
-    let building = world
-        .buildings
-        .iter()
-        .min_by(|a, b| {
-            let d = |c: [f32; 2]| Vec2::from(c).distance(at);
-            d(a.1.center()).total_cmp(&d(b.1.center()))
-        })
-        .map(|(id, _)| id);
-    let junction = citysim_sim::junction::junction_nodes(world)
-        .min_by(|a, b| {
-            let d = |n| Vec2::from(world.roads.nodes[n].pos).distance(at);
-            d(*a).total_cmp(&d(*b))
-        })
-        .map(|n| (n, world.roads.nodes[n].pos));
-    hl.set_if_neq(WorldHighlight {
-        hovered: junction.map(|(node, pos)| WorldTarget::Junction { node, pos }),
-        selected: building.map(WorldTarget::Building),
-        doomed_buildings: vec![],
-        doomed_road_cells: vec![],
-        doomed_roads: vec![],
-    });
 }
 
 /// Dev aid (`CITYSIM_GFX_SHOWCASE_SITES=x,z`): a row of building sites at
