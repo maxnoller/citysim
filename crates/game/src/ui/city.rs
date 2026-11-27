@@ -58,34 +58,29 @@ impl Plugin for CityPlugin {
     }
 }
 
-/// Business tax lost to traffic per booked day (`Economy::last_day_traffic`
-/// at each midnight). The sim keeps only yesterday's figure, so the
-/// interface collects the days it sees (yesterday's at once).
+/// Business tax lost to traffic per booked day, read from the history
+/// (`DaySummary::traffic`; days booked by older saves have none and are
+/// left out): (day, tax lost, time lost per commute).
 #[derive(Resource, Debug, Default)]
 pub struct LossHistory {
-    generation: Option<u64>,
-    seen: usize,
+    key: Option<(u64, usize)>,
     pub days: Vec<(u32, i64, f32)>,
 }
 
 fn record_losses(sim: Res<SimWorld>, mut h: ResMut<LossHistory>) {
     let e = &sim.world.economy;
-    if h.generation != Some(sim.generation) {
-        h.generation = Some(sim.generation);
-        h.days.clear();
-        h.seen = 0;
+    let key = Some((sim.generation, e.history.len()));
+    if h.key == key {
+        return;
     }
-    if e.history.len() != h.seen {
-        h.seen = e.history.len();
-        if let Some(d) = e.history.last() {
-            let t = e.last_day_traffic;
-            h.days.retain(|x| x.0 != d.day);
-            h.days.push((d.day, t.business_tax, t.per_commute_s()));
-            if h.days.len() > DAYS {
-                h.days.remove(0);
-            }
-        }
-    }
+    h.key = key;
+    h.days = e
+        .history
+        .iter()
+        .filter_map(|d| d.traffic.map(|t| (d.day, t.business_tax, t.per_commute_s())))
+        .collect();
+    let extra = h.days.len().saturating_sub(DAYS);
+    h.days.drain(..extra);
 }
 
 /// Where the window's plate is on screen while it shows, in interface
@@ -1554,7 +1549,7 @@ pub fn chart_data(id: u32, w: &World, losses: &[(u32, i64, f32)]) -> ChartData {
                 } else {
                     String::new()
                 },
-                empty: "Collected at each midnight while you play (a save keeps only yesterday's)".into(),
+                empty: "Booked at each midnight".into(),
                 live_last: false,
                 pick: None,
                 columns,

@@ -163,6 +163,7 @@ impl EconomyV4 {
             attendance: Default::default(),
             traffic_today: Default::default(),
             last_day_traffic: Default::default(),
+            advanced_today: 0,
         }
     }
 

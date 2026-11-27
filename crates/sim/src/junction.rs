@@ -1102,6 +1102,19 @@ pub(crate) struct ArmDemand {
     /// so a green ends in the gap between platoons.
     pub hold_through: bool,
     pub hold_left: bool,
+    /// A car holding the green (above) is still pulling away from a queue
+    /// (slower than `SIGNAL_DISCHARGE_SPEED`).
+    pub discharging: bool,
+    /// Cars within detection of the line in this arm's through lanes
+    /// (moving or not).
+    pub near: u16,
+    /// Cars standing in this arm's turn pocket (its front left turner's
+    /// count).
+    pub pocket: u16,
+    /// ... and it is full (but for one).
+    pub pocket_full: bool,
+    /// Longest a front car calling from this arm has waited, seconds.
+    pub wait_s: f32,
 }
 
 fn phase_demand(phase: &SignalPhase, demand: &[ArmDemand]) -> bool {
@@ -1136,10 +1149,58 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
             if elapsed < ticks(phase.min_green_s) {
                 return;
             }
-            // Next phase with demand, in plan order.
-            let next = (1..np)
-                .map(|k| (s.phase as usize + k) % np)
-                .find(|&p| phase_demand(&plan.phases[p], demand));
+            // Next phase with demand: in plan order on a coordinated
+            // signal; else the one with the most cars standing (a phase whose
+            // cars have waited `SIGNAL_STARVED_S` first), plan order on a tie.
+            let order = (1..np).map(|k| (s.phase as usize + k) % np);
+            let next = if plan.coordinated || !balance::SIGNAL_BY_QUEUE {
+                order.clone().find(|&p| phase_demand(&plan.phases[p], demand))
+            } else {
+                let score = |p: usize| {
+                    let ph = &plan.phases[p];
+                    let mut cars = 0u32;
+                    let mut starved = false;
+                    for &a in &ph.arms {
+                        let d = demand.get(a as usize).copied().unwrap_or_default();
+                        let q = j.queue.get(a as usize).copied().unwrap_or(0);
+                        starved |= d.wait_s >= balance::SIGNAL_STARVED_S;
+                        cars += if ph.left_only {
+                            d.pocket.max(d.left as u16) as u32 * balance::SIGNAL_POCKET_WEIGHT
+                        } else {
+                            q.saturating_sub(d.pocket) as u32
+                        };
+                    }
+                    (starved, cars)
+                };
+                // A through phase whose own left phase is called comes after
+                // it (lefts lead: a full pocket would block the inner lane).
+                let left_first = |p: usize| {
+                    let ph = &plan.phases[p];
+                    !ph.left_only
+                        && plan.phases.iter().enumerate().any(|(q, l)| {
+                            q != s.phase as usize
+                                && l.left_only
+                                && l.arms == ph.arms
+                                && l.arms.iter().any(|&a| {
+                                    demand
+                                        .get(a as usize)
+                                        .is_some_and(|d| d.pocket >= balance::SIGNAL_LEFT_FIRST_CARS)
+                                })
+                        })
+                };
+                // Roads take turns: after a through phase, its own road's
+                // phases wait while another road has demand.
+                let cur = &plan.phases[s.phase as usize];
+                let other_road = order
+                    .clone()
+                    .any(|p| plan.phases[p].arms != cur.arms && phase_demand(&plan.phases[p], demand));
+                let turn_over = |p: usize| !cur.left_only && other_road && plan.phases[p].arms == cur.arms;
+                order
+                    .filter(|&p| phase_demand(&plan.phases[p], demand) && !left_first(p) && !turn_over(p))
+                    .enumerate()
+                    .max_by(|(ia, a), (ib, b)| score(*a).cmp(&score(*b)).then(ib.cmp(ia)))
+                    .map(|(_, p)| p)
+            };
             let Some(mut next) = next else {
                 // Nobody else waits: rest in this phase.
                 return;
@@ -1154,18 +1215,73 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
                     d.hold_through || d.hold_left
                 }
             });
-            let mut end = !mine || elapsed >= ticks(phase.max_green_s);
+            // Pressure gap-out: once this phase's standing queues have
+            // discharged, the cars still arriving hold the green only while
+            // they outweigh the queue standing for another phase.
+            let served = phase
+                .arms
+                .iter()
+                .map(|&a| j.queue.get(a as usize).copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            let (mut discharging, mut arriving) = (false, 0u32);
+            for &a in &phase.arms {
+                let d = demand.get(a as usize).copied().unwrap_or_default();
+                discharging |= d.discharging;
+                arriving += d.near as u32;
+            }
+            let waiting = plan
+                .phases
+                .iter()
+                .filter(|p| p.arms != phase.arms && !p.left_only)
+                .map(|p| {
+                    p.arms
+                        .iter()
+                        .map(|&a| j.queue.get(a as usize).copied().unwrap_or(0) as u32)
+                        .sum::<u32>()
+                })
+                .max()
+                .unwrap_or(0);
+            let holding = mine;
+            // A full pocket on the road being served: its lefts spill into
+            // the inner lane, so the green is held no longer than the usual
+            // maximum (its left phase comes sooner).
+            let max_green = if !phase.left_only
+                && phase
+                    .arms
+                    .iter()
+                    .any(|&a| demand.get(a as usize).is_some_and(|d| d.pocket_full))
+            {
+                phase.max_green_s.min(balance::POCKET_FULL_MAX_GREEN_S)
+            } else {
+                phase.max_green_s
+            };
+            let mine = mine
+                && (phase.left_only
+                    || discharging
+                    || served > balance::SIGNAL_DISCHARGED_CARS
+                    || waiting < balance::SIGNAL_SWITCH_QUEUE_CARS as u32
+                    || arriving * balance::SIGNAL_SWITCH_RATIO >= waiting);
+            let mut end = !mine || elapsed >= ticks(max_green);
             if plan.coordinated {
                 let c = ticks(plan.cycle_s).max(1) as u64;
                 let t = (now + c - (ticks(plan.offset_s) as u64 % c)) % c;
                 let clear = ticks(balance::SIGNAL_YELLOW_S + balance::SIGNAL_ALL_RED_S) as u64;
                 if s.phase == main {
                     // The avenue keeps green until its share of the cycle
-                    // is used (a platoon is on its way).
+                    // is used (a platoon is on its way; queues elsewhere do
+                    // not cut it short).
                     let hold = (c as f32 * balance::SIGNAL_COORD_MAIN_SHARE) as u64;
+                    let end = (!holding || elapsed >= ticks(max_green)) && (!holding || t >= hold);
                     // An empty avenue gaps out early (the phase returns
                     // at the next cycle start anyway).
-                    end = end && (!mine || t >= hold) && t + clear < c;
+                    let end = end && t + clear < c;
+                    if end {
+                        s.stage = SignalStage::Yellow;
+                        s.ticks = 0;
+                        s.next = next as u8;
+                    }
+                    return;
                 } else if t + clear >= c {
                     // Force-off so the avenue turns green on time.
                     end = true;
@@ -1186,7 +1302,7 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
         }
         SignalStage::AllRed => {
             let min = ticks(balance::SIGNAL_ALL_RED_S);
-            if s.ticks >= min && (box_clear || s.ticks >= 3 * min) {
+            if s.ticks >= min && (box_clear || !balance::SIGNAL_ALL_RED_WAITS_FOR_BOX || s.ticks >= 3 * min) {
                 s.stage = SignalStage::Green;
                 s.ticks = 0;
                 s.phase = s.next.min(np as u8 - 1);
@@ -1317,8 +1433,11 @@ pub(crate) fn pocket_lengths(
     let (mut want_b, sb_b, rank_b) = end(seg.b);
     let (mut want_a, sb_a, rank_a) = end(seg.a);
     let drivable = seg.length - sb_a - sb_b;
+    // Up to `POCKET_LONG_M`; longer, up to `POCKET_MAX_M`, only on a long
+    // block (half its drivable length at most).
+    let cap = balance::POCKET_MAX_M.min(balance::POCKET_LONG_M.max(drivable * 0.5));
     let fit = |len: f32| -> f32 {
-        let len = len.min(balance::POCKET_MAX_M);
+        let len = len.min(cap);
         if len >= balance::POCKET_MIN_M { len } else { 0.0 }
     };
     // Room for one alone: all but the stretch behind the box where

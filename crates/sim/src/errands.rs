@@ -10,11 +10,14 @@ use crate::derived::rect_center;
 use crate::traffic::{self, Departure, Place, TripPurpose};
 use crate::{Building, BuildingId, World, Zone, balance, geom, households, people};
 
-/// Relative goods traffic by hour of day.
+/// Relative goods traffic by hour of day (most of it in the middle of the
+/// day, between the rush hours).
 fn goods_profile(h: f32) -> f32 {
     match h as u32 {
         0..=4 => 0.15,
-        5..=18 => 1.0,
+        5..=8 => 0.6,
+        9..=15 => 1.5,
+        16..=18 => 0.6,
         _ => 0.3,
     }
 }
