@@ -1163,7 +1163,7 @@ pub const RING_VERGE_M: f32 = 0.5;
 pub const RING_GIVE_WAY_OUTSIDE_M: f32 = 1.0;
 /// Road an arm keeps between the ring's give-way line and the next
 /// junction's box, metres (a ring may not swallow its neighbour).
-pub const RING_MIN_ARM_M: f32 = 12.0;
+pub const RING_MIN_ARM_M: f32 = 10.0;
 /// Roads a ring takes at most.
 pub const RING_MAX_ARMS: usize = 6;
 /// Least sweep round the ring between one arm's entry and the next arm's

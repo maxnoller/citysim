@@ -706,3 +706,65 @@ pub fn organic(w: &mut World) -> Vec<(crate::Curve, crate::CommandError)> {
     );
     refused
 }
+
+/// A scripted player's roundabouts: every junction that is not one yet
+/// (and, with `avenues_only`, where an avenue meets) becomes the biggest
+/// roundabout that fits it, as long as `reserve` stays in hand (a player
+/// who keeps building the city first). Where an avenue meets: two-lane
+/// rings only. Returns the roundabouts built and what they cost. Call it
+/// as the city grows (new junctions get theirs).
+pub fn add_roundabouts(w: &mut World, avenues_only: bool, reserve: i64) -> (u32, i64) {
+    use crate::roundabout::RoundaboutSize as R;
+    if avenues_only {
+        add_roundabouts_of(w, &[R::Large, R::Medium], &[], reserve)
+    } else {
+        add_roundabouts_of(w, &[R::Large, R::Medium], &[R::Small, R::Mini], reserve)
+    }
+}
+
+/// [`add_roundabouts`] with the sizes to try, biggest first, where an
+/// avenue meets and where streets alone meet (an empty list: none there).
+pub fn add_roundabouts_of(
+    w: &mut World,
+    avenue: &[crate::roundabout::RoundaboutSize],
+    street: &[crate::roundabout::RoundaboutSize],
+    reserve: i64,
+) -> (u32, i64) {
+    use crate::roundabout::RoundaboutSize as R;
+    let nodes: Vec<crate::NodeId> = crate::junction::junction_nodes(w).collect();
+    let (mut built, mut spent) = (0, 0);
+    for n in nodes {
+        if crate::roundabout::roundabout(w, n).is_some() {
+            continue;
+        }
+        let kinds: Vec<RoadKind> = w.roads.nodes[n]
+            .segments
+            .iter()
+            .map(|&s| w.roads.segments[s].kind)
+            .collect();
+        if kinds.contains(&RoadKind::Highway) {
+            continue;
+        }
+        let sizes = if kinds.contains(&RoadKind::Avenue) {
+            avenue
+        } else {
+            street
+        };
+        for &size in sizes {
+            let cmd = Command::SetRoundabout {
+                node: n,
+                size: Some(size),
+            };
+            let Ok(p) = w.preview(&cmd) else { continue };
+            if w.economy.money - p.cost < reserve.max(PLAYER_RESERVE) {
+                break;
+            }
+            if w.apply(cmd).is_ok() {
+                built += 1;
+                spent += p.cost;
+            }
+            break;
+        }
+    }
+    (built, spent)
+}
