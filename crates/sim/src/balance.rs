@@ -222,7 +222,7 @@ pub const MIN_GAP_M: f32 = 5.5;
 pub const FOLLOW_HEADWAY_S: f32 = 1.1;
 /// ... on streets: 2.75 m lanes lined with driveways and kerbside activity
 /// are driven with more distance (about 0.45 cars/s per lane from a queue).
-pub const STREET_FOLLOW_HEADWAY_S: f32 = 2.0;
+pub const STREET_FOLLOW_HEADWAY_S: f32 = 2.6;
 /// Acceleration, m/s².
 pub const ACCELERATION: f32 = 3.5;
 /// Comfortable braking used towards stop lines and junctions, m/s².
@@ -348,7 +348,7 @@ pub const POCKET_CALL_CARS: u16 = 3;
 /// phase, and the main through phases (longer, so the left phase's lost
 /// time is spread over more cars).
 pub const POCKET_LEFT_MAX_GREEN_S: f32 = 14.0;
-pub const POCKET_MAIN_MAX_GREEN_S: f32 = 30.0;
+pub const POCKET_MAIN_MAX_GREEN_S: f32 = 40.0;
 /// Right turns of the other road go during a left-arrow phase.
 pub const RIGHT_TURN_OVERLAP: bool = true;
 /// Routing: a left turn from a turn pocket costs this share of the usual
@@ -378,6 +378,10 @@ pub const SIGNAL_LEFT_MAX_GREEN_S: f32 = 8.0;
 /// Yellow and all-red clearance, seconds.
 pub const SIGNAL_YELLOW_S: f32 = 2.5;
 pub const SIGNAL_ALL_RED_S: f32 = 1.0;
+/// Does the all-red wait (up to three times as long) for the box to empty?
+/// Off: cars let in on the next green yield to those still in the box
+/// anyway.
+pub const SIGNAL_ALL_RED_WAITS_FOR_BOX: bool = false;
 /// A green is held only for vehicles that reach the line within this many
 /// seconds (passage time); vehicles further back call their phase.
 pub const SIGNAL_PASSAGE_S: f32 = 2.5;
@@ -389,6 +393,10 @@ pub const SIGNAL_DISCHARGED_CARS: u16 = 1;
 /// (A car near the line slower than this, m/s, is still pulling away from
 /// a queue: it holds the green whatever stands elsewhere.)
 pub const SIGNAL_DISCHARGE_SPEED: f32 = 7.0;
+/// (Nor while the cars within [`SIGNAL_DETECT_M`] of the line on its
+/// through lanes, times this, are at least as many as those standing for
+/// the other phase.)
+pub const SIGNAL_SWITCH_RATIO: u32 = 2;
 /// Signals that are not coordinated serve next the phase with the most
 /// cars standing for it (left phases: the cars in the pockets), not the
 /// next one in plan order; a phase whose front car has waited this long is

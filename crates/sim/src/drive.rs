@@ -614,7 +614,21 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 && r - f.exit_start < balance::MIN_GAP_M + balance::VEHICLE_SPACING_M)
         })
         .collect();
-    tick_signals(traffic, roads, &fronts, &can_go, &boxed, now);
+    // Cars within detection of the line in each front's lane (a platoon
+    // holds its green; a car or two arriving does not against a queue).
+    let near_cars: Vec<u16> = fronts
+        .iter()
+        .map(|f| {
+            let (k, p, _) = cars[f.idx];
+            let stop = p + f.d_line;
+            cars[f.idx..]
+                .iter()
+                .take_while(|c| c.0 == k && stop - c.1 <= balance::SIGNAL_DETECT_M)
+                .count()
+                .min(u16::MAX as usize) as u16
+        })
+        .collect();
+    tick_signals(traffic, roads, &fronts, &can_go, &near_cars, &boxed, now);
     // Lanes whose front car waits at a red light: waiting there is normal
     // (a red can last a whole cycle), so it does not count towards giving
     // up.
@@ -1294,6 +1308,7 @@ fn tick_signals(
     roads: &RoadNetwork,
     fronts: &[Front],
     can_go: &[bool],
+    near_cars: &[u16],
     boxed: &[(u32, u16, f32, VehicleId)],
     now: u64,
 ) {
@@ -1345,6 +1360,7 @@ fn tick_signals(
                 } else {
                     d.through = true;
                     d.hold_through |= near;
+                    d.near = d.near.saturating_add(near_cars[kk]);
                 }
                 d.discharging |= near && f.speed < balance::SIGNAL_DISCHARGE_SPEED;
                 d.wait_s = d.wait_s.max(f.wait as f32 / crate::TICKS_PER_SECOND as f32);

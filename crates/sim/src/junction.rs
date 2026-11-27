@@ -1105,6 +1105,9 @@ pub(crate) struct ArmDemand {
     /// A car holding the green (above) is still pulling away from a queue
     /// (slower than `SIGNAL_DISCHARGE_SPEED`).
     pub discharging: bool,
+    /// Cars within detection of the line in this arm's through lanes
+    /// (moving or not).
+    pub near: u16,
     /// Cars standing in this arm's turn pocket (its front left turner's
     /// count).
     pub pocket: u16,
@@ -1203,29 +1206,40 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
                     d.hold_through || d.hold_left
                 }
             });
-            // Queue-based gap-out: once this phase's standing queues have
-            // discharged, a trickle of arrivals no longer holds the green
-            // against a standing queue elsewhere.
+            // Pressure gap-out: once this phase's standing queues have
+            // discharged, the cars still arriving hold the green only while
+            // they outweigh the queue standing for another phase.
             let served = phase
                 .arms
                 .iter()
                 .map(|&a| j.queue.get(a as usize).copied().unwrap_or(0))
                 .max()
                 .unwrap_or(0);
-            let discharging = phase
-                .arms
+            let (mut discharging, mut arriving) = (false, 0u32);
+            for &a in &phase.arms {
+                let d = demand.get(a as usize).copied().unwrap_or_default();
+                discharging |= d.discharging;
+                arriving += d.near as u32;
+            }
+            let waiting = plan
+                .phases
                 .iter()
-                .any(|&a| demand.get(a as usize).is_some_and(|d| d.discharging));
-            let waiting = (0..j.arms.len())
-                .filter(|a| !phase.arms.contains(&(*a as u8)))
-                .map(|a| j.queue.get(a).copied().unwrap_or(0))
+                .filter(|p| p.arms != phase.arms && !p.left_only)
+                .map(|p| {
+                    p.arms
+                        .iter()
+                        .map(|&a| j.queue.get(a as usize).copied().unwrap_or(0) as u32)
+                        .sum::<u32>()
+                })
                 .max()
                 .unwrap_or(0);
+            let holding = mine;
             let mine = mine
                 && (phase.left_only
                     || discharging
                     || served > balance::SIGNAL_DISCHARGED_CARS
-                    || waiting < balance::SIGNAL_SWITCH_QUEUE_CARS);
+                    || waiting < balance::SIGNAL_SWITCH_QUEUE_CARS as u32
+                    || arriving * balance::SIGNAL_SWITCH_RATIO >= waiting);
             let mut end = !mine || elapsed >= ticks(phase.max_green_s);
             if plan.coordinated {
                 let c = ticks(plan.cycle_s).max(1) as u64;
@@ -1233,11 +1247,19 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
                 let clear = ticks(balance::SIGNAL_YELLOW_S + balance::SIGNAL_ALL_RED_S) as u64;
                 if s.phase == main {
                     // The avenue keeps green until its share of the cycle
-                    // is used (a platoon is on its way).
+                    // is used (a platoon is on its way; queues elsewhere do
+                    // not cut it short).
                     let hold = (c as f32 * balance::SIGNAL_COORD_MAIN_SHARE) as u64;
+                    let end = (!holding || elapsed >= ticks(phase.max_green_s)) && (!holding || t >= hold);
                     // An empty avenue gaps out early (the phase returns
                     // at the next cycle start anyway).
-                    end = end && (!mine || t >= hold) && t + clear < c;
+                    let end = end && t + clear < c;
+                    if end {
+                        s.stage = SignalStage::Yellow;
+                        s.ticks = 0;
+                        s.next = next as u8;
+                    }
+                    return;
                 } else if t + clear >= c {
                     // Force-off so the avenue turns green on time.
                     end = true;
@@ -1258,7 +1280,7 @@ pub(crate) fn tick_signal(j: &mut JunctionState, demand: &[ArmDemand], now: u64,
         }
         SignalStage::AllRed => {
             let min = ticks(balance::SIGNAL_ALL_RED_S);
-            if s.ticks >= min && (box_clear || s.ticks >= 3 * min) {
+            if s.ticks >= min && (box_clear || !balance::SIGNAL_ALL_RED_WAITS_FOR_BOX || s.ticks >= 3 * min) {
                 s.stage = SignalStage::Green;
                 s.ticks = 0;
                 s.phase = s.next.min(np as u8 - 1);
