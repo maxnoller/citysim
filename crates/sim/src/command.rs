@@ -80,6 +80,19 @@ pub enum Command {
     /// not settled elsewhere, and the demolition cost refunded. Refused
     /// (`CannotRestore`) when the lot has changed. See [`crate::restore`].
     RestoreBuilding(Box<crate::restore::BuildingRecord>),
+    /// A road command (`BuildRoad`, `BuildCurve`, `SetRoadKind`) that clears
+    /// its way: the buildings standing in the reserve the road needs
+    /// (`RoadKind::reserve_half_width_m`, measured as the refusal measures
+    /// it) that give way to roads (`Building::gives_way_to_roads`: every
+    /// grown building) are taken down with it, as the bulldozer would
+    /// (residents leave, staff lose the job, the lot's cells under the road
+    /// lose their zone), and paid for at the bulldozer's price
+    /// (`Preview::demolition_cost`, part of `cost`). `Preview::buildings`
+    /// lists them. Refused as the inner command is for everything else,
+    /// and with `BuildingInTheWay` for a building that does not give way;
+    /// any other inner command is refused (`NotARoadCommand`). The inner
+    /// commands alone are unchanged: a building in the way refuses them.
+    Clearing(Box<Command>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -152,6 +165,8 @@ pub enum CommandError {
     },
     /// `RestoreBuilding`: the building cannot be put back, and why.
     CannotRestore(crate::restore::RestoreProblem),
+    /// `Clearing` around a command that does not build or change a road.
+    NotARoadCommand,
 }
 
 impl CommandError {
@@ -203,6 +218,7 @@ impl fmt::Display for CommandError {
             CommandError::NotANode => write!(f, "no junction there"),
             CommandError::TooManyArms { arms, .. } => write!(f, "{arms} roads cannot meet at one junction"),
             CommandError::CannotRestore(p) => write!(f, "cannot put the building back: {p}"),
+            CommandError::NotARoadCommand => write!(f, "only roads clear their way"),
         }
     }
 }
@@ -237,8 +253,12 @@ pub struct Preview {
     pub length_m: f32,
     /// Removal: the road parts removed.
     pub removed: Vec<Curve>,
-    /// Removal: buildings demolished.
+    /// Removal, and roads clearing their way (`Command::Clearing`):
+    /// buildings demolished, in id order.
     pub buildings: Vec<BuildingId>,
+    /// Roads clearing their way: the part of `cost` that pays for taking
+    /// down `buildings` (the bulldozer's price).
+    pub demolition_cost: i64,
     /// Zoning: the cells that get (un)zoned.
     pub zone_cells: Vec<CellRef>,
 }
@@ -307,6 +327,10 @@ pub(crate) enum Plan {
         down_m: f32,
         old: RoadKind,
         curve: Curve,
+        /// Buildings in the wider reserve, taken down first, and what
+        /// that costs (part of `cost`).
+        clears: Vec<BuildingId>,
+        clear_cost: i64,
     },
     Remove {
         parts: Vec<Part>,
@@ -346,6 +370,8 @@ impl Plan {
                 pieces: plan.preview_pieces(world),
                 nodes: plan.preview_nodes(),
                 length_m: plan.new_m,
+                buildings: plan.clears.clone(),
+                demolition_cost: plan.clear_cost,
                 ..Preview::default()
             },
             Plan::Kind {
@@ -355,9 +381,13 @@ impl Plan {
                 kind,
                 old,
                 curve,
+                clears,
+                clear_cost,
                 ..
             } => Preview {
                 cost: *cost,
+                buildings: clears.clone(),
+                demolition_cost: *clear_cost,
                 upgraded: cells_m(*up_m),
                 downgraded: cells_m(*down_m),
                 pieces: if old == kind {
@@ -481,54 +511,14 @@ fn quads_overlap(a: &[[f32; 2]; 4], b: &[[f32; 2]; 4]) -> bool {
 
 pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
     match cmd {
-        &Command::BuildRoad { from, to, kind } => plan_cell_road(world, from, to, kind),
-        &Command::BuildCurve { curve, kind } => {
-            let plan = build::plan_road(world, curve, kind)?;
-            afford(world, plan.cost)?;
-            let mut cells: Vec<Cell> = Vec::new();
-            for p in curve.flatten(0.1).windows(2) {
-                let n = (geom::dist(p[0], p[1]) / 2.0).ceil().max(1.0) as usize;
-                for k in 0..=n {
-                    let q = [
-                        p[0][0] + (p[1][0] - p[0][0]) * k as f32 / n as f32,
-                        p[0][1] + (p[1][1] - p[0][1]) * k as f32 / n as f32,
-                    ];
-                    let c = Cell::from_pos(q);
-                    if c.in_bounds() && cells.last() != Some(&c) && !cells.contains(&c) {
-                        cells.push(c);
-                    }
-                }
-            }
-            Ok(Plan::Road { plan, cells })
-        }
+        &Command::BuildRoad { from, to, kind } => plan_cell_road(world, from, to, kind, false),
+        &Command::BuildCurve { curve, kind } => plan_curve(world, curve, kind, false),
         &Command::SetRoadKind {
             segment,
             from_m,
             to_m,
             kind,
-        } => {
-            if !RoadKind::BUILDABLE.contains(&kind) {
-                return Err(CommandError::InvalidRoadKind(kind));
-            }
-            let p = build::part(&world.roads, segment, from_m, to_m).ok_or(CommandError::NoSuchRoad)?;
-            let seg = &world.roads.segments[segment];
-            if seg.kind == RoadKind::Highway {
-                return Err(CommandError::InvalidRoadKind(RoadKind::Highway));
-            }
-            let l = p.hi - p.lo;
-            let diff = kind.cost_per_cell() - seg.kind.cost_per_cell();
-            let cost = if diff > 0 { build::price(l, diff) } else { 0 };
-            afford(world, cost)?;
-            Ok(Plan::Kind {
-                part: p,
-                kind,
-                cost,
-                up_m: if diff > 0 { l } else { 0.0 },
-                down_m: if diff < 0 { l } else { 0.0 },
-                old: seg.kind,
-                curve: seg.curve.sub(p.lo, p.hi),
-            })
-        }
+        } => plan_kind(world, segment, from_m, to_m, kind, false),
         &Command::RemoveRoad { segment, from_m, to_m } => {
             let p = build::part(&world.roads, segment, from_m, to_m).ok_or(CommandError::NoSuchRoad)?;
             let seg = &world.roads.segments[segment];
@@ -591,11 +581,84 @@ pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
                 footprint,
             })
         }
+        Command::Clearing(inner) => match **inner {
+            Command::BuildRoad { from, to, kind } => plan_cell_road(world, from, to, kind, true),
+            Command::BuildCurve { curve, kind } => plan_curve(world, curve, kind, true),
+            Command::SetRoadKind {
+                segment,
+                from_m,
+                to_m,
+                kind,
+            } => plan_kind(world, segment, from_m, to_m, kind, true),
+            _ => Err(CommandError::NotARoadCommand),
+        },
     }
 }
 
+/// A road along a curve (`clear`: through the buildings that give way).
+fn plan_curve(world: &World, curve: Curve, kind: RoadKind, clear: bool) -> Result<Plan, CommandError> {
+    let plan = build::plan_road(world, curve, kind, clear)?;
+    afford(world, plan.cost)?;
+    let mut cells: Vec<Cell> = Vec::new();
+    for p in curve.flatten(0.1).windows(2) {
+        let n = (geom::dist(p[0], p[1]) / 2.0).ceil().max(1.0) as usize;
+        for k in 0..=n {
+            let q = [
+                p[0][0] + (p[1][0] - p[0][0]) * k as f32 / n as f32,
+                p[0][1] + (p[1][1] - p[0][1]) * k as f32 / n as f32,
+            ];
+            let c = Cell::from_pos(q);
+            if c.in_bounds() && cells.last() != Some(&c) && !cells.contains(&c) {
+                cells.push(c);
+            }
+        }
+    }
+    Ok(Plan::Road { plan, cells })
+}
+
+/// A change of kind along part of a segment (`clear`: through the
+/// buildings that give way, should the new kind need a wider reserve).
+fn plan_kind(
+    world: &World,
+    segment: SegmentId,
+    from_m: f32,
+    to_m: f32,
+    kind: RoadKind,
+    clear: bool,
+) -> Result<Plan, CommandError> {
+    if !RoadKind::BUILDABLE.contains(&kind) {
+        return Err(CommandError::InvalidRoadKind(kind));
+    }
+    let p = build::part(&world.roads, segment, from_m, to_m).ok_or(CommandError::NoSuchRoad)?;
+    let seg = &world.roads.segments[segment];
+    if seg.kind == RoadKind::Highway {
+        return Err(CommandError::InvalidRoadKind(RoadKind::Highway));
+    }
+    let curve = seg.curve.sub(p.lo, p.hi);
+    let mut clears = Vec::new();
+    if kind.reserve_half_width_m() > seg.kind.reserve_half_width_m() {
+        build::clear_way(world, &curve, kind, clear, &mut clears)?;
+    }
+    let clear_cost = build::demolition_cost(world, &clears);
+    let l = p.hi - p.lo;
+    let diff = kind.cost_per_cell() - seg.kind.cost_per_cell();
+    let cost = if diff > 0 { build::price(l, diff) } else { 0 } + clear_cost;
+    afford(world, cost)?;
+    Ok(Plan::Kind {
+        part: p,
+        kind,
+        cost,
+        up_m: if diff > 0 { l } else { 0.0 },
+        down_m: if diff < 0 { l } else { 0.0 },
+        old: seg.kind,
+        curve,
+        clears,
+        clear_cost,
+    })
+}
+
 /// The cell shorthand: a straight road between two cell centres.
-fn plan_cell_road(world: &World, from: Cell, to: Cell, kind: RoadKind) -> Result<Plan, CommandError> {
+fn plan_cell_road(world: &World, from: Cell, to: Cell, kind: RoadKind, clear: bool) -> Result<Plan, CommandError> {
     if !RoadKind::BUILDABLE.contains(&kind) {
         return Err(CommandError::InvalidRoadKind(kind));
     }
@@ -606,7 +669,7 @@ fn plan_cell_road(world: &World, from: Cell, to: Cell, kind: RoadKind) -> Result
         return Err(CommandError::ZeroLength);
     }
     let cells = from.straight_line_to(to).ok_or(CommandError::NotStraight)?;
-    let plan = match build::plan_road(world, Curve::straight(from.center(), to.center()), kind) {
+    let plan = match build::plan_road(world, Curve::straight(from.center(), to.center()), kind, clear) {
         Ok(p) => p,
         Err(CommandError::BuildingInTheWay { at, building }) => {
             // The first cell of the line the building stands on.
@@ -751,6 +814,9 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
     let preview = plan.preview(world);
     match plan {
         Plan::Road { plan, .. } => {
+            // The buildings in the way go first (as the bulldozer takes
+            // them: residents leave, staff lose the job).
+            crate::growth::remove_buildings(world, &plan.clears);
             // Redrawing a road as it is changes nothing (and splits nothing).
             if !preview.pieces.is_empty() {
                 build::execute_road(world, &plan);
@@ -759,8 +825,14 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             world.economy.money -= plan.cost;
         }
         Plan::Kind {
-            part, kind, cost, old, ..
+            part,
+            kind,
+            cost,
+            old,
+            clears,
+            ..
         } => {
+            crate::growth::remove_buildings(world, &clears);
             if old != kind {
                 build::execute_kind(world, part, kind);
                 world.versions.roads += 1;

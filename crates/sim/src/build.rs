@@ -46,6 +46,10 @@ pub(crate) struct RoadPlan {
     pub new_m: f32,
     pub upgraded_m: f32,
     pub downgraded_m: f32,
+    /// Buildings taken down to clear the way (`Command::Clearing`), in id
+    /// order; their demolition is `clear_cost` of `cost`.
+    pub clears: Vec<BuildingId>,
+    pub clear_cost: i64,
 }
 
 impl RoadPlan {
@@ -161,12 +165,13 @@ fn seg_seg_dist(a0: [f32; 2], a1: [f32; 2], b0: [f32; 2], b1: [f32; 2]) -> f32 {
         .min(point_seg_dist(b1, a0, a1))
 }
 
-/// The building whose footprint comes closer than `reach` to the curve,
-/// with the curve point nearest to it.
-pub(crate) fn building_near(world: &World, c: &Curve, reach: f32) -> Option<(BuildingId, [f32; 2])> {
+/// Every building whose footprint comes closer than `reach` to the curve,
+/// in id order, with that distance and the curve point nearest to its
+/// centre.
+pub(crate) fn buildings_near(world: &World, c: &Curve, reach: f32) -> Vec<(BuildingId, f32, [f32; 2])> {
     let (lo, hi) = c.bounds();
     let pts = c.flatten(0.05);
-    let mut best: Option<(f32, BuildingId, [f32; 2])> = None;
+    let mut out = Vec::new();
     for (id, b) in world.buildings.iter() {
         let poly = b.corners();
         let blo = poly
@@ -178,25 +183,69 @@ pub(crate) fn building_near(world: &World, c: &Curve, reach: f32) -> Option<(Bui
         if blo[0] > hi[0] + reach || bhi[0] < lo[0] - reach || blo[1] > hi[1] + reach || bhi[1] < lo[1] - reach {
             continue;
         }
+        let mut best = f32::INFINITY;
         for w in pts.windows(2) {
             let mut d = f32::INFINITY;
             for k in 0..4 {
                 d = d.min(seg_seg_dist(w[0], w[1], poly[k], poly[(k + 1) % 4]));
             }
-            d = d.min(point_polygon_dist(w[0], &poly));
-            if d < reach && best.is_none_or(|x| d < x.0) {
-                // The curve point nearest the building's centre.
-                let q = c.nearest(b.center()).2;
-                best = Some((d, id, q));
-            }
+            best = best.min(d.min(point_polygon_dist(w[0], &poly)));
+        }
+        if best < reach {
+            // The curve point nearest the building's centre.
+            out.push((id, best, c.nearest(b.center()).2));
         }
     }
-    best.map(|b| (b.1, b.2))
+    out
+}
+
+/// The nearest of `buildings_near`'s list (the first of equals), with the
+/// curve point nearest to its centre.
+fn nearest_of(list: &[(BuildingId, f32, [f32; 2])]) -> Option<(BuildingId, [f32; 2])> {
+    let mut best: Option<&(BuildingId, f32, [f32; 2])> = None;
+    for x in list {
+        if best.is_none_or(|b| x.1 < b.1) {
+            best = Some(x);
+        }
+    }
+    best.map(|b| (b.0, b.2))
+}
+
+/// Buildings in the reserve a road of `kind` needs along `c`: added to
+/// `clears` when the road clears its way (`clear`) and they give way to
+/// roads; otherwise the nearest one that does not refuses the road.
+pub(crate) fn clear_way(
+    world: &World,
+    c: &Curve,
+    kind: RoadKind,
+    clear: bool,
+    clears: &mut Vec<BuildingId>,
+) -> Result<(), CommandError> {
+    let near = buildings_near(world, c, kind.reserve_half_width_m() - 0.05);
+    let stays: Vec<(BuildingId, f32, [f32; 2])> = near
+        .iter()
+        .copied()
+        .filter(|&(id, _, _)| !clear || !world.buildings[id].gives_way_to_roads())
+        .collect();
+    if let Some((building, at)) = nearest_of(&stays) {
+        return Err(CommandError::BuildingInTheWay { at, building });
+    }
+    clears.extend(near.iter().map(|x| x.0));
+    Ok(())
+}
+
+/// What taking these buildings down costs: the bulldozer's price by cell.
+pub(crate) fn demolition_cost(world: &World, ids: &[BuildingId]) -> i64 {
+    ids.iter()
+        .filter_map(|&id| world.buildings.get(id))
+        .map(|b| b.footprint.area() as i64)
+        .sum::<i64>()
+        * balance::BULLDOZE_COST_PER_CELL
 }
 
 /// How far the quadrilateral `poly` reaches into the reserve of any road
 /// (metres; 0 or less: clear) and the unit direction away from the road it
-/// reaches into deepest. Measured as `building_near` measures it, so a
+/// reaches into deepest. Measured as `buildings_near` measures it, so a
 /// building placed clear of every reserve never stands in the way of the
 /// identical road being built again.
 pub(crate) fn reserve_intrusion(world: &World, poly: &[[f32; 2]; 4]) -> (f32, [f32; 2]) {
@@ -234,9 +283,10 @@ pub(crate) fn reserve_intrusion(world: &World, poly: &[[f32; 2]; 4]) -> (f32, [f
     worst
 }
 
-/// Plan a road of `kind` along `curve`. `shorthand`: the cell command
-/// (`BuildRoad`), whose errors keep their old cell form.
-pub(crate) fn plan_road(world: &World, curve: Curve, kind: RoadKind) -> Result<RoadPlan, CommandError> {
+/// Plan a road of `kind` along `curve`. `clear`: buildings in its way that
+/// give way to roads are taken down with it (`RoadPlan::clears`) instead
+/// of refusing it.
+pub(crate) fn plan_road(world: &World, curve: Curve, kind: RoadKind, clear: bool) -> Result<RoadPlan, CommandError> {
     let roads = &world.roads;
     if !RoadKind::BUILDABLE.contains(&kind) {
         return Err(CommandError::InvalidRoadKind(kind));
@@ -621,14 +671,23 @@ pub(crate) fn plan_road(world: &World, curve: Curve, kind: RoadKind) -> Result<R
             }
         }
     }
-    // Buildings in the way of the new pieces.
-    for p in &pieces {
-        if let Piece::New(c) = p
-            && let Some((building, at)) = building_near(world, c, kind.reserve_half_width_m() - 0.05)
-        {
-            return Err(CommandError::BuildingInTheWay { at, building });
+    // Buildings in the way of the new pieces, and of existing ones whose
+    // new kind needs a wider reserve (none today: every kind keeps 4 m).
+    let mut clears: Vec<BuildingId> = Vec::new();
+    for (k, p) in pieces.iter().enumerate() {
+        match *p {
+            Piece::New(c) => clear_way(world, &c, kind, clear, &mut clears)?,
+            Piece::Existing { old }
+                if old != RoadKind::Highway && kind.reserve_half_width_m() > old.reserve_half_width_m() =>
+            {
+                let c = Curve::straight(stops[k].pos, stops[k + 1].pos);
+                clear_way(world, &c, kind, clear, &mut clears)?;
+            }
+            Piece::Existing { .. } => {}
         }
     }
+    clears.sort();
+    clears.dedup();
     let mut new_m = 0.0;
     let mut up = 0.0;
     let mut down = 0.0;
@@ -650,7 +709,8 @@ pub(crate) fn plan_road(world: &World, curve: Curve, kind: RoadKind) -> Result<R
             Piece::Existing { .. } => {}
         }
     }
-    cost += price(new_m, kind.cost_per_cell()) + change_cost.round() as i64;
+    let clear_cost = demolition_cost(world, &clears);
+    cost += price(new_m, kind.cost_per_cell()) + change_cost.round() as i64 + clear_cost;
     Ok(RoadPlan {
         kind,
         stops,
@@ -659,10 +719,12 @@ pub(crate) fn plan_road(world: &World, curve: Curve, kind: RoadKind) -> Result<R
         new_m,
         upgraded_m: up,
         downgraded_m: down,
+        clears,
+        clear_cost,
     })
 }
 
-/// Build a planned road.
+/// Build a planned road (the buildings in its way are gone already).
 pub(crate) fn execute_road(world: &mut World, plan: &RoadPlan) {
     let roads = &mut world.roads;
     for (s, d, p) in plan.splits() {
