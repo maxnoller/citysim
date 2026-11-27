@@ -41,6 +41,7 @@ pub fn focus(kind: DemoKind) -> (Cell, f32) {
         DemoKind::Hierarchy => (Cell::new(70, 128), 1100.0),
         DemoKind::Organic => (Cell::new(88, 118), 1000.0),
         DemoKind::Shapes => (Cell::new(80, 125), 1000.0),
+        DemoKind::Rings => (Cell::new(62, 128), 820.0),
         _ => (Cell::new(45, 128), 560.0),
     }
 }
@@ -51,6 +52,7 @@ pub fn street(kind: DemoKind) -> Cell {
         DemoKind::Jam => Cell::new(22, 126),
         DemoKind::Organic => Cell::new(68, 119),
         DemoKind::Shapes => Cell::new(52, 115),
+        DemoKind::Rings => Cell::new(86, 116),
         _ => Cell::new(30, 128),
     }
 }
@@ -84,11 +86,13 @@ pub fn build(kind: DemoKind, seed: u64) -> World {
             }
             run_to_hour(&mut w, hour, |_| {});
         }
-        DemoKind::Organic | DemoKind::Shapes => {
+        DemoKind::Organic | DemoKind::Shapes | DemoKind::Rings => {
             let target =
                 env::<u32>("CITYSIM_DEMO_POP").unwrap_or(if kind == DemoKind::Organic { 3_800 } else { 3_000 });
             let mut refused = Vec::new();
-            if kind == DemoKind::Organic {
+            if kind == DemoKind::Rings {
+                scenarios::prebuilt(&mut w, |w| refused = super::rings::rings(w));
+            } else if kind == DemoKind::Organic {
                 scenarios::prebuilt(&mut w, |w| {
                     refused = scenarios::organic(w)
                         .into_iter()

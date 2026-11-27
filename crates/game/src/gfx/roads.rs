@@ -195,6 +195,11 @@ fn rebuild_roads(
         let mut glow = MeshBuilder::new();
         for &i in nodes.get(&c).map(Vec::as_slice).unwrap_or(&[]) {
             road_geom::mesh_node(&mut m, &layout.nodes[i]);
+            if let Some(r) = &layout.nodes[i].ring {
+                for (_, tip) in super::ring_geom::lamp_spots(&layout.nodes[i], r) {
+                    road_geom::light_pool(&mut glow, tip, POOL_R, road_geom::WALK_Y + 0.025, Color::WHITE);
+                }
+            }
         }
         for &i in segs.get(&c).map(Vec::as_slice).unwrap_or(&[]) {
             road_geom::mesh_segment(&mut m, &layout.segs[i]);

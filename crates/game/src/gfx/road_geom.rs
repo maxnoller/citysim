@@ -261,6 +261,8 @@ pub struct NodeLayout {
     pub arms: Vec<Arm>,
     /// Number of segments meeting here.
     pub degree: usize,
+    /// A roundabout: drawn by `ring_geom`.
+    pub ring: Option<super::ring_geom::RingDraw>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -377,6 +379,7 @@ pub fn layout(world: &World) -> RoadLayout {
                 kind: NodeKind::Junction,
                 arms,
                 degree,
+                ring: super::ring_geom::RingDraw::of(world, nid),
             });
             continue;
         }
@@ -409,6 +412,7 @@ pub fn layout(world: &World) -> RoadLayout {
             kind,
             arms,
             degree,
+            ring: None,
         });
     }
     let degree = |n: NodeId| roads.nodes.get(n).map_or(0, |n| n.segments.len());
@@ -478,6 +482,7 @@ pub fn hash_node<H: Hasher>(n: &NodeLayout, h: &mut H) {
     hf(h, n.pos.x);
     hf(h, n.pos.y);
     (n.degree, n.kind == NodeKind::Junction, n.kind == NodeKind::Entry).hash(h);
+    n.ring.as_ref().map(|r| (r.size, r.seed)).hash(h);
     for a in &n.arms {
         for v in [
             a.dir.x,
@@ -604,7 +609,13 @@ pub fn mesh_node(m: &mut MeshBuilder, node: &NodeLayout) {
         NodeKind::Entry => {}
         NodeKind::End => mesh_end(m, node),
         NodeKind::Through => mesh_through(m, node),
-        NodeKind::Junction => mesh_junction(m, node),
+        NodeKind::Junction => match &node.ring {
+            Some(r) => {
+                super::ring_geom::mesh_ring(m, node, r);
+                super::ring_geom::mesh_lamps(m, node, r);
+            }
+            None => mesh_junction(m, node),
+        },
     }
 }
 

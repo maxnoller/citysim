@@ -22,6 +22,7 @@ mod palette;
 mod perf;
 mod props;
 mod record;
+mod ring_geom;
 mod road_geom;
 mod road_tool;
 mod roads;

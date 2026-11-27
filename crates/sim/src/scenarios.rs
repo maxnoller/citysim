@@ -730,7 +730,6 @@ pub fn add_roundabouts_of(
     street: &[crate::roundabout::RoundaboutSize],
     reserve: i64,
 ) -> (u32, i64) {
-    use crate::roundabout::RoundaboutSize as R;
     let nodes: Vec<crate::NodeId> = crate::junction::junction_nodes(w).collect();
     let (mut built, mut spent) = (0, 0);
     for n in nodes {

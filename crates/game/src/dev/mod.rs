@@ -15,6 +15,7 @@
 
 mod autoshot;
 mod control;
+mod rings;
 mod scenario;
 mod shapes;
 mod stills;
@@ -39,6 +40,8 @@ pub enum DemoKind {
     /// gfx's road-shape test town (`shapes`): odd-angle junctions, a
     /// rotated grid, a ring, cul-de-sacs.
     Shapes,
+    /// A town with roundabouts of every size (`rings`).
+    Rings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,9 +92,10 @@ impl DevConfig {
             Some("hierarchy") => Some(DemoKind::Hierarchy),
             Some("organic") => Some(DemoKind::Organic),
             Some("shapes") => Some(DemoKind::Shapes),
+            Some("rings") => Some(DemoKind::Rings),
             Some("" | "0") | None => None,
             Some(other) => {
-                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy, organic, shapes or jam)");
+                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy, organic, shapes, rings or jam)");
                 None
             }
         };
