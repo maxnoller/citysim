@@ -45,7 +45,32 @@ pub enum Op {
     Kind(Curve, RoadKind),
     /// Remove every segment whose serial is in `lo..hi` (undo of new road).
     RemoveSerials(u64, u64),
+    /// Zone the free, unzoned cells at these centres (undo: the zoning a
+    /// road's land took, back before the buildings it took).
+    ZoneAt(Vec<[f32; 2]>, Zone),
 }
+
+/// The tools' new road: a road along `curve` that takes down the grown
+/// buildings in its way (`Command::Clearing`), as the bulldozer would.
+pub fn road_op(curve: Curve, kind: RoadKind) -> Op {
+    Op::Cmd(Command::Clearing(Box::new(Command::BuildCurve { curve, kind })))
+}
+
+/// The curve of a road-building operation (clearing its way or not).
+pub fn road_curve(op: &Op) -> Option<Curve> {
+    match op {
+        Op::Cmd(Command::BuildCurve { curve, .. }) => Some(*curve),
+        Op::Cmd(Command::Clearing(c)) => match &**c {
+            Command::BuildCurve { curve, .. } => Some(*curve),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// How far (metres) a cell's centre may be from a recorded one and still be
+/// the same land (as `RestoreBuilding` matches lots).
+const SAME_LAND_M: f32 = 0.3;
 
 /// The segment carrying the centre line `c` and the range of it, metres
 /// from its `a` node.
@@ -87,12 +112,32 @@ pub fn resolve(w: &World, op: &Op) -> Result<Command, CommandError> {
             Ok(Command::RemoveRoad { segment, from_m, to_m })
         }
         Op::Kind(c, kind) => {
+            // Clearing its way: a kind that needs a wider reserve takes the
+            // grown buildings in it down (none today: every kind keeps the
+            // same reserve).
             let (segment, from_m, to_m) = part_of(w, c).ok_or(CommandError::NoSuchRoad)?;
-            Ok(Command::SetRoadKind {
+            Ok(Command::Clearing(Box::new(Command::SetRoadKind {
                 segment,
                 from_m,
                 to_m,
                 kind: *kind,
+            })))
+        }
+        Op::ZoneAt(points, zone) => {
+            let mut cells: Vec<CellRef> = points
+                .iter()
+                .filter_map(|&p| {
+                    let c = w.zoning.cell_at(p)?;
+                    let x = w.zoning.cell(c)?;
+                    let same = w.zoning.cell_center(c).is_some_and(|q| dist(p, q) < SAME_LAND_M);
+                    (same && x.usable() && x.zone.is_none() && x.building.is_none()).then_some(c)
+                })
+                .collect();
+            cells.sort();
+            cells.dedup();
+            Ok(Command::ZoneCells {
+                cells,
+                zone: Some(*zone),
             })
         }
         Op::RemoveSerials(..) => Err(CommandError::NoSuchRoad),
@@ -180,7 +225,13 @@ impl Evaluated {
             .collect()
     }
 
-    /// Buildings demolished.
+    /// What the road commands pay for road (not for the buildings they
+    /// take down), by command: `Command::Refund` gives it back.
+    pub fn road_payments(&self) -> Vec<i64> {
+        self.previews().map(|p| p.road_cost).filter(|&c| c > 0).collect()
+    }
+
+    /// Buildings demolished (bulldozed, or in the way of a road).
     pub fn buildings(&self) -> Vec<BuildingId> {
         let mut out: Vec<BuildingId> = self.previews().flat_map(|p| p.buildings.iter().copied()).collect();
         out.sort();
@@ -287,6 +338,12 @@ pub enum UndoRecord {
         /// road's new land), as they were: undo puts them back after the
         /// roads (`Command::RestoreBuilding`).
         buildings: Vec<BuildingRecord>,
+        /// Zoning the action's road land took (cell centres): put back
+        /// before the buildings, which need their lots zoned.
+        zones: Vec<([f32; 2], Zone)>,
+        /// What the action paid for road, and when: refunded last
+        /// (`Command::Refund`).
+        paid: Vec<(u64, i64)>,
     },
     Zones {
         label: String,
@@ -315,7 +372,8 @@ pub fn demolished(real: &World, before: &World, after: &World) -> Vec<BuildingRe
 }
 
 /// The undo record of a road action (build, change of kind, removal)
-/// checked as `eval` on `before`, leaving `after`; `buildings`: what it
+/// checked as `eval` on `before` (at the real world's tick: road payments
+/// are refunded by it), leaving `after`; `buildings`: what it
 /// demolishes ([`demolished`]).
 pub fn undo_for_roads(
     before: &World,
@@ -335,13 +393,39 @@ pub fn undo_for_roads(
             restore_kinds.push((seg.curve, k));
         }
     }
+    let tick = before.time.tick;
     UndoRecord::Roads {
         label,
         new_serials: (before.roads.next_serial, after.roads.next_serial),
         restore_kinds,
         rebuild: eval.removed(),
         buildings,
+        zones: lost_zones(before, after),
+        paid: eval.road_payments().into_iter().map(|a| (tick, a)).collect(),
     }
+}
+
+/// Zones that cells of `before` no longer have in `after` (a road's
+/// reserve took them), by cell centre.
+pub fn lost_zones(before: &World, after: &World) -> Vec<([f32; 2], Zone)> {
+    if before.versions.roads == after.versions.roads {
+        return Vec::new();
+    }
+    before
+        .zoning
+        .cells()
+        .filter_map(|(c, x)| Some((c, x.zone?)))
+        .filter(|&(c, z)| after.zoning.cell(c).is_none_or(|y| y.zone != Some(z)))
+        .filter_map(|(c, z)| Some((before.zoning.cell_center(c)?, z)))
+        .filter(|&(p, z)| {
+            // Unless the same land is zoned so under another name.
+            !after
+                .zoning
+                .cell_at(p)
+                .and_then(|c| Some((after.zoning.cell_center(c)?, after.zoning.cell(c)?.zone)))
+                .is_some_and(|(q, now)| dist(p, q) < SAME_LAND_M && now == Some(z))
+        })
+        .collect()
 }
 
 /// The undo record of a zoning action changing `cells`.
@@ -363,6 +447,8 @@ pub fn undo_ops(world: &World, rec: &UndoRecord) -> Vec<Op> {
             restore_kinds,
             rebuild,
             buildings,
+            zones,
+            paid,
             ..
         } => {
             let mut ops = Vec::new();
@@ -377,8 +463,18 @@ pub fn undo_ops(world: &World, rec: &UndoRecord) -> Vec<Op> {
             for (c, k) in rebuild {
                 ops.push(Op::Cmd(Command::BuildCurve { curve: *c, kind: *k }));
             }
+            let mut by_zone: BTreeMap<u8, (Zone, Vec<[f32; 2]>)> = BTreeMap::new();
+            for &(p, z) in zones {
+                by_zone.entry(z as u8).or_insert((z, Vec::new())).1.push(p);
+            }
+            for (z, points) in by_zone.into_values() {
+                ops.push(Op::ZoneAt(points, z));
+            }
             for b in buildings {
                 ops.push(Op::Cmd(Command::RestoreBuilding(Box::new(b.clone()))));
+            }
+            for &(tick, amount) in paid {
+                ops.push(Op::Cmd(Command::Refund { tick, amount }));
             }
             ops
         }
@@ -623,5 +719,236 @@ mod tests {
             w.apply(c).unwrap();
         }
         assert!(cells.iter().all(|&c| w.zoning.cell(c).unwrap().zone.is_none()));
+    }
+
+    // ------------------------------------------- roads through buildings
+
+    /// The two-district town grown for a day (homes, shops, works).
+    fn grown() -> World {
+        let mut w = World::new(5);
+        citysim_sim::scenarios::prebuilt(&mut w, |w| citysim_sim::scenarios::two_districts(w, true));
+        while w.time.tick < citysim_sim::balance::TICKS_PER_DAY as u64 {
+            w.step();
+        }
+        w.economy.money = 1_000_000;
+        w
+    }
+
+    fn unit(v: [f32; 2]) -> [f32; 2] {
+        let l = (v[0] * v[0] + v[1] * v[1]).sqrt().max(1e-6);
+        [v[0] / l, v[1] / l]
+    }
+
+    /// For each home: the point on its road in front of it, the direction
+    /// from there to the home, and the road's direction.
+    fn fronts(w: &World) -> Vec<([f32; 2], [f32; 2], [f32; 2])> {
+        w.buildings
+            .values()
+            .filter(|b| b.kind == Zone::Residential && b.occupied > 0)
+            .filter_map(|b| {
+                let c = b.center();
+                let (s, d, _) = w.roads.nearest_segment(c, 40.0)?;
+                let seg = &w.roads.segments[s];
+                let p = seg.nearest(c).2;
+                Some((p, unit([c[0] - p[0], c[1] - p[1]]), seg.pose(d, 0.0).dir))
+            })
+            .collect()
+    }
+
+    /// What `commit` does: check the plan on a scratch copy, record the undo,
+    /// send the commands. Returns the undo record and the checked plan.
+    fn commit(w: &mut World, ops: &[Op]) -> (UndoRecord, Evaluated) {
+        let before = scratch(w);
+        let (e, after) = evaluate(&before, ops);
+        assert!(e.ok(), "{:?}", e.first_error());
+        let lost = demolished(w, &before, &after);
+        let rec = undo_for_roads(&before, &after, &e, "road".into(), lost);
+        for c in e.cmds() {
+            w.apply(c).unwrap();
+        }
+        (rec, e)
+    }
+
+    /// What Ctrl+Z does with the record.
+    fn take_back(w: &mut World, rec: &UndoRecord) {
+        let (u, _) = evaluate(&scratch(w), &undo_ops(w, rec));
+        assert!(u.ok(), "{:?}", u.first_error());
+        for c in u.cmds() {
+            w.apply(c).unwrap();
+        }
+    }
+
+    /// Build `ops` through grown buildings, check what went is what was
+    /// marked and paid for, undo, check everything is back.
+    fn through_and_back(w0: &World, ops: &[Op]) -> usize {
+        let mut w = w0.clone();
+        let (money, people, n) = (w.economy.money, w.citizens.len(), w.buildings.len());
+        let (rec, e) = commit(&mut w, ops);
+        let marked = e.buildings();
+        assert!(!marked.is_empty(), "the road takes buildings");
+        let gone: Vec<BuildingId> = w0.buildings.keys().filter(|b| !w.buildings.contains_key(*b)).collect();
+        assert_eq!(gone, marked, "what goes is what was marked");
+        assert_eq!(w.economy.money, money - e.cost, "road and demolitions paid");
+        let demolition: i64 = e
+            .steps
+            .iter()
+            .filter_map(|s| s.result.as_ref().ok())
+            .map(|p| p.demolition_cost)
+            .sum();
+        assert!(demolition > 0 && e.cost > demolition);
+        assert!(w.citizens.len() < people, "residents moved out");
+        let UndoRecord::Roads { buildings, paid, .. } = &rec else {
+            unreachable!()
+        };
+        assert_eq!(buildings.len(), marked.len());
+        assert!(!paid.is_empty());
+        take_back(&mut w, &rec);
+        assert_eq!(w.buildings.len(), n, "every building is back");
+        assert_eq!(w.citizens.len(), people, "everyone is back");
+        assert_eq!(w.roads.segments.len(), w0.roads.segments.len(), "the road is gone");
+        // Road and demolitions refunded; taking the road away again costs
+        // the bulldozer's fee (a dollar a cell).
+        let fee = money - w.economy.money;
+        let len: f32 = e.pieces().iter().map(|(c, _)| c.length()).sum();
+        assert!(fee >= 0 && fee <= (len / 4.0) as i64 + 4, "fee {fee} for {len} m");
+        w.check_sim_invariants().unwrap();
+        marked.len()
+    }
+
+    #[test]
+    fn a_street_through_homes_from_a_road_then_undo() {
+        // A T on the road in front of a home, straight out through its lot
+        // (splits the existing road).
+        let w = grown();
+        let mut done = 0;
+        for (p, d, _) in fronts(&w) {
+            let ops = [road_op(
+                Curve::straight(p, [p[0] + d[0] * 30.0, p[1] + d[1] * 30.0]),
+                RoadKind::Street,
+            )];
+            if evaluate(&scratch(&w), &ops).0.ok() {
+                through_and_back(&w, &ops);
+                done += 1;
+                if done == 2 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(done, 2);
+    }
+
+    #[test]
+    fn a_street_along_a_row_of_lots_and_a_curve_then_undo() {
+        // A street parallel to a road through its first row of lots (two
+        // T's at the cross streets would be refused for spacing: a free
+        // piece in the middle of the block), and a curve through a block.
+        let w = grown();
+        let (mut row, mut curve) = (0, 0);
+        for (p, d, t) in fronts(&w) {
+            let q = [p[0] + d[0] * 12.0, p[1] + d[1] * 12.0];
+            let a = [q[0] - t[0] * 14.0, q[1] - t[1] * 14.0];
+            let b = [q[0] + t[0] * 14.0, q[1] + t[1] * 14.0];
+            if row == 0 {
+                let ops = [road_op(Curve::straight(a, b), RoadKind::Street)];
+                if evaluate(&scratch(&w), &ops).0.ok() {
+                    row = through_and_back(&w, &ops);
+                }
+            }
+            if curve == 0 {
+                let end = [p[0] + d[0] * 30.0 + t[0] * 24.0, p[1] + d[1] * 30.0 + t[1] * 24.0];
+                let corner = [p[0] + d[0] * 30.0, p[1] + d[1] * 30.0];
+                let ops = [road_op(Curve::through_corner(p, corner, end), RoadKind::Street)];
+                if evaluate(&scratch(&w), &ops).0.ok() {
+                    curve = through_and_back(&w, &ops);
+                }
+            }
+            if row > 0 && curve > 0 {
+                break;
+            }
+        }
+        assert!(row > 0 && curve > 0, "row {row} curve {curve}");
+    }
+
+    #[test]
+    fn a_grid_through_homes_then_undo() {
+        let w = grown();
+        for (p, d, t) in fronts(&w) {
+            for block in [24.0, 32.0] {
+                let g = crate::ui::shapes::GridFrame {
+                    a: [p[0] - t[0] * block * 0.5, p[1] - t[1] * block * 0.5],
+                    u: t,
+                    v: d,
+                    nu: 1,
+                    nv: 1,
+                    block_m: block,
+                };
+                let g = crate::ui::tools::align_grid(&w, g);
+                let ops: Vec<Op> = g.streets().into_iter().map(|c| road_op(c, RoadKind::Street)).collect();
+                let (e, _) = evaluate(&scratch(&w), &ops);
+                if e.ok() && !e.buildings().is_empty() {
+                    through_and_back(&w, &ops);
+                    return;
+                }
+            }
+        }
+        panic!("no grid fits over the homes");
+    }
+
+    #[test]
+    fn an_upgrade_is_refunded_by_undo() {
+        let mut w = grown();
+        let money = w.economy.money;
+        let c = w
+            .roads
+            .segments
+            .values()
+            .find(|s| s.kind == RoadKind::Street && s.length > 30.0)
+            .map(|s| s.curve)
+            .unwrap();
+        let (rec, e) = commit(&mut w, &[Op::Kind(c, RoadKind::Avenue)]);
+        assert!(
+            e.cost > 0 && e.buildings().is_empty(),
+            "every kind keeps the same reserve"
+        );
+        assert_eq!(kind_along(&w, &c), Some(RoadKind::Avenue));
+        take_back(&mut w, &rec);
+        assert_eq!(kind_along(&w, &c), Some(RoadKind::Street));
+        assert_eq!(w.economy.money, money, "the upgrade is refunded");
+    }
+
+    #[test]
+    fn a_refused_or_cancelled_road_takes_nothing() {
+        let w = grown();
+        let (p, d, _) = fronts(&w)[0];
+        let through = road_op(
+            Curve::straight(p, [p[0] + d[0] * 30.0, p[1] + d[1] * 30.0]),
+            RoadKind::Street,
+        );
+        // Checking a plan (the preview) changes nothing.
+        let before = scratch(&w);
+        let (e, _) = evaluate(&before, std::slice::from_ref(&through));
+        assert!(!e.buildings().is_empty());
+        assert_eq!(before.buildings.len(), w.buildings.len());
+        // A second piece refused (runs back along the first): the plan is
+        // refused as a whole and still shows the reason.
+        let back = road_op(
+            Curve::straight(
+                [p[0] + d[0] * 30.0, p[1] + d[1] * 30.0],
+                [p[0] + d[0] * 2.0, p[1] + d[1] * 2.0],
+            ),
+            RoadKind::Street,
+        );
+        let (e, _) = evaluate(&before, &[through.clone(), back]);
+        assert!(!e.ok());
+        assert!(e.first_error().is_some());
+        // Not enough money for road and demolitions.
+        let mut poor = w.clone();
+        poor.economy.money = 10;
+        let (e, _) = evaluate(&scratch(&poor), &[through]);
+        assert!(matches!(e.first_error(), Some(CommandError::InsufficientFunds { .. })));
+        assert!(
+            e.buildings().is_empty(),
+            "nothing is marked for a road that can't be paid"
+        );
     }
 }
