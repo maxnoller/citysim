@@ -41,8 +41,9 @@ const OUT_CHUNK: f32 = 512.0;
 /// Grid and roads keys.
 type Keys = ((u64, u64), (u64, u64));
 
-/// (keys and ghost key, chunk hashes, taken land).
-type Land = ((Keys, u64), HashMap<IVec2, u64>, Taken);
+/// (keys and ghost key, chunk hashes, taken land of the whole map once a
+/// quality change needs it).
+type Land = ((Keys, u64), HashMap<IVec2, u64>, Option<Taken>);
 
 #[derive(Default)]
 struct TreeChunks {
@@ -188,9 +189,23 @@ struct Taken(HashMap<IVec2, Vec<[Vec2; 4]>>);
 
 impl Taken {
     fn new(world: &World) -> Taken {
+        Taken::new_in(world, &[(Vec2::splat(f32::MIN), Vec2::splat(f32::MAX))])
+    }
+
+    /// Only cells whose centre lies within 16 m of one of the rectangles
+    /// (enough for every tree inside them).
+    fn new_in(world: &World, rects: &[(Vec2, Vec2)]) -> Taken {
         let mut out: HashMap<IVec2, Vec<[Vec2; 4]>> = HashMap::new();
         for (c, zc) in world.zoning.cells() {
             if zc.zone.is_none() && zc.building.is_none() {
+                continue;
+            }
+            let Some(p) = world.zoning.cell_center(c) else { continue };
+            let p = Vec2::from(p);
+            if !rects
+                .iter()
+                .any(|(lo, hi)| p.x >= lo.x - 16.0 && p.y >= lo.y - 16.0 && p.x <= hi.x + 16.0 && p.y <= hi.y + 16.0)
+            {
                 continue;
             }
             let Some(q) = world.zoning.cell_corners(c) else {
@@ -344,9 +359,9 @@ fn rebuild_trees(
     let world = &sim.world;
     let land_key = (keys, key.2);
     if state.land.as_ref().is_none_or(|(k, _, _)| *k != land_key) {
-        state.land = Some((land_key, chunk_hashes(world, &ghost), Taken::new(world)));
+        state.land = Some((land_key, chunk_hashes(world, &ghost), None));
     }
-    let (_, hashes, taken) = state.land.take().expect("land");
+    let (_, hashes, mut full) = state.land.take().expect("land");
     let dens = quality_settings(quality).tree_density;
     let n = MAP_CELLS / CHUNK;
     // Chunks whose land changed are re-meshed now; those that only show
@@ -369,9 +384,22 @@ fn rebuild_trees(
     }
     if changed.is_empty() && other_quality.is_empty() {
         state.stale = false;
-        state.land = Some((land_key, hashes, taken));
+        state.land = Some((land_key, hashes, full));
         return;
     }
+    // Only the land of the chunks re-meshed (an edit touches a few).
+    let size = CHUNK as f32 * CELL_SIZE;
+    let local;
+    let taken = if other_quality.is_empty() {
+        let rects: Vec<(Vec2, Vec2)> = changed
+            .iter()
+            .map(|(c, _)| (c.as_vec2() * size, (c.as_vec2() + 1.0) * size))
+            .collect();
+        local = Taken::new_in(world, &rects);
+        &local
+    } else {
+        &*full.get_or_insert_with(|| Taken::new(world))
+    };
     let start = std::time::Instant::now();
     let mut trees = Vec::new();
     let budget = other_quality.len();
@@ -395,7 +423,7 @@ fn rebuild_trees(
                     cell_trees(x, y, &mut trees);
                     for t in trees
                         .iter()
-                        .filter(|t| keep(t, dens) && open(&taken, &edges, &ghost, Vec2::new(t.pos.x, t.pos.z)))
+                        .filter(|t| keep(t, dens) && open(taken, &edges, &ghost, Vec2::new(t.pos.x, t.pos.z)))
                     {
                         draw_tree(&mut m, t, false);
                         draw_tree(&mut far, t, true);
@@ -441,7 +469,7 @@ fn rebuild_trees(
     count.0 = state.chunks.values().map(|(_, _, n, _)| n).sum();
     // Kept only while chunks wait for the new quality.
     if state.stale {
-        state.land = Some((land_key, hashes, taken));
+        state.land = Some((land_key, hashes, full));
     }
 }
 

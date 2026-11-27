@@ -192,6 +192,7 @@ fn main_end(mut t: ResMut<MainTiming>, mut m: ResMut<MainMarks>) {
     if let Some(prev) = m.0[3] {
         m.1[3] = prev.elapsed().as_secs_f64() * 1000.0;
     }
+    m.2 = m.1;
 }
 
 /// Parts of the render world's frame, ms: extract commands and asset
@@ -239,9 +240,10 @@ fn render_mark<const I: usize>(out: Res<Pipelines>) {
     }
 }
 
-/// Time stamps of the main world's parts (see `MAIN_PARTS`).
+/// Time stamps of the main world's parts (see `MAIN_PARTS`), the parts of
+/// this update and of the last whole one.
 #[derive(Resource, Default)]
-struct MainMarks([Option<Instant>; 4], [f64; 4]);
+struct MainMarks([Option<Instant>; 4], [f64; 4], [f64; 4]);
 
 fn main_mark<const I: usize>(mut m: ResMut<MainMarks>) {
     let now = Instant::now();
@@ -936,7 +938,7 @@ fn record(
         r.materials = mat_n as u32;
         r.new_pipelines = new_pipelines;
         r.compiling = compiling;
-        r.main_parts = main_marks.1;
+        r.main_parts = main_marks.2;
         r.render_parts = side.parts;
         r.gpu_wait_ms = side.gpu_wait_ms;
         r.tags.extend(tags);

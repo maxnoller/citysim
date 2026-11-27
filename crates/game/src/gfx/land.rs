@@ -6,6 +6,8 @@
 //! all read it.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use bevy::prelude::*;
 use citysim_sim::zoning::{Lattice, ZoneCell};
@@ -30,6 +32,12 @@ pub struct RoadEdges {
     pub key: Option<(u64, u64)>,
     lines: Vec<(Vec<Vec2>, f32)>,
     buckets: HashMap<IVec2, Vec<u32>>,
+    /// Per bucket, a hash of the lines in it.
+    hashes: HashMap<IVec2, u64>,
+    /// Buckets whose lines differ from the index before (`None`: all of
+    /// them, the first index or a new world), so what was fitted against the
+    /// old index elsewhere can stay.
+    changed: Option<std::collections::HashSet<IVec2>>,
 }
 
 fn bucket(p: Vec2) -> IVec2 {
@@ -75,11 +83,59 @@ impl RoadEdges {
                 }
             }
         }
+        let line_hash: Vec<u64> = lines
+            .iter()
+            .map(|(pts, keep)| {
+                let mut h = DefaultHasher::new();
+                keep.to_bits().hash(&mut h);
+                for p in pts {
+                    p.x.to_bits().hash(&mut h);
+                    p.y.to_bits().hash(&mut h);
+                }
+                h.finish()
+            })
+            .collect();
+        let hashes = buckets
+            .iter()
+            .map(|(b, ids)| {
+                let mut v: Vec<u64> = ids.iter().map(|&i| line_hash[i as usize]).collect();
+                v.sort_unstable();
+                let mut h = DefaultHasher::new();
+                v.hash(&mut h);
+                (*b, h.finish())
+            })
+            .collect();
         RoadEdges {
             key: None,
             lines,
             buckets,
+            hashes,
+            changed: None,
         }
+    }
+
+    /// Mark the buckets that differ from `old` (same world).
+    fn diff(&mut self, old: &RoadEdges) {
+        let mut changed = std::collections::HashSet::new();
+        for (b, h) in &self.hashes {
+            if old.hashes.get(b) != Some(h) {
+                changed.insert(*b);
+            }
+        }
+        for b in old.hashes.keys() {
+            if !self.hashes.contains_key(b) {
+                changed.insert(*b);
+            }
+        }
+        self.changed = Some(changed);
+    }
+
+    /// Whether every line that could touch `lo..hi` is as in the index
+    /// before (false after a new world or the first index).
+    pub fn unchanged_in(&self, lo: Vec2, hi: Vec2) -> bool {
+        let Some(changed) = &self.changed else { return false };
+        let (b0, b1) = (bucket(lo), bucket(hi));
+        (b0.y..=b1.y).all(|y| (b0.x..=b1.x).all(|x| !changed.contains(&IVec2::new(x, y))))
     }
 
     /// Indices of the lines whose padded bounds touch `lo..hi`.
@@ -132,8 +188,13 @@ impl RoadEdges {
 fn update_edges(sim: Res<SimWorld>, mut edges: ResMut<RoadEdges>) {
     let key = sim.key(sim.world.versions.roads);
     if edges.key != Some(key) {
-        *edges = RoadEdges::new(&sim.world);
-        edges.key = Some(key);
+        let mut new = RoadEdges::new(&sim.world);
+        // Same world (not a load or a new game): note what changed.
+        if edges.key.is_some_and(|(g, _)| g == key.0) {
+            new.diff(&edges);
+        }
+        new.key = Some(key);
+        *edges = new;
     }
 }
 
@@ -553,7 +614,33 @@ mod tests {
             key: None,
             lines,
             buckets,
+            hashes: HashMap::new(),
+            changed: None,
         }
+    }
+
+    #[test]
+    fn only_buckets_whose_roads_changed_are_marked() {
+        let mut w = World::new(1);
+        w.economy.money = 1_000_000;
+        let road = |w: &mut World, a: (i32, i32), b: (i32, i32)| {
+            w.apply(citysim_sim::Command::BuildRoad {
+                from: citysim_sim::Cell::new(a.0, a.1),
+                to: citysim_sim::Cell::new(b.0, b.1),
+                kind: citysim_sim::RoadKind::Street,
+            })
+            .expect("road");
+        };
+        road(&mut w, (20, 20), (40, 20));
+        road(&mut w, (200, 200), (220, 200));
+        let old = RoadEdges::new(&w);
+        assert!(!old.unchanged_in(Vec2::ZERO, Vec2::ONE), "a first index knows nothing");
+        road(&mut w, (200, 210), (220, 210));
+        let mut new = RoadEdges::new(&w);
+        new.diff(&old);
+        // Far from the new road: unchanged; at it: changed.
+        assert!(new.unchanged_in(Vec2::new(160.0, 160.0), Vec2::new(330.0, 165.0)));
+        assert!(!new.unchanged_in(Vec2::new(1700.0, 1680.0), Vec2::new(1710.0, 1690.0)));
     }
 
     #[test]
