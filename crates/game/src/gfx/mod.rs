@@ -32,6 +32,7 @@ mod stats;
 mod trees;
 mod vehicle_gen;
 mod vehicles;
+mod yards;
 mod zones;
 
 use bevy::prelude::*;
@@ -73,6 +74,7 @@ impl Plugin for GfxPlugin {
             perf::PerfPlugin,
             record::RecordPlugin,
             route::RoutePlugin,
+            yards::YardsPlugin,
         ));
     }
 }
