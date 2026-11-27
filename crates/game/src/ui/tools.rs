@@ -47,7 +47,7 @@ use super::toasts::{Toast, ToastKind};
 use super::widgets::UiAction;
 use crate::shared::{
     ActiveTool, BulldozeMode, CurveToolView, GameSet, HoveredCell, PointerOverUi, PreviewKind, RoadChoice, RoadMode,
-    RoadStretch, ScriptPointer, SimClock, SimCommand, SimWorld, SnapFeedback, ToolModes, ToolPreview, WorldCamera,
+    CommandTime, RoadStretch, ScriptPointer, SimClock, SimCommand, SimWorld, SnapFeedback, ToolModes, ToolPreview, WorldCamera,
     WorldHighlight, WorldTarget, ZoneMode,
 };
 
@@ -323,6 +323,10 @@ pub struct ToolState {
     /// Commands of a plan being sent in parts, with the time each took to
     /// check (an estimate of what it costs to apply).
     outbox: std::collections::VecDeque<(Command, f32)>,
+    /// Checked time (ms) of the commands sent last frame, and the ratio of
+    /// real applying time to it (`pump_outbox`).
+    sent_estimate: f32,
+    cost_ratio: f32,
     /// A plan was sent this frame (its parts' results are summarised by
     /// the tool, not toasted one by one).
     pub batch_frame: bool,
@@ -356,9 +360,11 @@ enum Then {
     Road,
 }
 
-/// Estimated cost (ms, the time to check them) of the commands sent per
-/// frame when a plan is sent in parts.
-const SEND_BUDGET_MS: f32 = 1.0;
+/// Real time (ms) the commands of a plan sent in parts may take to apply
+/// in one frame (at least one command goes each frame). Each command's cost
+/// is estimated by the time it took to check, scaled by how the last frames'
+/// estimates compared with `CommandTime`.
+const SEND_BUDGET_MS: f32 = 3.0;
 /// Seconds a plan may be stale before the preview shows it dimmed.
 const STALE_DIM_S: f32 = 0.15;
 
@@ -1167,18 +1173,35 @@ fn drive_job(state: &mut ToolState, sim: &SimWorld, toasts: &mut MessageWriter<T
 }
 
 /// Send queued commands of a plan sent in parts: about
-/// [`SEND_BUDGET_MS`] of them a frame (the simulation holds still
-/// meanwhile, [`hold_sim`]).
-fn pump_outbox(state: &mut ToolState, out: &mut MessageWriter<SimCommand>) {
+/// [`SEND_BUDGET_MS`] of real applying time a frame (the simulation holds
+/// still meanwhile, [`hold_sim`]). `applied`: what last frame's took.
+fn pump_outbox(state: &mut ToolState, out: &mut MessageWriter<SimCommand>, applied: f32) {
+    // How the real world's cost compares with the checks' (it carries the
+    // traffic and the people): learnt from the frames sent so far.
+    if state.sent_estimate > 0.05 && applied > 0.0 {
+        let r = (applied / state.sent_estimate).clamp(0.5, 50.0);
+        state.cost_ratio = if state.cost_ratio > 0.0 {
+            0.5 * state.cost_ratio + 0.5 * r
+        } else {
+            r
+        };
+    }
+    state.sent_estimate = 0.0;
     let sending = !state.outbox.is_empty();
-    let mut budget = SEND_BUDGET_MS;
-    while let Some((cmd, ms)) = state.outbox.pop_front() {
-        debug!("tool sends {cmd:?}");
-        out.write(SimCommand(cmd));
-        budget -= ms;
-        if budget <= 0.0 {
+    // Before anything was learnt: the real world takes about twice as long.
+    let ratio = if state.cost_ratio > 0.0 {
+        state.cost_ratio.max(1.0)
+    } else {
+        2.0
+    };
+    while let Some(&(_, ms)) = state.outbox.front() {
+        if state.sent_estimate > 0.0 && (state.sent_estimate + ms) * ratio > SEND_BUDGET_MS {
             break;
         }
+        let (cmd, ms) = state.outbox.pop_front().expect("just looked");
+        debug!("tool sends {cmd:?}");
+        out.write(SimCommand(cmd));
+        state.sent_estimate += ms;
     }
     if sending {
         state.batch_frame = true;
@@ -1609,6 +1632,7 @@ fn use_tool(
     mut state: ResMut<ToolState>,
     mut out: MessageWriter<SimCommand>,
     mut toasts: MessageWriter<Toast>,
+    applied: Res<CommandTime>,
 ) {
     state.batch_frame = false;
     let state = state.as_mut();
@@ -1619,7 +1643,7 @@ fn use_tool(
     let now = time.elapsed_secs();
     // An action waiting for its plan, then whatever is queued to send.
     drive_job(state, &sim, &mut toasts);
-    pump_outbox(state, &mut out);
+    pump_outbox(state, &mut out, applied.0);
     let undo_asked = actions.read().any(|a| *a == UiAction::Undo);
     if state.job.is_some() {
         // Input waits until the action is on its way (a few frames at

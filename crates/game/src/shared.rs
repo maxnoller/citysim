@@ -178,6 +178,11 @@ pub struct HoveredPoint {
     pub zone_cell: Option<CellRef>,
 }
 
+/// Real time `apply_commands` took this frame (ms, 0 when nothing was
+/// sent): ui sends a plan in parts by it, the benchmark records it.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CommandTime(pub f32);
+
 /// Dev scripts without a window (`CITYSIM_BENCH`): the pointer's position
 /// in the world camera's viewport (logical px). Where there is no primary
 /// window, shared's hover and ui's tools take the pointer from here (the
@@ -720,6 +725,7 @@ impl Plugin for SharedPlugin {
         .init_resource::<HoveredPoint>()
         .init_resource::<PointerOverUi>()
         .init_resource::<ScriptPointer>()
+        .init_resource::<CommandTime>()
         .init_resource::<CameraInputBlocked>()
         .init_resource::<ToolPreview>()
         .init_resource::<OverlayMode>()
@@ -767,8 +773,12 @@ fn apply_commands(
     mut cmds: MessageReader<SimCommand>,
     mut last: ResMut<LastCommand>,
     time: Res<Time<Real>>,
+    mut took: ResMut<CommandTime>,
 ) {
+    let started = std::time::Instant::now();
+    let mut any = false;
     for SimCommand(cmd) in cmds.read() {
+        any = true;
         let res = sim.world.apply(cmd.clone());
         if let Err(e) = &res {
             debug!("command {cmd:?} rejected: {e}");
@@ -776,6 +786,8 @@ fn apply_commands(
         last.result = Some((cmd.clone(), res));
         last.at = time.elapsed_secs();
     }
+    let ms = if any { started.elapsed().as_secs_f32() * 1e3 } else { 0.0 };
+    took.set_if_neq(CommandTime(ms));
 }
 
 fn compute_hover(

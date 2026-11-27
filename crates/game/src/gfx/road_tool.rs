@@ -14,6 +14,10 @@
 //! bending too tightly, `6`: a road the sim refuses for running along
 //! another).
 
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use bevy::light::NotShadowCaster;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline};
@@ -123,9 +127,10 @@ fn setup(
         marks: [materials.add(marks(1.0)), materials.add(marks(0.4))],
         xray: [xray.add(ghost(0.32)), xray.add(ghost(0.13))],
     };
-    // 0: the road (lit, translucent); 1: the plan's marks over everything
-    // nearby; 3: the live marks (points, handles, snap).
-    for (i, m) in [(0, &mats.road[0]), (1, &mats.marks[0]), (3, &mats.marks[0])] {
+    // The plan is drawn by chunks (`PlanChunks`: 0 the road, lit and
+    // translucent, 1 its marks over everything nearby, 2 those through
+    // whatever hides them); 3: the live marks (points, handles, snap).
+    for (i, m) in [(3, &mats.marks[0])] {
         commands.spawn((
             Name::new("Curve tool"),
             ToolPart(i),
@@ -135,8 +140,8 @@ fn setup(
             NotShadowCaster,
         ));
     }
-    // 2, 4: the marks again, faint, through whatever hides them.
-    for i in [2, 4] {
+    // 4: the live marks again, faint, through whatever hides them.
+    for i in [4] {
         commands.spawn((
             Name::new("Curve tool (x-ray)"),
             ToolPart(i),
@@ -340,17 +345,74 @@ fn live_marks(view: &CurveToolView, k: f32) -> MeshBuilder {
     marks
 }
 
-/// What the plan's meshes were built from (they are rebuilt only when it
-/// changes, not when the pointer moves).
-#[derive(Default, PartialEq)]
-struct PlanDrawn {
-    active: bool,
-    kind: Option<RoadKind>,
-    pieces: Vec<(Curve, PieceChange)>,
-    refused: Vec<Curve>,
-    error_at: Option<[f32; 2]>,
-    nodes: Vec<([f32; 2], NodeChange)>,
+/// Side of the squares the plan is drawn in (a plan that changes at one
+/// end, a grid one block deeper, re-meshes only the squares there).
+const PLAN_CHUNK_M: f32 = 128.0;
+
+/// The plan's meshes by square: content hash and the road, marks and
+/// x-ray entities.
+#[derive(Default)]
+struct PlanChunks {
+    chunks: HashMap<IVec2, (u64, [Entity; 3])>,
     k: f32,
+    dim: bool,
+}
+
+/// The plan's parts in each square, as views of their own.
+fn plan_by_chunk(view: &CurveToolView) -> HashMap<IVec2, CurveToolView> {
+    let mut out: HashMap<IVec2, CurveToolView> = HashMap::new();
+    if !view.active {
+        return out;
+    }
+    fn at<'a>(out: &'a mut HashMap<IVec2, CurveToolView>, kind: Option<RoadKind>, p: [f32; 2]) -> &'a mut CurveToolView {
+        out.entry(road_geom::chunk_of(Vec2::from(p), PLAN_CHUNK_M))
+            .or_insert_with(|| CurveToolView {
+                active: true,
+                kind,
+                ..default()
+            })
+    }
+    let kind = view.kind;
+    for &(c, ch) in &view.pieces {
+        at(&mut out, kind, c.point_at(c.length() * 0.5, 0.0)).pieces.push((c, ch));
+    }
+    for &c in &view.refused {
+        at(&mut out, kind, c.point_at(c.length() * 0.5, 0.0)).refused.push(c);
+    }
+    for &(p, ch) in &view.nodes {
+        at(&mut out, kind, p).nodes.push((p, ch));
+    }
+    if let Some(p) = view.error_at {
+        at(&mut out, kind, p).error_at = Some(p);
+    }
+    out
+}
+
+fn chunk_hash(v: &CurveToolView, k: f32) -> u64 {
+    let mut h = DefaultHasher::new();
+    k.to_bits().hash(&mut h);
+    v.kind.hash(&mut h);
+    let curve = |c: &Curve, h: &mut DefaultHasher| {
+        for p in c.p {
+            p[0].to_bits().hash(h);
+            p[1].to_bits().hash(h);
+        }
+    };
+    for (c, ch) in &v.pieces {
+        curve(c, &mut h);
+        (*ch as u8).hash(&mut h);
+    }
+    0xffu8.hash(&mut h);
+    for c in &v.refused {
+        curve(c, &mut h);
+    }
+    for (p, ch) in &v.nodes {
+        p[0].to_bits().hash(&mut h);
+        p[1].to_bits().hash(&mut h);
+        (*ch as u8).hash(&mut h);
+    }
+    v.error_at.map(|p| (p[0].to_bits(), p[1].to_bits())).hash(&mut h);
+    h.finish()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -359,83 +421,112 @@ fn draw(
     view: Res<CurveToolView>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut parts: Query<(Entity, &ToolPart, &mut Visibility)>,
-    mut mats: Query<(&ToolPart, &mut MeshMaterial3d<StandardMaterial>)>,
-    mut xmats: Query<(&ToolPart, &mut MeshMaterial3d<XrayMaterial>)>,
+    mut mats: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    mut xmats: Query<&mut MeshMaterial3d<XrayMaterial>>,
     tool_mats: Option<Res<ToolMats>>,
     rigs: Query<&super::camera::CameraRig>,
-    mut last: Local<(f32, PlanDrawn, bool)>,
+    mut plan: Local<PlanChunks>,
     tool_time: Option<Res<super::bench::ToolDrawTime>>,
 ) {
     let _timed = tool_time.as_deref().map(|t| t.time());
+    let Some(tm) = tool_mats else { return };
     // Marks grow with the zoom (in steps, so they are not re-meshed every
     // frame while zooming).
     let dist = rigs.iter().next().map_or(150.0, |r| r.current.distance);
     let k = 2f32.powf((dist / 140.0).max(1.0).log2().round().min(3.0));
-    if !view.is_changed() && k == last.0 {
+    let k_changed = k != plan.k;
+    if !view.is_changed() && !k_changed {
         return;
     }
-    let k_changed = k != last.0;
-    last.0 = k;
-    // The plan's part: only when the plan (or the zoom step) changed.
-    let plan = PlanDrawn {
-        active: view.active,
-        kind: view.kind,
-        pieces: view.pieces.clone(),
-        refused: view.refused.clone(),
-        error_at: view.error_at,
-        nodes: view.nodes.clone(),
-        k,
-    };
-    let mut built: [Option<MeshBuilder>; 5] = Default::default();
-    if plan != last.1 {
-        let (road, marks) = if view.active {
-            meshes_of(&view, k)
-        } else {
-            (MeshBuilder::new(), MeshBuilder::new())
+    plan.k = k;
+    let dim = view.active && view.stale;
+    let i = usize::from(dim);
+    // The plan's squares: only those whose content changed are re-meshed.
+    let by_chunk = plan_by_chunk(&view);
+    let gone: Vec<IVec2> = plan.chunks.keys().filter(|c| !by_chunk.contains_key(c)).copied().collect();
+    for c in gone {
+        if let Some((_, ents)) = plan.chunks.remove(&c) {
+            for e in ents {
+                commands.entity(e).despawn();
+            }
+        }
+    }
+    for (c, sub) in &by_chunk {
+        let hash = chunk_hash(sub, k);
+        if plan.chunks.get(c).is_some_and(|(h, _)| *h == hash) {
+            continue;
+        }
+        let (road, marks) = meshes_of(sub, k);
+        let built = [road, marks.clone(), marks];
+        let ents = match plan.chunks.get(c) {
+            Some((_, e)) => *e,
+            None => {
+                let mut spawn = |name: &str, part: usize| {
+                    let mut e = commands.spawn((
+                        Name::new(name.to_string()),
+                        ToolPart(part),
+                        Transform::default(),
+                        Visibility::Hidden,
+                        NotShadowCaster,
+                    ));
+                    match part {
+                        0 => e.insert(MeshMaterial3d(tm.road[i].clone())),
+                        1 => e.insert(MeshMaterial3d(tm.marks[i].clone())),
+                        _ => e.insert(MeshMaterial3d(tm.xray[i].clone())),
+                    };
+                    e.id()
+                };
+                [
+                    spawn("Curve tool plan", 0),
+                    spawn("Curve tool plan marks", 1),
+                    spawn("Curve tool plan (x-ray)", 2),
+                ]
+            }
         };
-        built[0] = Some(road);
-        built[2] = Some(marks.clone());
-        built[1] = Some(marks);
-        last.1 = plan;
+        for (e, m) in ents.into_iter().zip(built) {
+            if m.is_empty() {
+                commands.entity(e).insert(Visibility::Hidden);
+            } else {
+                // Never remove Mesh3d (see cursor.rs): replace it.
+                commands
+                    .entity(e)
+                    .insert((Mesh3d(meshes.add(m.build())), Visibility::Inherited));
+            }
+        }
+        plan.chunks.insert(*c, (hash, ents));
     }
     // The live part: points, handles, snap (small; follows the pointer).
-    if view.is_changed() || k_changed {
-        let mut live = if view.active {
-            live_marks(&view, k)
-        } else {
-            MeshBuilder::new()
-        };
-        live.translate(Vec3::Y * marks_lift());
-        built[4] = Some(live.clone());
-        built[3] = Some(live);
-    }
+    let mut live = if view.active {
+        live_marks(&view, k)
+    } else {
+        MeshBuilder::new()
+    };
+    live.translate(Vec3::Y * marks_lift());
+    let mut built = [Some(live.clone()), Some(live)];
     for (e, part, mut vis) in &mut parts {
-        let Some(m) = built[part.0].take() else { continue };
+        if part.0 < 3 {
+            continue;
+        }
+        let Some(m) = built[part.0 - 3].take() else { continue };
         if m.is_empty() {
             vis.set_if_neq(Visibility::Hidden);
         } else {
-            // Never remove Mesh3d (see cursor.rs): replace it.
             commands.entity(e).insert(Mesh3d(meshes.add(m.build())));
             vis.set_if_neq(Visibility::Inherited);
         }
     }
-    // A stale plan is drawn dimmed: swap the plan parts' materials.
-    let dim = view.active && view.stale;
-    if dim != last.2
-        && let Some(tm) = tool_mats
-    {
-        last.2 = dim;
-        let i = usize::from(dim);
-        for (part, mut m) in &mut mats {
-            let h = match part.0 {
-                0 => &tm.road[i],
-                1 => &tm.marks[i],
-                _ => continue,
-            };
-            m.0 = h.clone();
-        }
-        for (part, mut m) in &mut xmats {
-            if part.0 == 2 {
+    // A stale plan is drawn dimmed: swap the plan parts' materials (only
+    // the tool's own materials: nothing else is re-specialised).
+    if dim != plan.dim {
+        plan.dim = dim;
+        for (_, ents) in plan.chunks.values() {
+            if let Ok(mut m) = mats.get_mut(ents[0]) {
+                m.0 = tm.road[i].clone();
+            }
+            if let Ok(mut m) = mats.get_mut(ents[1]) {
+                m.0 = tm.marks[i].clone();
+            }
+            if let Ok(mut m) = xmats.get_mut(ents[2]) {
                 m.0 = tm.xray[i].clone();
             }
         }

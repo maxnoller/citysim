@@ -258,7 +258,10 @@ impl Evaluated {
 /// order.
 fn removed_kinds(w: &World, cmd: &Command) -> Vec<RoadKind> {
     match cmd {
-        Command::RemoveRoad { .. } | Command::BulldozeArea { .. } | Command::Bulldoze { .. } => w
+        Command::RemoveRoad { .. }
+        | Command::RemoveRoads { .. }
+        | Command::BulldozeArea { .. }
+        | Command::Bulldoze { .. } => w
             .preview(cmd)
             .map(|p| {
                 p.removed
@@ -270,6 +273,9 @@ fn removed_kinds(w: &World, cmd: &Command) -> Vec<RoadKind> {
         _ => Vec::new(),
     }
 }
+
+/// Segments an undo takes away per command (`Command::RemoveRoads`).
+const REMOVE_BATCH: usize = 32;
 
 /// Check operation `i` on `w` (applying what is accepted), adding its
 /// steps to `steps`.
@@ -283,21 +289,26 @@ fn eval_op(w: &mut World, i: usize, op: &Op, steps: &mut Vec<Step>) {
         })
     };
     if let Op::RemoveSerials(lo, hi) = op {
-        // One segment at a time: a removal may merge the others.
+        // A batch of segments at a time (`REMOVE_BATCH`): one road change
+        // each, so a large road goes in a few commands. Looked up again for
+        // each batch: a removal may merge the others.
         for _ in 0..10_000 {
-            let Some((s, len)) = w
+            let mut parts: Vec<(citysim_sim::SegmentId, f32, f32)> = w
                 .roads
                 .segments
                 .iter()
-                .find(|(_, s)| (*lo..*hi).contains(&s.serial))
-                .map(|(s, seg)| (s, seg.length))
-            else {
+                .filter(|(_, s)| (*lo..*hi).contains(&s.serial))
+                .map(|(s, seg)| (s, 0.0, seg.length))
+                .collect();
+            if parts.is_empty() {
                 break;
-            };
-            let cmd = Command::RemoveRoad {
-                segment: s,
-                from_m: 0.0,
-                to_m: len,
+            }
+            parts.truncate(REMOVE_BATCH);
+            let cmd = if parts.len() == 1 {
+                let (segment, from_m, to_m) = parts[0];
+                Command::RemoveRoad { segment, from_m, to_m }
+            } else {
+                Command::RemoveRoads { parts }
             };
             let kinds = removed_kinds(w, &cmd);
             let res = w.apply(cmd.clone());

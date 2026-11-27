@@ -340,6 +340,8 @@ struct FrameRec {
     main_parts: [f64; 6],
     /// gfx drawing the tools' feedback ([`ToolDrawTime`]), ms.
     tool_draw_ms: f64,
+    /// Commands applied (`shared::CommandTime`), ms.
+    cmd_ms: f64,
     render_parts: [f64; 6],
     gpu_wait_ms: f64,
     tags: Vec<String>,
@@ -1210,6 +1212,7 @@ fn record(
     pipelines: Res<Pipelines>,
     mut meshes: MessageReader<AssetEvent<Mesh>>,
     tool_draw: Res<ToolDrawTime>,
+    cmd_time: Res<crate::shared::CommandTime>,
     mut mats: (
         MessageReader<AssetEvent<CityMaterial>>,
         MessageReader<AssetEvent<StandardMaterial>>,
@@ -1270,6 +1273,7 @@ fn record(
         r.compiling = compiling;
         r.main_parts = main_marks.2;
         r.tool_draw_ms = tool_draw_ms;
+        r.cmd_ms = cmd_time.0 as f64;
         r.render_parts = side.parts;
         r.gpu_wait_ms = side.gpu_wait_ms;
         r.tags.extend(tags);
@@ -1290,7 +1294,7 @@ use citysim_sim::junction::{JunctionControl, junction_nodes, junction_view};
 
 fn frames_csv(bench: &Bench) -> String {
     let mut out = String::from(
-        "frame,ms,main_ms,render_ms,sim_ms,meshes,materials,new_pipelines,compiling,gpu_wait_ms,tool_draw_ms",
+        "frame,ms,main_ms,render_ms,sim_ms,meshes,materials,new_pipelines,compiling,gpu_wait_ms,tool_draw_ms,cmd_ms",
     );
     for p in MAIN_PARTS {
         out.push_str(&format!(",main_{p}"));
@@ -1307,7 +1311,7 @@ fn frames_csv(bench: &Bench) -> String {
             .map(|v| format!("{v:.3},"))
             .collect();
         out.push_str(&format!(
-            "{i},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.3},{:.3},{parts}\"{}\"\n",
+            "{i},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.3},{:.3},{:.3},{parts}\"{}\"\n",
             r.ms,
             r.main_ms,
             r.render_ms,
@@ -1318,6 +1322,7 @@ fn frames_csv(bench: &Bench) -> String {
             r.compiling,
             r.gpu_wait_ms,
             r.tool_draw_ms,
+            r.cmd_ms,
             r.tags.join("; ").replace('"', "'")
         ));
     }
@@ -1408,18 +1413,18 @@ fn hitches(bench: &Bench) -> String {
                 let main_max = recs[*start..end].iter().map(|r| r.main_ms).fold(0.0, f64::max);
                 let render_max = recs[*start..end].iter().map(|r| r.render_ms).fold(0.0, f64::max);
                 // The tools' own work: the tool systems (`GameSet::Tools`),
-                // their commands applied (`GameSet::Sim`) and gfx drawing
+                // their commands applied (`shared::CommandTime`) and gfx drawing
                 // their feedback, per frame: average and worst.
                 let part = |name: &str| MAIN_PARTS.iter().position(|p| *p == name).expect("part");
-                let (ti, si) = (part("tools"), part("sim_cmds"));
+                let ti = part("tools");
                 let stat = |f: &dyn Fn(&FrameRec) -> f64| {
                     let v: Vec<f64> = recs[*start..end].iter().map(f).collect();
                     (v.iter().sum::<f64>() / n, v.iter().copied().fold(0.0, f64::max))
                 };
                 let tools = stat(&|r| r.main_parts[ti]);
-                let cmds = stat(&|r| r.main_parts[si]);
+                let cmds = stat(&|r| r.cmd_ms);
                 let draw = stat(&|r| r.tool_draw_ms);
-                let all = stat(&|r| r.main_parts[ti] + r.main_parts[si] + r.tool_draw_ms);
+                let all = stat(&|r| r.main_parts[ti] + r.cmd_ms + r.tool_draw_ms);
                 acts.push(format!(
                     "    {{ \"action\": {}, \"frames\": {}, \"avg_ms\": {avg:.2}, \"worst_ms\": {:.2}, \
                      \"worst_at\": {}, \"over_33ms\": {over33}, \"main_ms_max\": {main_max:.2}, \
