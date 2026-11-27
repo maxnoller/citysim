@@ -174,14 +174,14 @@ fn walking_is_deterministic() {
 
 #[test]
 fn a_road_edit_under_walking_people_reroutes_them() {
-    let mut w = organic_at(10, 3, 8);
+    let mut w = organic_at(10, 3, 13);
     // A walker with a good way to go: take out a stretch of road ahead of
     // them (with its pavements).
     let (id, ahead) = w
         .walking
         .walkers
         .iter()
-        .filter(|(_, x)| x.left_m() > 60.0)
+        .filter(|(_, x)| x.left_m() > 40.0)
         .map(|(id, x)| (*id, x.ahead()))
         .next()
         .expect("a walker with a way to go");

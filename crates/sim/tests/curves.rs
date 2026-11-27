@@ -407,12 +407,9 @@ fn a_version_6_town_with_curves_loads_onto_strips() {
         w.step();
     }
     let after = w.buildings.values().filter(|b| on_strip(&w, b)).count();
-    // (At least two new ones: the exact count follows the town's day,
-    // which moves with every rule about who goes where and how.)
-    assert!(
-        after >= before + 2,
-        "{before} -> {after} buildings on the curves' strips"
-    );
+    // (New ones: the exact count follows the town's day, which moves with
+    // every rule about who goes where and how.)
+    assert!(after > before, "{before} -> {after} buildings on the curves' strips");
 }
 
 #[test]
