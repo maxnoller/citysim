@@ -35,6 +35,7 @@ impl Plugin for BarPlugin {
                     update_clock,
                     compact_bar,
                     keep_tools_clear,
+                    steady_columns,
                     raise_slots,
                     demolish_modes,
                 )
@@ -158,11 +159,14 @@ fn spawn_bar(
 }
 
 fn stat_column(p: &mut ChildSpawnerCommands, fonts: &UiFonts, big: bool, value: BarText, cap: BarText, cap_text: &str) {
-    p.spawn(layout(Node {
-        flex_direction: FlexDirection::Column,
-        row_gap: px(5),
-        ..default()
-    }))
+    p.spawn((
+        layout(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(5),
+            ..default()
+        }),
+        Steady(0.0),
+    ))
     .with_children(|col| {
         col.spawn((
             figure(fonts, "", if big { t::FONT_BIG } else { t::FONT_MID }, t::TEXT),
@@ -214,12 +218,15 @@ fn spawn_vitals(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                     MoneyIcon,
                     Wide,
                 ));
-                b.spawn(layout(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(5),
-                    min_width: px(118),
-                    ..default()
-                }))
+                b.spawn((
+                    layout(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(5),
+                        min_width: px(118),
+                        ..default()
+                    }),
+                    Steady(118.0),
+                ))
                 .with_children(|col| {
                     col.spawn((figure(fonts, "$0", t::FONT_BIG, t::TEXT), BarText::Money));
                     col.spawn((caps(fonts, "", t::FONT_CAP, t::POSITIVE), BarText::MoneyDelta));
@@ -255,11 +262,14 @@ fn spawn_vitals(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
             ),
         ))
         .with_children(|r| {
-            r.spawn(layout(Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: px(5),
-                ..default()
-            }))
+            r.spawn((
+                layout(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(5),
+                    ..default()
+                }),
+                Steady(0.0),
+            ))
             .with_children(|col| {
                 col.spawn((figure(fonts, "", t::FONT_MID, t::TEXT), BarText::Jobless));
                 col.spawn(caps(fonts, "Jobless", t::FONT_CAP, t::TEXT_MUTED));
@@ -1133,6 +1143,38 @@ fn compact_bar(
         let w = px(if c { 62.0 } else { t::SLOT_W });
         if n.width != w {
             n.width = w;
+        }
+    }
+}
+
+/// A column of changing figures that never gets narrower (Barlow's digits
+/// are proportional: "4,111" is narrower than "4,080", and everything to
+/// its right would shift with each change).
+/// Its narrowest width (logical px).
+#[derive(Component)]
+struct Steady(f32);
+
+fn steady_columns(
+    ui: Res<UiState>,
+    scale: Res<UiScale>,
+    mut cols: Query<(&Steady, &mut Node, &ComputedNode)>,
+    mut last: Local<(f32, bool)>,
+) {
+    // A new interface size or the compact bar measures afresh.
+    let fresh = *last != (scale.0, ui.compact);
+    *last = (scale.0, ui.compact);
+    for (base, mut n, c) in &mut cols {
+        if fresh {
+            n.min_width = px(base.0);
+            continue;
+        }
+        let w = (c.size.x * c.inverse_scale_factor).ceil();
+        let now = match n.min_width {
+            Val::Px(v) => v,
+            _ => 0.0,
+        };
+        if w > now + 0.5 {
+            n.min_width = px(w);
         }
     }
 }

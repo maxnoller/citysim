@@ -1068,6 +1068,16 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
         eval = plan::evaluate(&base, &ops).0;
     }
     if let Some(e) = eval.first_error() {
+        if let CommandError::BuildingInTheWay { at, building } = e {
+            let b = sim.world.buildings.get(*building);
+            debug!(
+                "undo refused: building {building:?} in the way at {at:?}: {:?} ops {:?}",
+                b.map(|b| (b.center(), b.footprint, b.created_tick)),
+                ops.iter()
+                    .filter(|o| !matches!(o, Op::Cmd(Command::RestoreBuilding(_))))
+                    .collect::<Vec<_>>()
+            );
+        }
         return Toast::new(
             ToastKind::Warning,
             format!("Can't undo the {label}: {}", super::context::error_text(e)),
