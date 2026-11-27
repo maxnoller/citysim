@@ -336,6 +336,9 @@ pub fn person_model(build: usize, pose: usize, far: bool) -> MeshBuilder {
         let heel = ankle + Vec3::new(-0.06, -foot_h, 0.0);
         let toe = ankle + Vec3::new(0.17, -foot_h + toe_lift, 0.0);
         let mid = (heel + toe) * 0.5 + Vec3::Y * (foot_h * 0.5);
+        if far {
+            continue;
+        }
         limb(
             &mut m,
             mid + Vec3::new(-0.115, 0.0, 0.0),

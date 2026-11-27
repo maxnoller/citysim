@@ -1518,6 +1518,7 @@ mod tests {
                         WALK_Y,
                         MARK_Y,
                         MARK_Y + 0.002,
+                        MARK_Y + 0.004,
                         ROAD_Y + 0.13,
                         0.025,
                         ROAD_Y + 0.004,

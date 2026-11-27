@@ -48,7 +48,6 @@ impl PeopleModels {
         let (near, distant) = &self.meshes[(build % BUILDS) * POSES + pose % POSES];
         if far { distant.clone() } else { near.clone() }
     }
-
 }
 
 /// One drawn person.
@@ -327,7 +326,7 @@ pub fn looks(seed: u32, stage: LifeStage) -> (usize, f32, u32) {
         LifeStage::Child => (person_gen::CHILD_BUILD, 0.56 + 0.14 * ((h >> 20) % 100) as f32 / 100.0),
         LifeStage::Teen => ((h % 6) as usize, 0.88 + 0.1 * ((h >> 20) % 100) as f32 / 100.0),
         LifeStage::Senior => (
-            if h % 3 == 0 {
+            if h.is_multiple_of(3) {
                 (h >> 3) as usize % 6
             } else {
                 person_gen::SENIOR_BUILD
