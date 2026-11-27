@@ -358,7 +358,7 @@ enum Then {
 
 /// Estimated cost (ms, the time to check them) of the commands sent per
 /// frame when a plan is sent in parts.
-const SEND_BUDGET_MS: f32 = 3.0;
+const SEND_BUDGET_MS: f32 = 1.0;
 /// Seconds a plan may be stale before the preview shows it dimmed.
 const STALE_DIM_S: f32 = 0.15;
 

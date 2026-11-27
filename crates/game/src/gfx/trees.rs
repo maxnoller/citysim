@@ -46,16 +46,32 @@ type Keys = ((u64, u64), (u64, u64));
 /// whole map once a quality change needs it).
 type Land = ((Keys, u64, u64), HashMap<IVec2, u64>, Option<Taken>);
 
+/// A chunk's meshes built row by row: rows `..row` are in.
+struct PartialChunk {
+    c: IVec2,
+    hash: u64,
+    quality: GraphicsQuality,
+    row: i32,
+    near: MeshBuilder,
+    far: MeshBuilder,
+    placed: usize,
+}
+
 #[derive(Default)]
 struct TreeChunks {
     key: Option<(Keys, GraphicsQuality, u64)>,
     /// `Greens::version` the chunks were made for.
     greens: u64,
-    /// Some chunks still show another quality's density (a quality change
-    /// re-meshes a few chunks per frame, `QUALITY_REMESH_MS`).
+    /// Some chunks still wait to be re-meshed (another quality's density,
+    /// or land an edit changed: a few chunks per frame, `QUALITY_REMESH_MS`).
     stale: bool,
     /// Seconds since the last re-mesh for a changed road ghost.
     since_ghost: f32,
+    /// A chunk being re-meshed over several frames (a chunk of dense trees
+    /// takes longer than a frame's budget).
+    partial: Option<PartialChunk>,
+    /// `SimWorld::generation` the chunks were made for.
+    generation: Option<u64>,
     /// Chunk -> (cells hash, [near, far] entities, trees placed, density
     /// quality it was meshed for).
     chunks: HashMap<IVec2, (u64, [Entity; 2], usize, GraphicsQuality)>,
@@ -349,12 +365,14 @@ fn rebuild_trees(
     (view, time, greens): (Option<Res<CurveToolView>>, Res<Time<Real>>, Res<Greens>),
     tool_time: Res<super::bench::ToolDrawTime>,
 ) {
-    let _timed = tool_time.time();
     state.since_ghost += time.delta_secs();
     let quality = drawn_quality(applied.as_deref(), *requested);
     let ghost = view.map(|v| Ghost::of(&v)).unwrap_or_default();
     let keys = (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads));
     let key = (keys, quality, ghost.key());
+    // Tool feedback time: only re-meshes for the road being drawn (not
+    // those after an edit or a quality switch).
+    let _timed = state.key.is_some_and(|k| k.2 != key.2).then(|| tool_time.time());
     if state.key == Some(key) && state.greens == greens.version && !state.stale {
         return;
     }
@@ -417,22 +435,41 @@ fn rebuild_trees(
     };
     let start = std::time::Instant::now();
     let mut trees = Vec::new();
-    let budget = other_quality.len();
+    // Chunks whose land changed first (nearest the change of the road
+    // being drawn or built), then those of another quality; at least one a
+    // frame, the rest within `QUALITY_REMESH_MS` (a road edit touching
+    // several chunks spreads them over a few frames: the trees under a new
+    // road go a frame or two after it appears).
+    // A world just loaded (or the first frame) has every chunk to make:
+    // all at once, while it loads.
+    let whole = state.chunks.is_empty() || state.generation != Some(sim.generation);
+    state.generation = Some(sim.generation);
+    let budget = if whole { f64::INFINITY } else { QUALITY_REMESH_MS };
     let mut todo = changed;
     todo.extend(other_quality);
-    let urgent = todo.len() - budget;
     state.stale = false;
     for (i, (c, hash)) in todo.into_iter().enumerate() {
-        if i >= urgent.max(1) && start.elapsed().as_secs_f64() * 1000.0 > QUALITY_REMESH_MS {
+        if i >= 1 && start.elapsed().as_secs_f64() * 1000.0 > budget {
             state.stale = true;
             break;
         }
         let (cx, cy) = (c.x, c.y);
         {
-            let mut m = MeshBuilder::new();
-            let mut far = MeshBuilder::new();
-            let mut placed = 0;
-            for y in cy * CHUNK..(cy + 1) * CHUNK {
+            // Carry on with this chunk if it was begun for the same land.
+            let mut p = match state.partial.take() {
+                Some(p) if p.c == c && p.hash == hash && p.quality == quality => p,
+                _ => PartialChunk {
+                    c,
+                    hash,
+                    quality,
+                    row: cy * CHUNK,
+                    near: MeshBuilder::new(),
+                    far: MeshBuilder::new(),
+                    placed: 0,
+                },
+            };
+            while p.row < (cy + 1) * CHUNK {
+                let y = p.row;
                 for x in cx * CHUNK..(cx + 1) * CHUNK {
                     trees.clear();
                     cell_trees(x, y, &mut trees);
@@ -440,12 +477,23 @@ fn rebuild_trees(
                         let p = Vec2::new(t.pos.x, t.pos.z);
                         keep(t, dens) && open(taken, &edges, &ghost, p) && !greens.contains(p)
                     }) {
-                        draw_tree(&mut m, t, false);
-                        draw_tree(&mut far, t, true);
-                        placed += usize::from(t.small == 0);
+                        draw_tree(&mut p.near, t, false);
+                        draw_tree(&mut p.far, t, true);
+                        p.placed += usize::from(t.small == 0);
                     }
                 }
+                p.row += 1;
+                if start.elapsed().as_secs_f64() * 1000.0 > budget {
+                    break;
+                }
             }
+            if p.row < (cy + 1) * CHUNK {
+                // The rest of its rows next frame (the old meshes stay).
+                state.partial = Some(p);
+                state.stale = true;
+                break;
+            }
+            let (m, far, placed) = (p.near, p.far, p.placed);
             // Meshes are local to the chunk centre: the LOD cross-fade is
             // measured from the entity origin.
             let size = CHUNK as f32 * CELL_SIZE;

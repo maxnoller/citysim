@@ -292,9 +292,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   junctions), `ui/plan.rs` (`Op`s checked in order on a scratch copy; road parts named by centre line and resolved
   when their turn comes; undo by serials / curves / zone cells; `plan::evaluate` is the reference, `plan::Prefixes` the same
   carrying on from the worlds after the operations a plan shares with the one before), `ui/planner.rs` (plans are checked
-  on a worker thread: a frame waits at most `planner::WAIT`, 2.5 ms, then shows the last plan checked, `ToolPlan::stale`; a
+  on a worker thread: a frame waits at most `planner::WAIT`, 1 ms, then shows the last plan checked, `ToolPlan::stale`; a
   click, Enter, release or Ctrl+Z is a `Job` sent once its plan is checked, input waits meanwhile; its commands go out about
-  3 ms of them a frame with `SimClock::hold` set; undo stays one step), `ui/readout.rs` (the cursor card's words),
+  1 ms (by the time each took to check) of them a frame, at least one, with `SimClock::hold` set; undo stays one step), `ui/readout.rs` (the cursor card's words),
   `ui/people.rs` (names, portraits, person / place / car / city `Sheet`s with headline, trip bar (with lateness),
   mood reason, action links, `Section::folding` sections the panel lets the player fold, remembered in
   `panel::Folds`). One-line panel texts are cut with "…" by measured width (`panel::Ellipsis`). A plan is sent only when every step passes. `scripts/play.py road` presses Enter to build its

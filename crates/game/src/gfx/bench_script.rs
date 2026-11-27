@@ -173,9 +173,14 @@ pub fn scaled(frames: u32) -> u32 {
     ((frames as f32 * f).round() as u32).max(1)
 }
 
-/// Frames the `actions` / `tools` script measures.
+/// Frames the `actions` / `tools` script measures (`CITYSIM_BENCH_END=n`:
+/// at most `n`, to look at its first acts alone).
 pub fn actions_frames(kind: ScriptKind) -> u32 {
-    scaled(acts(kind).last().map_or(0, |a| a.0))
+    let all = scaled(acts(kind).last().map_or(0, |a| a.0));
+    std::env::var("CITYSIM_BENCH_END")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(all, |n: u32| n.min(all))
 }
 
 /// The street the script builds: start and end (sim metres).

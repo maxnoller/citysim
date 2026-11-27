@@ -23,7 +23,7 @@ use citysim_sim::World;
 use super::plan::{self, Evaluated, Op};
 
 /// Longest the frame waits for a plan it has just asked for.
-pub const WAIT: Duration = Duration::from_micros(2_500);
+pub const WAIT: Duration = Duration::from_micros(1_000);
 
 /// A checked plan.
 pub struct Done {
