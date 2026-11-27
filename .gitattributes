@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.png binary
+*.ttf binary
+*.citysave binary
+Cargo.lock linguist-generated

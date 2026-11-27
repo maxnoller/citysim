@@ -2,9 +2,14 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
-# One run per branch: a new push cancels the old run (private-repo minutes).
+permissions:
+  contents: read
+
+# One run per branch or pull request: a new push cancels the old run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
