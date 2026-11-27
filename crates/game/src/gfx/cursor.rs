@@ -275,9 +275,9 @@ fn move_frame(
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(&mut HoverFrame, &mut Transform, &mut Visibility, &Mesh3d)>,
     mut shapes: Local<CellShapes>,
-    tool_time: Res<super::bench::ToolDrawTime>,
+    tool_time: Option<Res<super::bench::ToolDrawTime>>,
 ) {
-    let _timed = tool_time.time();
+    let _timed = tool_time.as_deref().map(|t| t.time());
     let Ok((mut frame, mut t, mut vis, mesh)) = q.single_mut() else {
         return;
     };
@@ -326,9 +326,9 @@ fn move_grid(
     sim: Res<SimWorld>,
     tool: Res<ActiveTool>,
     mut q: Query<(&mut Transform, &mut Visibility), With<CellGrid>>,
-    tool_time: Res<super::bench::ToolDrawTime>,
+    tool_time: Option<Res<super::bench::ToolDrawTime>>,
 ) {
-    let _timed = tool_time.time();
+    let _timed = tool_time.as_deref().map(|t| t.time());
     let Ok((mut t, mut vis)) = q.single_mut() else { return };
     let zone_land = !matches!(*tool, ActiveTool::Zone(_)) || point.zone_cell.is_some();
     match grid_frame(&sim, &hovered, &point).filter(|_| zone_land) {
@@ -374,9 +374,9 @@ fn draw_ghost(
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(Entity, &mut Visibility), With<GhostMesh>>,
     mut shapes: Local<CellShapes>,
-    tool_time: Res<super::bench::ToolDrawTime>,
+    tool_time: Option<Res<super::bench::ToolDrawTime>>,
 ) {
-    let _timed = tool_time.time();
+    let _timed = tool_time.as_deref().map(|t| t.time());
     if !preview.is_changed() {
         return;
     }

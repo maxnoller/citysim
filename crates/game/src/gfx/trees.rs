@@ -363,7 +363,7 @@ fn rebuild_trees(
     mut count: ResMut<TreeCount>,
     edges: Res<RoadEdges>,
     (view, time, greens): (Option<Res<CurveToolView>>, Res<Time<Real>>, Res<Greens>),
-    tool_time: Res<super::bench::ToolDrawTime>,
+    tool_time: Option<Res<super::bench::ToolDrawTime>>,
 ) {
     state.since_ghost += time.delta_secs();
     let quality = drawn_quality(applied.as_deref(), *requested);
@@ -372,7 +372,10 @@ fn rebuild_trees(
     let key = (keys, quality, ghost.key());
     // Tool feedback time: only re-meshes for the road being drawn (not
     // those after an edit or a quality switch).
-    let _timed = state.key.is_some_and(|k| k.2 != key.2).then(|| tool_time.time());
+    let _timed = tool_time
+        .as_deref()
+        .filter(|_| state.key.is_some_and(|k| k.2 != key.2))
+        .map(|t| t.time());
     if state.key == Some(key) && state.greens == greens.version && !state.stale {
         return;
     }
