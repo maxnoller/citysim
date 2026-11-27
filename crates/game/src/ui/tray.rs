@@ -140,6 +140,7 @@ fn tray_keys(
     (parents, scrollers): (Query<&ChildOf>, Query<&Node>),
     mut scroll: Query<(&mut ScrollPosition, &ComputedNode, &bevy::ui::UiGlobalTransform)>,
     mut focus: Local<TrayFocus>,
+    (time, mut waited): (Res<Time<Real>>, Local<(Option<FocusArea>, f32)>),
     mut out: MessageWriter<UiAction>,
     (window_area, panel_area): (Res<super::city::WindowArea>, Res<super::panel::PanelArea>),
 ) {
@@ -149,7 +150,17 @@ fn tray_keys(
         FocusArea::Panel => panel_area.0.is_some(),
     };
     let areas: Vec<FocusArea> = FocusArea::ALL.into_iter().filter(|a| open(*a)).collect();
-    let mut area = ui.focus.filter(|a| areas.contains(a));
+    // Focus asked for a plate still sliding in (a capture sets it with the
+    // selection) is kept for a moment.
+    let opening = ui.focus.filter(|a| !areas.contains(a));
+    match (opening, &mut *waited) {
+        (Some(a), w) if w.0 == Some(a) => w.1 += time.delta_secs(),
+        (Some(a), w) => *w = (Some(a), 0.0),
+        (None, w) => *w = (None, 0.0),
+    }
+    let mut area = ui
+        .focus
+        .filter(|a| areas.contains(a) || waited.0 == Some(*a) && waited.1 < 1.0);
     if keys.just_pressed(KeyCode::F6) && !ui.menu_open {
         // Through what is open, then out (Shift: the other way).
         let back = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
