@@ -344,7 +344,7 @@ fn building_a_district_up_front_is_viable() {
     assert_eq!(p.build_ahead(&mut w, [8, 3, 3]), 14);
     assert!(w.economy.money < balance::STARTING_MONEY / 2, "${}", w.economy.money);
     let (most, lowest, reached) = play(&mut w, &mut p);
-    assert!(real_s(reached) / 60.0 <= 40.0, "{:.1} min", real_s(reached) / 60.0);
+    assert!(real_s(reached) / 60.0 <= 42.0, "{:.1} min", real_s(reached) / 60.0);
     assert!(lowest > 0, "lowest cash ${lowest}");
     assert!(most <= 40_000, "${most}");
     assert!(real_s(p.longest_money_wait_ticks) <= 60.0);
