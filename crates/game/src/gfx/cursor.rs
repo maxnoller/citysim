@@ -11,15 +11,14 @@
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use citysim_sim::CELL_SIZE;
+use citysim_sim::zoning::{CellRef, LandShapes};
+use citysim_sim::{CELL_SIZE, World};
 
 use super::heights;
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix};
 use super::zones::zone_color;
-use crate::shared::{
-    ActiveTool, GameSet, HoveredCell, HoveredPoint, PreviewKind, SimWorld, ToolPreview, zone_cell_corners,
-};
+use crate::shared::{ActiveTool, GameSet, HoveredCell, HoveredPoint, PreviewKind, SimWorld, ToolPreview};
 
 /// Grid radius around the cursor, cells.
 const GRID_R: i32 = 14;
@@ -28,7 +27,7 @@ const GRID_R: i32 = 14;
 struct HoverFrame {
     pos: Vec3,
     /// Corners (around the centre) the mesh was built for.
-    shape: [Vec2; 4],
+    shape: Vec<Vec2>,
 }
 
 #[derive(Component)]
@@ -66,30 +65,27 @@ fn overlay_material(materials: &mut Assets<StandardMaterial>, color: Color, bias
 }
 
 /// A cell outline with a soft fill, a little larger than the cell, around
-/// its centre (`q`: corners relative to the centre, in order).
-fn frame_mesh(q: [Vec2; 4]) -> Mesh {
+/// its centre (`q`: corners of the convex land relative to the centre, in
+/// order: a cell's quad, or its cut shape where two roads' rows meet).
+fn frame_mesh(q: &[Vec2]) -> Mesh {
     let mut m = MeshBuilder::new();
     let w = 0.45;
     let line = [1.0, 1.0, 1.0, 1.0];
     let fill = [1.0, 1.0, 1.0, 0.22];
     let grow = |p: Vec2, d: f32| p + p.normalize_or_zero() * d;
-    let outer = q.map(|p| grow(p, 0.35));
-    let inner = q.map(|p| grow(p, 0.35 - w * std::f32::consts::SQRT_2));
+    let outer: Vec<Vec2> = q.iter().map(|&p| grow(p, 0.35)).collect();
+    let inner: Vec<Vec2> = q
+        .iter()
+        .map(|&p| grow(p, 0.35 - w * std::f32::consts::SQRT_2))
+        .collect();
     let v = |p: Vec2| Vec3::new(p.x, 0.0, p.y);
-    let ccw = (q[1] - q[0]).perp_dot(q[2] - q[0]) > 0.0;
-    let mut quad = |a: [Vec2; 4], c: [f32; 4]| {
-        let pts = a.map(v);
-        if ccw {
-            m.quad_up(pts, c);
-        } else {
-            m.quad_up([pts[0], pts[3], pts[2], pts[1]], c);
-        }
-    };
-    for k in 0..4 {
-        let n = (k + 1) % 4;
-        quad([outer[k], outer[n], inner[n], inner[k]], line);
+    let n = q.len();
+    for k in 0..n {
+        let j = (k + 1) % n;
+        m.quad_up([v(outer[k]), v(outer[j]), v(inner[j]), v(inner[k])], line);
     }
-    quad(inner, fill);
+    let ring: Vec<Vec3> = inner.iter().map(|&p| v(p)).collect();
+    m.fan_up(Vec3::ZERO, &ring, fill);
     m.build()
 }
 
@@ -147,9 +143,9 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
         Name::new("Hovered cell"),
         HoverFrame {
             pos: Vec3::ZERO,
-            shape: square(),
+            shape: square().to_vec(),
         },
-        Mesh3d(meshes.add(frame_mesh(square()))),
+        Mesh3d(meshes.add(frame_mesh(&square()))),
         MeshMaterial3d(mats.frame.clone()),
         Transform::default(),
         Visibility::Hidden,
@@ -185,29 +181,66 @@ fn tool_color(tool: ActiveTool) -> Color {
     }
 }
 
+/// `zoning::cell_shape` for the cursor and the zone tool's preview: the
+/// blocks indexed once per roads and zoning version.
+#[derive(Default)]
+pub struct CellShapes {
+    key: Option<((u64, u64), (u64, u64))>,
+    shapes: Option<LandShapes>,
+}
+
+impl CellShapes {
+    fn refresh(&mut self, sim: &SimWorld) {
+        let key = (sim.key(sim.world.versions.roads), sim.key(sim.world.versions.grid));
+        if self.key != Some(key) {
+            self.key = Some(key);
+            // One lattice: nothing is cut.
+            self.shapes = sim
+                .world
+                .zoning
+                .lattices()
+                .nth(1)
+                .is_some()
+                .then(|| LandShapes::new(&sim.world));
+        }
+    }
+
+    /// The land a zoning cell holds: its quad, or where the rows of two
+    /// roads meet at an angle its cut shape (none when nothing is left).
+    fn land(&self, world: &World, c: CellRef) -> Option<Vec<Vec2>> {
+        let quad = world.zoning.cell_corners(c)?.map(Vec2::from).to_vec();
+        match self.shapes.as_ref().and_then(|s| s.shape(world, c)) {
+            Some(p) if p.len() >= 3 => Some(p.into_iter().map(Vec2::from).collect()),
+            Some(_) => None,
+            None => Some(quad),
+        }
+    }
+}
+
 /// The hovered cell as drawn: its centre and corners around it. With a
 /// zone tool only zoneable land (the zoning cell under the cursor, whatever
-/// lattice: a strip cell along a curve is a trapezoid); with other tools
+/// lattice: a strip cell along a curve is a trapezoid, a cell where two
+/// roads' rows meet is cut along the line between them); with other tools
 /// the map cell when there is no zoning cell.
 fn hovered_quad(
     sim: &SimWorld,
+    shapes: &CellShapes,
     hovered: &HoveredCell,
     point: &HoveredPoint,
     tool: ActiveTool,
-) -> Option<(Vec2, [Vec2; 4])> {
+) -> Option<(Vec2, Vec<Vec2>)> {
     if let Some(c) = point.zone_cell
-        && let Some(q) = sim.world.zoning.cell_corners(c)
+        && let Some(q) = shapes.land(&sim.world, c)
     {
-        let q = q.map(Vec2::from);
-        let ctr = (q[0] + q[1] + q[2] + q[3]) * 0.25;
-        return Some((ctr, q.map(|p| p - ctr)));
+        let ctr = q.iter().copied().sum::<Vec2>() / q.len() as f32;
+        return Some((ctr, q.into_iter().map(|p| p - ctr).collect()));
     }
     if matches!(tool, ActiveTool::Zone(_)) {
         return None;
     }
     let c = hovered.0?;
     let ctr = Vec2::new((c.x as f32 + 0.5) * CELL_SIZE, (c.y as f32 + 0.5) * CELL_SIZE);
-    Some((ctr, square()))
+    Some((ctr, square().to_vec()))
 }
 
 /// Placement of the faint cell grid (corner `(i, j)` at the origin, `+x`
@@ -241,23 +274,25 @@ fn move_frame(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(&mut HoverFrame, &mut Transform, &mut Visibility, &Mesh3d)>,
+    mut shapes: Local<CellShapes>,
 ) {
     let Ok((mut frame, mut t, mut vis, mesh)) = q.single_mut() else {
         return;
     };
+    shapes.refresh(&sim);
     // Inspect highlights what it points at (buildings, roads, cars); a
     // cell frame on bare ground would only look like a stray tile.
     // The bulldozer marks what it would remove (red); a cell frame and the
     // grid mean nothing to it with free-form roads.
-    let at = hovered_quad(&sim, &hovered, &point, *tool).filter(|_| shows_cells(*tool));
+    let at = hovered_quad(&sim, &shapes, &hovered, &point, *tool).filter(|_| shows_cells(*tool));
     let Some((ctr, shape)) = at else {
         vis.set_if_neq(Visibility::Hidden);
         return;
     };
-    if shape.iter().zip(frame.shape.iter()).any(|(a, b)| a.distance(*b) > 0.01)
+    if (shape.len() != frame.shape.len() || shape.iter().zip(frame.shape.iter()).any(|(a, b)| a.distance(*b) > 0.01))
         && let Some(mut m) = meshes.get_mut(&mesh.0)
     {
-        *m = frame_mesh(shape);
+        *m = frame_mesh(&shape);
         frame.shape = shape;
     }
     let target = Vec3::new(ctr.x, heights::HIGHLIGHT, ctr.y);
@@ -334,10 +369,12 @@ fn draw_ghost(
     sim: Res<SimWorld>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(Entity, &mut Visibility), With<GhostMesh>>,
+    mut shapes: Local<CellShapes>,
 ) {
     if !preview.is_changed() {
         return;
     }
+    shapes.refresh(&sim);
     let Ok((entity, mut vis)) = q.single_mut() else { return };
     let mut m = MeshBuilder::new();
     let valid = preview.is_valid();
@@ -353,10 +390,19 @@ fn draw_ghost(
             let y = heights::GHOST;
             let fill = lin(base.with_alpha(if valid { 0.5 } else { 0.25 }));
             if valid {
+                // Each cell's land as the overlay draws it (cut where two
+                // roads' rows meet), pulled in a little.
                 for &c in &preview.zone_cells {
-                    if let Some(q) = zone_cell_corners(&sim.world, c, 0.3, y) {
-                        m.quad_up(q, fill);
-                    }
+                    let Some(p) = shapes.land(&sim.world, c) else { continue };
+                    let ctr = p.iter().copied().sum::<Vec2>() / p.len() as f32;
+                    let ring: Vec<Vec3> = p
+                        .iter()
+                        .map(|&q| {
+                            let q = q + (ctr - q).normalize_or_zero() * 0.3 * std::f32::consts::SQRT_2;
+                            Vec3::new(q.x, y, q.y)
+                        })
+                        .collect();
+                    m.fan_up(Vec3::new(ctr.x, y, ctr.y), &ring, fill);
                 }
             }
             if let Some(q) = preview.area {

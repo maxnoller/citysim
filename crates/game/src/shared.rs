@@ -613,18 +613,6 @@ pub fn world_to_cell(v: Vec3) -> Cell {
     Cell::from_pos(world_to_sim(v))
 }
 
-/// Corners of a zoning cell on any lattice (inset by `inset` metres) at
-/// `height`, in order around the edge; `None` for an unknown lattice.
-pub fn zone_cell_corners(world: &World, c: CellRef, inset: f32, height: f32) -> Option<[Vec3; 4]> {
-    let q = world.zoning.cell_corners(c)?;
-    let center = q.iter().fold(Vec2::ZERO, |a, p| a + Vec2::from(*p)) * 0.25;
-    Some(q.map(|p| {
-        let p = Vec2::from(p);
-        let p = p + (center - p).normalize_or_zero() * inset * std::f32::consts::SQRT_2;
-        Vec3::new(p.x, height, p.y)
-    }))
-}
-
 // ---------------------------------------------------------------- performance panel
 
 /// How much the performance panel shows (written by ui). gfx measures its
