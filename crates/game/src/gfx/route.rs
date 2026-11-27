@@ -398,8 +398,11 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> (MeshBui
     let mut soft = MeshBuilder::new();
     let mut m = MeshBuilder::new();
     let y = heights::HIGHLIGHT + 0.06;
+    // On foot: a narrower line along the pavements and zebras.
+    let walk = route.state == RouteState::Walking;
+    let wk = if walk { 0.42 } else { 1.0 };
     // Off the map under way: drawn as a car's line, from the estimate on.
-    let planned = route.state != RouteState::Driving && route.traveller.is_none();
+    let planned = !matches!(route.state, RouteState::Driving | RouteState::Walking) && route.traveller.is_none();
     let pts: Vec<Vec2> = route.points.iter().map(|&p| Vec2::from(p)).collect();
     if pts.len() >= 2 {
         let mut cum = Vec::with_capacity(pts.len());
@@ -422,7 +425,7 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> (MeshBui
             if planned {
                 1.0
             } else {
-                (d / (FADE_M * k)).clamp(0.0, 1.0).powf(0.8)
+                (d / (FADE_M * k * wk)).clamp(0.0, 1.0).powf(0.8)
             }
         };
         let whole = |_: f32| 1.0;
@@ -438,17 +441,17 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> (MeshBui
             vec![(0.0, total)]
         };
         for &s in &spans {
-            ribbon(&mut soft, &pts, &cum, s, EDGE_W * k, y, edge, &fade);
+            ribbon(&mut soft, &pts, &cum, s, EDGE_W * k * wk, y, edge, &fade);
         }
         // The solid core starts a little ahead of the car (under it).
-        let start = if planned { 0.0 } else { 2.5 };
+        let start = if planned { 0.0 } else { 2.5 * wk };
         for &(a, b) in &spans {
             ribbon(
                 &mut m,
                 &pts,
                 &cum,
                 (a.max(start), b),
-                CORE_W * k,
+                CORE_W * k * wk,
                 y + 0.01,
                 core,
                 &whole,
@@ -456,11 +459,11 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, k: f32) -> (MeshBui
         }
         if !planned {
             let white = lin(Color::WHITE);
-            let mut d = (FADE_M + 4.0) * k;
-            while d < total - 4.0 * k {
+            let mut d = (FADE_M + 4.0) * k * wk;
+            while d < total - 4.0 * k * wk {
                 let (p, dir) = at(&pts, &cum, d);
-                chevron(&mut m, p, dir, y + 0.02, white, k);
-                d += CHEVRON_EVERY * k;
+                chevron(&mut m, p, dir, y + 0.02, white, k * wk);
+                d += CHEVRON_EVERY * k * wk;
             }
         }
     }

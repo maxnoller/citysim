@@ -32,7 +32,6 @@ pub const BUILDS: usize = 8;
 /// Metres covered by one full walk cycle (two steps) of a 1.75 m adult.
 pub const STRIDE_M: f32 = 1.4;
 
-
 /// A body type.
 #[derive(Debug, Clone, Copy)]
 struct Build {

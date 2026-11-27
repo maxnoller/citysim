@@ -226,7 +226,11 @@ fn sync_people(
         vis.drawn = pos;
         let d = cam.distance(pos);
         let show = !vis.hidden && d < CUT_OFF_M;
-        visibility.set_if_neq(if show { Visibility::Inherited } else { Visibility::Hidden });
+        visibility.set_if_neq(if show {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
         if !show {
             continue;
         }
@@ -282,7 +286,11 @@ pub fn looks(seed: u32, stage: LifeStage) -> (usize, f32, u32) {
         LifeStage::Child => (person_gen::CHILD_BUILD, 0.56 + 0.14 * ((h >> 20) % 100) as f32 / 100.0),
         LifeStage::Teen => ((h % 6) as usize, 0.88 + 0.1 * ((h >> 20) % 100) as f32 / 100.0),
         LifeStage::Senior => (
-            if h % 3 == 0 { (h >> 3) as usize % 6 } else { person_gen::SENIOR_BUILD },
+            if h % 3 == 0 {
+                (h >> 3) as usize % 6
+            } else {
+                person_gen::SENIOR_BUILD
+            },
             0.92 + 0.1 * ((h >> 20) % 100) as f32 / 100.0,
         ),
         LifeStage::Adult => ((h % 6) as usize, 0.93 + 0.14 * ((h >> 20) % 100) as f32 / 100.0),

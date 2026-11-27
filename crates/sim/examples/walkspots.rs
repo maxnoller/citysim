@@ -17,20 +17,35 @@ fn main() {
         let k = ((x.pos[0] / 40.0) as i32, (x.pos[1] / 40.0) as i32);
         let e = grid.entry(k).or_default();
         e.0 += 1;
-        if x.state == walk::WalkState::Waiting { e.1 += 1; }
-        if x.state == walk::WalkState::Crossing { e.2 += 1; }
+        if x.state == walk::WalkState::Waiting {
+            e.1 += 1;
+        }
+        if x.state == walk::WalkState::Crossing {
+            e.2 += 1;
+        }
     }
     let mut v: Vec<_> = grid.into_iter().collect();
     v.sort_by_key(|x| std::cmp::Reverse(x.1.0));
     println!("{} walkers at {:.2} h", w.walking.walkers.len(), w.time.hour());
     for ((x, y), (n, wt, cr)) in v.iter().take(12) {
-        println!("square centre ({}, {}): {n} walkers, {wt} waiting, {cr} crossing", x * 40 + 20, y * 40 + 20);
+        println!(
+            "square centre ({}, {}): {n} walkers, {wt} waiting, {cr} crossing",
+            x * 40 + 20,
+            y * 40 + 20
+        );
     }
     for n in junction::junction_nodes(&w).take(400) {
         if junction::junction_control(&w, n) == Some(JunctionControl::Signal) {
             let p = w.roads.nodes[n].pos;
-            let near = w.walking.walkers.values().filter(|x| (x.pos[0]-p[0]).abs() < 30.0 && (x.pos[1]-p[1]).abs() < 30.0).count();
-            if near > 0 { println!("signal at {:?}: {near} walkers near", p); }
+            let near = w
+                .walking
+                .walkers
+                .values()
+                .filter(|x| (x.pos[0] - p[0]).abs() < 30.0 && (x.pos[1] - p[1]).abs() < 30.0)
+                .count();
+            if near > 0 {
+                println!("signal at {:?}: {near} walkers near", p);
+            }
         }
     }
 }

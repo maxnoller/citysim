@@ -650,7 +650,9 @@ pub(crate) fn go_leisure(world: &mut World, id: CitizenId) -> bool {
         let factor = if car { 1.0 } else { balance::CARLESS_TIME_FACTOR };
         secs_to_ticks(estimate_s(fp, vp) * factor) as f32 / HOUR as f32
     };
-    let longest = if !car && walkable {
+    let longest = if !car && walkable && midday_visit(world.time.hour()) {
+        balance::LUNCH_WALK_MAX_TRIP_H
+    } else if !car && walkable {
         balance::WALK_TRIP_MAX_H
     } else {
         balance::LEISURE_DURATION_H
@@ -1038,6 +1040,9 @@ fn walk_choice(
     // Not further than they walk in `WALK_MAX_H`.
     let hours = if commute {
         balance::WALK_COMMUTE_MAX_H
+    } else if purpose == TripPurpose::Leisure && midday_visit(world.time.hour()) {
+        // Lunch is not worth a long walk.
+        balance::LUNCH_WALK_MAX_TRIP_H
     } else {
         balance::WALK_MAX_H
     };
