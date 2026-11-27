@@ -500,6 +500,23 @@ pub struct Zoning {
     /// (see `faces`; derived, not saved: recomputed on load).
     #[serde(skip)]
     pub(crate) face_lattices: BTreeSet<LatticeId>,
+    /// How the bands of one block's grid join (derived like
+    /// `face_lattices`).
+    #[serde(skip)]
+    pub(crate) band_links: BTreeMap<LatticeId, BandLink>,
+}
+
+/// Where one band of a block's grid meets the next: an L-shaped block's
+/// grid is two bands of rows, the second starting where the first ends,
+/// column for column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandLink {
+    /// The band before (its last row meets this band's row 0).
+    pub prev: Option<LatticeId>,
+    /// The band after (its row 0 meets this band's last row).
+    pub next: Option<LatticeId>,
+    /// Rows of this band.
+    pub rows: i32,
 }
 
 impl Default for Zoning {
@@ -511,6 +528,7 @@ impl Default for Zoning {
             roads_version: 0,
             zones_version: 0,
             face_lattices: BTreeSet::new(),
+            band_links: BTreeMap::new(),
         }
     }
 }
@@ -522,6 +540,27 @@ impl Zoning {
     /// block, its rows are stretched or squeezed to whole cells.
     pub fn is_block_grid(&self, id: LatticeId) -> bool {
         self.face_lattices.contains(&id)
+    }
+
+    /// The cell next to `c` towards `f` (lattice axes): the same
+    /// lattice's neighbour, or across the boundary of two bands of one
+    /// block's grid the cell of the next band (see [`BandLink`]).
+    pub fn cell_across(&self, c: CellRef, f: Facing) -> CellRef {
+        let n = c.step(f);
+        if let Some(link) = self.band_links.get(&c.lattice) {
+            if n.j < 0
+                && let Some(p) = link.prev
+                && let Some(pl) = self.band_links.get(&p)
+            {
+                return CellRef::new(p, n.i, pl.rows - 1);
+            }
+            if n.j >= link.rows
+                && let Some(x) = link.next
+            {
+                return CellRef::new(x, n.i, 0);
+            }
+        }
+        n
     }
 
     pub fn lattice(&self, id: LatticeId) -> Option<&Lattice> {

@@ -210,6 +210,17 @@ fn trapezoid_l_and_avenue_blocks_get_one_grid() {
         let q = b.world_at(i as f32, 0.0);
         assert!((p[0] - q[0]).abs() < 0.01 && (p[1] - q[1]).abs() < 0.01, "{p:?} {q:?}");
     }
+    // Stepping across the band boundary lands in the other band.
+    let across = lats.iter().any(|&id| {
+        let l = w.zoning.lattice(id).unwrap();
+        l.cells.keys().any(|&(i, j)| {
+            [Facing::PlusY, Facing::MinusY].into_iter().any(|f| {
+                let n = w.zoning.cell_across(CellRef::new(id, i, j), f);
+                n.lattice != id && lats.contains(&n.lattice) && w.zoning.cell(n).is_some()
+            })
+        })
+    });
+    assert!(across, "bands linked");
     // A block with an avenue along one side.
     let v = [[1000.0, 400.0], [1093.0, 400.0], [1094.0, 489.0], [1000.0, 490.0]];
     w.apply(Command::BuildCurve {

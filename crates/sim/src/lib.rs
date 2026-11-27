@@ -39,7 +39,7 @@ pub mod derived;
 pub mod drive;
 pub mod economy;
 pub mod errands;
-pub(crate) mod faces;
+pub mod faces;
 pub mod geom;
 pub mod grid;
 pub mod growth;

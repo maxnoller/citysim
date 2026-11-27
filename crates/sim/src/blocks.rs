@@ -346,6 +346,31 @@ fn face_lattice(z: &mut Zoning, st: &Strip) -> LatticeId {
     id
 }
 
+/// Link the bands of a planned grid that exist (see `BandLink`).
+fn link_bands(z: &mut Zoning, plan: &Plan) {
+    let ids: Option<Vec<LatticeId>> = plan
+        .bands
+        .iter()
+        .map(|st| {
+            z.face_lattices
+                .iter()
+                .copied()
+                .find(|&id| z.lattice(id).and_then(|l| l.strip.as_ref()) == Some(st))
+        })
+        .collect();
+    let Some(ids) = ids else { return };
+    for (k, &id) in ids.iter().enumerate() {
+        z.band_links.insert(
+            id,
+            crate::zoning::BandLink {
+                prev: k.checked_sub(1).map(|p| ids[p]),
+                next: ids.get(k + 1).copied(),
+                rows: plan.rows[k],
+            },
+        );
+    }
+}
+
 /// The blocks of one side of a segment as they are: `(lattice, min, max,
 /// front)`, sorted.
 fn side_blocks(z: &Zoning, s: SegmentId, side: Side) -> Vec<(LatticeId, [i32; 2], [i32; 2], u8)> {
@@ -943,6 +968,11 @@ pub(crate) fn sync(world: &mut World) -> Vec<BuildingId> {
         }
         z.built_for.insert(s, (seg.curve, seg.serial));
     }
+    for (_, plan) in fp.plans.values() {
+        if let Some(plan) = plan {
+            link_bands(z, plan);
+        }
+    }
     z.blocks.sort_by(|a, b| {
         a.segment
             .cmp(&b.segment)
@@ -1007,6 +1037,12 @@ pub(crate) fn derive_faces(world: &mut World) -> usize {
             }
         }
     }
+    world.zoning.band_links.clear();
+    for (_, plan) in fp.plans.values() {
+        if let Some(plan) = plan {
+            link_bands(&mut world.zoning, plan);
+        }
+    }
     if redo.is_empty() {
         return 0;
     }
@@ -1051,6 +1087,7 @@ fn gc_lattices(z: &mut Zoning) {
         {
             *l = None;
             z.face_lattices.remove(&LatticeId(k as u16));
+            z.band_links.remove(&LatticeId(k as u16));
         }
     }
     while z.lattices.len() > 1 && z.lattices.last().is_some_and(|l| l.is_none()) {

@@ -8,6 +8,7 @@ mod camera;
 mod city_material;
 mod cursor;
 mod daynight;
+mod greens;
 mod guides;
 mod land;
 mod loading;
@@ -75,6 +76,7 @@ impl Plugin for GfxPlugin {
             record::RecordPlugin,
             route::RoutePlugin,
             yards::YardsPlugin,
+            greens::GreensPlugin,
         ));
     }
 }
