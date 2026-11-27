@@ -172,8 +172,11 @@ pub const SLANT: f32 = 0.249;
 /// The layout the interface is designed for; `UiScale` grows and shrinks
 /// from it (see `ui_scale_for`).
 pub const DESIGN_SIZE: Vec2 = Vec2::new(1920.0, 1080.0);
-/// The smallest logical window the layout must fit (compact bar).
-pub const MIN_LAYOUT: Vec2 = Vec2::new(1250.0, 700.0);
+/// The smallest logical window the layout must fit: the compact bar's
+/// vitals, tool slots and clock side by side (about 1,320 px with their
+/// margins, and room between them; a larger interface size is held back
+/// to this).
+pub const MIN_LAYOUT: Vec2 = Vec2::new(1380.0, 700.0);
 /// Below this logical width the bar compacts (day strip and labels go).
 pub const COMPACT_W: f32 = 1660.0;
 

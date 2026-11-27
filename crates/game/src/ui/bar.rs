@@ -34,6 +34,7 @@ impl Plugin for BarPlugin {
                     update_demand,
                     update_clock,
                     compact_bar,
+                    keep_tools_clear,
                     raise_slots,
                     demolish_modes,
                 )
@@ -171,16 +172,28 @@ fn stat_column(p: &mut ChildSpawnerCommands, fonts: &UiFonts, big: bool, value: 
     });
 }
 
+/// The three groups of the bar: vitals (left), tools (centre), time
+/// (right).
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum BarGroup {
+    Vitals,
+    Tools,
+    Time,
+}
+
 fn spawn_vitals(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    bar.spawn(layout(Node {
-        position_type: PositionType::Absolute,
-        left: px(30),
-        top: px(0),
-        bottom: px(0),
-        align_items: AlignItems::Center,
-        column_gap: px(t::S6),
-        ..default()
-    }))
+    bar.spawn((
+        BarGroup::Vitals,
+        layout(Node {
+            position_type: PositionType::Absolute,
+            left: px(30),
+            top: px(0),
+            bottom: px(0),
+            align_items: AlignItems::Center,
+            column_gap: px(t::S6),
+            ..default()
+        }),
+    ))
     .with_children(|v| {
         // Money: opens the budget.
         spawn_button(
@@ -403,18 +416,21 @@ const SLOTS: [&[SlotDef]; 3] = [
 ];
 
 fn spawn_tools(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    bar.spawn(layout(Node {
-        position_type: PositionType::Absolute,
-        left: px(0),
-        right: px(0),
-        top: px(0),
-        bottom: px(0),
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::End,
-        padding: UiRect::bottom(px(9)),
-        column_gap: px(5),
-        ..default()
-    }))
+    bar.spawn((
+        BarGroup::Tools,
+        layout(Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            right: px(0),
+            top: px(0),
+            bottom: px(0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::End,
+            padding: UiRect::bottom(px(9)),
+            column_gap: px(5),
+            ..default()
+        }),
+    ))
     .with_children(|row| {
         for (g, group) in SLOTS.iter().enumerate() {
             if g > 0 {
@@ -740,15 +756,18 @@ fn signal_glyph(b: &mut ChildSpawnerCommands, owner: Entity) {
 struct SignalGlyph(Entity, bool);
 
 fn spawn_time(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    bar.spawn(layout(Node {
-        position_type: PositionType::Absolute,
-        right: px(30),
-        top: px(0),
-        bottom: px(0),
-        align_items: AlignItems::Center,
-        column_gap: px(t::S6),
-        ..default()
-    }))
+    bar.spawn((
+        BarGroup::Time,
+        layout(Node {
+            position_type: PositionType::Absolute,
+            right: px(30),
+            top: px(0),
+            bottom: px(0),
+            align_items: AlignItems::Center,
+            column_gap: px(t::S6),
+            ..default()
+        }),
+    ))
     .with_children(|tm| {
         // Day strip.
         tm.spawn((
@@ -1114,6 +1133,45 @@ fn compact_bar(
         let w = px(if c { 62.0 } else { t::SLOT_W });
         if n.width != w {
             n.width = w;
+        }
+    }
+}
+
+/// The tool slots stand in the middle of the bar; where the bar is too
+/// narrow for that (a large interface size in a small window) they move to
+/// the middle of the room between the vitals and the clock, so the clock
+/// never runs into the last slot.
+fn keep_tools_clear(
+    root: Query<&ComputedNode, With<BarRoot>>,
+    mut groups: Query<(&BarGroup, &mut Node, &ComputedNode), Without<BarRoot>>,
+) {
+    let mut w = [0.0f32; 3];
+    let bar = root.single().map_or(0.0, |c| c.size.x * c.inverse_scale_factor);
+    for (g, _, c) in &groups {
+        let width = c.size.x * c.inverse_scale_factor;
+        match g {
+            BarGroup::Vitals => w[0] = width,
+            BarGroup::Time => w[2] = width,
+            BarGroup::Tools => {}
+        }
+    }
+    // The slots' own width: the row spans the bar, its content is centred.
+    let content = groups
+        .iter()
+        .find(|g| *g.0 == BarGroup::Tools)
+        .map_or(0.0, |(_, _, c)| c.content_size.x * c.inverse_scale_factor);
+    if bar <= 0.0 || content <= 0.0 {
+        return;
+    }
+    const GAP: f32 = 14.0;
+    let (left, right) = (30.0 + w[0] + GAP, 30.0 + w[2] + GAP);
+    let centred = (bar - content) * 0.5;
+    let crowded = centred < left || centred < right;
+    let (l, r) = if crowded { (px(left), px(right)) } else { (px(0), px(0)) };
+    for (g, mut n, _) in &mut groups {
+        if *g == BarGroup::Tools && (n.left != l || n.right != r) {
+            n.left = l;
+            n.right = r;
         }
     }
 }
