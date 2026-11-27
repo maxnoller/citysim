@@ -41,6 +41,43 @@ fn main() {
             overlaps += o.len() as u32;
             for x in &o {
                 worst = worst.max(x.2);
+                if std::env::var("RING_VERBOSE").is_ok() && x.2 > 0.3 {
+                    let desc = |id: citysim_sim::VehicleId| {
+                        let v = &w.vehicles[id];
+                        match v.junction {
+                            Some(jm) => {
+                                let j = w.traffic.junction_states.get(jm.node).unwrap();
+                                let m = &j.movements[jm.movement as usize];
+                                let p = m.ring_path().unwrap();
+                                format!(
+                                    "ring m{} {:?} arm{}l{}->arm{}l{} ringlane{} d {:.1}/{:.1} (entry {:.1} arc {:.1}) v {:.1}",
+                                    jm.movement,
+                                    m.turn,
+                                    m.from_arm,
+                                    m.from_lane,
+                                    m.to_arm,
+                                    m.to_lane,
+                                    p.ring_lane,
+                                    jm.distance,
+                                    m.length,
+                                    p.entry_len,
+                                    p.arc_len,
+                                    v.speed
+                                )
+                            }
+                            None => format!(
+                                "lane seg {:?} fwd {} lane {} prog {:.1} v {:.1}",
+                                v.segment, v.forward, v.lane, v.progress, v.speed
+                            ),
+                        }
+                    };
+                    println!(
+                        "t {t} depth {:.2}\n  {}\n  {}",
+                        x.2,
+                        desc(bodies[x.0].0),
+                        desc(bodies[x.1].0)
+                    );
+                }
             }
             max_in_box = max_in_box.max(w.vehicles.values().filter(|v| v.junction.is_some()).count());
         }

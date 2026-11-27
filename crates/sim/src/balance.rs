@@ -1173,31 +1173,29 @@ pub const RING_MIN_SWEEP: f32 = 0.12;
 /// an entry joins (1 = alike).
 pub const RING_EXIT_SPREAD: f32 = 1.0;
 /// Sideways acceleration drivers accept on the ring: speed = sqrt(a r).
-pub const RING_LATERAL_ACCEL: f32 = 2.2;
+pub const RING_LATERAL_ACCEL: f32 = 2.4;
 /// Slowest speed on a ring (the mini roundabout), m/s.
 pub const RING_MIN_SPEED: f32 = 3.0;
 /// Paths within this of a conflict point pass it, metres.
 pub const RING_CONFLICT_M: f32 = 2.0;
-/// Paths sharing the way this far before a conflict point follow each other
-/// there instead of conflicting, metres.
-pub const RING_SHARED_M: f32 = 4.0;
 /// Margin beyond a car's rear before a conflict point counts as cleared.
 pub const RING_CLEAR_M: f32 = 1.0;
 /// An entering car goes only when the next car on the ring reaches its
 /// merge point at least this long after the entering car's rear cleared
 /// it, seconds (with the time it takes to get there from where it stands,
 /// a critical gap of about 3.5 s from a stand).
-pub const RING_SAFETY_S: f32 = 1.0;
+pub const RING_SAFETY_S: f32 = 0.8;
 /// The same for a car leaving across the outer lane.
 pub const RING_CROSS_SAFETY_S: f32 = 0.8;
 /// Time headway on the ring, seconds.
-pub const RING_HEADWAY_S: f32 = 1.2;
+pub const RING_HEADWAY_S: f32 = 1.0;
 /// How far ahead along its path a car on the ring looks, metres.
 pub const RING_LOOKAHEAD_M: f32 = 22.0;
-/// Clearance between bodies on the ring: another car's half width plus a
-/// margin, metres (a car stops when its centre comes within its own half
-/// length plus this of another body).
-pub const RING_BODY_CLEAR_M: f32 = 1.3;
+/// Room a car on the ring keeps ahead of its body to another's (a
+/// standing queue's bumper gap), metres.
+pub const RING_FRONT_GAP_M: f32 = 1.0;
+/// Room it keeps to its sides, metres.
+pub const RING_SIDE_GAP_M: f32 = 0.3;
 /// Trucks go round a ring at this share of a car's speed.
 pub const RING_TRUCK_SPEED: f32 = 0.85;
 /// Routing: expected wait at a roundabout's give-way line, seconds.

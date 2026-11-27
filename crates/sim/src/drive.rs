@@ -707,11 +707,15 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     .then(fx.eta.total_cmp(&fy.eta))
                     .then(fx.idx.cmp(&fy.idx))
             });
+            // (front, its car in `ring_cars`), and whether its exit had room.
+            let mut let_in: Vec<(usize, usize)> = Vec::new();
+            let mut rooms = vec![true; e - k];
             for fi in order {
                 let f = fronts[fi];
                 let half = f.back - balance::STOP_LINE_M;
                 let mlen = j.movements[f.movement].length;
                 let room = exit_room(roads, &f, mlen, &rear, &rear_speed, &on_lane, &inbox);
+                rooms[fi - k] = room;
                 // Let go and too close to stop: keeps going.
                 let committed = f.go_before && f.speed * f.speed / (2.0 * balance::BRAKING) > f.d_line - f.back + 0.3;
                 let ok = committed
@@ -719,15 +723,44 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         && crate::roundabout::may_enter(&ring, j, f.movement, f.d_line, f.speed, half, &ring_cars));
                 fronts[fi].permit = ok;
                 if ok {
+                    let_in.push((fi, ring_cars.len()));
                     ring_cars.push(crate::roundabout::RingCar::new(j, f.movement, -f.d_line, f.speed, half));
                     if f.reaches {
                         inbox[f.exit_key] = inbox[f.exit_key].saturating_add(1);
                     }
+                }
+            }
+            // Entries let in this tick give way to each other too: one whose
+            // merge another's path passes too soon waits (unless it can no
+            // longer stop).
+            for &(fi, x) in &let_in {
+                let f = fronts[fi];
+                let committed = f.go_before && f.speed * f.speed / (2.0 * balance::BRAKING) > f.d_line - f.back + 0.3;
+                if committed {
+                    continue;
+                }
+                let others: Vec<crate::roundabout::RingCar> = ring_cars
+                    .iter()
+                    .enumerate()
+                    .filter(|&(y, c)| y != x && c.movement != usize::MAX)
+                    .map(|(_, c)| *c)
+                    .collect();
+                if !crate::roundabout::may_enter(&ring, j, f.movement, f.d_line, f.speed, ring_cars[x].half, &others) {
+                    fronts[fi].permit = false;
+                    ring_cars[x].movement = usize::MAX;
+                    if f.reaches {
+                        inbox[f.exit_key] = inbox[f.exit_key].saturating_sub(1);
+                    }
+                }
+            }
+            for fi in k..e {
+                let f = fronts[fi];
+                if f.permit {
                     if let Some(x) = cache.last_denial.get_mut(key_index(cars[f.idx].2)) {
                         *x = 255;
                     }
                 } else if f.d_line < f.back + 1.0 {
-                    let reason = if room { 3 } else { 1 };
+                    let reason = if rooms[fi - k] { 3 } else { 1 };
                     denials[reason] += 1;
                     let slot = key_index(node);
                     if cache.node_denials.len() <= slot {
@@ -1290,6 +1323,17 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     }
                 } else {
                     target = target.min(stop_speed(f.d_line - f.back));
+                    // At a roundabout the car just let in from this lane may
+                    // stand right beyond the line: keep the gap to it.
+                    if j.ring_geom.0.is_some() {
+                        let here = key as usize;
+                        let at = box_from.partition_point(|b| b.0 < here);
+                        if let Some(&(k, d)) = box_from.get(at)
+                            && k == here
+                        {
+                            target = target.min(follow_speed(f.d_line + d, hw));
+                        }
+                    }
                     // A car standing just beyond a short box (a bend, a join
                     // of curves) is closer than the stop line: keep the gap.
                     if rear[f.exit_key].is_finite() {

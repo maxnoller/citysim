@@ -262,6 +262,8 @@ pub struct RingPath {
     pub total: f32,
     /// Points every `SAMPLE_M` from 0 to `total` (the last at `total`).
     pub(crate) samples: Vec<[f32; 2]>,
+    /// Unit directions at the samples.
+    pub(crate) dirs: Vec<[f32; 2]>,
 }
 
 impl RingPath {
@@ -321,11 +323,12 @@ impl RingPath {
             exit_len,
             total: entry_len + arc_len + exit_len,
             samples: Vec::new(),
+            dirs: Vec::new(),
         };
         let n = (p.total / SAMPLE_M).ceil() as usize;
-        p.samples = (0..=n)
-            .map(|k| p.pose_at((k as f32 * SAMPLE_M).min(p.total)).0)
-            .collect();
+        let poses: Vec<([f32; 2], [f32; 2])> = (0..=n).map(|k| p.pose_at((k as f32 * SAMPLE_M).min(p.total))).collect();
+        p.samples = poses.iter().map(|x| x.0).collect();
+        p.dirs = poses.iter().map(|x| x.1).collect();
         p
     }
 }
@@ -705,13 +708,15 @@ pub(crate) fn build(
                     let d = geom::sub(*p, q);
                     geom::dot(d, d) < w2
                 }) {
-                    // A car on the same way just before the point follows
-                    // (or leads): no conflict to give way to.
-                    let back = (2.0 * balance::RING_SHARED_M / SAMPLE_M) as usize;
-                    let kx = px.sample_at(cp.s);
-                    let shared = k >= back
-                        && kx >= back
-                        && geom::dist(py.samples[k - back], px.samples[kx - back]) < balance::RING_CONFLICT_M;
+                    // A car on the same way before the point follows (or
+                    // leads): the same entry lane for a merge, the same ring
+                    // lane to the same exit lane for a crossing on the way out.
+                    let (a, b) = (&movements[mx], m);
+                    let shared = if cp.entry {
+                        (a.from_arm, a.from_lane) == (b.from_arm, b.from_lane)
+                    } else {
+                        (a.to_arm, a.to_lane) == (b.to_arm, b.to_lane) && py.ring_lane == px.ring_lane
+                    };
                     if !shared {
                         passes[(mx * MAX_POINTS + ci) * nm + my] = k as f32 * SAMPLE_M;
                     }
@@ -894,16 +899,17 @@ pub(crate) struct RingCar {
     pub speed: f32,
     pub half: f32,
     pub pos: [f32; 2],
+    pub dir: [f32; 2],
 }
 
 impl RingCar {
     pub(crate) fn new(j: &crate::junction::JunctionState, movement: usize, d: f32, speed: f32, half: f32) -> RingCar {
-        let pos = j.movements.get(movement).map_or([0.0; 2], |m| {
+        let (pos, dir) = j.movements.get(movement).map_or(([0.0; 2], [1.0, 0.0]), |m| {
             if d >= 0.0 {
-                m.pose_at(d).0
+                m.pose_at(d)
             } else {
                 let (p, dir) = m.pose_at(0.0);
-                [p[0] + dir[0] * d, p[1] + dir[1] * d]
+                ([p[0] + dir[0] * d, p[1] + dir[1] * d], dir)
             }
         });
         RingCar {
@@ -912,6 +918,7 @@ impl RingCar {
             speed,
             half,
             pos,
+            dir,
         }
     }
 }
@@ -957,7 +964,7 @@ pub(crate) fn may_enter(
         }
         last_entry = last_entry.max(cp.s);
         let t_me = arrival(d_line + cp.s + half + balance::RING_CLEAR_M, speed, vmax);
-        for y in cars {
+        for y in cars.iter().filter(|y| y.movement != usize::MAX) {
             let s_y = ring.passes(m, ci, y.movement);
             if !s_y.is_finite() {
                 continue;
@@ -998,59 +1005,101 @@ pub(crate) fn may_enter(
 }
 
 /// Free distance ahead of each car in the ring (how far its centre may
-/// travel along its path before it would touch another car), infinite when
-/// nothing is within `RING_LOOKAHEAD_M`. When two cars see each other the
-/// one further round the ring goes first.
+/// travel along its path before its body, with a margin, would touch
+/// another car), infinite when nothing is within `RING_LOOKAHEAD_M`. When
+/// two cars are each in the other's way (side by side where paths cross or
+/// merge), the one with more room to move goes on as far as it can without
+/// touching the other at all; the other waits.
 pub(crate) fn free_ahead(ring: &Ring, j: &crate::junction::JunctionState, cars: &[RingCar]) -> Vec<f32> {
     let n = cars.len();
-    let mut free = vec![f32::INFINITY; n];
-    let mut who = vec![usize::MAX; n];
     let look = balance::RING_LOOKAHEAD_M.min(0.45 * std::f32::consts::TAU * ring.dims.lane_r[1]);
-    for (xi, x) in cars.iter().enumerate() {
+    // How far car `xi` may go before touching car `yi` with margins
+    // `ahead` / `side`.
+    let hit = |xi: usize, yi: usize, ahead: f32, side: f32| -> f32 {
+        let (x, y) = (&cars[xi], &cars[yi]);
         let Some(px) = j.movements.get(x.movement).and_then(|m| m.ring_path()) else {
-            continue;
+            return f32::INFINITY;
         };
-        let k0 = px.sample_at(x.d.max(0.0) + SAMPLE_M);
-        let k1 = px.sample_at(x.d.max(0.0) + look);
-        for (yi, y) in cars.iter().enumerate() {
-            if yi == xi || geom::dist(x.pos, y.pos) > look + 8.0 {
+        // From just ahead of the car to `look` beyond, straight on past
+        // the end of its path (onto its exit lane).
+        let last = px.samples.len() - 1;
+        let start = (x.d.max(0.0) / SAMPLE_M).round() as usize + 1;
+        let steps = (look / SAMPLE_M) as usize;
+        (start..start + steps)
+            .find(|&k| {
+                let (c, d) = if k <= last {
+                    (px.samples[k], px.dirs[k])
+                } else {
+                    let (e, d) = (px.samples[last], px.dirs[last]);
+                    let over = (k - last) as f32 * SAMPLE_M;
+                    ([e[0] + d[0] * over, e[1] + d[1] * over], d)
+                };
+                let c = [c[0] + d[0] * ahead * 0.5, c[1] + d[1] * ahead * 0.5];
+                boxes_overlap(
+                    (c, d, x.half + ahead * 0.5, CAR_HALF_W + side),
+                    (y.pos, y.dir, y.half, CAR_HALF_W),
+                )
+            })
+            .map_or(f32::INFINITY, |k| ((k - 1) as f32 * SAMPLE_M - x.d).max(0.0))
+    };
+    // Every car in the way of every car: (free distance, which).
+    let mut ways: Vec<Vec<(f32, usize)>> = vec![Vec::new(); n];
+    for xi in 0..n {
+        for yi in 0..n {
+            if yi == xi || geom::dist(cars[xi].pos, cars[yi].pos) > look + 8.0 {
                 continue;
             }
-            let Some(m) = j.movements.get(y.movement) else { continue };
-            // The other car's body as a segment, and how close counts as
-            // touching: half of this car, the other's width, a margin.
-            let (c, dir) = if y.d >= 0.0 {
-                m.pose_at(y.d)
-            } else {
-                (y.pos, m.pose_at(0.0).1)
-            };
-            let a = [c[0] - dir[0] * y.half, c[1] - dir[1] * y.half];
-            let b = [c[0] + dir[0] * y.half, c[1] + dir[1] * y.half];
-            let reach = x.half + balance::RING_BODY_CLEAR_M;
-            if let Some(k) = (k0..=k1).find(|&k| crate::build::point_seg_dist(px.samples[k], a, b) < reach) {
-                let f = (k as f32 * SAMPLE_M - x.d).max(0.0);
-                if f < free[xi] {
-                    free[xi] = f;
-                    who[xi] = yi;
-                }
+            let f = hit(xi, yi, balance::RING_FRONT_GAP_M, balance::RING_SIDE_GAP_M);
+            if f.is_finite() {
+                ways[xi].push((f, yi));
             }
         }
     }
-    // Two cars in each other's way: the one further round goes.
+    let mut free: Vec<f32> = ways
+        .iter()
+        .map(|w| w.iter().map(|x| x.0).fold(f32::INFINITY, f32::min))
+        .collect();
     for xi in 0..n {
-        let yi = who[xi];
-        if yi == usize::MAX || who[yi] != xi || xi > yi {
-            continue;
+        for &(_, yi) in &ways[xi] {
+            if yi < xi || !ways[yi].iter().any(|w| w.1 == xi) {
+                continue;
+            }
+            // Each in the other's way: room without any margin decides.
+            let (tx, ty) = (hit(xi, yi, 0.2, 0.0), hit(yi, xi, 0.2, 0.0));
+            let (goes, other, room) = if tx > ty || (tx == ty && xi < yi) {
+                (xi, yi, tx)
+            } else {
+                (yi, xi, ty)
+            };
+            let rest = ways[goes]
+                .iter()
+                .filter(|w| w.1 != other)
+                .map(|w| w.0)
+                .fold(f32::INFINITY, f32::min);
+            free[goes] = rest.min(room);
         }
-        let (ax, ay) = (angle_of(ring.center, cars[xi].pos), angle_of(ring.center, cars[yi].pos));
-        // Is y downstream of x (by less than half a turn)?
-        let y_ahead = sweep(ax, ay) < std::f32::consts::PI;
-        let yields = if y_ahead { xi } else { yi };
-        let goes = if y_ahead { yi } else { xi };
-        let _ = yields;
-        free[goes] = f32::INFINITY;
     }
     free
+}
+
+/// Half a car's width (trucks alike), metres.
+const CAR_HALF_W: f32 = 1.05;
+
+/// Do two oriented rectangles `(centre, unit dir, half length, half
+/// width)` overlap? (Separating axes: only products and sums.)
+fn boxes_overlap(a: ([f32; 2], [f32; 2], f32, f32), b: ([f32; 2], [f32; 2], f32, f32)) -> bool {
+    let t = geom::sub(b.0, a.0);
+    for &(axis, owner) in &[(a.1, 0), ([-a.1[1], a.1[0]], 0), (b.1, 1), ([-b.1[1], b.1[0]], 1)] {
+        let _ = owner;
+        let proj = |bx: &([f32; 2], [f32; 2], f32, f32)| {
+            let r = [-bx.1[1], bx.1[0]];
+            bx.2 * geom::dot(bx.1, axis).abs() + bx.3 * geom::dot(r, axis).abs()
+        };
+        if geom::dot(t, axis).abs() > proj(&a) + proj(&b) {
+            return false;
+        }
+    }
+    true
 }
 
 /// A car on the ring about to leave across the outer lane (or merge into
@@ -1070,8 +1119,11 @@ pub(crate) fn crossing_hold(
             continue;
         }
         let to_point = cp.s - x.d - x.half - 0.5;
-        if to_point < x.speed * x.speed / (2.0 * balance::BRAKING) + 0.3 {
-            // Too close to stop: committed.
+        if to_point < -x.half {
+            continue;
+        }
+        if x.speed > 1.0 && to_point < x.speed * x.speed / (2.0 * balance::BRAKING) {
+            // Moving and too close to stop: committed.
             continue;
         }
         let t_me = arrival(cp.s - x.d + x.half + balance::RING_CLEAR_M, x.speed, vmax);

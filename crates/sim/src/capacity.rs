@@ -118,6 +118,9 @@ pub struct BenchResult {
     pub main_by_lane: [f32; 2],
     /// Entries by turn (straight, right, left, U-turn), cars per minute.
     pub by_turn: [f32; 4],
+    /// Mean seconds a car entering the junction stood (below
+    /// `WAIT_SPEED`) on its way there (queueing and waiting at the line).
+    pub mean_wait_s: f32,
 }
 
 struct ArmInfo {
@@ -253,6 +256,8 @@ pub fn run_traced(
     let mut green_ticks = [0u64; 4];
     let mut green_entries = [0u64; 4];
     let mut gave_up_base = w.traffic.stuck_removed;
+    let mut standing: std::collections::BTreeMap<VehicleId, u32> = Default::default();
+    let (mut wait_sum, mut wait_n) = (0u64, 0u64);
     for t in 0..total_s * tps {
         let measuring = t >= warmup_s * tps;
         if t == warmup_s * tps {
@@ -302,6 +307,11 @@ pub fn run_traced(
         }
         w.step();
         trace(&w, node, t);
+        for (id, v) in w.vehicles.iter() {
+            if v.junction.is_none() && v.speed < crate::balance::WAIT_SPEED {
+                *standing.entry(id).or_default() += 1;
+            }
+        }
         // Entries into the box.
         if let Some(n) = node {
             let mut now_in: Vec<VehicleId> = Vec::new();
@@ -309,6 +319,8 @@ pub fn run_traced(
                 if let Some(jm) = v.junction.filter(|jm| jm.node == n) {
                     now_in.push(id);
                     if measuring && !in_box.contains(&id) {
+                        wait_sum += standing.get(&id).copied().unwrap_or(0) as u64;
+                        wait_n += 1;
                         let from = arms
                             .iter()
                             .position(|a| a.as_ref().is_some_and(|a| a.segment == jm.from));
@@ -368,6 +380,7 @@ pub fn run_traced(
         control,
         main_by_lane: lane_count.map(|c| c as f32 / mins),
         by_turn: turn_count.map(|c| c as f32 / mins),
+        mean_wait_s: wait_sum as f32 / wait_n.max(1) as f32 / tps as f32,
     }
 }
 
