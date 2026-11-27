@@ -46,8 +46,8 @@ use super::toasts::{Toast, ToastKind};
 use super::widgets::UiAction;
 use crate::shared::{
     ActiveTool, BulldozeMode, CurveToolView, GameSet, HoveredCell, PointerOverUi, PreviewKind, RoadChoice, RoadMode,
-    RoadStretch, SimCommand, SimWorld, SnapFeedback, ToolModes, ToolPreview, WorldCamera, WorldHighlight, WorldTarget,
-    ZoneMode,
+    RoadStretch, ScriptPointer, SimCommand, SimWorld, SnapFeedback, ToolModes, ToolPreview, WorldCamera,
+    WorldHighlight, WorldTarget, ZoneMode,
 };
 
 // ---------------------------------------------------------------- options
@@ -495,6 +495,7 @@ fn track_pointer(
     hovered: Res<HoveredCell>,
     keys: Res<ButtonInput<KeyCode>>,
     window: Query<&Window, With<PrimaryWindow>>,
+    script: Res<ScriptPointer>,
     cameras: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     tool: Res<ActiveTool>,
     modes: Res<ToolModes>,
@@ -504,8 +505,7 @@ fn track_pointer(
 ) {
     state.on_map = hovered.0.is_some();
     if hovered.0.is_some() {
-        if let Ok(w) = window.single()
-            && let Some(pos) = w.cursor_position()
+        if let Some(pos) = script.position(window.single().ok())
             && let Ok((cam, tf)) = cameras.single()
             && let Some(p) = ground_at(cam, tf, pos)
         {

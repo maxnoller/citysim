@@ -309,7 +309,9 @@ fn draw(
     mut parts: Query<(Entity, &ToolPart, &mut Visibility)>,
     rigs: Query<&super::camera::CameraRig>,
     mut last_k: Local<f32>,
+    tool_time: Res<super::bench::ToolDrawTime>,
 ) {
+    let _timed = tool_time.time();
     // Marks grow with the zoom (in steps, so they are not re-meshed every
     // frame while zooming).
     let dist = rigs.iter().next().map_or(150.0, |r| r.current.distance);

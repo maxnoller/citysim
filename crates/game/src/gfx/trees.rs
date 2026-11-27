@@ -347,7 +347,9 @@ fn rebuild_trees(
     mut count: ResMut<TreeCount>,
     edges: Res<RoadEdges>,
     (view, time, greens): (Option<Res<CurveToolView>>, Res<Time<Real>>, Res<Greens>),
+    tool_time: Res<super::bench::ToolDrawTime>,
 ) {
+    let _timed = tool_time.time();
     state.since_ghost += time.delta_secs();
     let quality = drawn_quality(applied.as_deref(), *requested);
     let ghost = view.map(|v| Ghost::of(&v)).unwrap_or_default();

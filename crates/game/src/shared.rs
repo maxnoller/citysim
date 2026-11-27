@@ -174,6 +174,23 @@ pub struct HoveredPoint {
     pub zone_cell: Option<CellRef>,
 }
 
+/// Dev scripts without a window (`CITYSIM_BENCH`): the pointer's position
+/// in the world camera's viewport (logical px). Where there is no primary
+/// window, shared's hover and ui's tools take the pointer from here (the
+/// script presses the mouse buttons in `ButtonInput<MouseButton>`).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScriptPointer(pub Option<Vec2>);
+
+impl ScriptPointer {
+    /// The pointer: the window's cursor, else (no window) the script's.
+    pub fn position(&self, window: Option<&Window>) -> Option<Vec2> {
+        match window {
+            Some(w) => w.cursor_position(),
+            None => self.0,
+        }
+    }
+}
+
 /// True while the mouse is over a UI element (written by ui).
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PointerOverUi(pub bool);
@@ -693,6 +710,7 @@ impl Plugin for SharedPlugin {
         .init_resource::<HoveredCell>()
         .init_resource::<HoveredPoint>()
         .init_resource::<PointerOverUi>()
+        .init_resource::<ScriptPointer>()
         .init_resource::<CameraInputBlocked>()
         .init_resource::<ToolPreview>()
         .init_resource::<OverlayMode>()
@@ -755,6 +773,7 @@ fn compute_hover(
     window: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     over_ui: Res<PointerOverUi>,
+    script: Res<ScriptPointer>,
     sim: Res<SimWorld>,
     mut hovered: ResMut<HoveredCell>,
     mut point: ResMut<HoveredPoint>,
@@ -762,8 +781,7 @@ fn compute_hover(
     let mut cell = None;
     let mut ground = None;
     if !over_ui.0
-        && let Ok(window) = window.single()
-        && let Some(pos) = window.cursor_position()
+        && let Some(pos) = script.position(window.single().ok())
         && let Ok((camera, cam_tf)) = cameras.single()
         && let Ok(ray) = camera.viewport_to_world(cam_tf, pos)
         && let Some(hit) = ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))

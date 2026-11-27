@@ -10,8 +10,13 @@
 #   PERF_CHECK_ONLY=quality,actions10k scripts/perf-check.sh   # some runs only
 #
 # Runs: quality (CITYSIM_BENCH_SCRIPT=quality, ten switches), actions10k and
-# actions20k (CITYSIM_BENCH_SCRIPT=actions, HUD drawn), speed1 / speed12 (the
-# plain camera path at 1x and 12x), plain20k. All at 1920x1080 on High
+# actions20k (CITYSIM_BENCH_SCRIPT=actions, HUD drawn; they end with the tool
+# acts: a street grid pending while the camera pans and the pointer moves,
+# built and undone, a chain of curves, zone fill and marquee, the area
+# bulldozer; the grid is 8 x 13 blocks at 10,000 residents, 20 x 20 at
+# 20,000), tools14k (the tool acts alone in the owner's city of 13,800
+# residents), speed1 / speed12 (the plain camera path at 1x and 12x),
+# plain20k. All at 1920x1080 on High
 # (PERF_CHECK_SIZE, PERF_CHECK_QUALITY override). The demo cities come from
 # the shared demo cache (~/.cache/citysim/demos): the first run builds them
 # (about a minute for 10,000 residents, a few for 20,000 on 12 cores).
@@ -59,7 +64,8 @@ run actions10k CITYSIM_BENCH_SCRIPT=actions CITYSIM_BENCH_UI=1
 run speed1 CITYSIM_BENCH_FRAMES=1200 CITYSIM_BENCH_SPEED=0
 run speed12 CITYSIM_BENCH_FRAMES=1200 CITYSIM_BENCH_SPEED=3
 run plain20k CITYSIM_DEMO_POP=20000 CITYSIM_BENCH_FRAMES=1200
-run actions20k CITYSIM_DEMO_POP=20000 CITYSIM_BENCH_SCRIPT=actions CITYSIM_BENCH_UI=1
+run actions20k CITYSIM_DEMO_POP=20000 CITYSIM_BENCH_SCRIPT=actions CITYSIM_BENCH_UI=1 CITYSIM_BENCH_GRID=20x20
+run tools14k CITYSIM_DEMO_POP=13800 CITYSIM_BENCH_SCRIPT=tools CITYSIM_BENCH_UI=1
 
 python3 scripts/perf-summary.py "$out" | tee "$out/table.txt"
 echo "raw results: $out ($(($(date +%s) - start)) s)"
