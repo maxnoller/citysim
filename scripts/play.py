@@ -670,7 +670,9 @@ def launch(release, quality, demo, extra_env):
         try:
             cmd("ready", timeout=2.0)
             break
-        except RuntimeError:
+        except (RuntimeError, TimeoutError):
+            # Not ready yet ("err"), or no reply while the first frames
+            # build the render pipelines (slow on a software renderer).
             time.sleep(0.2)
     log("control channel up:", cmd("stats"))
 
