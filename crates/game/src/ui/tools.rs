@@ -323,6 +323,8 @@ pub struct ToolState {
     /// Commands of a plan being sent in parts, with the time each took to
     /// check (an estimate of what it costs to apply).
     outbox: std::collections::VecDeque<(Command, f32)>,
+    /// Zone fill results by start cell.
+    fill: FillCache,
     /// Checked time (ms) of the commands sent last frame, and the ratio of
     /// real applying time to it (`pump_outbox`).
     sent_estimate: f32,
@@ -330,6 +332,46 @@ pub struct ToolState {
     /// A plan was sent this frame (its parts' results are summarised by
     /// the tool, not toasted one by one).
     pub batch_frame: bool,
+}
+
+/// The zone fill's last result: the pointer moving over the same land asks
+/// for it every frame (twice), and a large area takes milliseconds.
+#[derive(Default)]
+struct FillCache(std::sync::Mutex<Option<(FillKey, CellRef, Vec<CellRef>)>>);
+
+/// The world a fill was worked out on: seed, versions (zoning bumps the
+/// grid's), day, buildings.
+type FillKey = (u64, u64, u64, u64, u64, usize);
+
+impl FillCache {
+    fn cells(&self, world: &World, at: [f32; 2]) -> Vec<CellRef> {
+        let z = &world.zoning;
+        // Started on usable land: the fill depends only on that cell.
+        let Some(start) = z.cell_at(at).filter(|&c| z.cell(c).is_some_and(|x| x.usable())) else {
+            return zoning::fill_area(world, at, FILL_LIMIT);
+        };
+        let v = &world.versions;
+        let key = (
+            world.seed,
+            v.roads,
+            v.grid,
+            v.buildings,
+            world.time.day as u64,
+            world.buildings.len(),
+        );
+        let Ok(mut cache) = self.0.lock() else {
+            return zoning::fill_area(world, at, FILL_LIMIT);
+        };
+        if let Some((k, c, cells)) = cache.as_ref()
+            && *k == key
+            && *c == start
+        {
+            return cells.clone();
+        }
+        let cells = zoning::fill_area(world, at, FILL_LIMIT);
+        *cache = Some((key, start, cells.clone()));
+        cells
+    }
 }
 
 /// An action waiting for its plan.
@@ -943,7 +985,7 @@ pub fn pending(
                     }
                 }
                 ZoneMode::Fill => {
-                    let cells = zoning::fill_area(world, c, FILL_LIMIT);
+                    let cells = state.fill.cells(world, c);
                     if cells.is_empty() {
                         return no_zone(zone, "No zoning land here: point between roads");
                     }
