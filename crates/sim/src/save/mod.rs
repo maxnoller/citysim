@@ -51,7 +51,7 @@ const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
-pub const EXTENSION_VERSION: u32 = 5;
+pub const EXTENSION_VERSION: u32 = 6;
 
 /// Every field of a [`Budget`], including those its own serde skips.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -251,6 +251,38 @@ impl ExtensionV5 {
     }
 }
 
+/// Extension block, version 6: version 5 plus people on foot (the walkers
+/// under way, the crossings' turn-taking timers by crossing, the day's
+/// walking counts).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ExtensionV6 {
+    v5: ExtensionV5,
+    walkers: Vec<(crate::CitizenId, crate::walk::Walker)>,
+    timers: Vec<(crate::walk::CrossingKey, crate::walk::CrossTimers)>,
+    stats: crate::walk::WalkStats,
+    /// `walk::Walking::routes_for`.
+    routes_for: u64,
+}
+
+impl ExtensionV6 {
+    pub(crate) fn of(w: &World) -> ExtensionV6 {
+        let net = &w.walking.net;
+        ExtensionV6 {
+            v5: ExtensionV5::of(w),
+            walkers: w.walking.walkers.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            timers: net
+                .crossings
+                .iter()
+                .zip(&w.walking.timers)
+                .filter(|(_, t)| **t != crate::walk::CrossTimers::default())
+                .map(|(c, t)| (c.key, *t))
+                .collect(),
+            stats: w.walking.stats.clone(),
+            routes_for: w.walking.routes_for,
+        }
+    }
+}
+
 /// Blocks before version 5 kept the traffic loss of the last booked day
 /// only (`Economy::last_day_traffic`): it goes to that day, the days
 /// before stay empty.
@@ -298,7 +330,7 @@ pub(crate) fn save(world: &World) -> Vec<u8> {
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     let body = postcard::to_stdvec(world).expect("World is always serialisable");
     out.extend_from_slice(&body);
-    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV5::of(world))).expect("serialisable");
+    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV6::of(world))).expect("serialisable");
     out.extend_from_slice(&ext);
     out
 }
@@ -327,6 +359,7 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     if version >= 5 {
         check_people(&world).map_err(LoadError::Corrupt)?;
     }
+    let mut walking: Option<ExtensionV6> = None;
     if !rest.is_empty() {
         let (ext_version, rest): (u32, &[u8]) =
             postcard::take_from_bytes(rest).map_err(|e| LoadError::Corrupt(format!("extension: {e}")))?;
@@ -354,6 +387,11 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
             5 => postcard::from_bytes::<ExtensionV5>(rest)
                 .map_err(bad)?
                 .restore(&mut world),
+            6 => {
+                let mut e = postcard::from_bytes::<ExtensionV6>(rest).map_err(bad)?;
+                std::mem::take(&mut e.v5).restore(&mut world);
+                walking = Some(e);
+            }
             _ => {}
         }
     }
@@ -381,6 +419,11 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     }
     if version < 5 {
         upgrade_people(&mut world);
+    }
+    // People on foot: the network for these roads, then the walkers under
+    // way (older saves: their walks stay timed off screen).
+    if let Some(e) = walking {
+        crate::walk::restore(&mut world, e.walkers, e.timers, e.stats, e.routes_for);
     }
     Ok(world)
 }

@@ -489,6 +489,9 @@ pub struct Sheet {
 /// draw (on foot, or a car beyond the cars shown), the place they are
 /// going: there is nothing to see on the way.
 pub fn person_position(world: &World, id: CitizenId) -> Option<[f32; 2]> {
+    if let Some((_, w)) = citysim_sim::walk::walker_of(world, id) {
+        return Some(w.pos);
+    }
     let v = inspect::citizen(world, id)?;
     if let Some(t) = v.trip {
         return match t.vehicle.and_then(|c| world.vehicles.get(c)) {
@@ -503,12 +506,16 @@ pub fn person_position(world: &World, id: CitizenId) -> Option<[f32; 2]> {
 /// shown.
 pub fn trip_unseen(world: &World, t: &inspect::TripView) -> bool {
     t.vehicle.is_none_or(|c| !world.vehicles.contains_key(c))
+        && !(t.mode == TravelMode::Walking && t.eta_tick.is_none())
 }
 
 /// Why a trip is not on the map, in words.
 fn unseen_words(t: &inspect::TripView) -> &'static str {
     match t.mode {
-        TravelMode::Walking => "On foot: the marker on the map shows where they should be by now",
+        TravelMode::Walking => {
+            "On foot where the map shows nobody (too many walking at once): the marker shows where they should be \
+             by now"
+        }
         TravelMode::NoCar => "Without a car they go by lift or bus: the marker shows where they should be by now",
         _ => {
             "Off screen: the map shows up to 125 cars per 1,000 residents, the rest drive in the same traffic. The \

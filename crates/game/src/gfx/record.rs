@@ -8,7 +8,12 @@
 //! render and save. The camera flies a Catmull-Rom path through
 //! `CITYSIM_RECORD_PATH` keyframes `"t,x,z,yaw,pitch,distance;..."`
 //! (seconds, sim metres, radians, metres) and every frame is saved as
-//! `dir/frame_00000.png`; the run ends after the last keyframe.
+//! `dir/frame_00000.png`; the run ends after the last keyframe. A
+//! keyframe may carry a seventh value, the sim speed from it on (an index
+//! into `SPEEDS`: 0 = 1x, 2 = 6x). `CITYSIM_RECORD_FOLLOW="t0,t1"`: from
+//! `t0` to `t1` seconds the camera's focus follows a person walking on the
+//! map (picked at `t0`: on the way to work if anyone is, nearest the focus;
+//! their drawn figure), the rest of the pose still from the path.
 //! `CITYSIM_RECORD_HOURS=a,b` draws the time of day moving from hour `a`
 //! to hour `b` over the path (day into night in one flight). Join the
 //! frames with e.g. `ffmpeg -framerate 30 -i dir/frame_%05d.png -c:v
@@ -29,8 +34,9 @@ pub fn enabled() -> bool {
     std::env::var_os("CITYSIM_RECORD").is_some_and(|v| !v.is_empty())
 }
 
-/// Keyframe: (seconds, focus x, focus z, yaw, pitch, distance).
-type Key = [f32; 6];
+/// Keyframe: (seconds, focus x, focus z, yaw, pitch, distance, speed
+/// index or -1).
+type Key = [f32; 7];
 
 #[derive(Resource)]
 struct Recorder {
@@ -45,6 +51,10 @@ struct Recorder {
     frame: u32,
     saved: u32,
     done_at: Option<u32>,
+    /// `CITYSIM_RECORD_FOLLOW` window, and who is followed.
+    follow: Option<(f32, f32)>,
+    followed: Option<citysim_sim::CitizenId>,
+    last_focus: Option<Vec3>,
 }
 
 const WARMUP: u32 = 90;
@@ -87,6 +97,12 @@ impl Plugin for RecordPlugin {
                 frame: 0,
                 saved: 0,
                 done_at: None,
+                follow: std::env::var("CITYSIM_RECORD_FOLLOW").ok().and_then(|s| {
+                    let (a, b) = s.split_once(',')?;
+                    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+                }),
+                followed: None,
+                last_focus: None,
             })
             .add_systems(Update, record.in_set(GameSet::Input));
     }
@@ -96,7 +112,7 @@ fn parse_keys(s: &str) -> Vec<Key> {
     s.split(';')
         .filter_map(|k| {
             let v: Vec<f32> = k.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-            (v.len() == 6).then(|| [v[0], v[1], v[2], v[3], v[4], v[5]])
+            (v.len() == 6 || v.len() == 7).then(|| [v[0], v[1], v[2], v[3], v[4], v[5], *v.get(6).unwrap_or(&-1.0)])
         })
         .collect()
 }
@@ -149,6 +165,8 @@ fn record(
     ready: Res<SceneReady>,
     mut clock: ResMut<SimClock>,
     mut camera: ResMut<CameraOverride>,
+    sim: Res<crate::shared::SimWorld>,
+    people: Query<&super::people::PersonVisual>,
     mut images: ResMut<Assets<Image>>,
     cams: Query<(Entity, Option<&RenderTarget>), With<WorldCamera>>,
     mut exit: MessageWriter<AppExit>,
@@ -165,7 +183,57 @@ fn record(
     }
     let end = rec.keys.last().map_or(0.0, |k| k[0]);
     let t = rec.frame.saturating_sub(WARMUP) as f32 / rec.fps;
-    camera.0 = Some(pose_at(&rec.keys, t));
+    let mut pose = pose_at(&rec.keys, t);
+    // The speed of the last keyframe passed that sets one.
+    if let Some(k) = rec.keys.iter().rev().find(|k| k[0] <= t && k[6] >= 0.0) {
+        clock.speed = (k[6] as usize).min(crate::shared::SPEEDS.len() - 1);
+    }
+    if let Some((t0, t1)) = rec.follow
+        && (t0..=t1).contains(&t)
+        && rec.frame > WARMUP
+    {
+        let w = &sim.world;
+        if rec
+            .followed
+            .is_none_or(|c| citysim_sim::walk::walker_of(w, c).is_none())
+            && rec.last_focus.is_none()
+        {
+            let f = pose.focus;
+            let to_work = |id: &citysim_sim::CitizenId| {
+                w.citizens
+                    .get(*id)
+                    .and_then(|c| c.location.journey())
+                    .is_some_and(|j| j.purpose == citysim_sim::TripPurpose::ToWork)
+            };
+            rec.followed = w
+                .walking
+                .walkers
+                .iter()
+                .filter(|(_, x)| x.left_m() > 60.0 && x.done_m() > 2.0)
+                .min_by(|a, b| {
+                    let d = |x: &citysim_sim::walk::Walker| Vec2::from(x.pos).distance(Vec2::new(f.x, f.z));
+                    (!to_work(a.0), d(a.1)).partial_cmp(&(!to_work(b.0), d(b.1))).unwrap()
+                })
+                .map(|(id, _)| *id);
+            if let Some(c) = rec.followed {
+                info!("record: following {c:?}");
+            }
+        }
+        let at = rec.followed.and_then(|c| {
+            let (leader, _) = citysim_sim::walk::walker_of(w, c)?;
+            people
+                .iter()
+                .find(|v| v.leader == leader && v.slot == 0)
+                .map(|v| v.drawn)
+        });
+        if let Some(p) = at {
+            rec.last_focus = Some(Vec3::new(p.x, 0.0, p.z));
+        }
+        if let Some(f) = rec.last_focus {
+            pose.focus = f;
+        }
+    }
+    camera.0 = Some(pose);
     if let Some((a, b)) = rec.hours {
         let k = (t / end.max(1e-3)).clamp(0.0, 1.0);
         hour.0 = Some(a + (b - a) * k);
@@ -205,7 +273,7 @@ mod tests {
 
     #[test]
     fn the_path_passes_through_its_keyframes() {
-        let keys = parse_keys("0,0,0,0,1,100; 5,100,0,1,0.8,200; 10,100,100,2,0.6,50");
+        let keys = parse_keys("0,0,0,0,1,100; 5,100,0,1,0.8,200,2; 10,100,100,2,0.6,50");
         assert_eq!(keys.len(), 3);
         for k in &keys {
             let p = pose_at(&keys, k[0]);

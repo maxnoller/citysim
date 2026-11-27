@@ -836,3 +836,85 @@ meant).
   `CommandError::NoSuchReceipt`. The interface's undo of a road sends it last, after taking the road back, putting the
   zoning the road's land took back (`ZoneCells`) and restoring the buildings (`RestoreBuilding`, which refunds the
   demolitions). Undoing a road still pays the bulldozer's dollar a cell to take it away.
+
+## 2026-11-27 (r7-walk: people walk)
+
+Citizens walk on the map: they leave a door, walk the pavements, wait at the kerb, cross on the zebras and go in at
+their destination. Module `citysim_sim::walk`; everything about people on foot is in `world.walking` (`Walking`).
+
+### The walking network (`walk::WalkNet`, derived, not saved)
+
+- Built from the roads when `versions.roads` changes (`walk::network(world)` once the simulation has built it for the
+  current roads): a pavement along both sides of every street and avenue at `half_width + pavement / 2` (
+  `balance::STREET_PAVEMENT_M` 1.25, `AVENUE_PAVEMENT_M` 1.5; none along the highway), kerb corners round every node,
+  a zebra across each junction arm where renderers draw one (stop line at least `ZEBRA_WIDTH_M + 1` from the node, not
+  across the highway, not overlapping another arm's zebra; centre line at `walk::zebra_line(setback)` = setback minus
+  `ZEBRA_INSET_M` 0.4 minus half of `ZEBRA_WIDTH_M` 1.75), and mid-block zebras on stretches of at least
+  `MIDBLOCK_MIN_M` 150 m between stop lines, one per `MIDBLOCK_SPACING_M` (`walk::midblock_positions(world, s)`,
+  metres from `a`: renderers draw these; gfx does in `road_geom::mesh_segment_with`).
+- `Crossing { key: CrossingKey { segment, at }, node, arm, from_a, center, dir, kind, half_width, ends, points }`,
+  `outline()` for drawing; `WalkNet::crossing(key)`, `on_segment(s)`, `at_arm(node, arm)`.
+- Doors: `walk::door(building)` = the middle of the lot's front edge, `DOOR_INSET_M` 1.5 inside; routes snap to the
+  nearest pavement within 45 m. `WalkNet::route(from, to, limit) -> Route { pts, marks: [(leg, CrossingKey)], len }`
+  (A*, crossings cost `WALK_CROSSING_COST_M` 8 m extra).
+
+### Walkers (`walk::Walker`, saved in extension block 6)
+
+- `world.walking.walkers: Walkers` (dense list keyed by the leading citizen: `get`, `iter`, `len`...). A `Walker` has
+  its `party` (children walking with the adult), `from`, `to`, `route`, `leg` / `along`, `speed`, a sideways
+  `offset`, `seed`, the pose `pos` / `heading` / `state: WalkState::{Walking, Waiting, Crossing}`, `walked_m` (the
+  walk cycle's phase), `done_m()`, `left_m()`, `ahead()` (the rest of the way from `pos`), `crossing()`.
+- `walk::walker_of(world, citizen) -> Option<(leader, &Walker)>` for a leader or a party member. A walking citizen's
+  `Journey` has `mode: Walking`, `arrive_tick: None` while walked on the map (`Some` when timed off screen as before:
+  over the walker budget `walk::walker_budget` = `WALKERS_PER_1000` 300 per 1,000 residents, 200-8,000); party
+  members carry `driver: Some(leader)`.
+- Pace `walk::pace(world, citizen)`: `WALK_SPEED` 1.75 m/s, ±`WALK_SPEED_SPREAD` 10 % by person, by stage
+  `WALK_STAGE_FACTOR` (children 0.82, teens 1.04, adults 1, seniors 0.78); a party walks at its slowest member's pace.
+- A road edit makes every walker find their way again from where they stand (`Walking::routes_for`, saved); without a
+  way they finish off screen.
+
+### Who walks
+
+- A trip from a building is walked when a route along the pavements exists no longer than `WALK_MAX_M` 650 m and than
+  their pace covers in `WALK_MAX_H` 4 h (to work `WALK_COMMUTE_MAX_H` 3 h, to lunch `LUNCH_WALK_MAX_TRIP_H` 1.5 h), and
+  the person's draw is below `walk::walk_share(len, senior)`: `WALK_SHARE_NEAR` 0.95 up to `WALK_NEAR_M` 120 m, falling
+  by 1/e every `WALK_DECAY_M` 200 m (seniors: `WALK_SENIOR_RANGE` 0.7 of the distances), times `WALK_COMMUTE_FACTOR` (1)
+  for commutes. The draw is a habit for commutes (both ways alike), daily otherwise. Children walk with the adult; a
+  worker may walk to lunch though the car is at work. The old rule (every trip within 100 m straight walked off screen)
+  is gone.
+- Commuters who walk plan by the walking time; a walked commute counts as a fine commute (happiness) and loses no
+  business tax to traffic.
+- Counts: `walking.stats` (`WalkStats`: trips started on foot and otherwise today / yesterday and by hour; `share()`).
+
+### Crossing rules
+
+- **Cars give way.** A car does not enter a junction while someone is on (or stepping onto) the zebra of its own arm
+  or of the arm it turns onto, on its half of the road (`walk::blocks_entry`); a car in a box stops short of the zebra
+  it turns onto (`walk::held_at`); a car stops short of a mid-block zebra with someone on it and keeps it clear (does not
+  enter it without room beyond) (`walk::zebra_ahead`). Hooks in `drive.rs` are marked "(walk.rs)".
+- **People never step in front of a car that cannot stop**: braking distance plus two ticks plus `PED_SAFETY_M` 1.5 m,
+  or a car over the zebra (`CrossNow::hazard`). A standing car can stop.
+- **Signals**: people cross an arm during a through phase that sends no traffic from that arm (not in protected-left
+  phases), stepping on only in the first `WALK_INTERVAL_S` 6 s of that green and only with time to cross before its
+  maximum (`walk::signal_walk`; `walk::walk_signal(world, node, arm)` for renderers). People waiting call the phase
+  (`junction::ArmDemand::walk_call`, `phase_demand`). Turning cars give way to them; there is no separate pedestrian
+  phase or extra all-red.
+- **Without signals** (give-way and all-way junctions, mid-block): people wait for a gap long enough to cross before the
+  next moving car (or a crawling queue within 8 m, or a car just let into the junction) arrives, for up to
+  `PED_PATIENCE_S` 40 s (on a main road: the major road of a give-way junction or a mid-block zebra, `PED_MAIN_PATIENCE_S`
+  40 s), then step out and the cars stop. Later arrivals join a group within `PED_GROUP_S` 2 s; once a car has stood
+  waiting `CAR_PATIENCE_S` 3 s, people let the cars go for `CAR_TURN_S` 6 s (`CrossTimers`, saved by `CrossingKey`).
+- Per tick: `walk::prepare` before the cars (who holds which half of which zebra, signal calls; gathered at the end of
+  the previous tick), `walk::tick` after them (cars' hazards at crossings people want to use, then the walkers move).
+
+### Saves
+
+- Extension block **6** (`ExtensionV6`: block 5 plus the walkers, crossing timers by `CrossingKey`, the day's walking
+  counts and `routes_for`). Blocks 1-5 load; their walks stay timed off screen.
+
+### Diagnostics and tools
+
+`walk::debug_holds(world)` (car ticks held at zebras by kind), `walk::people_on_crossings(world)` (bodies for overlap
+tests), `examples/walkprobe.rs` (`STREETS=1`, `SEED=n`: where people hold up cars in a grown city), `walkspots.rs`
+(busy squares, signals and give-ways with people, mid-block zebras of a saved city: camera poses), `headless` hourly
+CSVs gained `walkers_mean,walked,other`, daily `walked,other_trips`.

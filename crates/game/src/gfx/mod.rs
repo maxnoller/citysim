@@ -23,7 +23,9 @@ mod model_sheet;
 mod noise;
 mod overlay;
 mod palette;
+mod people;
 mod perf;
+mod person_gen;
 mod props;
 mod record;
 mod road_geom;
@@ -82,6 +84,7 @@ impl Plugin for GfxPlugin {
             yards::YardsPlugin,
             greens::GreensPlugin,
             model_sheet::ModelSheetPlugin,
+            people::PeoplePlugin,
         ));
     }
 }

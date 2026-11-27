@@ -1115,17 +1115,27 @@ pub(crate) struct ArmDemand {
     pub pocket_full: bool,
     /// Longest a front car calling from this arm has waited, seconds.
     pub wait_s: f32,
+    /// People wait to cross this arm (`walk`): a through phase that sends
+    /// no traffic from it serves them.
+    pub walk_call: bool,
 }
 
 fn phase_demand(phase: &SignalPhase, demand: &[ArmDemand]) -> bool {
-    phase.arms.iter().any(|&a| {
-        let d = demand.get(a as usize).copied().unwrap_or_default();
-        if phase.left_only {
-            d.left
-        } else {
-            d.through || d.left || d.through_left
-        }
-    })
+    // People waiting to cross (`walk::signal_walk`).
+    let walkers = !phase.left_only
+        && demand
+            .iter()
+            .enumerate()
+            .any(|(a, d)| d.walk_call && !phase.arms.contains(&(a as u8)));
+    walkers
+        || phase.arms.iter().any(|&a| {
+            let d = demand.get(a as usize).copied().unwrap_or_default();
+            if phase.left_only {
+                d.left
+            } else {
+                d.through || d.left || d.through_left
+            }
+        })
 }
 
 /// Advance a signal by one tick. `box_clear`: nobody is inside the box

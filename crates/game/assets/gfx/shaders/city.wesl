@@ -26,6 +26,9 @@ struct CityParams {
     unused: f32,
     // Cloud drift speed, m/s (x, y), cloud size, m (z), unused (w).
     wind: vec4<f32>,
+    // People's colours: skin from 0, hair from 8, clothes on top from 16,
+    // below from 32 (`city_material::PERSON_COLOURS_AT`).
+    people: array<vec4<f32>>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
@@ -133,7 +136,7 @@ fn line_dist(x: f32) -> f32 {
 }
 
 // Surface patterns of the detailed building models (`Glow::Roof` ..
-// `Glow::Membrane`): a brightness factor for the base colour.
+// `Glow::Membrane`, tags 20-24): a brightness factor for the base colour.
 // `fw`: fwidth of the world position (taken in uniform control flow).
 fn surface_pattern(kind: u32, wp: vec3<f32>, n: vec3<f32>, fw: vec3<f32>) -> f32 {
     // Horizontal direction along the surface.
@@ -142,7 +145,7 @@ fn surface_pattern(kind: u32, wp: vec3<f32>, n: vec3<f32>, fw: vec3<f32>) -> f32
     let t = select(vec2<f32>(1.0, 0.0), t2 / max(tl, 1e-4), tl > 0.05);
     let along = dot(wp.xz, t);
     let fa = dot(fw.xz, abs(t));
-    if kind == 10u {
+    if kind == 20u {
         // Roof tiles: courses up the slope with a shadow line under each,
         // staggered joints, a little colour per tile.
         let slope = max(sqrt(max(1.0 - n.y * n.y, 0.0)), 0.25);
@@ -154,12 +157,12 @@ fn surface_pattern(kind: u32, wp: vec3<f32>, n: vec3<f32>, fw: vec3<f32>) -> f32
         let joint = 1.0 - 0.1 * (1.0 - smoothstep(0.0, 0.06, line_dist(j))) * pattern_fade(fa / 0.42);
         let h = hash21(vec2<f32>(floor(j), course));
         return mix(1.0, shadow * joint * (0.95 + 0.1 * h), f);
-    } else if kind == 11u {
+    } else if kind == 21u {
         // Weatherboard: boards 0.24 m, a dark lap line under each.
         let y = wp.y / 0.24;
         let lap = 1.0 - 0.16 * (1.0 - smoothstep(0.0, 0.16, fract(y)));
         return mix(1.0, lap, pattern_fade(fw.y / 0.24));
-    } else if kind == 12u {
+    } else if kind == 22u {
         // Brick: courses 0.2 m, bricks 0.46 m, light mortar, some variety.
         let y = wp.y / 0.2;
         let course = floor(y);
@@ -171,13 +174,13 @@ fn surface_pattern(kind: u32, wp: vec3<f32>, n: vec3<f32>, fw: vec3<f32>) -> f32
         let h = hash21(vec2<f32>(floor(x), course));
         let f = pattern_fade(max(fw.y / 0.2, fa / 0.46));
         return mix(1.0, (0.9 + 0.16 * h) * (1.0 + 0.22 * mortar), f);
-    } else if kind == 13u {
+    } else if kind == 23u {
         // Profiled metal sheet: ribs every 0.32 m, lit on one side.
         let x = along / 0.32;
         let r = fract(x);
         let rib = 0.94 + 0.1 * smoothstep(0.0, 0.25, r) * (1.0 - smoothstep(0.3, 0.45, r));
         return mix(1.0, rib, pattern_fade(fa / 0.32));
-    } else if kind == 14u {
+    } else if kind == 24u {
         // Flat roof: membrane panels with faint seams and weathering.
         let p = wp.xz / vec2<f32>(2.2, 1.6);
         let seam = 1.0 - 0.07 * (1.0 - smoothstep(0.0, 0.04, min(line_dist(p.x), line_dist(p.y))));
@@ -204,7 +207,7 @@ fn fragment(
 @if(VERTEX_UVS_A) {
     let kind = u32(in.uv.x + 0.5);
     let base = pbr_input.material.base_color.rgb;
-    if kind >= 10u && kind <= 14u {
+    if kind >= 20u && kind <= 24u {
         let k = surface_pattern(kind, wp, normalize(in.world_normal), fw);
         pbr_input.material.base_color = vec4<f32>(base * k, 1.0);
     } else if kind == 1u {
@@ -260,6 +263,23 @@ fn fragment(
         if h < city.windows * (0.14 + 0.4 * wall) {
             glow += warm * (2.4 * city.night * (0.4 + 0.6 * far));
         }
+    } else if kind >= 10u && kind <= 13u {
+        // A person's colour slot, picked by the entity's tag
+        // (`person_gen::person_tag`); the vertex colour shades it.
+        let tag = get_tag(in.instance_index);
+        var idx = 32u + ((tag >> 5u) & 7u);
+        if kind == 10u {
+            idx = ((tag >> 8u) & 7u) % 6u;
+        } else if kind == 11u {
+            idx = 8u + ((tag >> 11u) & 7u);
+        } else if kind == 12u {
+            idx = 16u + ((tag >> 1u) & 15u);
+        }
+        let col = base * city.people[idx].rgb;
+        pbr_input.material.base_color = vec4<f32>(col, 1.0);
+        // Under the street lights at night: a faint lift so people read
+        // against the dark pavement (not a glow).
+        glow = col * (0.22 * city.night);
         } else if kind == 7u {
         // Shop fronts: a warm interior glow, kept low so a whole glazed
         // ground floor does not bloom into a white panel.

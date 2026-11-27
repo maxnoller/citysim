@@ -970,6 +970,10 @@ fn depart_some(world: &mut World, budget: &mut i64, ended: &mut Vec<Ended>) {
         };
         set_pose(&world.roads, &mut v);
         let id = world.vehicles.insert(v);
+        // People at zebras see it this tick too (`walk`).
+        let slot = crate::idmap::key_index(from.segment) as u32;
+        let at = world.cache.walk_lanes.partition_point(|x| x.0 < slot);
+        world.cache.walk_lanes.insert(at, (slot, id));
         world.traffic.trips.insert(
             id,
             Trip {

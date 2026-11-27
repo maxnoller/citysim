@@ -39,18 +39,25 @@ pub enum Glow {
     /// on a faint warm glow by the share of lit windows, so a town zoomed
     /// all the way out (windows a pixel or less) still reads as lit.
     Body = 9,
+    /// People's colour slots: the colour comes from the palette by the
+    /// entity's `MeshTag` (`person_gen::person_tag`), the vertex colour
+    /// only shades it. Never glows.
+    PersonSkin = 10,
+    PersonHair = 11,
+    PersonTop = 12,
+    PersonBottom = 13,
     // Surfaces (not lights): a faint procedural pattern in the shader,
     // faded out with distance. Only the detailed models carry them.
     /// Roof tiles: courses along the slope, a little variation per tile.
-    Roof = 10,
+    Roof = 20,
     /// Weatherboard / siding: horizontal boards.
-    Siding = 11,
+    Siding = 21,
     /// Brick: courses and staggered joints.
-    Brick = 12,
+    Brick = 22,
     /// Profiled metal cladding: vertical ribs.
-    Cladding = 13,
+    Cladding = 23,
     /// Flat roof membrane / concrete: faint panel seams.
-    Membrane = 14,
+    Membrane = 24,
 }
 
 /// Flat-shaded, vertex-coloured triangle soup.

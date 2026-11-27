@@ -461,6 +461,8 @@ fn gap_s(j: &JunctionState, mine: u8, theirs: u8) -> f32 {
 
 pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
     let now = world.time.tick;
+    // People waiting at signalled crossings call their phase (`walk`).
+    let walk_calls = crate::walk::calls(world);
     // Stop lines for the current junction geometry.
     ensure_tables(world);
 
@@ -486,9 +488,11 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         vehicles,
         traffic,
         cache,
+        walking,
         ..
     } = world;
     let roads: &RoadNetwork = roads;
+    let walking: &crate::walk::Walking = walking;
     let traffic: &mut TrafficState = traffic;
     let setbacks_vec: Vec<[f32; 2]> = std::mem::take(&mut cache.setbacks);
     let setbacks: &[[f32; 2]] = &setbacks_vec;
@@ -642,7 +646,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 .min(u16::MAX as usize) as u16
         })
         .collect();
-    tick_signals(traffic, roads, &fronts, &can_go, &near_cars, &boxed, now);
+    tick_signals(traffic, roads, &fronts, &can_go, &near_cars, &boxed, &walk_calls, now);
     // Lanes whose front car waits at a red light: waiting there is normal
     // (a red can last a whole cycle), so it does not count towards giving
     // up.
@@ -805,6 +809,21 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     }
                 };
             }
+            // People on the zebras it would cross (walk.rs).
+            if ok
+                && let Some(ci) =
+                    crate::walk::blocks_entry(walking, roads, node, f.arm, j.arm_of(f.to).map(|b| b as u8))
+            {
+                ok = false;
+                if f.speed < balance::WAIT_SPEED && f.d_line < f.back + 2.0 {
+                    // Diagnostics: entering at signals / elsewhere, by the
+                    // zebra of its own arm or the one it turns onto.
+                    let own = crate::walk::held_at(walking, roads, node, f.arm, true);
+                    let k = usize::from(j.control != JunctionControl::Signal) + if own { 0 } else { 5 };
+                    cache.walk_holds[k] += 1;
+                    cache.walk_waits.push(ci);
+                }
+            }
             if ok {
                 // Yield to conflicting cars with precedence arriving soon.
                 let mine = class(j, &f);
@@ -924,6 +943,17 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     if rear[ek].is_finite() {
                         target = target.min(follow_speed(m.length - jm.distance + rear[ek] - exit_start, hw));
                     }
+                }
+            }
+            // People on the zebra it turns onto: wait short of it (walk.rs).
+            if let Some(b) = j.arm_of(jm.to)
+                && crate::walk::held_at(walking, roads, jm.node, b as u8, false)
+            {
+                let half = stop_back_m(is_truck(traffic.trips.get(id))) - balance::STOP_LINE_M;
+                let near = m.length - balance::ZEBRA_INSET_M - balance::ZEBRA_WIDTH_M;
+                if jm.distance + half <= near {
+                    target = target.min(stop_speed(near - balance::STOP_LINE_M - half - jm.distance));
+                    cache.walk_holds[2] += 1;
                 }
             }
             let speed = (v.speed + balance::ACCELERATION * DT).min(target).max(0.0);
@@ -1089,6 +1119,18 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     && next_turn(roads, traffic, pockets, v).is_some_and(|(_, m)| m & (1 << pl) != 0)
                 {
                     target = target.min(stop_speed(entry - v.progress));
+                }
+            }
+            // A mid-block zebra ahead: stop short of it for people on it, or
+            // while there is no room beyond it (keep it clear) (walk.rs).
+            if let Some((near, far, held)) = crate::walk::zebra_ahead(walking, s, v.forward, len, v.progress) {
+                let half = stop_back_m(is_truck(trip)) - balance::STOP_LINE_M;
+                if v.progress + half <= near + 0.05 {
+                    let full = leader.is_some_and(|lp| lp - balance::CAR_BODY_M[0] < far + 1.0);
+                    if held || full {
+                        target = target.min(stop_speed(near - balance::STOP_LINE_M - half - v.progress));
+                        cache.walk_holds[if held { 3 } else { 4 }] += 1;
+                    }
                 }
             }
             if let Some(lp) = leader {
@@ -1291,6 +1333,15 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             .map_or(0.0, |t| (now - t.requested_tick.min(now)) as f32 * DT);
         done.push((id, TripEnd::GaveUp(secs)));
     }
+    // Where the cars are, for the people at zebras (walk.rs; a car that
+    // changed lanes or entered a box this tick is still found by its
+    // junction).
+    cache.walk_lanes.clear();
+    cache
+        .walk_lanes
+        .extend(cars.iter().map(|c| (c.0 / (2 * LANE_SLOTS as u32), c.2)));
+    cache.walk_boxed.clear();
+    cache.walk_boxed.extend(boxed.iter().map(|b| (b.0, b.3)));
     world.cache.setbacks = setbacks_vec;
     world.cache.pockets = pockets_vec;
     for (id, f) in done {
@@ -1339,6 +1390,7 @@ fn exit_room(
     room + v * t >= ahead + balance::MIN_GAP_M
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tick_signals(
     traffic: &mut TrafficState,
     roads: &RoadNetwork,
@@ -1346,6 +1398,7 @@ fn tick_signals(
     can_go: &[bool],
     near_cars: &[u16],
     boxed: &[(u32, u16, f32, VehicleId)],
+    walk_calls: &[(usize, u8)],
     now: u64,
 ) {
     use crate::junction::ArmDemand;
@@ -1403,6 +1456,12 @@ fn tick_signals(
                 d.wait_s = d.wait_s.max(f.wait as f32 / crate::TICKS_PER_SECOND as f32);
             }
             kk += 1;
+        }
+        let w0 = walk_calls.partition_point(|c| c.0 < slot);
+        for &(_, arm) in walk_calls[w0..].iter().take_while(|c| c.0 == slot) {
+            if let Some(d) = per_arm.get_mut(arm as usize) {
+                d.walk_call = true;
+            }
         }
         let box_clear = !(b < boxed.len() && boxed[b].0 as usize == slot);
         crate::junction::tick_signal(j, &per_arm, now, box_clear);

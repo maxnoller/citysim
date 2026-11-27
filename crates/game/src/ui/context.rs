@@ -358,7 +358,53 @@ pub fn inspect_card(world: &World, target: &WorldTarget) -> Option<Card> {
         WorldTarget::Road(stretch) => road_card(world, &stretch.segments),
         WorldTarget::Junction { node, .. } => junction_card(world, *node),
         WorldTarget::Vehicle(v) => vehicle_card(world, *v),
+        WorldTarget::Walker(c) => walker_card(world, *c),
     }
+}
+
+/// A person walking on the map: who, why, from where to where, how far.
+fn walker_card(world: &World, id: citysim_sim::CitizenId) -> Option<Card> {
+    let (_, w) = citysim_sim::walk::walker_of(world, id)?;
+    let t = citysim_sim::inspect::citizen(world, id)?.trip?;
+    let mut card = Card::new(icon::USER, t::ACCENT);
+    card.title = format!("{} · on foot", super::people::name(world, id));
+    card.rows.push(Row::new(
+        "Walking",
+        super::people::reason_word(t.reason).to_string(),
+        t::TEXT,
+    ));
+    if let Some(from) = w.from {
+        card.rows.push(Row::new(
+            "From",
+            super::people::building_name(world, from),
+            t::TEXT_MUTED,
+        ));
+    }
+    card.rows
+        .push(Row::new("To", super::people::building_name(world, w.to), t::TEXT));
+    card.rows.push(Row::new(
+        "Still to go",
+        super::readout::metres(w.left_m()),
+        t::TEXT_MUTED,
+    ));
+    if !w.party.is_empty() {
+        let n = w.party.len();
+        card.rows.push(Row::new(
+            "With",
+            if n == 1 {
+                "a child".to_string()
+            } else {
+                format!("{n} children")
+            },
+            t::TEXT_MUTED,
+        ));
+    }
+    card.hint = if w.state == citysim_sim::walk::WalkState::Waiting {
+        "Waiting to cross · click to follow".into()
+    } else {
+        "Click to follow".into()
+    };
+    Some(card)
 }
 
 /// A car or truck: who is in it and where it goes.
