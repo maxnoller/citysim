@@ -70,7 +70,7 @@ pub struct PanelArea(pub Option<Rect>);
 
 /// The plate of the side panel.
 #[derive(Component)]
-struct PanelPlate;
+pub struct PanelPlate;
 
 /// The line from what is selected to the panel, and its two ends.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -379,9 +379,12 @@ fn spawn_panel(mut commands: Commands, mut cache: ResMut<PlateCache>, mut mats: 
             ))
             .with_child((
                 Body(Root::Panel),
+                // Shrinks to the plate (whose height the screen bounds), so
+                // the sheet's body scrolls instead of running under the bar.
                 layout(Node {
                     flex_direction: FlexDirection::Column,
-                    max_height: percent(100),
+                    flex_shrink: 1.0,
+                    min_height: px(0),
                     width: percent(100),
                     ..default()
                 }),

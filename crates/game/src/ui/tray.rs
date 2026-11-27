@@ -9,10 +9,11 @@
 //! One page shows at a time; the drawer rises from behind the bar when it
 //! opens and sinks when it closes.
 //!
-//! Keyboard: F6 moves the focus into the open city window or drawer (and
-//! out again); the arrow keys move it to the nearest control in that
-//! direction, Enter presses it, Esc leaves. The camera ignores the arrows
-//! meanwhile.
+//! Keyboard: F6 moves the focus through what is open (the city window, the
+//! drawer, the side panel; Shift+F6 backwards) and out again; the arrow
+//! keys move it to the nearest control in that direction (a scrolling
+//! page or panel scrolls it into view), Enter presses it, Esc leaves. The
+//! camera ignores the arrows meanwhile.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
@@ -68,57 +69,126 @@ impl Plugin for TrayPlugin {
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct TrayExtent(pub f32);
 
-/// The control of the drawer that has the keyboard focus.
+/// The control that has the keyboard focus.
 #[derive(Default)]
 struct TrayFocus(Option<Entity>);
 
-/// Keyboard focus inside the open drawer (see the module notes).
+/// The plates the keyboard can work in, in F6 order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusArea {
+    Window,
+    Drawer,
+    Panel,
+}
+
+impl FocusArea {
+    const ALL: [FocusArea; 3] = [FocusArea::Window, FocusArea::Drawer, FocusArea::Panel];
+}
+
+type FocusButtons<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static UiButton,
+        &'static ComputedNode,
+        &'static bevy::ui::UiGlobalTransform,
+        &'static InheritedVisibility,
+        Has<Disabled>,
+        Has<Focused>,
+    ),
+>;
+
+/// The plate entities of the three areas.
+type FocusPlates<'w, 's> = (
+    Query<'w, 's, Entity, With<super::city::WindowPlate>>,
+    Query<'w, 's, Entity, With<TrayPlate>>,
+    Query<'w, 's, Entity, With<super::panel::PanelPlate>>,
+);
+
+/// Is `e` inside `root` (or `root` itself)? Also returns the nearest
+/// scrolling node on the way up, if any (every node has a
+/// `ScrollPosition`; the ones that scroll have `Overflow` scroll).
+fn inside(e: Entity, root: Entity, parents: &Query<&ChildOf>, nodes: &Query<&Node>) -> (bool, Option<Entity>) {
+    let mut cur = e;
+    let mut scroll = None;
+    for _ in 0..64 {
+        if cur == root {
+            return (true, scroll);
+        }
+        if scroll.is_none() && cur != e && nodes.get(cur).is_ok_and(|n| n.overflow.y == OverflowAxis::Scroll) {
+            scroll = Some(cur);
+        }
+        match parents.get(cur) {
+            Ok(p) => cur = p.parent(),
+            Err(_) => return (false, None),
+        }
+    }
+    (false, None)
+}
+
+/// Keyboard focus in the city window, the open drawer or the side panel
+/// (see the module notes).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn tray_keys(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut ui: ResMut<UiState>,
     root: Query<&TrayRoot>,
-    plate: Query<(&ComputedNode, &bevy::ui::UiGlobalTransform), With<TrayPlate>>,
-    buttons: Query<(
-        Entity,
-        &UiButton,
-        &ComputedNode,
-        &bevy::ui::UiGlobalTransform,
-        &InheritedVisibility,
-        Has<Disabled>,
-        Has<Focused>,
-    )>,
+    plates: FocusPlates,
+    buttons: FocusButtons,
+    (parents, scrollers): (Query<&ChildOf>, Query<&Node>),
+    mut scroll: Query<(&mut ScrollPosition, &ComputedNode, &bevy::ui::UiGlobalTransform)>,
     mut focus: Local<TrayFocus>,
     mut out: MessageWriter<UiAction>,
-    window_area: Res<super::city::WindowArea>,
+    (window_area, panel_area): (Res<super::city::WindowArea>, Res<super::panel::PanelArea>),
 ) {
-    // The city window first (it stands over everything), else the drawer.
-    let window = window_area.physical.filter(|_| ui.window.is_some());
-    let up = window.is_some() || root.single().is_ok_and(|r| r.t > 0.9 && r.shown.is_some());
-    if keys.just_pressed(KeyCode::F6) && !ui.menu_open {
-        let want = !ui.tray_focus && up;
-        ui.tray_focus = want;
-    }
-    if ui.tray_focus && (!up || ui.menu_open || keys.just_pressed(KeyCode::Escape)) {
-        ui.tray_focus = false;
-    }
-    // Its controls: visible buttons inside the plate (physical px).
-    let area = match window {
-        Some(r) => Some(r),
-        None => plate
-            .single()
-            .ok()
-            .map(|(n, tf)| Rect::from_center_size(tf.translation, n.size)),
+    let open = |a: FocusArea| match a {
+        FocusArea::Window => ui.window.is_some() && window_area.physical.is_some(),
+        FocusArea::Drawer => root.single().is_ok_and(|r| r.t > 0.9 && r.shown.is_some()),
+        FocusArea::Panel => panel_area.0.is_some(),
     };
-    let controls: Vec<(Entity, Vec2, UiAction)> = match area {
-        Some(area) if ui.tray_focus => buttons
+    let areas: Vec<FocusArea> = FocusArea::ALL.into_iter().filter(|a| open(*a)).collect();
+    let mut area = ui.focus.filter(|a| areas.contains(a));
+    if keys.just_pressed(KeyCode::F6) && !ui.menu_open {
+        // Through what is open, then out (Shift: the other way).
+        let back = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        let mut order: Vec<Option<FocusArea>> = areas.iter().copied().map(Some).collect();
+        order.insert(0, None);
+        let i = order.iter().position(|a| *a == area).unwrap_or(0) as i32;
+        let n = order.len() as i32;
+        area = order[(i + if back { -1 } else { 1 }).rem_euclid(n) as usize];
+        if area != ui.focus {
+            focus.0 = None;
+        }
+    }
+    if ui.menu_open || keys.just_pressed(KeyCode::Escape) {
+        area = None;
+    }
+    if ui.focus != area {
+        ui.focus = area;
+    }
+    if ui.tray_focus != area.is_some() {
+        ui.tray_focus = area.is_some();
+    }
+    let plate = match area {
+        Some(FocusArea::Window) => plates.0.single().ok(),
+        Some(FocusArea::Drawer) => plates.1.single().ok(),
+        Some(FocusArea::Panel) => plates.2.single().ok(),
+        None => None,
+    };
+    // Its controls: visible buttons inside the plate (physical px), with
+    // the scrolling node each sits in.
+    let controls: Vec<(Entity, Vec2, UiAction, Option<Entity>, Vec2)> = match plate {
+        Some(plate) => buttons
             .iter()
-            .filter(|b| b.4.get() && !b.5 && b.1.kind != ButtonKind::Slot)
-            .filter(|b| area.contains(b.3.translation) && b.2.size.x > 1.0)
-            .map(|b| (b.0, b.3.translation, b.1.action))
+            .filter(|b| b.4.get() && !b.5 && b.1.kind != ButtonKind::Slot && b.2.size.x > 1.0)
+            .filter_map(|b| {
+                let (yes, sc) = inside(b.0, plate, &parents, &scrollers);
+                yes.then_some((b.0, b.3.translation, b.1.action, sc, b.2.size))
+            })
             .collect(),
-        _ => Vec::new(),
+        None => Vec::new(),
     };
     if controls.is_empty() {
         focus.0 = None;
@@ -133,15 +203,22 @@ fn tray_keys(
         .into_iter()
         .find(|(k, _)| keys.just_pressed(*k))
         .map(|(_, d)| d);
+        let mut moved = false;
         match (cur, dir) {
-            // First focus: the top-left control.
+            // First focus: the top-left control in view.
             (None, _) => {
+                let in_view = |c: &&(Entity, Vec2, UiAction, Option<Entity>, Vec2)| {
+                    c.3.and_then(|s| scroll.get(s).ok())
+                        .is_none_or(|(_, n, tf)| Rect::from_center_size(tf.translation, n.size).contains(c.1))
+                };
                 focus.0 = controls
                     .iter()
+                    .filter(in_view)
                     .min_by(|a, b| (a.1.x + a.1.y * 4.0).total_cmp(&(b.1.x + b.1.y * 4.0)))
+                    .or_else(|| controls.first())
                     .map(|c| c.0);
             }
-            (Some(&(_, at, _)), Some(d)) => {
+            (Some(&(_, at, ..)), Some(d)) => {
                 // Nearest control ahead, preferring ones straight ahead.
                 let next = controls
                     .iter()
@@ -153,17 +230,38 @@ fn tray_keys(
                     .min_by(|a, b| a.0.total_cmp(&b.0));
                 if let Some((_, e)) = next {
                     focus.0 = Some(e);
+                    moved = true;
                 }
             }
-            (Some(&(_, _, action)), None) => {
+            (Some(&(_, _, action, ..)), None) => {
                 if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
                     out.write(action);
                 }
             }
         }
+        // Keep the focused control in view of its scrolling page.
+        if moved
+            && let Some(&(_, at, _, Some(sc), size)) = focus.0.and_then(|e| controls.iter().find(|c| c.0 == e))
+            && let Ok((mut pos, n, tf)) = scroll.get_mut(sc)
+        {
+            let view = Rect::from_center_size(tf.translation, n.size);
+            let margin = 24.0 / n.inverse_scale_factor.max(1e-3);
+            let (top, bottom) = (at.y - size.y * 0.5 - margin, at.y + size.y * 0.5 + margin);
+            let shift = if top < view.min.y {
+                top - view.min.y
+            } else if bottom > view.max.y {
+                bottom - view.max.y
+            } else {
+                0.0
+            };
+            if shift != 0.0 {
+                // ScrollPosition is in logical px.
+                pos.0.y = (pos.0.y + shift * n.inverse_scale_factor).max(0.0);
+            }
+        }
     }
     for (e, .., focused) in &buttons {
-        let want = ui.tray_focus && focus.0 == Some(e);
+        let want = area.is_some() && focus.0 == Some(e);
         if want && !focused {
             commands.entity(e).insert(Focused);
         } else if !want && focused && !ui.menu_open {
