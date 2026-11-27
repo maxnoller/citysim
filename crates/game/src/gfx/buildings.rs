@@ -202,11 +202,11 @@ fn spawn_models(
 
 /// A quality switch moves the near / middle boundary of every building.
 fn apply_quality(
-    applied: Res<QualityApplied>,
+    applied: Option<Res<QualityApplied>>,
     mut shown: Local<Option<GraphicsQuality>>,
     mut parts: Query<(&BuildingPart, &mut VisibilityRange, &mut Visibility)>,
 ) {
-    let Some(q) = applied.0 else { return };
+    let Some(q) = applied.and_then(|a| a.0) else { return };
     if *shown == Some(q) {
         return;
     }
@@ -222,8 +222,8 @@ fn apply_quality(
 }
 
 /// The near distance for buildings spawned now.
-fn current_near(applied: &QualityApplied, requested: GraphicsQuality) -> f32 {
-    near_distance(super::scene::drawn_quality(Some(applied), requested))
+fn current_near(applied: Option<&QualityApplied>, requested: GraphicsQuality) -> f32 {
+    near_distance(super::scene::drawn_quality(applied, requested))
 }
 
 #[derive(Component)]
@@ -419,9 +419,9 @@ fn sync_buildings(
     edges: Res<RoadEdges>,
     mut mouths: ResMut<DrivewayMouths>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
-    quality: (Res<QualityApplied>, Res<GraphicsQuality>),
+    quality: (Option<Res<QualityApplied>>, Res<GraphicsQuality>),
 ) {
-    let near = current_near(&quality.0, *quality.1);
+    let near = current_near(quality.0.as_deref(), *quality.1);
     let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
     if spawned.key == Some(key) && !spawned.filling {
         return;
@@ -583,9 +583,9 @@ fn advance_sites(
     mut models: ResMut<BuildingModels>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sites: Query<(Entity, &mut Site, &mut Transform, &Children), Without<Shrinking>>,
-    quality: (Res<QualityApplied>, Res<GraphicsQuality>),
+    quality: (Option<Res<QualityApplied>>, Res<GraphicsQuality>),
 ) {
-    let near = current_near(&quality.0, *quality.1);
+    let near = current_near(quality.0.as_deref(), *quality.1);
     let world = &sim.world;
     for (e, mut site, mut tf, children) in &mut sites {
         if !world.buildings.contains_key(site.id) {

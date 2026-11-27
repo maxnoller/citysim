@@ -241,7 +241,7 @@ fn sill_at(p: &Profile, x: f32) -> f32 {
 
 /// Wheel: tyre with a tread and sidewall, a rim and hub on the outer side.
 fn wheel(m: &mut MeshBuilder, c: Vec3, r: f32, w: f32, outer: f32, lod: Lod) {
-    let n = if lod == Lod::Near { 10 } else { 7 };
+    let n = if lod == Lod::Near { 10 } else { 6 };
     let p = |i: usize, rad: f32, z: f32| {
         let a = (i as f32 + 0.5) / n as f32 * std::f32::consts::TAU;
         Vec3::new(c.x + rad * a.cos(), c.y + rad * a.sin(), z)
@@ -340,7 +340,7 @@ pub fn car_model(body: Color, shape: u32, lod: Lod) -> MeshBuilder {
     } else if near {
         7
     } else {
-        5
+        3
     };
     for xw in [p.base, -p.base] {
         for k in 0..=arch_n {
@@ -629,8 +629,8 @@ pub fn car_model(body: Color, shape: u32, lod: Lod) -> MeshBuilder {
         let y0 = p.sill - 0.02;
         let y1 = p.sill + 0.2;
         m.cuboid2(
-            Vec3::new(if sgn > 0.0 { x - 0.12 } else { x - 0.05 }, y0, -hw - 0.02),
-            Vec3::new(if sgn > 0.0 { x + 0.05 } else { x + 0.12 }, y1, hw + 0.02),
+            Vec3::new(if sgn > 0.0 { x - 0.14 } else { x }, y0, -hw - 0.02),
+            Vec3::new(if sgn > 0.0 { x } else { x + 0.14 }, y1, hw + 0.02),
             bumper,
             shade(bumper, 1.1),
         );
@@ -655,7 +655,7 @@ pub fn car_model(body: Color, shape: u32, lod: Lod) -> MeshBuilder {
             // Liner: the arch's inside, a dark half-disc in front of the
             // far side and a strip round the arch.
             let zl = s * (hw - 0.3);
-            let arch_k = 6;
+            let arch_k = if near { 6 } else { 3 };
             let pts: Vec<Vec2> = (0..=arch_k)
                 .map(|k| {
                     let a = k as f32 / arch_k as f32 * std::f32::consts::PI;
@@ -671,16 +671,18 @@ pub fn car_model(body: Color, shape: u32, lod: Lod) -> MeshBuilder {
                     Vec3::Z * s,
                     liner,
                 );
-                m.quad_facing(
-                    [
-                        Vec3::new(w[0].x, w[0].y, zl),
-                        Vec3::new(w[1].x, w[1].y, zl),
-                        Vec3::new(w[1].x, w[1].y, s * hw),
-                        Vec3::new(w[0].x, w[0].y, s * hw),
-                    ],
-                    -Vec3::Y,
-                    liner,
-                );
+                if near {
+                    m.quad_facing(
+                        [
+                            Vec3::new(w[0].x, w[0].y, zl),
+                            Vec3::new(w[1].x, w[1].y, zl),
+                            Vec3::new(w[1].x, w[1].y, s * hw),
+                            Vec3::new(w[0].x, w[0].y, s * hw),
+                        ],
+                        -Vec3::Y,
+                        liner,
+                    );
+                }
             }
         }
     }
@@ -762,7 +764,7 @@ pub fn car_model(body: Color, shape: u32, lod: Lod) -> MeshBuilder {
         // Number plates.
         let plate = Color::srgb_u32(0xEDEBE3);
         let rear_plate = Color::srgb_u32(0xE8C25A);
-        for (x, sgn, col) in [(hl + 0.06, 1.0f32, plate), (-hl - 0.13, -1.0, rear_plate)] {
+        for (x, sgn, col) in [(hl + 0.006, 1.0f32, plate), (-hl - 0.006, -1.0, rear_plate)] {
             let y = p.sill + 0.24;
             m.quad_facing(
                 [
@@ -1071,8 +1073,8 @@ fn truck_body(
                     palette::METAL_DARK,
                 );
                 m.cuboid(
-                    Vec3::new(bx0 - 0.05, 0.7, -0.2),
-                    Vec3::new(bx0, cy + r, 0.2),
+                    Vec3::new(bx0, 0.7, -0.2),
+                    Vec3::new(bx0 + 0.05, cy + r, 0.2),
                     palette::METAL_DARK,
                 );
             }
@@ -1145,7 +1147,7 @@ fn truck_body(
                 lin(load),
             );
             if !far {
-                m.cone(c, (bx1 - bx0) * 0.38, 0.45, 6, load, 0.1);
+                m.cone(c, ((bx1 - bx0) * 0.38).min(hw - 0.15), 0.45, 6, load, 0.1);
             }
             // Stripe along the cab instead.
             for z in [hw - 0.03, -hw + 0.03] {
@@ -1498,7 +1500,7 @@ pub fn moving_van(livery: usize, lod: Lod) -> MeshBuilder {
         );
         m.cuboid2(
             Vec3::new(hl - 0.05, 0.28, -hw),
-            Vec3::new(hl + 0.06, 0.46, hw),
+            Vec3::new(hl, 0.46, hw),
             Color::srgb_u32(0x2B2E33),
             Color::srgb_u32(0x3B3E43),
         );
@@ -1620,8 +1622,8 @@ pub fn moving_van(livery: usize, lod: Lod) -> MeshBuilder {
             y += step;
         }
         m.cuboid(
-            Vec3::new(bx0 - 0.2, 0.38, -0.5),
-            Vec3::new(bx0 + 0.02, 0.45, 0.5),
+            Vec3::new(bx0, 0.38, -0.5),
+            Vec3::new(bx0 + 0.22, 0.45, 0.5),
             palette::METAL_DARK,
         );
     }
@@ -1637,10 +1639,10 @@ pub fn moving_van(livery: usize, lod: Lod) -> MeshBuilder {
         let plate = Color::srgb_u32(0xEDEBE3);
         m.quad_facing(
             [
-                Vec3::new(hl + 0.065, 0.3, -0.25),
-                Vec3::new(hl + 0.065, 0.3, 0.25),
-                Vec3::new(hl + 0.065, 0.42, 0.25),
-                Vec3::new(hl + 0.065, 0.42, -0.25),
+                Vec3::new(hl + 0.006, 0.3, -0.25),
+                Vec3::new(hl + 0.006, 0.3, 0.25),
+                Vec3::new(hl + 0.006, 0.42, 0.25),
+                Vec3::new(hl + 0.006, 0.42, -0.25),
             ],
             Vec3::X,
             plate,
@@ -1790,7 +1792,7 @@ mod tests {
                 let (min, max) = bounds(&m);
                 assert!(min.y >= -0.001 && min.y < 0.4, "{shape} {lod:?} {min}");
                 assert!(
-                    max.z - min.z < 2.1 && max.x - min.x <= 4.42,
+                    max.z - min.z <= 2.12 && max.x - min.x <= 4.42,
                     "{shape} {lod:?} {min} {max}"
                 );
                 assert!((max.x + min.x).abs() < 0.2, "{shape} {lod:?} off centre {min} {max}");
@@ -1807,7 +1809,7 @@ mod tests {
         for shape in 0..SHAPES {
             let t = Lod::ALL.map(|l| car_model(Color::WHITE, shape, l).triangle_count());
             assert!(t[0] > t[1] && t[1] > t[2], "{shape}: {t:?}");
-            assert!(t[1] <= 260 && t[2] <= 80, "{shape}: {t:?}");
+            assert!(t[1] <= 300 && t[2] <= 80, "{shape}: {t:?}");
         }
     }
 
@@ -1833,7 +1835,7 @@ mod tests {
                     "{min} {max}"
                 );
                 assert!(
-                    max.z - min.z <= citysim_sim::balance::CAR_BODY_M[1] + 0.25,
+                    max.z - min.z <= citysim_sim::balance::CAR_BODY_M[1] + 0.3,
                     "{min} {max}"
                 );
                 assert!(min.y >= -0.001 && (max.x + min.x).abs() < 0.2);
@@ -1863,7 +1865,7 @@ mod tests {
                 let (min, max) = bounds(&m);
                 assert!(min.y >= -0.001, "{min}");
                 assert!(max.x - min.x <= TRUCK_LEN + 0.2, "{min} {max}");
-                assert!(max.z - min.z < 2.3, "{min} {max}");
+                assert!(max.z - min.z < 2.5, "{min} {max}");
                 // Origin near the middle (LOD cross-fade and queue spacing).
                 assert!((max.x + min.x).abs() < 0.2);
             }

@@ -1130,6 +1130,11 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
     let v = inspect::vehicle(world, id)?;
     let veh = world.vehicles.get(id)?;
     let truck = v.purpose == TripPurpose::Goods;
+    // What the vehicle is, by its trip (gfx draws the same: a moving van
+    // for a household moving, a lorry for goods to or from the highway, a
+    // delivery truck for goods inside the town).
+    let moving = matches!(v.purpose, TripPurpose::MoveIn | TripPurpose::MoveOut);
+    let long_haul = truck && (v.origin == Place::Entry || v.destination == Place::Entry);
     let driver_trip = v
         .driver
         .or(v.owner)
@@ -1142,15 +1147,36 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
     }
     let mut s = Sheet {
         kind: SheetKind::Vehicle,
-        headline: if truck {
+        headline: if long_haul && v.destination == Place::Entry {
+            "Taking goods out of town".to_string()
+        } else if long_haul {
+            "Bringing goods into town".to_string()
+        } else if truck {
             "Delivering goods".to_string()
+        } else if moving {
+            format!(
+                "{} · {} aboard",
+                if v.purpose == TripPurpose::MoveIn {
+                    "Moving in"
+                } else {
+                    "Moving out"
+                },
+                v.occupants
+            )
         } else {
             format!("Going {} · {} aboard", reason_word(v.reason), v.occupants)
         },
         trip: driver_trip.map(|t| trip_bar(world, &t)),
         actions,
-        title: if truck {
+        title: if long_haul {
+            "Lorry".into()
+        } else if truck {
             "Delivery truck".into()
+        } else if moving {
+            match v.driver.or(v.owner) {
+                Some(d) => format!("{}'s moving van", name(world, d)),
+                None => "Moving van".into(),
+            }
         } else if let Some(d) = v.driver.or(v.owner) {
             format!("{}'s car", name(world, d))
         } else {
