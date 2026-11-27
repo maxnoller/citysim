@@ -1145,3 +1145,60 @@ pub const LATTICE_OFFSET_TOL: f32 = 0.02;
 /// `MIN_GAP_M` between centres, so no body may be longer than that.
 pub const CAR_BODY_M: [f32; 2] = [4.4, 1.9];
 pub const TRUCK_BODY_M: [f32; 2] = [5.3, 2.2];
+
+// ---------------------------------------------------------- roundabouts ----
+
+/// Price to build a roundabout by size (mini, small, medium, large), on top
+/// of taking down what stands on its land. A signalled junction costs
+/// nothing to build but `SIGNAL_UPKEEP_PER_DAY` a day.
+pub const ROUNDABOUT_COST: [i64; 4] = [1_200, 3_000, 6_500, 11_000];
+/// Upkeep of a roundabout per day by size (planting, kerbs, lamps), part
+/// of road upkeep.
+pub const ROUNDABOUT_UPKEEP_PER_DAY: [i64; 4] = [15, 25, 40, 60];
+/// Pavement round a ring, metres.
+pub const RING_PAVEMENT_M: f32 = 2.5;
+/// Verge beyond the pavement that the ring's land includes, metres.
+pub const RING_VERGE_M: f32 = 0.5;
+/// Give-way line distance outside the ring's outer kerb along an arm.
+pub const RING_GIVE_WAY_OUTSIDE_M: f32 = 1.0;
+/// Road an arm keeps between the ring's give-way line and the next
+/// junction's box, metres (a ring may not swallow its neighbour).
+pub const RING_MIN_ARM_M: f32 = 12.0;
+/// Roads a ring takes at most.
+pub const RING_MAX_ARMS: usize = 6;
+/// Least sweep round the ring between one arm's entry and the next arm's
+/// exit, radians.
+pub const RING_MIN_SWEEP: f32 = 0.12;
+/// How far before an arm a ring lane turns off for it, relative to where
+/// an entry joins (1 = alike).
+pub const RING_EXIT_SPREAD: f32 = 1.0;
+/// Sideways acceleration drivers accept on the ring: speed = sqrt(a r).
+pub const RING_LATERAL_ACCEL: f32 = 2.2;
+/// Slowest speed on a ring (the mini roundabout), m/s.
+pub const RING_MIN_SPEED: f32 = 3.0;
+/// Paths within this of a conflict point pass it, metres.
+pub const RING_CONFLICT_M: f32 = 2.0;
+/// Paths sharing the way this far before a conflict point follow each other
+/// there instead of conflicting, metres.
+pub const RING_SHARED_M: f32 = 4.0;
+/// Margin beyond a car's rear before a conflict point counts as cleared.
+pub const RING_CLEAR_M: f32 = 1.0;
+/// An entering car goes only when the next car on the ring reaches its
+/// merge point at least this long after the entering car's rear cleared
+/// it, seconds (with the time it takes to get there from where it stands,
+/// a critical gap of about 3.5 s from a stand).
+pub const RING_SAFETY_S: f32 = 1.0;
+/// The same for a car leaving across the outer lane.
+pub const RING_CROSS_SAFETY_S: f32 = 0.8;
+/// Time headway on the ring, seconds.
+pub const RING_HEADWAY_S: f32 = 1.2;
+/// How far ahead along its path a car on the ring looks, metres.
+pub const RING_LOOKAHEAD_M: f32 = 22.0;
+/// Clearance between bodies on the ring: another car's half width plus a
+/// margin, metres (a car stops when its centre comes within its own half
+/// length plus this of another body).
+pub const RING_BODY_CLEAR_M: f32 = 1.3;
+/// Trucks go round a ring at this share of a car's speed.
+pub const RING_TRUCK_SPEED: f32 = 0.85;
+/// Routing: expected wait at a roundabout's give-way line, seconds.
+pub const ROUTE_RING_S: f32 = 2.5;

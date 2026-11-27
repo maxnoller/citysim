@@ -128,6 +128,11 @@ fn angle_deg(a: [f32; 2], b: [f32; 2]) -> f32 {
 }
 
 /// Distance from a point to a convex polygon (0 inside).
+/// Distance from a point to a quad (0 inside).
+pub(crate) fn point_polygon_distance(p: [f32; 2], poly: &[[f32; 2]; 4]) -> f32 {
+    point_polygon_dist(p, poly)
+}
+
 fn point_polygon_dist(p: [f32; 2], poly: &[[f32; 2]; 4]) -> f32 {
     if crate::zoning::in_quad(poly, p) {
         return 0.0;
@@ -194,6 +199,15 @@ pub(crate) fn building_near(world: &World, c: &Curve, reach: f32) -> Option<(Bui
     best.map(|b| (b.1, b.2))
 }
 
+/// What taking these buildings down costs: the bulldozer's price by cell.
+pub(crate) fn demolition_price(world: &World, ids: &[BuildingId]) -> i64 {
+    ids.iter()
+        .filter_map(|&id| world.buildings.get(id))
+        .map(|b| b.footprint.area() as i64)
+        .sum::<i64>()
+        * balance::BULLDOZE_COST_PER_CELL
+}
+
 /// How far the quadrilateral `poly` reaches into the reserve of any road
 /// (metres; 0 or less: clear) and the unit direction away from the road it
 /// reaches into deepest. Measured as `building_near` measures it, so a
@@ -229,6 +243,15 @@ pub(crate) fn reserve_intrusion(world: &World, poly: &[[f32; 2]; 4]) -> (f32, [f
                 let n = libm::sqrtf(dx * dx + dy * dy).max(1e-6);
                 worst = (reach - d, [dx / n, dy / n]);
             }
+        }
+    }
+    // The land of roundabouts.
+    for (_, c, r) in crate::roundabout::reserves(world) {
+        let d = point_polygon_dist(c, poly);
+        if r - d > worst.0 {
+            let (dx, dy) = (centre[0] - c[0], centre[1] - c[1]);
+            let n = libm::sqrtf(dx * dx + dy * dy).max(1e-6);
+            worst = (r - d, [dx / n, dy / n]);
         }
     }
     worst

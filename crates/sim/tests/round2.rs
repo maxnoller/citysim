@@ -811,5 +811,6 @@ fn long_scripted_run_has_a_pinned_checksum() {
 /// cheaper avenues and money through the day; then by lunch out giving way
 /// to slow roads (and drawn at the big city's car share), courtesy at every
 /// priority junction, a 2.2 s street headway and the late shift an hour
-/// later.
-const PINNED_CHECKSUM: u64 = 0x36b5f64d457b3b01;
+/// later; then by extension block 7 (roundabouts; the state itself is
+/// unchanged: with block 5 written the sum is still 0x36b5f64d457b3b01).
+const PINNED_CHECKSUM: u64 = 0x74ba7131ba8c7c85;

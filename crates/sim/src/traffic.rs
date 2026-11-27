@@ -639,12 +639,12 @@ pub(crate) fn upgrade_junction_geometry(world: &mut World) {
         .filter(|&n| {
             states
                 .get(n)
-                .is_some_and(|j| junction::build_geometry(roads, n).1.len() != j.movements.len())
+                .is_some_and(|j| j.ring.is_none() && junction::build_geometry(roads, n).1.len() != j.movements.len())
         })
         .collect();
     for n in stale {
         let old = states.remove(n);
-        let mut fresh = junction::build_state(roads, n, old.as_ref());
+        let mut fresh = junction::build_state(roads, states, n, old.as_ref());
         if let Some(o) = old.filter(|o| o.queue.len() == fresh.queue.len()) {
             fresh.queue = o.queue;
         }
@@ -659,10 +659,37 @@ pub(crate) fn sync_junctions(world: &mut World) {
     world.traffic.junctions_version = world.versions.roads;
     let roads = &world.roads;
     let states = &mut world.traffic.junction_states;
+    // Roundabouts whose node went keep their land blocked until zoning
+    // looks again.
+    let mut gone: Vec<([f32; 2], f32)> = Vec::new();
+    for (n, j) in states.iter() {
+        if let Some(size) = j.ring
+            && !roads.nodes.contains_key(n)
+            && let Some(g) = &j.ring_geom.0
+        {
+            gone.push((g.center, size.dims().reserve_r()));
+        }
+    }
     states.retain_keys(|n| roads.nodes.contains_key(n));
     for n in roads.nodes.keys() {
         let old = states.remove(n);
-        states.insert(n, junction::build_state(roads, n, old.as_ref()));
+        let fresh = junction::build_state(roads, states, n, old.as_ref());
+        // A road edit left no room for the ring: an ordinary junction again.
+        if let Some(size) = old.as_ref().and_then(|o| o.ring)
+            && fresh.ring.is_none()
+        {
+            gone.push((roads.nodes[n].pos, size.dims().reserve_r()));
+        }
+        states.insert(n, fresh);
+    }
+    if !gone.is_empty() {
+        world.traffic.control_version += 1;
+        let boxes: Vec<([f32; 2], [f32; 2])> = gone
+            .iter()
+            .map(|&(c, r)| ([c[0] - r, c[1] - r], [c[0] + r, c[1] + r]))
+            .collect();
+        let doomed = crate::blocks::refresh_boxes(world, &boxes);
+        crate::growth::remove_buildings(world, &doomed);
     }
 }
 

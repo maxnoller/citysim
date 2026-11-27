@@ -662,7 +662,7 @@ fn controls(args: &[String]) {
     let mut w = World::load(&std::fs::read(&args[0]).unwrap()).unwrap();
     w.traffic.junctions_version = u64::MAX;
     w.step();
-    let mut by: BTreeMap<String, [u32; 3]> = BTreeMap::new();
+    let mut by: BTreeMap<String, [u32; 4]> = BTreeMap::new();
     for n in junction::junction_nodes(&w).collect::<Vec<_>>() {
         let j = junction::junction(&w, n).unwrap();
         let mut kinds: Vec<String> = j.arms.iter().map(|a| format!("{:?}", a.kind)).collect();
@@ -672,10 +672,11 @@ fn controls(args: &[String]) {
             (JunctionControl::Signal, _) => 0,
             (JunctionControl::Priority, false) => 1,
             (JunctionControl::Priority, true) => 2,
+            (JunctionControl::Roundabout, _) => 3,
         };
         by.entry(kinds.join("+")).or_default()[k] += 1;
     }
-    println!("pop {}: [signal, priority, all-way]", w.stats.population);
+    println!("pop {}: [signal, priority, all-way, roundabout]", w.stats.population);
     for (k, v) in by {
         println!("  {k}: {v:?}");
     }

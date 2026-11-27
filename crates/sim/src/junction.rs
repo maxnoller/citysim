@@ -51,6 +51,19 @@ pub enum JunctionControl {
     /// Stop / give-way signs: the minor roads yield to the major road.
     #[default]
     Priority,
+    /// A roundabout (`JunctionState::ring`): entering traffic gives way to
+    /// the ring. Saved as `Priority` in the body (the ring itself travels
+    /// in the extension block).
+    Roundabout,
+}
+
+/// The body of a save stores a roundabout's control as `Priority` (older
+/// builds read it; the ring is restored from the extension block).
+fn control_in_body<S: serde::Serializer>(c: &JunctionControl, s: S) -> Result<S::Ok, S::Error> {
+    match c {
+        JunctionControl::Roundabout => JunctionControl::Priority.serialize(s),
+        other => other.serialize(s),
+    }
 }
 
 /// What the player asked for at a junction (`Command::SetJunctionControl`).
@@ -123,6 +136,10 @@ pub struct Movement {
     pub length: f32,
     #[serde(skip)]
     arc: ArcTable,
+    /// At a roundabout: the way round the ring (`curve` then only joins
+    /// its ends; use `pose_at`).
+    #[serde(skip)]
+    ring: Option<std::sync::Arc<crate::roundabout::RingPath>>,
 }
 
 impl PartialEq for Movement {
@@ -177,13 +194,64 @@ impl Movement {
             curve,
             length,
             arc,
+            ring: None,
         }
     }
 
-    /// Point and unit direction `d` metres along the curve (clamped).
+    /// A movement round a roundabout along `path`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ring(
+        from_arm: u8,
+        to_arm: u8,
+        from_lane: u8,
+        to_lane: u8,
+        turn: Turn,
+        preferred: bool,
+        path: std::sync::Arc<crate::roundabout::RingPath>,
+    ) -> Movement {
+        let (p0, d0) = path.pose_at(0.0);
+        let (p3, d3) = path.pose_at(path.total);
+        let h = geom::dist(p0, p3) * 0.4;
+        let curve = Curve::new(p0, geom_add(p0, scale(d0, h)), geom_add(p3, scale(d3, -h)), p3);
+        Movement {
+            from_arm,
+            to_arm,
+            from_lane,
+            to_lane,
+            turn,
+            preferred,
+            curve,
+            length: path.total,
+            arc: ArcTable::default(),
+            ring: Some(path),
+        }
+    }
+
+    /// Point and unit direction `d` metres along the path (clamped).
     pub fn pose_at(&self, d: f32) -> ([f32; 2], [f32; 2]) {
+        if let Some(r) = &self.ring {
+            return r.pose_at(d);
+        }
         let p = self.curve.pose_at_with(&self.arc, d, 0.0);
         (p.pos, p.dir)
+    }
+
+    /// The way round a roundabout (`None` at other junctions).
+    pub fn ring_path(&self) -> Option<&crate::roundabout::RingPath> {
+        self.ring.as_deref()
+    }
+
+    /// Points along the path every `step` metres, its end included
+    /// (renderers: a ring movement is not one curve).
+    pub fn points(&self, step: f32) -> Vec<[f32; 2]> {
+        let mut out = Vec::new();
+        let mut d = 0.0;
+        while d < self.length {
+            out.push(self.pose_at(d).0);
+            d += step.max(0.1);
+        }
+        out.push(self.pose_at(self.length).0);
+        out
     }
 }
 
@@ -242,6 +310,7 @@ pub struct JunctionState {
     /// Player override.
     pub setting: JunctionSetting,
     /// Control in force.
+    #[serde(serialize_with = "control_in_body")]
     pub control: JunctionControl,
     /// Arms in `node.segments` order.
     pub arms: Vec<Arm>,
@@ -283,7 +352,19 @@ pub struct JunctionState {
     /// since (interim priority rule).
     pub last_served: u8,
     pub phase_count: u16,
+    /// A roundabout of this size (`Command::SetRoundabout`); `setting` is
+    /// what the junction goes back to without it. Saved in the extension
+    /// block (`save`).
+    #[serde(skip)]
+    pub ring: Option<crate::roundabout::RoundaboutSize>,
+    /// The ring's geometry and tables (derived from `ring` and the roads).
+    #[serde(skip)]
+    pub ring_geom: RingCache,
 }
+
+/// [`JunctionState::ring_geom`]: derived, rebuilt with the junction.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RingCache(pub Option<std::sync::Arc<crate::roundabout::Ring>>);
 
 /// [`JunctionState::clear_after`]: a cache of the movements' geometry
 /// (always equal for comparisons; empty until first used after a load).
@@ -461,6 +542,10 @@ fn on_arc(from: f32, to: f32, a: f32) -> bool {
     let span = (to - from).rem_euclid(4.0);
     let off = (a - from).rem_euclid(4.0);
     off > 0.0 && off < span
+}
+
+pub(crate) fn classify_turn(din: [f32; 2], dout: [f32; 2]) -> Turn {
+    classify(din, dout)
 }
 
 fn classify(din: [f32; 2], dout: [f32; 2]) -> Turn {
@@ -1010,21 +1095,46 @@ fn resolve(setting: JunctionSetting, arms: &[Arm], busy: bool) -> JunctionContro
     }
 }
 
-/// Fresh state for node `n`, keeping the setting, busy flag and (when the
-/// geometry did not change) the signal state of `old`.
-pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionState>) -> JunctionState {
-    let (mut arms, movements) = build_geometry(roads, n);
+/// Fresh state for node `n`, keeping the setting, busy flag, roundabout
+/// and (when the geometry did not change) the signal state of `old`.
+/// `states`: the other junctions (a roundabout checks it still fits
+/// between its neighbours; one that no longer does becomes an ordinary
+/// junction again).
+pub(crate) fn build_state(
+    roads: &RoadNetwork,
+    states: &crate::side::SideTable<NodeId, JunctionState>,
+    n: NodeId,
+    old: Option<&JunctionState>,
+) -> JunctionState {
+    let (mut arms, mut movements) = build_geometry(roads, n);
     mark_major(&mut arms);
-    let conflicts = build_conflicts(roads.nodes[n].pos, &movements);
+    let mut ring = None;
+    let mut ring_geom = RingCache::default();
+    if let Some(size) = old.and_then(|o| o.ring)
+        && let Ok(ring_arms) = crate::roundabout::fit(roads, states, n, size)
+    {
+        let prev = old.and_then(|o| o.ring_geom.0.as_ref());
+        let (g, ms) = crate::roundabout::build(roads, n, size, ring_arms, &mut arms, prev, true);
+        movements = ms;
+        ring = Some(size);
+        ring_geom = RingCache(Some(g));
+    }
+    let conflicts = if ring.is_some() {
+        vec![0; movements.len().min(128)]
+    } else {
+        build_conflicts(roads.nodes[n].pos, &movements)
+    };
     let deg = arms.len();
     let setting = old.map_or(JunctionSetting::Auto, |o| o.setting);
     let busy = old.is_some_and(|o| o.busy);
-    let control = if deg >= 3 {
+    let control = if ring.is_some() {
+        JunctionControl::Roundabout
+    } else if deg >= 3 {
         resolve(setting, &arms, busy)
     } else {
         JunctionControl::Priority
     };
-    let plan = (deg >= 3).then(|| build_plan(roads, n, &arms, &movements));
+    let plan = (deg >= 3 && ring.is_none()).then(|| build_plan(roads, n, &arms, &movements));
     let same_shape = old
         .is_some_and(|o| o.arms.len() == arms.len() && o.arms.iter().zip(&arms).all(|(a, b)| a.segment == b.segment));
     let signal = match old {
@@ -1036,7 +1146,11 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
         control,
         queue: vec![0; deg],
         arms,
-        clear_after: ClearTable(build_clear(&movements, &conflicts)),
+        clear_after: ClearTable(if ring.is_some() {
+            Vec::new()
+        } else {
+            build_clear(&movements, &conflicts)
+        }),
         movements,
         conflicts,
         plan,
@@ -1051,6 +1165,8 @@ pub(crate) fn build_state(roads: &RoadNetwork, n: NodeId, old: Option<&JunctionS
         clear_at: old.map_or(0, |o| o.clear_at),
         last_served: old.filter(|_| same_shape).map_or(0, |o| o.last_served),
         phase_count: old.filter(|_| same_shape).map_or(0, |o| o.phase_count),
+        ring,
+        ring_geom,
     }
 }
 
@@ -1064,10 +1180,11 @@ fn fresh_signal(plan: Option<&SignalPlan>) -> SignalState {
     }
 }
 
-/// Change the setting of a junction state and re-resolve its control.
+/// Change the setting of a junction state and re-resolve its control (a
+/// roundabout keeps its control: the setting is what it goes back to).
 pub(crate) fn set_setting(j: &mut JunctionState, setting: JunctionSetting) {
     j.setting = setting;
-    let c = resolve(setting, &j.arms, j.busy);
+    let c = control_under(j, setting);
     if c != j.control {
         j.control = c;
         j.signal = fresh_signal(j.plan.as_ref());
@@ -1076,6 +1193,9 @@ pub(crate) fn set_setting(j: &mut JunctionState, setting: JunctionSetting) {
 
 /// Control the junction would have under `setting`.
 pub(crate) fn control_under(j: &JunctionState, setting: JunctionSetting) -> JunctionControl {
+    if j.ring.is_some() {
+        return JunctionControl::Roundabout;
+    }
     resolve(setting, &j.arms, j.busy)
 }
 
@@ -1688,6 +1808,15 @@ pub fn junction_shape(world: &World, n: NodeId, extra: f32) -> Option<JunctionSh
     }
     arms.sort_by(|x, y| x.0.total_cmp(&y.0));
     let arms: Vec<ArmCut> = arms.into_iter().map(|(_, a)| a).collect();
+    if let Some(ring) = crate::roundabout::ring(world, n) {
+        let outline = crate::roundabout::outline(ring, &arms, extra);
+        return Some(JunctionShape {
+            node: n,
+            pos: node.pos,
+            arms,
+            outline,
+        });
+    }
     let mut outline = Vec::new();
     let k = arms.len();
     for i in 0..k {

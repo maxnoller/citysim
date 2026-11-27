@@ -148,6 +148,7 @@ pub fn error_text(e: &CommandError) -> String {
             citysim_sim::RestoreProblem::Rezoned => "the lot isn't zoned for it any more".into(),
             citysim_sim::RestoreProblem::NoRoad => "no road reaches the lot any more".into(),
         },
+        CommandError::Roundabout(p) => ring_problem_text(p),
     }
 }
 
@@ -655,6 +656,24 @@ pub fn control_name(c: JunctionControl) -> &'static str {
     match c {
         JunctionControl::Signal => "Traffic lights",
         JunctionControl::Priority => "Priority (give way)",
+        JunctionControl::Roundabout => "Roundabout",
+    }
+}
+
+/// Why a roundabout does not fit, in the readout's words.
+pub fn ring_problem_text(p: &citysim_sim::RingProblem) -> String {
+    use citysim_sim::RingProblem as P;
+    match p {
+        P::TooFewArms => "A roundabout needs three or more roads".into(),
+        P::TooManyArms => "Too many roads meet here for a roundabout".into(),
+        P::Highway => "Not where the highway meets".into(),
+        P::AvenueOnMini => "Too small for an avenue: pick a bigger size".into(),
+        P::ArmsTooClose { degrees, .. } => format!("Roads meet at {degrees:.0}°: too sharp for this size"),
+        P::NeighbourTooClose { .. } => "Too close to the next junction for this size".into(),
+        P::RoadInTheWay { .. } => "Another road passes through the ring".into(),
+        P::OffMap => "Too close to the edge of the map".into(),
+        P::AlreadyThatSize => "Already this roundabout".into(),
+        P::NotARoundabout => "Not a roundabout".into(),
     }
 }
 

@@ -51,7 +51,9 @@ const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
-pub const EXTENSION_VERSION: u32 = 5;
+/// 6 belongs to the pedestrians' block (another branch); 7 adds the
+/// roundabouts.
+pub const EXTENSION_VERSION: u32 = 7;
 
 /// Every field of a [`Budget`], including those its own serde skips.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -251,6 +253,42 @@ impl ExtensionV5 {
     }
 }
 
+/// Extension block, version 7: version 5 plus the roundabouts (node and
+/// size; their geometry is rebuilt) and yesterday's roundabout upkeep.
+/// (Version 6 is the pedestrians' block on another branch: when the two
+/// meet, this one wraps it.)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ExtensionV7 {
+    v5: ExtensionV5,
+    rings: Vec<(crate::NodeId, crate::roundabout::RoundaboutSize)>,
+    roundabout_upkeep: [i64; 2],
+}
+
+impl ExtensionV7 {
+    pub(crate) fn of(w: &World) -> ExtensionV7 {
+        ExtensionV7 {
+            v5: ExtensionV5::of(w),
+            rings: w
+                .traffic
+                .junction_states
+                .iter()
+                .filter_map(|(n, j)| Some((n, j.ring?)))
+                .collect(),
+            roundabout_upkeep: [
+                w.economy.last_day_costs.roundabouts,
+                w.economy.last_day_costs.roundabout_count as i64,
+            ],
+        }
+    }
+
+    pub(crate) fn restore(self, w: &mut World) {
+        self.v5.restore(w);
+        w.economy.last_day_costs.roundabouts = self.roundabout_upkeep[0];
+        w.economy.last_day_costs.roundabout_count = self.roundabout_upkeep[1] as u32;
+        crate::roundabout::restore(w, &self.rings);
+    }
+}
+
 /// Blocks before version 5 kept the traffic loss of the last booked day
 /// only (`Economy::last_day_traffic`): it goes to that day, the days
 /// before stay empty.
@@ -298,7 +336,7 @@ pub(crate) fn save(world: &World) -> Vec<u8> {
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     let body = postcard::to_stdvec(world).expect("World is always serialisable");
     out.extend_from_slice(&body);
-    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV5::of(world))).expect("serialisable");
+    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV7::of(world))).expect("serialisable");
     out.extend_from_slice(&ext);
     out
 }
@@ -352,6 +390,9 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
                 restore_last_day_traffic(&mut world);
             }
             5 => postcard::from_bytes::<ExtensionV5>(rest)
+                .map_err(bad)?
+                .restore(&mut world),
+            7 => postcard::from_bytes::<ExtensionV7>(rest)
                 .map_err(bad)?
                 .restore(&mut world),
             _ => {}

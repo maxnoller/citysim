@@ -53,6 +53,8 @@ pub struct Bench {
     /// Demand on the main road's approaches and on the cross road's.
     pub main_load: Load,
     pub cross_load: Load,
+    /// A roundabout of this size at the junction (over `control`).
+    pub ring: Option<crate::roundabout::RoundaboutSize>,
 }
 
 impl Bench {
@@ -66,7 +68,14 @@ impl Bench {
             right: 0.0,
             main_load: Load::Saturated,
             cross_load: Load::Saturated,
+            ring: None,
         }
+    }
+
+    /// The junction as a roundabout of `size`.
+    pub fn roundabout(mut self, size: crate::roundabout::RoundaboutSize) -> Bench {
+        self.ring = Some(size);
+        self
     }
 
     pub fn turning(mut self, left: f32, right: f32) -> Bench {
@@ -147,6 +156,13 @@ pub fn build(b: &Bench) -> (World, Option<NodeId>) {
             control: b.control,
         })
         .expect("bench junction control");
+        if let Some(size) = b.ring {
+            w.apply(Command::SetRoundabout {
+                node: n,
+                size: Some(size),
+            })
+            .expect("bench roundabout");
+        }
     }
     w.economy.money = i64::MAX / 4;
     // Settle the junction tables.

@@ -471,6 +471,9 @@ fn draw_world_opts(c: &mut Canvas, w: &World, v: &View, show_zones: bool, cars: 
     // Stop lines, coloured by signal aspect per lane.
     for (n, _) in w.roads.nodes.iter() {
         let Some(j) = junction::junction(w, n) else { continue };
+        if j.control == JunctionControl::Roundabout {
+            continue;
+        }
         let view = junction::junction_view(w, n);
         let npos = w.roads.nodes[n].pos;
         for (i, arm) in j.arms.iter().enumerate() {
@@ -530,8 +533,14 @@ fn draw_world_opts(c: &mut Canvas, w: &World, v: &View, show_zones: bool, cars: 
             }
         }
     }
+    if cars {
+        draw_cars(c, w, v);
+    }
+}
+
+fn draw_cars(c: &mut Canvas, w: &World, v: &View) {
     // Vehicles.
-    for (id, car) in w.vehicles.iter().filter(|_| cars) {
+    for (id, car) in w.vehicles.iter() {
         let (p, d) = drive::vehicle_pose(w, car);
         let truck = w.traffic.trips.get(id).is_some_and(|t| t.purpose == TripPurpose::Goods);
         let (len, wid) = if truck { (6.5, 2.3) } else { (4.4, 1.9) };
@@ -1788,6 +1797,142 @@ fn organic_video(out: &str, seconds: u32) {
 }
 
 /// Header bar with a title and a line of numbers.
+/// A roundabout's island, apron, lane line and give-way marks (over the
+/// junction surface drawn by `draw_world_opts`).
+fn draw_ring(c: &mut Canvas, w: &World, v: &View, n: NodeId) {
+    let Some(ring) = roundabout::ring(w, n) else { return };
+    let d = ring.dims;
+    let p = v.px(ring.center);
+    if d.lanes == 2 {
+        // Lane line: dashes round the ring.
+        let r = d.outer_r - d.lane_w;
+        let steps = (r * std::f32::consts::TAU / 1.0) as usize;
+        for k in 0..steps {
+            if k % 4 >= 2 {
+                continue;
+            }
+            let a0 = k as f32 / steps as f32 * std::f32::consts::TAU;
+            let a1 = (k + 1) as f32 / steps as f32 * std::f32::consts::TAU;
+            let q0 = [ring.center[0] + r * libm::cosf(a0), ring.center[1] + r * libm::sinf(a0)];
+            let q1 = [ring.center[0] + r * libm::cosf(a1), ring.center[1] + r * libm::sinf(a1)];
+            c.poly(&strip(v, q0, q1, 0.1, 0.0), MARK, 1.0);
+        }
+    }
+    // Apron (trucks may run over it) and the island.
+    c.disc(p[0], p[1], d.inner_r * v.k, [150, 120, 100]);
+    if d.mountable {
+        c.disc(p[0], p[1], d.island_r * v.k, [205, 205, 198]);
+        c.disc(p[0], p[1], (d.island_r - 0.4) * v.k, [180, 180, 174]);
+    } else {
+        c.disc(p[0], p[1], d.island_r * v.k, KERB);
+        c.disc(p[0], p[1], (d.island_r - 0.35) * v.k, MEDIAN);
+        c.disc(p[0], p[1], (d.island_r * 0.25).max(1.0) * v.k, [60, 100, 50]);
+    }
+    // Give-way lines: dashes across the lanes in, and a splitter.
+    let j = w.traffic.junction_states.get(n).expect("ring junction");
+    for (arm, ra) in j.arms.iter().zip(&ring.arms) {
+        let seg = &w.roads.segments[arm.segment];
+        let pose = seg.pose_dir(seg.a == n, ra.setback, 0.0);
+        let din = [-pose.dir[0], -pose.dir[1]];
+        let r = junction::right_of(din);
+        let hw = arm.kind.half_width_m();
+        let steps = 6;
+        for k in 0..steps {
+            if k % 2 == 1 {
+                continue;
+            }
+            let o0 = hw * k as f32 / steps as f32;
+            let o1 = hw * (k + 1) as f32 / steps as f32;
+            let q0 = [pose.pos[0] + r[0] * o0, pose.pos[1] + r[1] * o0];
+            let q1 = [pose.pos[0] + r[0] * o1, pose.pos[1] + r[1] * o1];
+            c.poly(&strip(v, q0, q1, 0.25, 0.0), [250, 250, 250], 1.0);
+        }
+        if ra.splitter {
+            let len = 7.0;
+            let w0 = if arm.kind == RoadKind::Avenue { 1.0 } else { 0.35 };
+            let tip = [pose.pos[0] + pose.dir[0] * len, pose.pos[1] + pose.dir[1] * len];
+            let a = [pose.pos[0] + r[0] * w0, pose.pos[1] + r[1] * w0];
+            let b = [pose.pos[0] - r[0] * w0, pose.pos[1] - r[1] * w0];
+            let tip_a = [tip[0] + r[0] * w0 * 0.5, tip[1] + r[1] * w0 * 0.5];
+            let tip_b = [tip[0] - r[0] * w0 * 0.5, tip[1] - r[1] * w0 * 0.5];
+            c.poly(&[v.px(a), v.px(tip_a), v.px(tip_b), v.px(b)], KERB, 1.0);
+        }
+    }
+}
+
+/// Every roundabout size at a street crossing and an avenue crossing, with
+/// the bench's traffic after `secs` seconds.
+fn rings_sheet(out: &str, secs: u32) {
+    use citysim_sim::capacity::{Bench, Load};
+    let (pw, ph) = (560usize, 560usize);
+    let mut cv = Canvas::new(pw * 4 + 10, ph * 2 + 64 + 40, GRASS);
+    let rows = [
+        (RoadKind::Street, RoadKind::Street),
+        (RoadKind::Avenue, RoadKind::Avenue),
+    ];
+    for (row, &(main, cross)) in rows.iter().enumerate() {
+        for (col, &size) in RoundaboutSize::ALL.iter().enumerate() {
+            let rate = if main == RoadKind::Avenue { 22.0 } else { 9.0 };
+            let b = Bench::crossing(main, cross, JunctionSetting::Priority)
+                .turning(0.2, 0.2)
+                .loads(Load::Rate(rate), Load::Rate(rate));
+            let fits = {
+                let (w, n) = citysim_sim::capacity::build(&Bench::crossing(main, cross, JunctionSetting::Priority));
+                n.map(|n| roundabout::sizes(&w, n)[size as usize].1).unwrap_or(Ok(()))
+            };
+            let mut map = Canvas::new(pw - 6, ph - 6, GRASS);
+            let mut label = format!("{} {:?}S", size.name(), main).to_uppercase();
+            match fits {
+                Ok(()) => {
+                    let b = b.roundabout(size);
+                    let mut done = false;
+                    citysim_sim::capacity::run_traced(&b, 3, 0, secs, &mut |w, n, t| {
+                        if done || t + 1 < secs * TICKS_PER_SECOND {
+                            return;
+                        }
+                        done = true;
+                        let Some(n) = n else { return };
+                        let centre = w.roads.nodes[n].pos;
+                        let view = View::centred(centre, pw - 6, ph - 6, 7.0);
+                        draw_world_opts(&mut map, w, &view, false, false);
+                        draw_ring(&mut map, w, &view, n);
+                        draw_world_cars(&mut map, w, &view);
+                    });
+                    let d = size.dims();
+                    label = format!("{label} R{:.1}M {}L ${}", d.outer_r, d.lanes, size.cost());
+                }
+                Err(p) => {
+                    let (w, n) = citysim_sim::capacity::build(&Bench::crossing(main, cross, JunctionSetting::Priority));
+                    if let Some(n) = n {
+                        let centre = w.roads.nodes[n].pos;
+                        let view = View::centred(centre, pw - 6, ph - 6, 7.0);
+                        draw_world_opts(&mut map, &w, &view, false, false);
+                    }
+                    label = format!("{label}: {}", p.to_string().to_uppercase());
+                    if label.len() > 44 {
+                        label.truncate(44);
+                    }
+                }
+            }
+            map.text(10, 10, &label, 2, [250, 250, 250]);
+            cv.blit(&map, col * pw + 3, 64 + row * (ph + 20) + 3);
+        }
+    }
+    header(
+        &mut cv,
+        "ROUNDABOUTS: MINI, SMALL, MEDIUM, LARGE AT A STREET CROSSING AND AN AVENUE CROSSING",
+        "THE ROADS STAY, THE ARMS END AT THE RING; WHITE CARS ARE ON THE RING, RED ONES STAND",
+    );
+    ffmpeg_png(&cv, out);
+}
+
+/// Cars only (over a world drawn without them).
+fn draw_world_cars(c: &mut Canvas, w: &World, v: &View) {
+    let mut empty = Canvas::new(1, 1, GRASS);
+    let _ = &mut empty;
+    draw_cars(c, w, v);
+}
+
 fn header(cv: &mut Canvas, title: &str, info: &str) {
     cv.rect(0.0, 0.0, cv.w as f32, 64.0, [22, 24, 28]);
     cv.text(12, 10, title, 3, [235, 235, 235]);
@@ -2099,6 +2244,7 @@ fn main() {
         "save" => save_view(&out, &args[2..]),
         "savewatch" => save_watch(&out, &args[2..]),
         "rush" => rush(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20)),
+        "rings" => rings_sheet(&out, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(90)),
         _ => panic!("modes: signal, lots, video, day, watch, organic, curve, junctions, blocks, lattices, queue"),
     }
 }
