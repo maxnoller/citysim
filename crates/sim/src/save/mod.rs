@@ -6,7 +6,8 @@
 //!
 //! Version 7 (zoning on strips bent along curved roads, blocks six rows
 //! deep: the body is laid out as version 6, the bent lattices travel in
-//! extension block 4) is written now. Version 6 (citizens, household money
+//! extension block 4; block 5 adds the traffic losses of every booked day)
+//! is written now. Version 6 (citizens, household money
 //! and goods, the population bookkeeping; the 16-minute day, people bound
 //! to their cars, trips that name their buildings, party and cargo) loads
 //! with the same body; its zoning blocks are made again the current way
@@ -50,7 +51,7 @@ const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
-pub const EXTENSION_VERSION: u32 = 4;
+pub const EXTENSION_VERSION: u32 = 5;
 
 /// Every field of a [`Budget`], including those its own serde skips.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -220,6 +221,48 @@ impl ExtensionV4 {
     }
 }
 
+/// Extension block, version 5: version 4 plus what traffic cost the city
+/// on every booked day (`DaySummary::traffic` of each `Economy::history`
+/// entry, in order) and the money credited ahead of today's booking
+/// (`Economy::advanced_today`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ExtensionV5 {
+    v4: ExtensionV4,
+    day_traffic: Vec<Option<crate::economy::TrafficLoss>>,
+    /// `Economy::advanced_today`.
+    advanced_today: i64,
+}
+
+impl ExtensionV5 {
+    pub(crate) fn of(w: &World) -> ExtensionV5 {
+        ExtensionV5 {
+            v4: ExtensionV4::of(w),
+            day_traffic: w.economy.history.iter().map(|d| d.traffic).collect(),
+            advanced_today: w.economy.advanced_today,
+        }
+    }
+
+    pub(crate) fn restore(self, w: &mut World) {
+        self.v4.restore(w);
+        for (d, t) in w.economy.history.iter_mut().zip(self.day_traffic) {
+            d.traffic = t;
+        }
+        w.economy.advanced_today = self.advanced_today;
+    }
+}
+
+/// Blocks before version 5 kept the traffic loss of the last booked day
+/// only (`Economy::last_day_traffic`): it goes to that day, the days
+/// before stay empty.
+fn restore_last_day_traffic(w: &mut World) {
+    let t = w.economy.last_day_traffic;
+    if let Some(d) = w.economy.history.last_mut()
+        && t != crate::economy::TrafficLoss::default()
+    {
+        d.traffic = Some(t);
+    }
+}
+
 /// Derived fields that are not stored at all, recomputed exactly as
 /// `stats::update` computes them.
 fn restore_derived(w: &mut World) {
@@ -255,7 +298,7 @@ pub(crate) fn save(world: &World) -> Vec<u8> {
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     let body = postcard::to_stdvec(world).expect("World is always serialisable");
     out.extend_from_slice(&body);
-    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV4::of(world))).expect("serialisable");
+    let ext = postcard::to_stdvec(&(EXTENSION_VERSION, ExtensionV5::of(world))).expect("serialisable");
     out.extend_from_slice(&ext);
     out
 }
@@ -296,10 +339,19 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
             2 => postcard::from_bytes::<ExtensionV2>(rest)
                 .map_err(bad)?
                 .restore(&mut world),
-            3 => postcard::from_bytes::<ExtensionV3>(rest)
-                .map_err(bad)?
-                .restore(&mut world),
-            4 => postcard::from_bytes::<ExtensionV4>(rest)
+            3 => {
+                postcard::from_bytes::<ExtensionV3>(rest)
+                    .map_err(bad)?
+                    .restore(&mut world);
+                restore_last_day_traffic(&mut world);
+            }
+            4 => {
+                postcard::from_bytes::<ExtensionV4>(rest)
+                    .map_err(bad)?
+                    .restore(&mut world);
+                restore_last_day_traffic(&mut world);
+            }
+            5 => postcard::from_bytes::<ExtensionV5>(rest)
                 .map_err(bad)?
                 .restore(&mut world),
             _ => {}
@@ -311,6 +363,11 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     crate::traffic::upgrade_junction_geometry(&mut world);
     world.cache.ensure_roads(&world.roads, world.versions.roads);
     world.cache.ensure_zoning(&world.zoning);
+    // Block grids are not stored: found again, and made where a save from
+    // before them has per-road lattices.
+    if version >= 7 && crate::blocks::derive_faces(&mut world) > 0 {
+        world.cache.ensure_zoning(&world.zoning);
+    }
     if version == 6 {
         // Zoning blocks of the version-6 kind (two rows, straight blocks
         // along curves): made again the current way; zones move onto the
@@ -538,5 +595,30 @@ mod tests {
         let old: World = postcard::from_bytes(&bytes[8..]).unwrap();
         assert_eq!(old.buildings, w.buildings);
         assert_eq!(load(&bytes).unwrap(), w);
+    }
+
+    #[test]
+    fn traffic_losses_are_kept_per_day() {
+        let mut w = town();
+        for _ in 0..balance::TICKS_PER_DAY {
+            w.step();
+        }
+        assert_eq!(w.economy.history.len(), 2);
+        assert!(w.economy.history.iter().all(|d| d.traffic.is_some()));
+        assert_eq!(w.economy.history[1].traffic, Some(w.economy.last_day_traffic));
+        let loaded = load(&save(&w)).unwrap();
+        assert_eq!(loaded.economy.history, w.economy.history);
+        // A block of version 4 kept yesterday's loss only: the last day
+        // gets it, the days before stay empty.
+        let mut old = body_only(&w);
+        old.extend_from_slice(&postcard::to_stdvec(&(4u32, ExtensionV4::of(&w))).unwrap());
+        let loaded = load(&old).unwrap();
+        assert_eq!(loaded.economy.history[0].traffic, None);
+        let last = loaded.economy.history[1].traffic;
+        assert_eq!(
+            last,
+            (w.economy.last_day_traffic != Default::default()).then_some(w.economy.last_day_traffic)
+        );
+        assert_eq!(loaded.economy.history[1].budget, w.economy.history[1].budget);
     }
 }

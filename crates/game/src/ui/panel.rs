@@ -70,7 +70,7 @@ pub struct PanelArea(pub Option<Rect>);
 
 /// The plate of the side panel.
 #[derive(Component)]
-struct PanelPlate;
+pub struct PanelPlate;
 
 /// The line from what is selected to the panel, and its two ends.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -379,9 +379,12 @@ fn spawn_panel(mut commands: Commands, mut cache: ResMut<PlateCache>, mut mats: 
             ))
             .with_child((
                 Body(Root::Panel),
+                // Shrinks to the plate (whose height the screen bounds), so
+                // the sheet's body scrolls instead of running under the bar.
                 layout(Node {
                     flex_direction: FlexDirection::Column,
-                    max_height: percent(100),
+                    flex_shrink: 1.0,
+                    min_height: px(0),
                     width: percent(100),
                     ..default()
                 }),
@@ -495,6 +498,7 @@ fn follow(
     mut view: ResMut<PeopleView>,
     mut cam: ResMut<CameraFollow>,
     mut highlight: ResMut<WorldHighlight>,
+    mut routes: ResMut<super::route::TripCache>,
     mut owner_of: Local<Option<(citysim_sim::VehicleId, citysim_sim::CitizenId)>>,
 ) {
     let w = &sim.world;
@@ -521,7 +525,11 @@ fn follow(
         }
     }
     let at = match view.current() {
-        Some(Target::Person(c)) => people::person_position(w, c),
+        // Under way off the map: where they should be by now.
+        Some(Target::Person(c)) => routes
+            .person(w, c)
+            .and_then(|t| t.at)
+            .or_else(|| people::person_position(w, c)),
         Some(Target::Place(b)) => w.buildings.get(b).map(|b| b.center()),
         Some(Target::Vehicle(v)) => w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0),
         None => None,
@@ -536,8 +544,9 @@ fn follow(
         let car = v.trip.and_then(|t| t.vehicle).filter(|c| w.vehicles.contains_key(*c));
         let sel = match (car, v.trip, v.inside) {
             (Some(car), _, _) => Some(WorldTarget::Vehicle(car)),
-            // On the way where the map draws nothing: mark where they go.
-            (None, Some(t), _) => Some(WorldTarget::Building(t.to)),
+            // On the way where the map draws nothing: the route's marker
+            // shows where they should be (and the destination glows).
+            (None, Some(_), _) => None,
             (None, None, Some(b)) => Some(WorldTarget::Building(b)),
             _ => None,
         };
@@ -556,10 +565,15 @@ fn follow(
 
 /// The sheet the panel shows now: a person / place / car, else the
 /// selected road or junction.
-fn panel_sheet(world: &citysim_sim::World, view: &PeopleView, hl: &WorldHighlight) -> Option<Sheet> {
+fn panel_sheet(
+    world: &citysim_sim::World,
+    view: &PeopleView,
+    hl: &WorldHighlight,
+    routes: &mut super::route::TripCache,
+) -> Option<Sheet> {
     if let Some(t) = view.current() {
         return match t {
-            Target::Person(c) => people::person_sheet(world, c),
+            Target::Person(c) => people::person_sheet(world, c, routes),
             Target::Place(b) => people::place_sheet(world, b),
             Target::Vehicle(v) => people::vehicle_sheet(world, v),
         };
@@ -624,6 +638,7 @@ fn draw_sheets(
     ui: Res<UiState>,
     (view, folds): (Res<PeopleView>, Res<Folds>),
     hl: Res<WorldHighlight>,
+    mut routes: ResMut<super::route::TripCache>,
     mut roots: Query<&mut PanelRoot>,
     bodies: Query<(Entity, &Body)>,
     city_body: Query<Entity, With<super::city::CitySheetBody>>,
@@ -639,7 +654,7 @@ fn draw_sheets(
     }
     shown.age = 0.0;
     let w = &sim.world;
-    let panel = panel_sheet(w, &view, &hl).filter(|_| !ui.menu_open);
+    let panel = panel_sheet(w, &view, &hl, &mut routes).filter(|_| !ui.menu_open);
     let city = (ui.window == Some(CityPage::People) && !ui.menu_open).then(|| people::city_sheet(w));
     if let Ok(mut r) = roots.single_mut() {
         r.open = panel.is_some();
@@ -1790,13 +1805,15 @@ fn leader(
     view: Res<PeopleView>,
     hl: Res<WorldHighlight>,
     sim: Res<SimWorld>,
+    route: Res<crate::shared::RouteView>,
     ui_scale: Res<UiScale>,
     cameras: Query<(&Camera, &GlobalTransform), With<crate::shared::WorldCamera>>,
     mut parts: Query<(&Leader, &mut Node, &mut UiTransform, &mut Visibility)>,
 ) {
     let w = &sim.world;
     let at = match view.current() {
-        Some(Target::Person(c)) => people::person_position(w, c),
+        // Under way off the map: to the marker of where they should be.
+        Some(Target::Person(c)) => route.traveller.or_else(|| people::person_position(w, c)),
         Some(Target::Place(b)) => w.buildings.get(b).map(|b| b.center()),
         Some(Target::Vehicle(v)) => w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0),
         None => match &hl.selected {

@@ -19,6 +19,7 @@ use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 use citysim_sim::{CELL_SIZE, Cell, MAP_CELLS, MAP_SIZE_M, World};
 
+use super::greens::{Greens, GreensUpdate};
 use super::land::RoadEdges;
 use super::mesh_util::MeshBuilder;
 use super::noise::{self, Stream};
@@ -41,13 +42,15 @@ const OUT_CHUNK: f32 = 512.0;
 /// Grid and roads keys.
 type Keys = ((u64, u64), (u64, u64));
 
-/// (keys and ghost key, chunk hashes, taken land of the whole map once a
-/// quality change needs it).
-type Land = ((Keys, u64), HashMap<IVec2, u64>, Option<Taken>);
+/// (keys, ghost key and `Greens::version`, chunk hashes, taken land of the
+/// whole map once a quality change needs it).
+type Land = ((Keys, u64, u64), HashMap<IVec2, u64>, Option<Taken>);
 
 #[derive(Default)]
 struct TreeChunks {
     key: Option<(Keys, GraphicsQuality, u64)>,
+    /// `Greens::version` the chunks were made for.
+    greens: u64,
     /// Some chunks still show another quality's density (a quality change
     /// re-meshes a few chunks per frame, `QUALITY_REMESH_MS`).
     stale: bool,
@@ -77,7 +80,8 @@ impl Plugin for TreesPlugin {
             Update,
             (rebuild_trees, rebuild_outside)
                 .in_set(GameSet::Render)
-                .after(super::land::LandUpdate),
+                .after(super::land::LandUpdate)
+                .after(GreensUpdate),
         );
     }
 }
@@ -281,8 +285,9 @@ fn open(taken: &Taken, edges: &RoadEdges, ghost: &Ghost, p: Vec2) -> bool {
 }
 
 /// What a tree chunk depends on: zoning cells with a zone or building whose
-/// centre is in it (or near), and the roads near it (by their geometry).
-fn chunk_hashes(world: &World, ghost: &Ghost) -> HashMap<IVec2, u64> {
+/// centre is in it (or near), the roads near it (by their geometry) and the
+/// greens over it.
+fn chunk_hashes(world: &World, ghost: &Ghost, greens: &Greens) -> HashMap<IVec2, u64> {
     let size = CHUNK as f32 * CELL_SIZE;
     let mut hashers: HashMap<IVec2, DefaultHasher> = HashMap::new();
     let mut add = |lo: Vec2, hi: Vec2, f: &dyn Fn(&mut DefaultHasher)| {
@@ -311,6 +316,12 @@ fn chunk_hashes(world: &World, ghost: &Ghost) -> HashMap<IVec2, u64> {
             }
         });
     }
+    // Greens keep trees out: a chunk a green covers changes with it.
+    for g in &greens.areas {
+        let lo = Vec2::from(g.origin);
+        let hi = lo + Vec2::new(g.size[0] as f32, g.size[1] as f32) * g.step;
+        add(lo, hi, &|h| (g.face, g.signature).hash(h));
+    }
     for (_, seg) in world.roads.segments.iter() {
         let (lo, hi) = seg.curve.bounds();
         let pad = 16.0;
@@ -335,20 +346,21 @@ fn rebuild_trees(
     mut meshes: ResMut<Assets<Mesh>>,
     mut count: ResMut<TreeCount>,
     edges: Res<RoadEdges>,
-    (view, time): (Option<Res<CurveToolView>>, Res<Time<Real>>),
+    (view, time, greens): (Option<Res<CurveToolView>>, Res<Time<Real>>, Res<Greens>),
 ) {
     state.since_ghost += time.delta_secs();
     let quality = drawn_quality(applied.as_deref(), *requested);
     let ghost = view.map(|v| Ghost::of(&v)).unwrap_or_default();
     let keys = (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads));
     let key = (keys, quality, ghost.key());
-    if state.key == Some(key) && !state.stale {
+    if state.key == Some(key) && state.greens == greens.version && !state.stale {
         return;
     }
     // Only the ghost moved: re-mesh at most a few times a second.
     let ghost_only = state
         .key
-        .is_some_and(|(k, q, g)| k == keys && q == quality && g != key.2);
+        .is_some_and(|(k, q, g)| k == keys && q == quality && g != key.2)
+        && state.greens == greens.version;
     if ghost_only && state.since_ghost < 0.2 {
         return;
     }
@@ -357,9 +369,10 @@ fn rebuild_trees(
     }
     state.key = Some(key);
     let world = &sim.world;
-    let land_key = (keys, key.2);
+    state.greens = greens.version;
+    let land_key = (keys, key.2, greens.version);
     if state.land.as_ref().is_none_or(|(k, _, _)| *k != land_key) {
-        state.land = Some((land_key, chunk_hashes(world, &ghost), None));
+        state.land = Some((land_key, chunk_hashes(world, &ghost, &greens), None));
     }
     let (_, hashes, mut full) = state.land.take().expect("land");
     let dens = quality_settings(quality).tree_density;
@@ -421,10 +434,10 @@ fn rebuild_trees(
                 for x in cx * CHUNK..(cx + 1) * CHUNK {
                     trees.clear();
                     cell_trees(x, y, &mut trees);
-                    for t in trees
-                        .iter()
-                        .filter(|t| keep(t, dens) && open(taken, &edges, &ghost, Vec2::new(t.pos.x, t.pos.z)))
-                    {
+                    for t in trees.iter().filter(|t| {
+                        let p = Vec2::new(t.pos.x, t.pos.z);
+                        keep(t, dens) && open(taken, &edges, &ghost, p) && !greens.contains(p)
+                    }) {
                         draw_tree(&mut m, t, false);
                         draw_tree(&mut far, t, true);
                         placed += usize::from(t.small == 0);

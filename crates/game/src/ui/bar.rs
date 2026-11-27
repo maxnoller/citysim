@@ -34,6 +34,8 @@ impl Plugin for BarPlugin {
                     update_demand,
                     update_clock,
                     compact_bar,
+                    keep_tools_clear,
+                    steady_columns,
                     raise_slots,
                     demolish_modes,
                 )
@@ -157,11 +159,14 @@ fn spawn_bar(
 }
 
 fn stat_column(p: &mut ChildSpawnerCommands, fonts: &UiFonts, big: bool, value: BarText, cap: BarText, cap_text: &str) {
-    p.spawn(layout(Node {
-        flex_direction: FlexDirection::Column,
-        row_gap: px(5),
-        ..default()
-    }))
+    p.spawn((
+        layout(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(5),
+            ..default()
+        }),
+        Steady(0.0),
+    ))
     .with_children(|col| {
         col.spawn((
             figure(fonts, "", if big { t::FONT_BIG } else { t::FONT_MID }, t::TEXT),
@@ -171,16 +176,28 @@ fn stat_column(p: &mut ChildSpawnerCommands, fonts: &UiFonts, big: bool, value: 
     });
 }
 
+/// The three groups of the bar: vitals (left), tools (centre), time
+/// (right).
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum BarGroup {
+    Vitals,
+    Tools,
+    Time,
+}
+
 fn spawn_vitals(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    bar.spawn(layout(Node {
-        position_type: PositionType::Absolute,
-        left: px(30),
-        top: px(0),
-        bottom: px(0),
-        align_items: AlignItems::Center,
-        column_gap: px(t::S6),
-        ..default()
-    }))
+    bar.spawn((
+        BarGroup::Vitals,
+        layout(Node {
+            position_type: PositionType::Absolute,
+            left: px(30),
+            top: px(0),
+            bottom: px(0),
+            align_items: AlignItems::Center,
+            column_gap: px(t::S6),
+            ..default()
+        }),
+    ))
     .with_children(|v| {
         // Money: opens the budget.
         spawn_button(
@@ -201,12 +218,15 @@ fn spawn_vitals(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                     MoneyIcon,
                     Wide,
                 ));
-                b.spawn(layout(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(5),
-                    min_width: px(118),
-                    ..default()
-                }))
+                b.spawn((
+                    layout(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(5),
+                        min_width: px(118),
+                        ..default()
+                    }),
+                    Steady(118.0),
+                ))
                 .with_children(|col| {
                     col.spawn((figure(fonts, "$0", t::FONT_BIG, t::TEXT), BarText::Money));
                     col.spawn((caps(fonts, "", t::FONT_CAP, t::POSITIVE), BarText::MoneyDelta));
@@ -242,11 +262,14 @@ fn spawn_vitals(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
             ),
         ))
         .with_children(|r| {
-            r.spawn(layout(Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: px(5),
-                ..default()
-            }))
+            r.spawn((
+                layout(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(5),
+                    ..default()
+                }),
+                Steady(0.0),
+            ))
             .with_children(|col| {
                 col.spawn((figure(fonts, "", t::FONT_MID, t::TEXT), BarText::Jobless));
                 col.spawn(caps(fonts, "Jobless", t::FONT_CAP, t::TEXT_MUTED));
@@ -403,18 +426,21 @@ const SLOTS: [&[SlotDef]; 3] = [
 ];
 
 fn spawn_tools(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    bar.spawn(layout(Node {
-        position_type: PositionType::Absolute,
-        left: px(0),
-        right: px(0),
-        top: px(0),
-        bottom: px(0),
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::End,
-        padding: UiRect::bottom(px(9)),
-        column_gap: px(5),
-        ..default()
-    }))
+    bar.spawn((
+        BarGroup::Tools,
+        layout(Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            right: px(0),
+            top: px(0),
+            bottom: px(0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::End,
+            padding: UiRect::bottom(px(9)),
+            column_gap: px(5),
+            ..default()
+        }),
+    ))
     .with_children(|row| {
         for (g, group) in SLOTS.iter().enumerate() {
             if g > 0 {
@@ -581,8 +607,8 @@ fn spawn_demolish(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                 Some(
                     Tooltip::new(
                         "Undo",
-                        "Take back the last road, zoning or demolition. Nothing is refunded; demolished buildings \
-                         don't come back.",
+                        "Take back the last road, zoning or demolition: demolished buildings come back with their \
+                         people. Rebuilt road is paid again.",
                     )
                     .key("Ctrl+Z"),
                 ),
@@ -740,15 +766,18 @@ fn signal_glyph(b: &mut ChildSpawnerCommands, owner: Entity) {
 struct SignalGlyph(Entity, bool);
 
 fn spawn_time(bar: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    bar.spawn(layout(Node {
-        position_type: PositionType::Absolute,
-        right: px(30),
-        top: px(0),
-        bottom: px(0),
-        align_items: AlignItems::Center,
-        column_gap: px(t::S6),
-        ..default()
-    }))
+    bar.spawn((
+        BarGroup::Time,
+        layout(Node {
+            position_type: PositionType::Absolute,
+            right: px(30),
+            top: px(0),
+            bottom: px(0),
+            align_items: AlignItems::Center,
+            column_gap: px(t::S6),
+            ..default()
+        }),
+    ))
     .with_children(|tm| {
         // Day strip.
         tm.spawn((
@@ -1114,6 +1143,90 @@ fn compact_bar(
         let w = px(if c { 62.0 } else { t::SLOT_W });
         if n.width != w {
             n.width = w;
+        }
+    }
+}
+
+/// A column of changing figures that never gets narrower (Barlow's digits
+/// are proportional: "4,111" is narrower than "4,080", and everything to
+/// its right would shift with each change).
+/// Its narrowest width (logical px).
+#[derive(Component)]
+struct Steady(f32);
+
+fn steady_columns(
+    ui: Res<UiState>,
+    scale: Res<UiScale>,
+    mut cols: Query<(&Steady, &mut Node, &ComputedNode)>,
+    mut last: Local<(f32, bool)>,
+) {
+    // A new interface size or the compact bar measures afresh.
+    let fresh = *last != (scale.0, ui.compact);
+    *last = (scale.0, ui.compact);
+    for (base, mut n, c) in &mut cols {
+        if fresh {
+            n.min_width = px(base.0);
+            continue;
+        }
+        let w = (c.size.x * c.inverse_scale_factor).ceil();
+        let now = match n.min_width {
+            Val::Px(v) => v,
+            _ => 0.0,
+        };
+        if w > now + 0.5 {
+            n.min_width = px(w);
+        }
+    }
+}
+
+/// The tool slots stand in the middle of the bar; where the bar is too
+/// narrow for that (a large interface size in a small window) they move to
+/// the middle of the room between the vitals and the clock, so the clock
+/// never runs into the last slot.
+fn keep_tools_clear(
+    root: Query<&ComputedNode, With<BarRoot>>,
+    mut groups: Query<(Entity, &BarGroup, &mut Node, &ComputedNode), Without<BarRoot>>,
+    children: Query<&Children>,
+    sizes: Query<(&ComputedNode, &bevy::ui::UiGlobalTransform), Without<BarRoot>>,
+) {
+    let mut w = [0.0f32; 3];
+    let bar = root.single().map_or(0.0, |c| c.size.x * c.inverse_scale_factor);
+    let mut content = 0.0f32;
+    for (e, g, _, c) in &groups {
+        let inv = c.inverse_scale_factor;
+        match g {
+            BarGroup::Vitals => w[0] = c.size.x * inv,
+            BarGroup::Time => w[2] = c.size.x * inv,
+            // The slots' own extent: the row spans the bar, its children
+            // are centred in it.
+            BarGroup::Tools => {
+                let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+                for k in children.get(e).into_iter().flatten() {
+                    if let Ok((n, tf)) = sizes.get(*k)
+                        && n.size.x > 0.0
+                    {
+                        lo = lo.min(tf.translation.x - n.size.x * 0.5);
+                        hi = hi.max(tf.translation.x + n.size.x * 0.5);
+                    }
+                }
+                if hi > lo {
+                    content = (hi - lo) * inv;
+                }
+            }
+        }
+    }
+    if bar <= 0.0 || content <= 0.0 {
+        return;
+    }
+    const GAP: f32 = 14.0;
+    let (left, right) = (30.0 + w[0] + GAP, 30.0 + w[2] + GAP);
+    let centred = (bar - content) * 0.5;
+    let crowded = centred < left || centred < right;
+    let (l, r) = if crowded { (px(left), px(right)) } else { (px(0), px(0)) };
+    for (_, g, mut n, _) in &mut groups {
+        if *g == BarGroup::Tools && (n.left != l || n.right != r) {
+            n.left = l;
+            n.right = r;
         }
     }
 }

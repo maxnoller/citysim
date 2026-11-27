@@ -74,6 +74,12 @@ pub enum Command {
     SetJunctionControl { cell: Cell, control: JunctionSetting },
     /// The same for a junction node anywhere.
     SetNodeControl { node: NodeId, control: JunctionSetting },
+    /// Put a demolished building back from the record taken before the
+    /// demolition (`World::building_record`; the interface's undo): the
+    /// same building with its households and staff, as far as they have
+    /// not settled elsewhere, and the demolition cost refunded. Refused
+    /// (`CannotRestore`) when the lot has changed. See [`crate::restore`].
+    RestoreBuilding(Box<crate::restore::BuildingRecord>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -144,6 +150,8 @@ pub enum CommandError {
         at: [f32; 2],
         arms: u8,
     },
+    /// `RestoreBuilding`: the building cannot be put back, and why.
+    CannotRestore(crate::restore::RestoreProblem),
 }
 
 impl CommandError {
@@ -194,6 +202,7 @@ impl fmt::Display for CommandError {
             CommandError::NoSuchRoad => write!(f, "no such road"),
             CommandError::NotANode => write!(f, "no junction there"),
             CommandError::TooManyArms { arms, .. } => write!(f, "{arms} roads cannot meet at one junction"),
+            CommandError::CannotRestore(p) => write!(f, "cannot put the building back: {p}"),
         }
     }
 }
@@ -315,6 +324,10 @@ pub(crate) enum Plan {
         cell: Cell,
         change: JunctionChange,
     },
+    Restore {
+        rec: Box<crate::restore::BuildingRecord>,
+        footprint: crate::Footprint,
+    },
 }
 
 fn cells_m(m: f32) -> u32 {
@@ -396,6 +409,20 @@ impl Plan {
                 junction: Some(*change),
                 ..Preview::default()
             },
+            Plan::Restore { rec, footprint } => {
+                let mut cells: Vec<Cell> = footprint
+                    .cells()
+                    .filter_map(|c| world.zoning.cell_center(c))
+                    .map(Cell::from_pos)
+                    .collect();
+                cells.sort();
+                cells.dedup();
+                Preview {
+                    cost: -crate::restore::refund(rec),
+                    cells,
+                    ..Preview::default()
+                }
+            }
         }
     }
 }
@@ -556,6 +583,13 @@ pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
                 return Err(CommandError::NotANode);
             }
             plan_junction(world, node, Cell::from_pos(n.pos), control)
+        }
+        Command::RestoreBuilding(rec) => {
+            let footprint = crate::restore::plan(world, rec).map_err(CommandError::CannotRestore)?;
+            Ok(Plan::Restore {
+                rec: rec.clone(),
+                footprint,
+            })
         }
     }
 }
@@ -772,6 +806,9 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
             }
         }
         Plan::Tax(r) => world.economy.tax_rate = r,
+        Plan::Restore { rec, footprint } => {
+            crate::restore::execute(world, &rec, footprint);
+        }
         Plan::Junction { change, .. } => {
             crate::traffic::sync_junctions(world);
             if let Some(j) = world.traffic.junction_states.get_mut(change.node) {

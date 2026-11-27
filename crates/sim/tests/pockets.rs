@@ -177,7 +177,7 @@ fn straight_traffic_and_streets_are_unaffected() {
     let (w, _) = capacity::build(&Bench::crossing(K::Street, K::Street, S::Signal));
     assert!(pockets_of(&w).is_empty());
     let st = run(&Bench::crossing(K::Street, K::Street, S::Signal), 7, 120, 300);
-    // (Streets are driven at 40 km/h with 2 s between cars: about 46 a
+    // (Streets are driven at 40 km/h with 2.6 s between cars: about 36 a
     // minute through a signalled crossing of two.)
-    assert!((40.0..=56.0).contains(&st.per_minute), "{}", st.per_minute);
+    assert!((30.0..=46.0).contains(&st.per_minute), "{}", st.per_minute);
 }

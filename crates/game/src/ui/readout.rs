@@ -118,7 +118,21 @@ pub fn snap_words(s: &Snapped, suspended: bool) -> Option<String> {
         SnapTarget::Extension => parts.push("continues a road's line".into()),
         SnapTarget::Perpendicular => parts.push("straight on / at right angles".into()),
         SnapTarget::Parallel => parts.push(match s.spacing_m {
-            Some(m) => format!("parallel, {} from the road", metres(m)),
+            Some(m) => {
+                let rows = super::fsnap::rows_between(m);
+                let n = rows.round() as i32;
+                if (rows - n as f32).abs() < 0.01 && n >= 2 {
+                    // Whole rows of lots between the kerbs, back to back.
+                    let lots = if n % 2 == 0 {
+                        format!("2 × {} rows of lots", n / 2)
+                    } else {
+                        format!("{n} rows of lots")
+                    };
+                    format!("parallel, {} from the road · {lots}", metres(m))
+                } else {
+                    format!("parallel, {} from the road", metres(m))
+                }
+            }
             None => "parallel to the road".into(),
         }),
         SnapTarget::Angle => parts.push("15° step".into()),

@@ -416,6 +416,18 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            // T with the maps drawer open turns the traffic map off; the
+            // drawer shows "Off".
+            name: "maps-traffic-off-by-key",
+            wait: 1.2,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<OverlayMode>() = OverlayMode::Traffic;
+                w.resource_mut::<UiState>().tray = Some(InfoTray::Maps);
+                w.write_message(UiAction::MapKey(Some(OverlayMode::Traffic)));
+            },
+        },
+        Step {
             name: "stats",
             wait: 1.2,
             setup: |w| {
@@ -874,6 +886,20 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            // With the side panel open there is no room beside the full
+            // performance panel: it shows as its small strip meanwhile.
+            name: "window-perf-crowded",
+            wait: 3.0,
+            setup: |w| {
+                reset(w);
+                w.resource_mut::<UiState>().perf = PerfDetail::Full;
+                if let Some(b) = building_where(w, |b| b.kind == Zone::Residential && b.occupied > 0) {
+                    w.write_message(UiAction::Place(b));
+                }
+                w.write_message(UiAction::Stats);
+            },
+        },
+        Step {
             name: "route-car",
             wait: 2.0,
             setup: |w| {
@@ -1010,6 +1036,50 @@ fn steps() -> Vec<Step> {
                 // Hold the moment: people get out on the calendar long
                 // before their car finishes its drive.
                 w.resource_mut::<SimClock>().paused = true;
+            },
+        },
+        Step {
+            // Someone under way off the map (on foot if anyone is): the
+            // camera on where they should be by now, the line from there.
+            name: "people-follow-walker",
+            wait: 2.5,
+            setup: |w| {
+                reset(w);
+                let s = sim(w);
+                let now = s.time.tick;
+                let who = s
+                    .citizens
+                    .iter()
+                    .filter_map(|(id, c)| match &c.location {
+                        citysim_sim::citizens::Location::Travelling(j)
+                            if j.from.is_some() && !j.vehicle.is_some_and(|v| s.vehicles.contains_key(v)) =>
+                        {
+                            let walking = j.mode == citysim_sim::TravelMode::Walking;
+                            Some(((walking, j.due_tick.saturating_sub(now)), id))
+                        }
+                        _ => None,
+                    })
+                    .max_by_key(|x| x.0)
+                    .map(|x| x.1);
+                if let Some(id) = who {
+                    w.write_message(UiAction::Person(id));
+                    w.write_message(UiAction::Follow);
+                }
+                w.resource_mut::<CameraOverride>().0 = None;
+            },
+        },
+        Step {
+            // F6 into the selection panel.
+            name: "panel-focus",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                if let Some(b) = building_where(w, |b| b.kind == Zone::Residential && b.occupied > 4) {
+                    w.write_message(UiAction::Place(b));
+                }
+                w.resource_mut::<SimClock>().paused = true;
+                let mut ui = w.resource_mut::<UiState>();
+                ui.focus = Some(super::tray::FocusArea::Panel);
             },
         },
         Step {

@@ -174,6 +174,7 @@ impl World {
             // Payday and the day's budget, before the night's life events.
             economy::end_of_day(self);
         }
+        economy::hourly(self);
         households::tick(self);
         crate::errands::tick(self);
         traffic::tick(self);

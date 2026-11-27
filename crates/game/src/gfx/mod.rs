@@ -9,6 +9,7 @@ mod camera;
 mod city_material;
 mod cursor;
 mod daynight;
+mod greens;
 mod guides;
 mod land;
 mod loading;
@@ -32,6 +33,7 @@ mod stats;
 mod trees;
 mod vehicle_gen;
 mod vehicles;
+mod yards;
 mod zones;
 
 use bevy::prelude::*;
@@ -73,6 +75,8 @@ impl Plugin for GfxPlugin {
             perf::PerfPlugin,
             record::RecordPlugin,
             route::RoutePlugin,
+            yards::YardsPlugin,
+            greens::GreensPlugin,
         ));
     }
 }
@@ -130,6 +134,8 @@ mod reload_tests {
                 super::buildings::BuildingsPlugin,
                 super::vehicles::VehiclesPlugin,
                 super::trees::TreesPlugin,
+                super::greens::GreensPlugin,
+                super::yards::YardsPlugin,
             ));
         let lit = app
             .world_mut()

@@ -94,10 +94,10 @@ kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows;
 | B | Bulldozer on / off (off: back to the tool you had) |
 | Tab | Next mode of the tool (roads: straight, curve, chain, grid, upgrade; zones: paint, along a road, fill, rectangle; bulldozer: road or building, area); in the city window: next page (Shift+Tab: back) |
 | Alt · Backspace · [ ] | Hold to place without snapping · remove the last point · grid block size |
-| Ctrl+Z | Undo the last road, zoning or demolition (no refund for demolitions) |
-| P · U · O · T | City window: people · budget (the chart button top right: statistics) · maps (cycles zones and traffic) · traffic map |
+| Ctrl+Z | Undo the last road, zoning or demolition: demolished buildings come back with their households and staff (unless their lot has changed since); rebuilt road is paid again |
+| P · U · O · T | City window: people · budget (the chart button top right: statistics) · maps (cycles zones and traffic) · traffic map on / off (in every state, drawer open or not) |
 | F | Follow the person or car in the side panel (a pan key or Esc lets go) |
-| F6 | Move the keyboard into the city window or the open drawer: arrow keys choose, Enter presses, Esc leaves |
+| F6 | Move the keyboard into the city window, the open drawer or the side panel, and on to the next (Shift+F6 back): arrow keys choose (long pages scroll along), Enter presses, Esc leaves |
 | Space · 1 2 3 4 | Pause · speed 1x / 3x / 6x / 12x |
 | WASD or arrows · Q / E | Pan · rotate (Shift pans faster); edge scrolling can be switched on in Settings |
 | Mouse wheel · middle drag | Zoom · rotate and tilt |

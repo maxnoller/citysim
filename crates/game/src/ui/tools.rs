@@ -39,7 +39,7 @@ use citysim_sim::{
 };
 
 use super::UiState;
-use super::fsnap::{self, Anchor, OnNet, SnapOptions, Snapped, dist};
+use super::fsnap::{self, Anchor, OnNet, SnapOptions, Snapped, add, dist, dot, mul, sub};
 use super::plan::{self, Evaluated, Op, UndoRecord};
 use super::shapes::{Draft, GridFrame, Placed, Shape, Stretch};
 use super::toasts::{Toast, ToastKind};
@@ -633,17 +633,47 @@ fn stretch_part(world: &World, state: &ToolState, cursor: [f32; 2]) -> Option<(S
     }
 }
 
-/// Paint brush: cells whose centre is within about half a cell of `p`.
-fn brush_cells(world: &World, p: [f32; 2]) -> Vec<CellRef> {
-    let r = 4.5;
+/// Paint brush along the pointer's path from `a` to `b`: every cell the
+/// path crosses and every cell whose centre is within half a cell's
+/// diagonal of it, so a stroke is one band of cells sharing their sides
+/// (never a chain of cells touching at the corners, even drawn at 45
+/// degrees across the grid), however far the pointer moved since the last
+/// frame.
+fn brush_cells(world: &World, a: [f32; 2], b: [f32; 2]) -> Vec<CellRef> {
+    const R: f32 = citysim_sim::CELL_SIZE * 0.5 * std::f32::consts::SQRT_2 + 0.15;
+    // Candidates: centres within reach of the path.
+    let reach = R + 0.5;
+    let d = sub(b, a);
+    let len = dist(a, b);
+    let u = if len > 1e-3 { mul(d, 1.0 / len) } else { [1.0, 0.0] };
+    let n = [-u[1], u[0]];
+    let at = |s: f32, t: f32| add(add(a, mul(u, s)), mul(n, t));
     let q = [
-        [p[0] - r, p[1] - r],
-        [p[0] + r, p[1] - r],
-        [p[0] + r, p[1] + r],
-        [p[0] - r, p[1] + r],
+        at(-reach, -reach),
+        at(len + reach, -reach),
+        at(len + reach, reach),
+        at(-reach, reach),
     ];
-    let mut out = zoning::cells_in_quad(world, &q);
-    out.extend(world.zoning.cell_at(p));
+    let mut out: Vec<CellRef> = zoning::cells_in_quad(world, &q)
+        .into_iter()
+        .filter(|&c| {
+            let Some(ctr) = world.zoning.cell_center(c) else {
+                return false;
+            };
+            let t = dot(sub(ctr, a), u).clamp(0.0, len);
+            if dist(ctr, add(a, mul(u, t))) <= R {
+                return true;
+            }
+            // The path crosses the cell (or ends in it).
+            let Some(k) = world.zoning.cell_corners(c) else {
+                return false;
+            };
+            zoning::in_quad(&k, a)
+                || zoning::in_quad(&k, b)
+                || (0..4).any(|e| citysim_sim::curve::segments_meet(a, b, k[e], k[(e + 1) % 4]).is_some())
+        })
+        .collect();
+    out.extend(world.zoning.cell_at(b));
     out
 }
 
@@ -943,6 +973,9 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
         return (Some(Toast::new(ToastKind::Error, super::context::error_text(e))), false);
     }
     let mut toast = None;
+    // Buildings the plan takes down (bulldozed, or on land a new road now
+    // needs), recorded from the real world so undo can put them back.
+    let lost = || plan::demolished(&sim.world, &base, &after);
     match &pending {
         Pending::Road { curves, grid, .. } => {
             let label = if grid.is_some() {
@@ -952,7 +985,7 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
             } else {
                 "road".to_string()
             };
-            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label));
+            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label, lost()));
         }
         Pending::Upgrade { kind, .. } => {
             let label = if *kind == RoadKind::Avenue {
@@ -960,22 +993,32 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
             } else {
                 "change to street"
             };
-            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label.into()));
+            push_undo(state, plan::undo_for_roads(&base, &after, &eval, label.into(), lost()));
         }
         Pending::Bulldoze { .. } => {
             let removed = eval.removed().len();
-            let lost = eval.buildings().len();
-            if removed > 0 {
-                push_undo(state, plan::undo_for_roads(&base, &after, &eval, "demolition".into()));
-            } else if lost > 0 {
-                toast = Some(Toast::new(
-                    ToastKind::Info,
-                    if lost == 1 {
-                        "Building demolished".to_string()
-                    } else {
-                        format!("{lost} buildings demolished")
-                    },
-                ));
+            let buildings = lost();
+            let n = buildings.len();
+            if removed > 0 || n > 0 {
+                let label = if removed > 0 {
+                    "demolition"
+                } else if n == 1 {
+                    "building demolition"
+                } else {
+                    "demolition of buildings"
+                };
+                push_undo(
+                    state,
+                    plan::undo_for_roads(&base, &after, &eval, label.into(), buildings),
+                );
+            }
+            if removed == 0 && n > 0 {
+                let what = if n == 1 {
+                    "Building demolished".to_string()
+                } else {
+                    format!("{n} buildings demolished")
+                };
+                toast = Some(Toast::new(ToastKind::Info, format!("{what} · Ctrl+Z puts it back")));
             }
         }
         Pending::Zone { zone, .. } => {
@@ -1021,13 +1064,50 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
         return Toast::new(ToastKind::Info, "Nothing to undo");
     };
     let label = rec.label().to_string();
-    let ops = plan::undo_ops(&sim.world, &rec);
+    let mut ops = plan::undo_ops(&sim.world, &rec);
     if ops.is_empty() {
         return Toast::new(ToastKind::Info, format!("The {label} is already gone"));
     }
     let base = state.scratch_for(sim).clone();
-    let (eval, _) = plan::evaluate(&base, &ops);
+    let (mut eval, _) = plan::evaluate(&base, &ops);
+    // Buildings whose lot has changed stay demolished; the rest of the
+    // undo (roads, other buildings) still goes ahead.
+    let mut kept_out: Vec<String> = Vec::new();
+    let refused: Vec<usize> = eval
+        .steps
+        .iter()
+        .filter(|s| matches!(s.result, Err(CommandError::CannotRestore(_))))
+        .map(|s| s.op)
+        .collect();
+    let restores = ops
+        .iter()
+        .filter(|o| matches!(o, Op::Cmd(Command::RestoreBuilding(_))))
+        .count();
+    if !refused.is_empty() && refused.len() < ops.len() {
+        for s in &eval.steps {
+            if let Err(e @ CommandError::CannotRestore(_)) = &s.result {
+                kept_out.push(super::context::error_text(e));
+            }
+        }
+        ops = ops
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !refused.contains(i))
+            .map(|(_, o)| o)
+            .collect();
+        eval = plan::evaluate(&base, &ops).0;
+    }
     if let Some(e) = eval.first_error() {
+        if let CommandError::BuildingInTheWay { at, building } = e {
+            let b = sim.world.buildings.get(*building);
+            debug!(
+                "undo refused: building {building:?} in the way at {at:?}: {:?} ops {:?}",
+                b.map(|b| (b.center(), b.footprint, b.created_tick)),
+                ops.iter()
+                    .filter(|o| !matches!(o, Op::Cmd(Command::RestoreBuilding(_))))
+                    .collect::<Vec<_>>()
+            );
+        }
         return Toast::new(
             ToastKind::Warning,
             format!("Can't undo the {label}: {}", super::context::error_text(e)),
@@ -1038,13 +1118,47 @@ fn undo(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComman
         out.write(SimCommand(cmd));
     }
     let mut extra = String::new();
-    if eval.cost > 0 {
-        extra = format!(" (costs {}, no refund)", super::format::money(eval.cost));
+    let back: Vec<&citysim_sim::BuildingRecord> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Cmd(Command::RestoreBuilding(r)) => Some(&**r),
+            _ => None,
+        })
+        .collect();
+    let road_cost: i64 = eval.cost + back.iter().map(|r| r.building.footprint.area() as i64).sum::<i64>();
+    if road_cost > 0 && back.len() < ops.len() {
+        extra = format!(" (the road costs {})", super::format::money(road_cost));
     }
-    if let UndoRecord::Roads { lost_buildings, .. } = rec
-        && lost_buildings > 0
-    {
-        extra.push_str(" · demolished buildings don't come back");
+    if !back.is_empty() {
+        let people: usize = back.iter().map(|r| r.residents()).sum();
+        let staff: usize = back.iter().map(|r| r.workers.len()).sum();
+        let what = if back.len() == 1 {
+            "building back".to_string()
+        } else {
+            format!("{} buildings back", back.len())
+        };
+        extra.push_str(&format!(" · {what}"));
+        if people > 0 {
+            extra.push_str(&format!(
+                ", {people} {}",
+                if people == 1 { "resident" } else { "residents" }
+            ));
+        } else if staff > 0 {
+            extra.push_str(&format!(", {staff} on the staff"));
+        }
+    }
+    if !kept_out.is_empty() {
+        let n = kept_out.len();
+        let first = kept_out[0].trim_end_matches('.').to_string();
+        let msg = if n == restores {
+            format!("Undid the {label}{extra}, but the buildings can't come back: {first}")
+        } else {
+            format!(
+                "Undid the {label}{extra}; {n} {} can't come back: {first}",
+                if n == 1 { "building" } else { "buildings" }
+            )
+        };
+        return Toast::new(ToastKind::Warning, msg);
     }
     Toast::new(ToastKind::Success, format!("Undid the {label}{extra}"))
 }
@@ -1195,6 +1309,22 @@ fn step_back(state: &mut ToolState) {
     }
 }
 
+/// Paint mode, button held: add the cells along the pointer's path since
+/// the last frame to the stroke.
+fn extend_stroke(state: &mut ToolState, tool: ActiveTool, mode: ZoneMode, world: &World) {
+    if !(matches!(tool, ActiveTool::Zone(_)) && mode == ZoneMode::Paint && state.press.is_some()) {
+        return;
+    }
+    let Some(c) = state.cursor else { return };
+    let from = state.stroke_last.unwrap_or(c);
+    for cell in brush_cells(world, from, c) {
+        if !state.stroke.contains(&cell) {
+            state.stroke.push(cell);
+        }
+    }
+    state.stroke_last = Some(c);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn use_tool(
     time: Res<Time<Real>>,
@@ -1228,6 +1358,8 @@ fn use_tool(
     // no longer held.
     let released = mouse.just_released(MouseButton::Left) || state.press.is_some() && !mouse.pressed(MouseButton::Left);
     let right = mouse.just_pressed(MouseButton::Right) && !over_ui.0;
+    // The stroke so far, before the preview of this frame.
+    extend_stroke(state, *tool, modes.zone, &sim.world);
     let p = pending(*tool, *modes, *kind, &opts, state, &sim.world);
     refresh_plan(state, &sim, p);
     if (keys.just_pressed(KeyCode::Escape) && !ui.tray_focus || right) && state.busy() {
@@ -1342,24 +1474,7 @@ fn use_tool(
                 state.stroke_last = None;
             }
             // Paint: add the cells under the pointer's path.
-            if matches!(*tool, ActiveTool::Zone(_))
-                && modes.zone == ZoneMode::Paint
-                && state.press.is_some()
-                && let Some(c) = state.cursor
-            {
-                let from = state.stroke_last.unwrap_or(c);
-                let n = (dist(from, c) / 3.0).ceil().max(1.0) as usize;
-                for k in 1..=n {
-                    let t = k as f32 / n as f32;
-                    let q = [from[0] + (c[0] - from[0]) * t, from[1] + (c[1] - from[1]) * t];
-                    for cell in brush_cells(&sim.world, q) {
-                        if !state.stroke.contains(&cell) {
-                            state.stroke.push(cell);
-                        }
-                    }
-                }
-                state.stroke_last = Some(c);
-            }
+            extend_stroke(state, *tool, modes.zone, &sim.world);
             if released && state.press.is_some() {
                 // The plan for the release position.
                 let p = pending(*tool, *modes, *kind, &opts, state, &sim.world);

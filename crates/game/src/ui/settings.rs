@@ -136,7 +136,7 @@ fn current(quality: GraphicsQuality, state: &UiState, display: &DisplaySettings)
         ui_scale: state.ui_scale,
         edge_scroll: display.edge_scroll,
         lot_markers: display.lot_markers,
-        perf: state.perf,
+        perf: state.perf_choice,
     }
 }
 
@@ -145,6 +145,15 @@ fn load_settings(
     mut state: ResMut<UiState>,
     mut display: ResMut<DisplaySettings>,
 ) {
+    // `CITYSIM_UI_SCALE=i` (development: captures at every interface size)
+    // picks `UI_SCALES[i]` over the saved one.
+    let forced_scale = std::env::var("CITYSIM_UI_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&i| i < UI_SCALES.len());
+    if let Some(i) = forced_scale {
+        state.ui_scale = i;
+    }
     if !persistence_enabled() {
         return;
     }
@@ -156,10 +165,11 @@ fn load_settings(
     if std::env::var_os("CITYSIM_GFX_QUALITY").is_none() {
         *quality = s.quality;
     }
-    state.ui_scale = s.ui_scale;
+    state.ui_scale = forced_scale.unwrap_or(s.ui_scale);
     display.edge_scroll = s.edge_scroll;
     display.lot_markers = s.lot_markers;
     state.perf = s.perf;
+    state.perf_choice = s.perf;
     info!("settings loaded from {}", config_dir().display());
 }
 
@@ -238,10 +248,10 @@ const KEYS: [(&str, &[(&str, &str)]); 3] = [
             ("P", "City window: people"),
             ("U", "City window: budget"),
             ("O", "Maps · cycle"),
-            ("T", "Traffic map"),
+            ("T", "Traffic map on / off"),
             ("G", "Graphics quality"),
             ("F3", "Performance panel · small, full, off"),
-            ("F6", "Keyboard into window / drawer"),
+            ("F6", "Keyboard into window, drawer, side panel"),
             ("F5  F9", "Save · load"),
         ],
     ),

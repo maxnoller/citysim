@@ -20,7 +20,7 @@ use super::land::{self, CellView, RoadEdges};
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix, shade};
 use super::scene::WorldMaterials;
-use super::zones::{full_overlay, neighbours, zone_color};
+use super::zones::{full_overlay, zone_color};
 use crate::shared::{ActiveTool, DisplaySettings, GameSet, OverlayMode, SimWorld};
 
 /// Chunk size, metres.
@@ -46,12 +46,12 @@ fn chunk_hash(cells: &[CellView], free: &HashMap<CellRef, Zone>) -> u64 {
     let mut h = DefaultHasher::new();
     for c in cells {
         (c.cell, c.zone, c.fronts).hash(&mut h);
-        for p in c.quad {
+        for p in &c.poly {
             p.x.to_bits().hash(&mut h);
             p.y.to_bits().hash(&mut h);
         }
-        for n in neighbours(c.cell) {
-            free.get(&n).hash(&mut h);
+        for n in &c.edge_nbrs {
+            n.and_then(|n| free.get(&n)).hash(&mut h);
         }
     }
     h.finish()
@@ -115,12 +115,13 @@ fn chunk_mesh(cells: &[CellView], free: &HashMap<CellRef, Zone>) -> Option<Mesh>
         // street of empty lots does not read as a row of fences.
         let tint = mix(base, Color::WHITE, 0.55);
         let paint = lin(mix(base, palette::GRASS_LIGHT, 0.62));
-        let centre = c.center();
-        for (k, n) in neighbours(c.cell).into_iter().enumerate() {
-            if free.get(&n) == Some(&z) {
+        let centre = c.poly_center();
+        let np = c.poly.len();
+        for k in 0..np {
+            if c.edge_nbrs[k].and_then(|nb| free.get(&nb)) == Some(&z) {
                 continue;
             }
-            let (a, b) = (c.quad[k], c.quad[(k + 1) % 4]);
+            let (a, b) = (c.poly[k], c.poly[(k + 1) % np]);
             let inward = (centre - (a + b) * 0.5).normalize_or_zero();
             // Painted border on the grass, inside the edge.
             let w = 0.3;

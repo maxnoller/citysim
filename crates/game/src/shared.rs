@@ -521,6 +521,11 @@ pub struct RouteView {
     /// marker; gfx also highlights that building).
     pub origin: Option<RouteEnd>,
     pub destination: Option<RouteEnd>,
+    /// A person under way off the map (`Unseen`: on foot, a lift, a car
+    /// beyond those drawn): where they should be by now, estimated from the
+    /// share of the trip's time gone. `points` then start there and gfx
+    /// draws the line as for a car, with a marker here (`gfx/route.rs`).
+    pub traveller: Option<[f32; 2]>,
 }
 
 /// Player display settings that gfx honours (written by ui from the

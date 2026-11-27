@@ -75,10 +75,10 @@ pub const STARTING_MONEY: i64 = 30_000;
 /// Cost of one cell of newly built road (per cell-to-cell piece of length).
 /// The main money sink: an expanding city spends most of its surplus here.
 pub const ROAD_COST_PER_CELL: i64 = 65;
-/// Cost of one cell of avenue (round 5: 140 -> 90, a hierarchy must be
-/// affordable to the player who builds it). Upgrading a street to an
-/// avenue costs the difference; downgrading is free (no refund).
-pub const AVENUE_COST_PER_CELL: i64 = 90;
+/// Cost of one cell of avenue (round 5: 140 -> 90, round 6: 75; a hierarchy
+/// must be affordable to the player who builds it). Upgrading a street to
+/// an avenue costs the difference; downgrading is free (no refund).
+pub const AVENUE_COST_PER_CELL: i64 = 75;
 /// Cost per cell cleared by the bulldozer (road cell or building cell).
 pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// Daily upkeep per road cell (charged at midnight; can push money negative).
@@ -88,8 +88,8 @@ pub const BULLDOZE_COST_PER_CELL: i64 = 1;
 /// ($1 per 4 real minutes, as in round 2.)
 pub const ROAD_UPKEEP_PER_CELL_PER_DAY: i64 = 4;
 /// Daily upkeep per avenue cell (four lanes, more to maintain; round 5:
-/// 10 -> 8).
-pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 8;
+/// 10 -> 8, round 6: 6).
+pub const AVENUE_UPKEEP_PER_CELL_PER_DAY: i64 = 6;
 /// Daily upkeep of a junction with traffic lights (power, maintenance),
 /// part of road upkeep. Busy junctions get lights automatically, so a city
 /// whose traffic needs many lights pays for them.
@@ -103,26 +103,27 @@ pub const SERVICES_COST_PER_RESIDENT_PER_DAY: f32 = 3.6;
 /// A bigger city needs more complex services (hospitals, a fire brigade
 /// with ladders, transit, courts): each resident costs up to this much more
 /// per day, `* pop² / (pop² + SERVICES_CITY_SIZE_POP²)`: little in a town
-/// ($0.2 at 3,000 residents), $1.2 at 10,000, $1.8 at 20,000. Total
+/// ($0.1 at 3,000 residents), $0.6 at 10,000, $1.1 at 20,000. Total
 /// services therefore grow faster than the population, but a well-run
-/// bigger city still nets more per day than a smaller one (round 5: the
-/// size term was steep enough to cancel a hierarchy's extra residents).
-pub const SERVICES_CITY_SIZE_PER_RESIDENT: f32 = 2.2;
+/// bigger city keeps netting more per day as it grows (round 6: 2.2 at
+/// 9,000 made net income fall beyond 8,000 residents).
+pub const SERVICES_CITY_SIZE_PER_RESIDENT: f32 = 1.5;
 /// Population at which half of [`SERVICES_CITY_SIZE_PER_RESIDENT`] applies.
-pub const SERVICES_CITY_SIZE_POP: f32 = 9_000.0;
+pub const SERVICES_CITY_SIZE_POP: f32 = 12_000.0;
 /// The cost of density: extra services per resident per day by the level
 /// of their home `[1, 2, 3]` (apartment blocks need more fire cover,
 /// policing and rubbish collection than houses).
 pub const SERVICES_DENSITY_PER_RESIDENT: [f32; 3] = [0.0, 0.4, 1.0];
 
 /// Traffic costs business: every commute's time beyond
-/// `TRAFFIC_FREE_FACTOR` times its free-flow estimate is output lost at
+/// `TRAFFIC_FREE_FACTOR` times its free-flow estimate (rush-hour traffic in
+/// a city that works costs nothing; round 6: 1.6 -> 2.0) is output lost at
 /// `TRAFFIC_OUTPUT_PER_S` dollars per vehicle second ($10 an in-game hour
 /// of one worker), and the business tax on it (tax rate times that)
 /// is not paid, up to `TRAFFIC_LOSS_MAX_SHARE` of the day's business tax
 /// (`economy::TrafficLoss`, taken off the commercial and industrial tax
 /// lines).
-pub const TRAFFIC_FREE_FACTOR: f32 = 1.6;
+pub const TRAFFIC_FREE_FACTOR: f32 = 2.0;
 pub const TRAFFIC_OUTPUT_PER_S: f32 = 0.9;
 pub const TRAFFIC_LOSS_MAX_SHARE: f32 = 0.7;
 
@@ -222,7 +223,7 @@ pub const MIN_GAP_M: f32 = 5.5;
 pub const FOLLOW_HEADWAY_S: f32 = 1.1;
 /// ... on streets: 2.75 m lanes lined with driveways and kerbside activity
 /// are driven with more distance (about 0.45 cars/s per lane from a queue).
-pub const STREET_FOLLOW_HEADWAY_S: f32 = 2.0;
+pub const STREET_FOLLOW_HEADWAY_S: f32 = 2.6;
 /// Acceleration, m/s².
 pub const ACCELERATION: f32 = 3.5;
 /// Comfortable braking used towards stop lines and junctions, m/s².
@@ -294,6 +295,12 @@ pub const MERGE_MIN_LINE_M: f32 = 8.0;
 /// give-way approach this much to the major road.
 pub const PERMISSIVE_GAP_S: f32 = 2.5;
 pub const GIVE_WAY_GAP_S: f32 = 3.5;
+/// Courtesy at a priority junction: a minor-road car that has stood this
+/// long at its line goes as if it had priority while every conflicting car
+/// with priority is slower than [`COURTESY_SPEED`] (a creeping queue lets
+/// one in), seconds and m/s.
+pub const COURTESY_WAIT_S: f32 = 20.0;
+pub const COURTESY_SPEED: f32 = 4.0;
 /// A car not moving inside a junction box for this long is taken off the
 /// road (deadlock breaker; only road edits can cause it).
 pub const BOX_DEADLOCK_S: f32 = 20.0;
@@ -328,7 +335,10 @@ pub const NEIGHBOUR_CLEARANCE_M: f32 = 2.2;
 /// behind the box it follows. Left turners move into it from the inner
 /// lane; one that finds it full waits at its entry, `POCKET_ENTRY_M` in,
 /// so the queue spills back into the inner lane.
-pub const POCKET_MAX_M: f32 = 40.0;
+pub const POCKET_MAX_M: f32 = 60.0;
+/// (Pockets longer than this only where they take at most half the
+/// block's drivable length.)
+pub const POCKET_LONG_M: f32 = 40.0;
 pub const POCKET_MIN_M: f32 = 11.0;
 pub const POCKET_GAP_M: f32 = 6.0;
 pub const POCKET_ENTRY_M: f32 = 4.0;
@@ -348,7 +358,9 @@ pub const POCKET_CALL_CARS: u16 = 3;
 /// phase, and the main through phases (longer, so the left phase's lost
 /// time is spread over more cars).
 pub const POCKET_LEFT_MAX_GREEN_S: f32 = 14.0;
-pub const POCKET_MAIN_MAX_GREEN_S: f32 = 30.0;
+pub const POCKET_MAIN_MAX_GREEN_S: f32 = 40.0;
+/// ... but no longer than this while one of its pockets is full.
+pub const POCKET_FULL_MAX_GREEN_S: f32 = 30.0;
 /// Right turns of the other road go during a left-arrow phase.
 pub const RIGHT_TURN_OVERLAP: bool = true;
 /// Routing: a left turn from a turn pocket costs this share of the usual
@@ -378,9 +390,38 @@ pub const SIGNAL_LEFT_MAX_GREEN_S: f32 = 8.0;
 /// Yellow and all-red clearance, seconds.
 pub const SIGNAL_YELLOW_S: f32 = 2.5;
 pub const SIGNAL_ALL_RED_S: f32 = 1.0;
+/// Does the all-red wait (up to three times as long) for the box to empty?
+/// Off: cars let in on the next green yield to those still in the box
+/// anyway.
+pub const SIGNAL_ALL_RED_WAITS_FOR_BOX: bool = false;
 /// A green is held only for vehicles that reach the line within this many
 /// seconds (passage time); vehicles further back call their phase.
 pub const SIGNAL_PASSAGE_S: f32 = 2.5;
+/// Queue-based gap-out: a through green whose approaches have at most
+/// [`SIGNAL_DISCHARGED_CARS`] standing cars left ends (after its minimum)
+/// when another approach has [`SIGNAL_SWITCH_QUEUE_CARS`] standing, even
+/// if more cars are arriving.
+pub const SIGNAL_DISCHARGED_CARS: u16 = 1;
+/// (A car near the line slower than this, m/s, is still pulling away from
+/// a queue: it holds the green whatever stands elsewhere.)
+pub const SIGNAL_DISCHARGE_SPEED: f32 = 7.0;
+/// (Nor while the cars within [`SIGNAL_DETECT_M`] of the line on its
+/// through lanes, times this, are at least as many as those standing for
+/// the other phase.)
+pub const SIGNAL_SWITCH_RATIO: u32 = 2;
+/// Signals that are not coordinated serve next the phase with the most
+/// cars standing for it (left phases: the cars in the pockets), not the
+/// next one in plan order; a phase whose front car has waited this long is
+/// served first.
+pub const SIGNAL_BY_QUEUE: bool = true;
+pub const SIGNAL_STARVED_S: f32 = 60.0;
+/// A car standing in a turn pocket counts this many times (a full pocket
+/// spills into the inner lane and blocks it).
+pub const SIGNAL_POCKET_WEIGHT: u32 = 3;
+/// With this many cars in a pocket its left phase runs before its own
+/// through phase (a full pocket spills into the inner lane).
+pub const SIGNAL_LEFT_FIRST_CARS: u16 = 4;
+pub const SIGNAL_SWITCH_QUEUE_CARS: u16 = 4;
 /// Vehicles closer than this to the stop line call their phase, metres.
 pub const SIGNAL_DETECT_M: f32 = 40.0;
 /// Common cycle of coordinated signals along avenues, seconds ...
@@ -429,8 +470,9 @@ pub const ROUTE_RIGHT_S: f32 = 1.0;
 /// that ends at a junction, multiplied by that direction's congestion.
 pub const ROUTE_QUEUE_COST_S: f32 = 2.0;
 
-/// A car that reaches its destination stands at the kerb this long before
-/// it is gone (parking), seconds.
+/// A car that reaches its destination on a one-lane street stands in the
+/// lane this long before it is gone (parking, turning into a driveway):
+/// everyone behind waits. On wider roads it pulls in at once. Seconds.
 pub const PARK_DWELL_S: f32 = 0.0;
 /// A car slower than this counts as waiting.
 pub const WAIT_SPEED: f32 = 0.5;
@@ -518,7 +560,7 @@ pub const MOVE_IN_FILL_PER_HOUR: f32 = 2.4;
 pub const MOVE_IN_MAX_PER_HOUR: f32 = 480.0;
 /// Newcomers arrive between these hours; at night at this share of the
 /// mean rate (the day's total is unchanged).
-pub const MOVE_IN_DAY_H: [f32; 2] = [6.0, 22.0];
+pub const MOVE_IN_DAY_H: [f32; 2] = [6.0, 21.0];
 pub const MOVE_IN_NIGHT_SHARE: f32 = 0.2;
 /// ... and only while the city's attractiveness (residential demand
 /// ignoring empty housing) is above this.
@@ -780,7 +822,11 @@ pub const JOB_DIST_SCALE_M: f32 = 1000.0;
 pub const INDUSTRY_START_H: [f32; 2] = [6.5, 8.5];
 pub const OFFICE_START_H: [f32; 2] = [8.5, 9.5];
 pub const SHOP_START_H: [f32; 2] = [8.0, 9.5];
-pub const LATE_SHIFT_OFFSET_H: f32 = 4.5;
+pub const LATE_SHIFT_OFFSET_H: f32 = 3.0;
+/// The late shift's personal offset, +- hours (triangular; narrower than
+/// [`SHIFT_PERSONAL_SPREAD_H`]: it ends after the evening rush, with the
+/// shops).
+pub const LATE_SHIFT_SPREAD_H: f32 = 0.75;
 /// Shop workers on the late shift (shops stay staffed into the evening).
 pub const LATE_SHIFT_SHARE: f32 = 0.35;
 /// Industrial workers on the night shift (from ~21:00).
@@ -850,12 +896,17 @@ pub const LEISURE_GO_NEED: f32 = 0.55;
 /// two hours before [`LEISURE_CLOSE_H`]; above this need they go earlier.
 pub const LEISURE_URGENT_NEED: f32 = 0.85;
 pub const LEISURE_OPEN_H: f32 = 10.0;
-pub const LEISURE_CLOSE_H: f32 = 19.5;
+pub const LEISURE_CLOSE_H: f32 = 19.0;
 /// Venues close at this hour: nights out end then at the latest, and
 /// nobody sets off who would not have at least [`LEISURE_DURATION_H`] there
 /// before it.
-pub const LEISURE_LAST_H: f32 = 21.5;
+pub const LEISURE_LAST_H: f32 = 21.0;
 pub const LEISURE_FREE_H: f32 = 4.0;
+/// Nights out are planned to be home by this hour in today's traffic
+/// (`traffic::delay_factor` on the drive both ways): nobody sets off who
+/// would not make it with a full visit, and a visit ends in time for it
+/// (it lasts at least a quarter of an hour).
+pub const LEISURE_HOME_BY_H: f32 = 22.0;
 /// A night out lasts this long plus up to the spread (personal), hours.
 pub const LEISURE_DURATION_H: f32 = 1.25;
 pub const LEISURE_DURATION_SPREAD_H: f32 = 1.0;
@@ -863,6 +914,36 @@ pub const LEISURE_DURATION_SPREAD_H: f32 = 1.0;
 /// rate over `1 + distance / this`.
 pub const LEISURE_SAMPLES: usize = 6;
 pub const LEISURE_DIST_SCALE_M: f32 = 400.0;
+/// The same for a midday visit (lunch nearby).
+pub const MIDDAY_DIST_SCALE_M: f32 = 150.0;
+/// The middle of the day: someone at home with the day free (no shift
+/// before [`MIDDAY_FREE_H`] hours from now: a day off, or no job) goes out
+/// for lunch on a share of days ([`MIDDAY_OUT_SHARE`]), setting off at a
+/// personal time in `MIDDAY_OUT_H` (an hour's window: one look at home falls
+/// in it, `HOME_RECHECK_H`), to a venue chosen like a night out; the visit
+/// lasts [`MIDDAY_VISIT_H`] plus up to [`MIDDAY_VISIT_SPREAD_H`]. Children
+/// at home come along.
+pub const MIDDAY_OUT_H: [f32; 2] = [10.0, 13.0];
+pub const MIDDAY_FREE_H: f32 = 4.0;
+pub const MIDDAY_OUT_SHARE: f32 = 0.25;
+pub const MIDDAY_VISIT_H: f32 = 0.75;
+pub const MIDDAY_VISIT_SPREAD_H: f32 = 0.5;
+/// Lunch breaks: on a share of days ([`LUNCH_BREAK_SHARE`], per worker and
+/// day) a worker whose shift runs over the middle of the day leaves work at
+/// a personal time in `LUNCH_BREAK_H` for the nearest of a few venues
+/// (`LUNCH_SAMPLES`; not their own workplace) at most [`LUNCH_MAX_TRIP_H`]
+/// away, stays [`LUNCH_BREAK_VISIT_H`] and goes back to work (only with
+/// the car they came in, or on foot; the shift's end is unchanged). Not
+/// when less than [`LUNCH_MIN_LEFT_H`] of the shift would be left.
+pub const LUNCH_BREAK_SHARE: f32 = 0.3;
+pub const LUNCH_BREAK_H: [f32; 2] = [11.0, 12.5];
+pub const LUNCH_BREAK_VISIT_H: f32 = 0.5;
+pub const LUNCH_MAX_TRIP_H: f32 = 0.75;
+pub const LUNCH_MIN_LEFT_H: f32 = 2.0;
+pub const LUNCH_SAMPLES: usize = 6;
+/// A visit to a venue that starts before this hour is a midday visit (its
+/// length above; later ones are nights out).
+pub const MIDDAY_VISIT_BEFORE_H: f32 = 15.5;
 /// No longer used by the sim (every car trip is drawn while the vehicle
 /// budget allows, [`MAX_VEHICLES`]); kept for compatibility.
 pub const SHOP_DRIVE_SHARE: f32 = 1.0;

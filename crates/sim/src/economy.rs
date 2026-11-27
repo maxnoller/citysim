@@ -89,6 +89,13 @@ pub struct DaySummary {
     /// saved by older versions). (Saved in the save file's extension block.)
     #[serde(skip)]
     pub budget: Budget,
+    /// What traffic cost the city that day (`Economy::last_day_traffic` as
+    /// booked at its midnight: commutes, time lost, business tax lost).
+    /// `None` for days booked by saves written before it was kept per day
+    /// (a save of that kind keeps it for its last day only). (Saved in the
+    /// save file's extension block.)
+    #[serde(skip)]
+    pub traffic: Option<TrafficLoss>,
 }
 
 /// How the city's finances stand, for the HUD.
@@ -208,6 +215,12 @@ pub struct Economy {
     /// `business_tax`.
     #[serde(skip)]
     pub last_day_traffic: TrafficLoss,
+    /// Money credited so far today ahead of the midnight booking: every
+    /// in-game hour the city receives a 24th of yesterday's net (taxes come
+    /// in and bills are paid through the day), and midnight books the
+    /// day's real budget less this. Saved in the extension block.
+    #[serde(skip)]
+    pub advanced_today: i64,
 }
 
 /// What congestion cost the city in a day: commuters' time beyond
@@ -303,6 +316,7 @@ impl Default for Economy {
             attendance: Attendance::default(),
             traffic_today: TrafficLoss::default(),
             last_day_traffic: TrafficLoss::default(),
+            advanced_today: 0,
         }
     }
 }
@@ -435,7 +449,9 @@ pub(crate) fn end_of_day(world: &mut World) {
         worked_ticks: 0,
         last_day_share: e.attendance.share(),
     };
-    e.money += b.income() - b.expenses();
+    // The day's net, less what came in (or went out) through the day.
+    e.money += b.income() - b.expenses() - e.advanced_today;
+    e.advanced_today = 0;
     e.last_day = b;
     e.last_day_income = b.income();
     e.last_day_expenses = b.expenses();
@@ -460,9 +476,26 @@ pub(crate) fn end_of_day(world: &mut World) {
             .peak_congestion_yesterday
             .max(world.traffic.peak_congestion_today),
         budget: b,
+        traffic: Some(traffic),
     };
     e.history.push(summary);
     update_fiscal(world, b);
+}
+
+/// Every in-game hour but midnight: a 24th of yesterday's net income is
+/// credited (or charged) at once, so money flows through the day instead of
+/// all at midnight (`Economy::advanced_today`; the midnight booking
+/// settles the rest). Nothing on the first day.
+pub(crate) fn hourly(world: &mut World) {
+    let t = &world.time;
+    if t.tick_of_day == 0 || !t.tick_of_day.is_multiple_of(balance::TICKS_PER_HOUR) || world.economy.history.is_empty()
+    {
+        return;
+    }
+    let e = &mut world.economy;
+    let step = e.last_day.net() / 24;
+    e.money += step;
+    e.advanced_today += step;
 }
 
 /// Midnight: debt cuts services, a long debt makes residents leave; money

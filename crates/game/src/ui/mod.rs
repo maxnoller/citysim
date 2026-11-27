@@ -93,6 +93,9 @@ impl CityPage {
 pub struct UiState {
     /// The open info drawer (the maps).
     pub tray: Option<InfoTray>,
+    /// The maps drawer was brought up by an overlay key (T / O), so the
+    /// key that turns the map off puts it away again.
+    pub maps_by_key: bool,
     /// The city window and its page (people, budget, statistics). The game
     /// keeps running behind it; a build tool closes it.
     pub window: Option<CityPage>,
@@ -113,13 +116,19 @@ pub struct UiState {
     pub following: bool,
     /// The bar is in its compact form (narrow window).
     pub compact: bool,
-    /// The keyboard works the open window or drawer (F6; arrows, Enter,
-    /// Esc).
+    /// The keyboard works the open window, drawer or side panel (F6;
+    /// arrows, Enter, Esc): `focus` says which.
     pub tray_focus: bool,
+    pub focus: Option<tray::FocusArea>,
     /// The tool to go back to when the bulldozer is switched off.
     pub before_demolish: Option<ActiveTool>,
-    /// The performance panel's size (F3; remembered in the settings).
+    /// The performance panel's form on screen (F3 and the panel's buttons
+    /// set it). Normally the player's choice; the full panel steps down to
+    /// its small form while the city window needs the room
+    /// (`city::perf_room`).
     pub perf: crate::shared::PerfDetail,
+    /// The form the player chose (remembered in the settings).
+    pub perf_choice: crate::shared::PerfDetail,
 }
 
 impl UiState {
@@ -132,6 +141,7 @@ impl Default for UiState {
     fn default() -> Self {
         UiState {
             tray: None,
+            maps_by_key: false,
             window: None,
             menu_open: false,
             paused_before_menu: false,
@@ -143,8 +153,10 @@ impl Default for UiState {
             following: false,
             compact: false,
             tray_focus: false,
+            focus: None,
             before_demolish: None,
             perf: crate::shared::PerfDetail::Off,
+            perf_choice: crate::shared::PerfDetail::Off,
         }
     }
 }

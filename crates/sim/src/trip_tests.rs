@@ -22,8 +22,10 @@ fn town(seed: u64) -> World {
     scenarios::zone(&mut w, (12, 126), (90, 127), Zone::Residential);
     scenarios::zone(&mut w, (12, 129), (50, 130), Zone::Commercial);
     scenarios::zone(&mut w, (51, 129), (90, 130), Zone::Industrial);
-    // Grown until the next day's noon: shops are open (they close at 19:30).
-    for _ in 0..DAY * 9 / 8 {
+    // Grown until the next day's 15:00: shops are open (they close at
+    // 19:30), the morning rush and lunch are over and the evening rush has
+    // not begun (driveways are free).
+    for _ in 0..DAY + 6 * balance::TICKS_PER_HOUR as u64 {
         w.step();
     }
     w.check_sim_invariants().unwrap();
@@ -317,6 +319,8 @@ fn nobody_goes_out_for_longer_on_the_way_than_at_the_venue() {
             w.households[hid].cars = 0;
         }
         w.time.tick_of_day = 17 * balance::TICKS_PER_HOUR;
+        // (Traffic is fine: this is about the trip's length.)
+        w.traffic.delay_factor = 1.0;
         let est = day::estimate_s(centre(&w, home), centre(&w, far));
         let hours = |s: f32| s * crate::TICKS_PER_SECOND as f32 / balance::TICKS_PER_HOUR as f32;
         assert!(
@@ -328,5 +332,64 @@ fn nobody_goes_out_for_longer_on_the_way_than_at_the_venue() {
             "without a car it is not: {est:.0} s"
         );
         assert_eq!(day::go_leisure(&mut w, id), car_free, "car free: {car_free}");
+    }
+}
+
+/// The middle of the day: workers out for a lunch break go back to work
+/// until their shift ends; people with the day free go out for lunch; both
+/// are real trips whose reason the interface can show.
+#[test]
+fn lunch_breaks_go_back_to_work_and_the_day_free_go_out_for_lunch() {
+    use crate::inspect::{self, TripReason};
+    use std::collections::BTreeSet;
+    let mut w = town(3);
+    for _ in 0..19 * balance::TICKS_PER_HOUR {
+        w.step();
+    }
+    let (mut breaks, mut outings, mut back) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    // From 10:00 to 15:00.
+    for t in 0..5 * balance::TICKS_PER_HOUR {
+        w.step();
+        if t % 10 != 0 {
+            continue;
+        }
+        for id in w.citizens.keys() {
+            match inspect::citizen(&w, id).and_then(|v| v.trip).map(|t| t.reason) {
+                Some(TripReason::LunchBreak) => {
+                    breaks.insert(id);
+                }
+                Some(TripReason::BackToWork) => {
+                    back.insert(id);
+                }
+                Some(TripReason::OutForLunch) => {
+                    outings.insert(id);
+                }
+                _ => {}
+            }
+        }
+    }
+    w.check_sim_invariants().unwrap();
+    assert!(breaks.len() >= 3, "lunch breaks: {}", breaks.len());
+    assert!(outings.len() >= 3, "out for lunch: {}", outings.len());
+    assert!(
+        back.len() * 2 >= breaks.len(),
+        "{} went back of {}",
+        back.len(),
+        breaks.len()
+    );
+    // Everyone on a break whose shift goes on is working again, or on the
+    // way back (or still at lunch).
+    for &id in &breaks {
+        let Some(c) = w.citizens.get(id) else { continue };
+        if day::on_shift(&w, id).is_none() {
+            continue;
+        }
+        let ok = match c.location {
+            Location::In(b) => {
+                (Some(b) == c.workplace() && c.activity == Activity::Working) || c.activity == Activity::Leisure
+            }
+            Location::Travelling(j) => j.purpose == TripPurpose::Leisure,
+        };
+        assert!(ok, "{id:?} on a break is {:?} at {:?}", c.activity, c.location);
     }
 }
