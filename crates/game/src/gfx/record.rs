@@ -13,7 +13,9 @@
 //! into `SPEEDS`: 0 = 1x, 2 = 6x). `CITYSIM_RECORD_FOLLOW="t0,t1"`: from
 //! `t0` to `t1` seconds the camera's focus follows a person walking on the
 //! map (picked at `t0`: on the way to work if anyone is, nearest the focus;
-//! their drawn figure), the rest of the pose still from the path. Join the
+//! their drawn figure), the rest of the pose still from the path.
+//! `CITYSIM_RECORD_HOURS=a,b` draws the time of day moving from hour `a`
+//! to hour `b` over the path (day into night in one flight). Join the
 //! frames with e.g. `ffmpeg -framerate 30 -i dir/frame_%05d.png -c:v
 //! libx264 -pix_fmt yuv420p out.mp4`.
 
@@ -42,6 +44,8 @@ struct Recorder {
     size: (u32, u32),
     fps: f32,
     keys: Vec<Key>,
+    /// `CITYSIM_RECORD_HOURS`: drawn hour at the start and end.
+    hours: Option<(f32, f32)>,
     image: Option<Handle<Image>>,
     /// Frames rendered since the scene was ready (warm-up first).
     frame: u32,
@@ -85,6 +89,10 @@ impl Plugin for RecordPlugin {
                 size,
                 fps,
                 keys,
+                hours: std::env::var("CITYSIM_RECORD_HOURS").ok().and_then(|s| {
+                    let (a, b) = s.split_once(',')?;
+                    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+                }),
                 image: None,
                 frame: 0,
                 saved: 0,
@@ -162,6 +170,7 @@ fn record(
     mut images: ResMut<Assets<Image>>,
     cams: Query<(Entity, Option<&RenderTarget>), With<WorldCamera>>,
     mut exit: MessageWriter<AppExit>,
+    mut hour: ResMut<super::daynight::PinnedHour>,
 ) {
     clock.paused = false;
     for (cam, target) in &cams {
@@ -225,6 +234,10 @@ fn record(
         }
     }
     camera.0 = Some(pose);
+    if let Some((a, b)) = rec.hours {
+        let k = (t / end.max(1e-3)).clamp(0.0, 1.0);
+        hour.0 = Some(a + (b - a) * k);
+    }
     if !ready.0 {
         return;
     }

@@ -26,9 +26,16 @@ pub fn patch(m: &mut MeshBuilder, x0: f32, z0: f32, x1: f32, z1: f32, y: f32, co
 
 /// A parked car (no lights lit) centred at `c` heading along `yaw`.
 pub fn parked_car(m: &mut MeshBuilder, rng: &mut Stream, c: Vec3, yaw: f32) {
-    let body = rng.pick(&palette::CAR_BODIES);
-    let shape = [0, 1, 4, 2, 0, 1][rng.below(6) as usize];
-    let car = vehicle_gen::car_model(body, shape, m.lod);
+    let body = palette::CAR_BODIES[vehicle_gen::paint(rng.next_u32())];
+    let shape = [1, 1, 4, 0, 1, 4, 2, 5][rng.below(8) as usize];
+    // The middle building model takes the simple car (it is a few pixels
+    // there); up close the detailed one.
+    let lod = if m.fine {
+        super::building_gen::Lod::Near
+    } else {
+        super::building_gen::Lod::Far
+    };
+    let car = vehicle_gen::car_model(body, shape, lod);
     let start = m.pos.len();
     m.append(&car, c, yaw, Vec3::ONE, [1.0; 4]);
     // Parked: its lights stay dark at night.
@@ -305,4 +312,143 @@ pub fn solar_panels(m: &mut MeshBuilder, origin: Vec3, u: Vec3, v: Vec3, n: Vec3
             m.quad_facing([o2, o2 + u2, o2 + u2 + v2, o2 + v2], n, panel);
         }
     }
+}
+
+/// A garden trampoline: a dark mat on a ring of legs, a safety net ring.
+pub fn trampoline(m: &mut MeshBuilder, c: Vec3) {
+    m.fine_only(|m| {
+        let frame = Color::srgb_u32(0x3B6E9E);
+        m.cylinder(c + Vec3::Y * 0.55, 1.2, 0.08, 12, frame, shade(palette::TYRE, 1.1));
+        for i in 0..6 {
+            let a = i as f32 / 6.0 * std::f32::consts::TAU;
+            let p = c + Vec3::new(a.cos(), 0.0, a.sin()) * 1.15;
+            m.cuboid(p - Vec3::new(0.03, 0.0, 0.03), p + Vec3::new(0.03, 1.7, 0.03), frame);
+        }
+    });
+}
+
+/// A shipping container (6 m) centred at `c`, along x, with door ribs.
+pub fn container(m: &mut MeshBuilder, c: Vec3, color: Color, along_x: bool) {
+    let (hx, hz) = if along_x { (3.0, 1.2) } else { (1.2, 3.0) };
+    m.surface(super::mesh_util::Glow::Cladding, |m| {
+        m.cuboid2(
+            c - Vec3::new(hx, 0.0, hz),
+            c + Vec3::new(hx, 2.55, hz),
+            color,
+            shade(color, 1.08),
+        )
+    });
+    m.fine_only(|m| {
+        let end = if along_x {
+            Vec3::X * (hx + 0.01)
+        } else {
+            Vec3::Z * (hz + 0.01)
+        };
+        let side = if along_x { Vec3::Z } else { Vec3::X };
+        for k in [-0.6f32, 0.0, 0.6] {
+            let p = c + end + side * k;
+            m.cuboid(
+                p - Vec3::new(0.03, -0.1, 0.03),
+                p + Vec3::new(0.03, 2.45, 0.03),
+                shade(color, 0.7),
+            );
+        }
+    });
+}
+
+/// An open skip (builder's waste container) at `c`.
+pub fn skip(m: &mut MeshBuilder, c: Vec3, color: Color) {
+    let q = [
+        c + Vec3::new(-1.3, 1.0, -0.8),
+        c + Vec3::new(1.3, 1.0, -0.8),
+        c + Vec3::new(1.3, 1.0, 0.8),
+        c + Vec3::new(-1.3, 1.0, 0.8),
+    ];
+    let b = [
+        c + Vec3::new(-0.9, 0.0, -0.7),
+        c + Vec3::new(0.9, 0.0, -0.7),
+        c + Vec3::new(0.9, 0.0, 0.7),
+        c + Vec3::new(-0.9, 0.0, 0.7),
+    ];
+    for i in 0..4 {
+        let j = (i + 1) % 4;
+        let mid = (q[i] + q[j] + b[i] + b[j]) * 0.25;
+        let n = (mid - c).with_y(0.0).normalize_or(Vec3::X);
+        m.quad_facing([b[i], b[j], q[j], q[i]], n, color);
+    }
+    // Rubble inside.
+    m.quad_up(
+        [
+            q[0] + Vec3::new(0.2, -0.25, 0.15),
+            q[1] + Vec3::new(-0.2, -0.25, 0.15),
+            q[2] + Vec3::new(-0.2, -0.25, -0.15),
+            q[3] + Vec3::new(0.2, -0.25, -0.15),
+        ],
+        lin(Color::srgb_u32(0x8C8577)),
+    );
+}
+
+/// A forklift at `c`, turned `yaw`.
+pub fn forklift(m: &mut MeshBuilder, c: Vec3, yaw: f32) {
+    let mut f = MeshBuilder::new();
+    let body = Color::srgb_u32(0xE8B83A);
+    f.cuboid2(
+        Vec3::new(-0.9, 0.2, -0.55),
+        Vec3::new(0.5, 1.0, 0.55),
+        body,
+        shade(body, 1.1),
+    );
+    // Overhead guard.
+    for (x, z) in [(-0.8, -0.5), (0.4, -0.5), (-0.8, 0.5), (0.4, 0.5)] {
+        f.cuboid(
+            Vec3::new(x - 0.03, 1.0, z - 0.03),
+            Vec3::new(x + 0.03, 2.1, z + 0.03),
+            palette::METAL_DARK,
+        );
+    }
+    f.cuboid(
+        Vec3::new(-0.85, 2.1, -0.55),
+        Vec3::new(0.45, 2.16, 0.55),
+        palette::METAL_DARK,
+    );
+    // Mast and forks.
+    f.cuboid(
+        Vec3::new(0.55, 0.1, -0.4),
+        Vec3::new(0.65, 2.3, 0.4),
+        palette::METAL_DARK,
+    );
+    for z in [-0.3, 0.3] {
+        f.cuboid(
+            Vec3::new(0.65, 0.1, z - 0.06),
+            Vec3::new(1.6, 0.16, z + 0.06),
+            palette::METAL_DARK,
+        );
+    }
+    for (x, z) in [(-0.6, -0.56), (0.3, -0.56), (-0.6, 0.56), (0.3, 0.56)] {
+        f.cylinder(Vec3::new(x, 0.0, z), 0.22, 0.04, 6, palette::TYRE, palette::TYRE);
+        let _ = x;
+    }
+    m.append(&f, c, yaw, Vec3::ONE, [1.0; 4]);
+}
+
+/// Further props for the model sheet (each centred on the origin).
+pub fn sheet_extras() -> Vec<MeshBuilder> {
+    let mut out = Vec::new();
+    let mut m = MeshBuilder::new();
+    m.fine = true;
+    trampoline(&mut m, Vec3::ZERO);
+    out.push(m);
+    for (i, &c) in palette::CONTAINERS.iter().take(2).enumerate() {
+        let mut m = MeshBuilder::new();
+        m.fine = true;
+        container(&mut m, Vec3::ZERO, c, i == 0);
+        out.push(m);
+    }
+    let mut m = MeshBuilder::new();
+    skip(&mut m, Vec3::ZERO, palette::INDUSTRY_STRIPE);
+    out.push(m);
+    let mut m = MeshBuilder::new();
+    forklift(&mut m, Vec3::ZERO, 0.5);
+    out.push(m);
+    out
 }

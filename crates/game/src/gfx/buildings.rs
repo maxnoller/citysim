@@ -10,10 +10,14 @@ use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 use citysim_sim::{Building, BuildingId, CELL_SIZE};
 
-use super::building_gen::{self, ModelKey, VARIANTS};
+use bevy::ecs::hierarchy::ChildSpawnerCommands;
+use bevy::tasks::{ComputeTaskPool, TaskPool};
+
+use super::building_gen::{self, Lod, ModelKey, VARIANTS};
 use super::land::{self, Inset, Lot, RoadEdges};
-use super::scene::WorldMaterials;
-use crate::shared::{GameSet, SimWorld, WorldCamera};
+use super::mesh_util::add_gpu;
+use super::scene::{QualityApplied, WorldMaterials};
+use crate::shared::{GameSet, GraphicsQuality, SimWorld, WorldCamera};
 
 const GROW_SECS: f32 = 0.75;
 const SHRINK_SECS: f32 = 0.35;
@@ -25,20 +29,63 @@ const ANIMATE_IF_YOUNGER: u64 = 3 * citysim_sim::TICKS_PER_SECOND as u64;
 /// foundations, then the frame with scaffolding (and a crane when tall).
 pub const SITE_TICKS: u64 = 3 * citysim_sim::balance::TICKS_PER_HOUR as u64;
 
-/// Camera distance (m) where buildings cross-fade to their simplified model.
-pub const LOD_DISTANCE: std::ops::Range<f32> = 650.0..700.0;
+/// Camera distance (m) where buildings cross-fade to their distant model.
+pub const LOD_DISTANCE: std::ops::Range<f32> = 430.0..470.0;
 
-/// Cache of generated building models: `(detailed, distant)` per key.
+/// A building's models: the near one only once a building of this key has
+/// come close to the camera (most never do), the middle and distant ones
+/// from the start.
+#[derive(Clone)]
+struct Models {
+    near: Option<Handle<Mesh>>,
+    mid: Handle<Mesh>,
+    far: Handle<Mesh>,
+}
+
+/// Cache of generated building models per key. The meshes live on the GPU
+/// only (`MeshBuilder::build_gpu`).
 #[derive(Resource, Default)]
 pub struct BuildingModels {
-    meshes: HashMap<ModelKey, (Handle<Mesh>, Handle<Mesh>)>,
+    meshes: HashMap<ModelKey, Models>,
     emitters: HashMap<ModelKey, Vec<Vec3>>,
     driveways: HashMap<ModelKey, Vec<(f32, f32)>>,
+    doors: HashMap<ModelKey, Vec<Vec2>>,
     sites: HashMap<(ModelKey, u8), Handle<Mesh>>,
 }
 
+/// One generated model: middle and distant meshes, smoke emitters and
+/// driveways.
+type Generated = (ModelKey, [Mesh; 2], Vec<Vec3>, Vec<(f32, f32)>, Vec<Vec2>);
+
+fn generate_pair(key: ModelKey) -> Generated {
+    let mut mid = building_gen::generate(key, Lod::Mid);
+    let emitters = std::mem::take(&mut mid.emitters);
+    let driveways = std::mem::take(&mut mid.driveways);
+    let doors = mid.doors.iter().map(|p| Vec2::new(p.x, p.z)).collect();
+    (
+        key,
+        [mid.build_gpu(), building_gen::generate(key, Lod::Far).build_gpu()],
+        emitters,
+        driveways,
+        doors,
+    )
+}
+
+/// Run `f` over `keys` side by side on the compute threads.
+fn in_parallel<T: Send + 'static>(keys: Vec<ModelKey>, f: fn(ModelKey) -> T) -> Vec<T> {
+    if keys.len() == 1 {
+        return vec![f(keys[0])];
+    }
+    let pool = ComputeTaskPool::get_or_init(TaskPool::default);
+    pool.scope(|s| {
+        for k in keys {
+            s.spawn(async move { f(k) });
+        }
+    })
+}
+
 impl BuildingModels {
-    /// Number of distinct building models (each has two levels of detail).
+    /// Number of distinct building models.
     pub fn count(&self) -> usize {
         self.meshes.len()
     }
@@ -51,25 +98,63 @@ impl BuildingModels {
         };
         self.sites
             .entry((k, stage))
-            .or_insert_with(|| meshes.add(building_gen::site(k, stage).build()))
+            .or_insert_with(|| add_gpu(meshes, building_gen::site(k, stage).build_gpu()))
             .clone()
     }
 
+    /// Generate the middle and distant models of `keys` not yet cached,
+    /// side by side (a loaded city needs hundreds at once).
+    pub fn prepare(&mut self, keys: impl IntoIterator<Item = ModelKey>, meshes: &mut Assets<Mesh>) {
+        let mut todo: Vec<ModelKey> = keys.into_iter().filter(|k| !self.meshes.contains_key(k)).collect();
+        todo.sort_by_key(|k| (k.kind as u8, k.cells, k.level, k.variant));
+        todo.dedup();
+        if todo.is_empty() {
+            return;
+        }
+        for (key, [mid, far], emitters, driveways, doors) in in_parallel(todo, generate_pair) {
+            self.emitters.insert(key, emitters);
+            self.driveways.insert(key, driveways);
+            self.doors.insert(key, doors);
+            self.meshes.insert(
+                key,
+                Models {
+                    near: None,
+                    mid: add_gpu(meshes, mid),
+                    far: add_gpu(meshes, far),
+                },
+            );
+        }
+    }
+
+    /// Generate the near models of `keys` that lack one (at most `cap` a
+    /// call, so a fast camera move spreads the work over frames).
+    fn prepare_near(&mut self, keys: impl IntoIterator<Item = ModelKey>, cap: usize, meshes: &mut Assets<Mesh>) {
+        let mut todo: Vec<ModelKey> = keys
+            .into_iter()
+            .filter(|k| self.meshes.get(k).is_some_and(|m| m.near.is_none()))
+            .collect();
+        todo.sort_by_key(|k| (k.kind as u8, k.cells, k.level, k.variant));
+        todo.dedup();
+        todo.truncate(cap);
+        if todo.is_empty() {
+            return;
+        }
+        fn near(key: ModelKey) -> (ModelKey, Mesh) {
+            (key, building_gen::generate(key, Lod::Near).build_gpu())
+        }
+        for (key, mesh) in in_parallel(todo, near) {
+            let h = add_gpu(meshes, mesh);
+            if let Some(m) = self.meshes.get_mut(&key) {
+                m.near = Some(h);
+            }
+        }
+    }
+
+    /// The (middle, distant) models of `key`.
     pub fn get(&mut self, key: ModelKey, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mesh>) {
-        let emitters = &mut self.emitters;
-        let driveways = &mut self.driveways;
-        self.meshes
-            .entry(key)
-            .or_insert_with(|| {
-                let mut detail = building_gen::generate(key, false);
-                emitters.insert(key, std::mem::take(&mut detail.emitters));
-                driveways.insert(key, std::mem::take(&mut detail.driveways));
-                (
-                    meshes.add(detail.build()),
-                    meshes.add(building_gen::generate(key, true).build()),
-                )
-            })
-            .clone()
+        self.prepare([key], meshes);
+        let m = &self.meshes[&key];
+        (m.mid.clone(), m.far.clone())
     }
 
     /// Driveway x ranges at the lot front, in model space (after `get`).
@@ -77,9 +162,110 @@ impl BuildingModels {
         self.driveways.get(&key).map_or(&[], Vec::as_slice)
     }
 
+    /// Front doors, model space `(x, z)` (the model's front is `+z`), after
+    /// `get`.
+    pub fn doors(&self, key: ModelKey) -> &[Vec2] {
+        self.doors.get(&key).map_or(&[], Vec::as_slice)
+    }
+
     /// Chimney tops that smoke, in model space (after `get`).
     pub fn emitters(&self, key: ModelKey) -> &[Vec3] {
         self.emitters.get(&key).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// The detailed part of a building (middle model, the near one when the
+/// camera is close): which key it shows and whether the near model is on.
+#[derive(Component)]
+pub(super) struct BuildingDetail {
+    key: ModelKey,
+    near: bool,
+}
+
+/// Camera distance (m) up to which buildings show their near model, per
+/// quality (Low: never).
+pub fn near_distance(q: GraphicsQuality) -> f32 {
+    match q {
+        GraphicsQuality::Low => 0.0,
+        GraphicsQuality::Medium => 110.0,
+        GraphicsQuality::High => 150.0,
+    }
+}
+
+/// Hysteresis at the near / middle switch, metres.
+const NEAR_HYST: f32 = 10.0;
+/// Near models generated per frame at most.
+const NEAR_PER_FRAME: usize = 12;
+
+/// Spawn a finished building's two parts under its entity: the detailed
+/// part (middle model; `swap_near` puts the near one in up close) and the
+/// distant model, cross-faded at `LOD_DISTANCE`.
+fn spawn_models(
+    p: &mut ChildSpawnerCommands,
+    model_tf: Transform,
+    key: ModelKey,
+    (mid, far): &(Handle<Mesh>, Handle<Mesh>),
+    mats: &WorldMaterials,
+) {
+    p.spawn((
+        model_tf,
+        Mesh3d(mid.clone()),
+        MeshMaterial3d(mats.lit.clone()),
+        VisibilityRange {
+            start_margin: 0.0..0.0,
+            end_margin: LOD_DISTANCE,
+            use_aabb: false,
+        },
+        BuildingDetail { key, near: false },
+    ));
+    p.spawn((
+        model_tf,
+        Mesh3d(far.clone()),
+        MeshMaterial3d(mats.lit.clone()),
+        VisibilityRange {
+            start_margin: LOD_DISTANCE,
+            end_margin: 1e6..1e6,
+            use_aabb: false,
+        },
+    ));
+}
+
+/// Swap the near model in for buildings close to the camera and back out
+/// beyond the near distance (the quality's; with hysteresis). Near models
+/// are made the first time a building of their key comes close.
+fn swap_near(
+    applied: Option<Res<QualityApplied>>,
+    requested: Res<GraphicsQuality>,
+    cams: Query<&GlobalTransform, With<WorldCamera>>,
+    mut models: ResMut<BuildingModels>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut parts: Query<(&GlobalTransform, &mut BuildingDetail, &mut Mesh3d)>,
+) {
+    let Ok(cam) = cams.single() else { return };
+    let cam = cam.translation();
+    let near_m = near_distance(super::scene::drawn_quality(applied.as_deref(), *requested));
+    let want = |d: f32, on: bool| near_m > 0.0 && d < near_m + if on { NEAR_HYST } else { -NEAR_HYST };
+    // Near models still to make for buildings now in range.
+    let missing: Vec<ModelKey> = parts
+        .iter()
+        .filter(|(t, p, _)| !p.near && want(t.translation().distance(cam), false))
+        .map(|(_, p, _)| p.key)
+        .filter(|k| models.meshes.get(k).is_some_and(|m| m.near.is_none()))
+        .collect();
+    if !missing.is_empty() {
+        models.prepare_near(missing, NEAR_PER_FRAME, &mut meshes);
+    }
+    for (t, mut p, mut mesh) in &mut parts {
+        let on = want(t.translation().distance(cam), p.near);
+        if on == p.near {
+            continue;
+        }
+        let Some(m) = models.meshes.get(&p.key) else { continue };
+        let handle = if on { m.near.clone() } else { Some(m.mid.clone()) };
+        if let Some(h) = handle {
+            mesh.0 = h;
+            p.near = on;
+        }
     }
 }
 
@@ -97,6 +283,30 @@ pub struct BuildingEntities(pub HashMap<BuildingId, (Entity, ModelKey, Transform
 pub struct DrivewayMouths {
     pub version: u64,
     pub points: Vec<Vec2>,
+}
+
+/// Where each finished building's front doors are (sim metres, on the
+/// ground at the facade), from the drawn models: the entrance a walker
+/// would use (issue 51; the sim still lets people in and out at the middle
+/// of the lot's front edge). `version` changes whenever any door moves.
+/// Several doors for a terrace (one per house); a building under
+/// construction has none.
+#[derive(Resource, Default)]
+pub struct BuildingDoors {
+    pub version: u64,
+    pub doors: HashMap<BuildingId, Vec<Vec2>>,
+}
+
+impl BuildingDoors {
+    /// The door of `b` nearest to `p` (sim metres), if it has any.
+    #[allow(dead_code)]
+    pub fn nearest(&self, b: BuildingId, p: Vec2) -> Option<Vec2> {
+        self.doors
+            .get(&b)?
+            .iter()
+            .copied()
+            .min_by(|x, y| x.distance_squared(p).total_cmp(&y.distance_squared(p)))
+    }
 }
 
 /// A building still under construction (its children show the site).
@@ -216,9 +426,15 @@ impl Plugin for BuildingsPlugin {
         app.init_resource::<BuildingModels>()
             .init_resource::<BuildingEntities>()
             .init_resource::<DrivewayMouths>()
+            .init_resource::<BuildingDoors>()
             .add_systems(
                 Update,
-                (sync_buildings.in_set(BuildingsSync), advance_sites, animate_buildings)
+                (
+                    sync_buildings.in_set(BuildingsSync),
+                    advance_sites,
+                    animate_buildings,
+                    swap_near,
+                )
                     .chain()
                     .in_set(GameSet::Render)
                     .after(super::land::LandUpdate),
@@ -270,6 +486,7 @@ fn sync_buildings(
     mut index: ResMut<BuildingEntities>,
     edges: Res<RoadEdges>,
     mut mouths: ResMut<DrivewayMouths>,
+    mut doors: ResMut<BuildingDoors>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
 ) {
     let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
@@ -353,6 +570,8 @@ fn sync_buildings(
         }
         missing.truncate(FILL_PER_FRAME);
     }
+    // New models for this frame, generated side by side.
+    models.prepare(missing.iter().map(|(_, b)| model_key(b)), &mut meshes);
     for (id, b) in missing {
         let mk = model_key(b);
         let young = world.time.tick.saturating_sub(b.created_tick) < ANIMATE_IF_YOUNGER && !fresh;
@@ -383,30 +602,9 @@ fn sync_buildings(
             sp.entities.insert(id, (ec.id(), mk, pose_key(b), inset));
             continue;
         }
-        let (detail, far) = models.get(mk, &mut meshes);
+        let handles = models.get(mk, &mut meshes);
         let mut ec = commands.spawn((BuildingVisual, Visibility::default()));
-        ec.with_children(|p| {
-            p.spawn((
-                model_tf,
-                Mesh3d(detail),
-                MeshMaterial3d(mats.lit.clone()),
-                VisibilityRange {
-                    start_margin: 0.0..0.0,
-                    end_margin: LOD_DISTANCE,
-                    use_aabb: false,
-                },
-            ));
-            p.spawn((
-                model_tf,
-                Mesh3d(far),
-                MeshMaterial3d(mats.lit.clone()),
-                VisibilityRange {
-                    start_margin: LOD_DISTANCE,
-                    end_margin: 1e6..1e6,
-                    use_aabb: false,
-                },
-            ));
-        });
+        ec.with_children(|p| spawn_models(p, model_tf, mk, &handles, &mats));
         if young {
             ec.insert((tf.with_scale(Vec3::new(0.9, 0.01, 0.9)), Growing { start: now }));
         } else {
@@ -421,11 +619,25 @@ fn sync_buildings(
     if sp.filling {
         return;
     }
-    // Driveway mouths of every finished (or growing) building.
+    // Driveway mouths and doors of every finished (or growing) building.
     let mut points = Vec::new();
+    let mut door_map: HashMap<BuildingId, Vec<Vec2>> = HashMap::new();
     for (id, (_, key, _, inset)) in &sp.entities {
         let Some(b) = buildings.get(*id) else { continue };
         let lot = lot_of(b);
+        let ds: Vec<Vec2> = models
+            .doors(*key)
+            .iter()
+            .map(|d| {
+                lot.world(Vec2::new(
+                    inset.shift.x + d.x * inset.scale.x,
+                    inset.shift.y + d.y * inset.scale.z,
+                ))
+            })
+            .collect();
+        if !ds.is_empty() {
+            door_map.insert(*id, ds);
+        }
         for &(x0, x1) in models.driveways(*key) {
             let x = (x0 + x1) * 0.5;
             points.push(lot.world(Vec2::new(
@@ -438,6 +650,10 @@ fn sync_buildings(
     if points != mouths.points {
         mouths.points = points;
         mouths.version += 1;
+    }
+    if door_map != doors.doors {
+        doors.doors = door_map;
+        doors.version += 1;
     }
 }
 
@@ -475,7 +691,7 @@ fn advance_sites(
                 });
             }
             None => {
-                let (detail, far) = models.get(site.key, &mut meshes);
+                let handles = models.get(site.key, &mut meshes);
                 tf.scale = Vec3::new(0.9, 0.01, 0.9);
                 commands
                     .entity(e)
@@ -483,28 +699,7 @@ fn advance_sites(
                     .insert(Growing {
                         start: time.elapsed_secs(),
                     })
-                    .with_children(|p| {
-                        p.spawn((
-                            model_tf,
-                            Mesh3d(detail),
-                            MeshMaterial3d(mats.lit.clone()),
-                            VisibilityRange {
-                                start_margin: 0.0..0.0,
-                                end_margin: LOD_DISTANCE,
-                                use_aabb: false,
-                            },
-                        ));
-                        p.spawn((
-                            model_tf,
-                            Mesh3d(far),
-                            MeshMaterial3d(mats.lit.clone()),
-                            VisibilityRange {
-                                start_margin: LOD_DISTANCE,
-                                end_margin: 1e6..1e6,
-                                use_aabb: false,
-                            },
-                        ));
-                    });
+                    .with_children(|p| spawn_models(p, model_tf, site.key, &handles, &mats));
             }
         }
     }

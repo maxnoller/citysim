@@ -190,16 +190,7 @@ fn draw_tree(m: &mut MeshBuilder, t: &Tree, cheap: bool) {
         (_, false) if t.pine => props::pine_tree(m, t.pos, t.scale, t.canopy, t.yaw),
         (_, false) => props::round_tree(m, t.pos, t.scale, t.canopy, t.yaw),
         (_, true) if t.pine => m.cone(t.pos, 1.9 * t.scale, 7.5 * t.scale, 5, t.canopy, t.yaw),
-        (_, true) => {
-            props::octa_blob(
-                m,
-                t.pos + Vec3::Y * 4.0 * t.scale,
-                Vec3::new(2.4, 2.6, 2.4) * t.scale,
-                t.canopy,
-                t.yaw,
-            );
-            m.cylinder(t.pos, 0.22 * t.scale, 1.6 * t.scale, 3, palette::TRUNK, palette::TRUNK);
-        }
+        (_, true) => props::round_tree_far(m, t.pos, t.scale, t.canopy, t.yaw),
     }
 }
 
@@ -297,7 +288,36 @@ impl Ghost {
 /// Whether a tree may stand at `p`: away from the drawn roads and the road
 /// being drawn, and not on zoned or built land.
 fn open(taken: &Taken, edges: &RoadEdges, ghost: &Ghost, p: Vec2) -> bool {
-    !taken.contains(p) && edges.clearance(p) > 2.5 && !ghost.covers(p)
+    !taken.contains(p) && edges.clearance(p) > 2.5 && !ghost.covers(p) && !super::model_sheet::covers(p)
+}
+
+/// Every kind of tree, bush and rock for the model sheet: (detailed,
+/// distant) at a few sizes.
+pub fn sheet_models() -> Vec<(MeshBuilder, MeshBuilder)> {
+    let mut out = Vec::new();
+    for small in [0u8, 1, 2] {
+        for pine in [false, true] {
+            if small > 0 && pine {
+                continue;
+            }
+            for (k, scale) in [0.75f32, 1.0, 1.25].into_iter().enumerate() {
+                let t = Tree {
+                    pos: Vec3::ZERO,
+                    scale,
+                    pine,
+                    canopy: palette::CANOPIES[k % palette::CANOPIES.len()],
+                    yaw: k as f32,
+                    small,
+                };
+                let (mut near, mut far) = (MeshBuilder::new(), MeshBuilder::new());
+                far.lod = true;
+                draw_tree(&mut near, &t, false);
+                draw_tree(&mut far, &t, true);
+                out.push((near, far));
+            }
+        }
+    }
+    out
 }
 
 /// What a tree chunk depends on: zoning cells with a zone or building whose

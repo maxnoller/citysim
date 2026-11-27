@@ -1053,16 +1053,30 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
                 }
                 let b = p + d * 1.3;
                 m.cylinder(lift(b, y), 0.22, 0.85, 6, iron, shade(iron, 1.3));
-            } else if roll < 0.65 {
-                // Fire hydrant.
-                let red = Color::srgb_u32(0xC8322B);
-                m.cylinder(lift(p, y), 0.13, 0.6, 6, red, shade(red, 1.1));
-                m.cylinder(lift(p, y + 0.6), 0.09, 0.12, 6, red, shade(red, 1.2));
-                m.box_yaw(lift(p, y + 0.38), Vec3::new(0.42, 0.08, 0.08), yaw, red, red);
-            } else if roll < 0.8 {
-                // Litter bin.
+            } else if roll < 0.52 {
+                // Cycle stands: three steel hoops along the kerb.
+                let steel = Color::srgb_u32(0x6E7378);
+                for k in [-0.8f32, 0.0, 0.8] {
+                    let q = p + d * k;
+                    m.box_yaw(lift(q, y), Vec3::new(0.04, 0.8, 0.65), yaw, steel, steel);
+                }
+            } else if roll < 0.62 {
+                // Advertising column: posters under a little dome.
                 let green = Color::srgb_u32(0x2F5D49);
-                m.cylinder(lift(p, y), 0.24, 0.9, 6, green, shade(green, 1.3));
+                let paper = [
+                    Color::srgb_u32(0xE9E1CC),
+                    Color::srgb_u32(0xE0564A),
+                    Color::srgb_u32(0x2F8FCB),
+                    Color::srgb_u32(0xF2B33D),
+                ];
+                let c = p - face * 0.2;
+                let k = (roll * 97.0) as usize;
+                m.cylinder(lift(c, y), 0.55, 2.3, 6, paper[k % 4], green);
+                m.cone(lift(c, y + 2.3), 0.62, 0.4, 6, green, 0.0);
+            } else if roll < 0.8 {
+                // Litter bin with a dark lid.
+                let green = Color::srgb_u32(0x2F5D49);
+                m.cylinder(lift(p, y), 0.24, 0.95, 6, green, shade(green, 0.7));
             } else {
                 // Bollards along the kerb.
                 let post = Color::srgb_u32(0x4A4E52);

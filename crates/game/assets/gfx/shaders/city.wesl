@@ -123,6 +123,73 @@ fn ground_color(base: vec3<f32>, wp: vec3<f32>) -> vec3<f32> {
     return c;
 }
 
+
+// 0 where a pattern of period-1 coordinate `x` is finer than a pixel or
+// two (no shimmer), 1 where it is drawn large.
+fn pattern_fade(fw: f32) -> f32 {
+    return 1.0 - smoothstep(0.18, 0.45, fw);
+}
+
+// Distance from the nearest line of a period-1 pattern at `x` (0..0.5).
+fn line_dist(x: f32) -> f32 {
+    return abs(fract(x + 0.5) - 0.5);
+}
+
+// Surface patterns of the detailed building models (`Glow::Roof` ..
+// `Glow::Membrane`, tags 20-24): a brightness factor for the base colour.
+// `fw`: fwidth of the world position (taken in uniform control flow).
+fn surface_pattern(kind: u32, wp: vec3<f32>, n: vec3<f32>, fw: vec3<f32>) -> f32 {
+    // Horizontal direction along the surface.
+    let t2 = vec2<f32>(-n.z, n.x);
+    let tl = length(t2);
+    let t = select(vec2<f32>(1.0, 0.0), t2 / max(tl, 1e-4), tl > 0.05);
+    let along = dot(wp.xz, t);
+    let fa = dot(fw.xz, abs(t));
+    if kind == 20u {
+        // Roof tiles: courses up the slope with a shadow line under each,
+        // staggered joints, a little colour per tile.
+        let slope = max(sqrt(max(1.0 - n.y * n.y, 0.0)), 0.25);
+        let s = wp.y / slope / 0.34;
+        let course = floor(s);
+        let j = along / 0.42 + 0.5 * course;
+        let f = pattern_fade(fw.y / slope / 0.34);
+        let shadow = 1.0 - 0.22 * (1.0 - smoothstep(0.0, 0.22, fract(s)));
+        let joint = 1.0 - 0.1 * (1.0 - smoothstep(0.0, 0.06, line_dist(j))) * pattern_fade(fa / 0.42);
+        let h = hash21(vec2<f32>(floor(j), course));
+        return mix(1.0, shadow * joint * (0.95 + 0.1 * h), f);
+    } else if kind == 21u {
+        // Weatherboard: boards 0.24 m, a dark lap line under each.
+        let y = wp.y / 0.24;
+        let lap = 1.0 - 0.16 * (1.0 - smoothstep(0.0, 0.16, fract(y)));
+        return mix(1.0, lap, pattern_fade(fw.y / 0.24));
+    } else if kind == 22u {
+        // Brick: courses 0.2 m, bricks 0.46 m, light mortar, some variety.
+        let y = wp.y / 0.2;
+        let course = floor(y);
+        let x = along / 0.46 + 0.5 * course;
+        let mortar = max(
+            1.0 - smoothstep(0.0, 0.09, line_dist(y)),
+            1.0 - smoothstep(0.0, 0.05, line_dist(x)),
+        );
+        let h = hash21(vec2<f32>(floor(x), course));
+        let f = pattern_fade(max(fw.y / 0.2, fa / 0.46));
+        return mix(1.0, (0.9 + 0.16 * h) * (1.0 + 0.22 * mortar), f);
+    } else if kind == 23u {
+        // Profiled metal sheet: ribs every 0.32 m, lit on one side.
+        let x = along / 0.32;
+        let r = fract(x);
+        let rib = 0.94 + 0.1 * smoothstep(0.0, 0.25, r) * (1.0 - smoothstep(0.3, 0.45, r));
+        return mix(1.0, rib, pattern_fade(fa / 0.32));
+    } else if kind == 24u {
+        // Flat roof: membrane panels with faint seams and weathering.
+        let p = wp.xz / vec2<f32>(2.2, 1.6);
+        let seam = 1.0 - 0.07 * (1.0 - smoothstep(0.0, 0.04, min(line_dist(p.x), line_dist(p.y))));
+        let stain = 0.94 + 0.08 * vnoise(wp.xz / 3.7);
+        return mix(1.0, seam * stain, pattern_fade(max(fw.x, fw.z) / 1.6));
+    }
+    return 1.0;
+}
+
 @fragment
 fn fragment(
     in: VertexOutput,
@@ -133,13 +200,26 @@ fn fragment(
 
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let wp = in.world_position.xyz;
+    let fw = fwidth(wp);
     pbr_input.directional_shadow_factor = cloud_shadow(wp.xz);
 
     var glow = vec3<f32>(0.0);
 @if(VERTEX_UVS_A) {
     let kind = u32(in.uv.x + 0.5);
     let base = pbr_input.material.base_color.rgb;
-    if kind == 1u {
+    if kind >= 20u && kind <= 24u {
+        let k = surface_pattern(kind, wp, normalize(in.world_normal), fw);
+        pbr_input.material.base_color = vec4<f32>(base * k, 1.0);
+    } else if kind == 1u {
+        // Glass reflects the sky: brighter at grazing angles, with a soft
+        // diagonal sheen that moves as the camera does (by day).
+        let v = normalize(view.world_position - wp);
+        let ndv = abs(dot(normalize(in.world_normal), v));
+        let fres = pow(1.0 - ndv, 3.0);
+        let sheen = smoothstep(0.35, 0.5, fract(dot(wp, vec3<f32>(0.21, 0.27, 0.19)) + 0.12 * dot(v, vec3<f32>(1.0, 0.4, 1.0))));
+        let sky = vec3<f32>(0.62, 0.74, 0.86);
+        let day = 1.0 - city.night;
+        pbr_input.material.base_color = vec4<f32>(mix(base, sky, (0.45 * fres + 0.12 * sheen) * day), 1.0);
         // Window: lit share varies per building (hash of the model origin).
         let o = get_world_from_local(in.instance_index)[3].xyz;
         let hb = hash21(floor(o.xz * 0.37) + vec2<f32>(3.1, 7.7));
