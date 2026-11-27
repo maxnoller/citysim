@@ -429,8 +429,22 @@ fn count_pending_pipelines(cache: Res<PipelineCache>, pending: Res<PendingPipeli
 }
 
 /// The quality the world camera shows now (the benchmark waits for it).
+/// What depends on the quality besides the camera (tree density, road
+/// furniture, shadow cascades, cloud shadows) follows this, not the
+/// requested `GraphicsQuality`, so everything changes together once the
+/// new pipelines are ready.
 #[derive(Resource, Default)]
 pub(super) struct QualityApplied(pub Option<GraphicsQuality>);
+
+/// The quality drawn now: the applied one, or the requested one where
+/// nothing applies it (tests without a renderer).
+pub(super) fn drawn_quality(applied: Option<&QualityApplied>, requested: GraphicsQuality) -> GraphicsQuality {
+    applied.and_then(|a| a.0).unwrap_or(requested)
+}
+
+/// Milliseconds a frame may spend re-meshing for a quality change (trees,
+/// road furniture): the rest waits for the next frames.
+pub(super) const QUALITY_REMESH_MS: f64 = 2.0;
 
 /// Hidden camera that renders the scene with the requested quality into a
 /// small image so its pipelines compile before the main camera switches.
@@ -450,6 +464,47 @@ struct QualityState {
     camera: Option<Entity>,
     applied: Option<GraphicsQuality>,
     warm: Option<WarmUp>,
+    /// Warm-up cameras for the levels not in use, started with the first
+    /// frame so their pipelines compile while the loading card shows
+    /// (`SceneReady` waits for every pending pipeline).
+    prewarm: Vec<WarmUp>,
+    /// Levels whose pipelines have been compiled: switching to them needs
+    /// no warm-up.
+    warmed: Vec<GraphicsQuality>,
+    prewarm_started: bool,
+}
+
+/// A hidden camera rendering the scene at quality `q` into a small image.
+fn spawn_warm_up(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    tf: &Transform,
+    proj: &Projection,
+    q: GraphicsQuality,
+    now: f32,
+) -> WarmUp {
+    let image = images.add(Image::new_target_texture(320, 180, TextureFormat::Bgra8UnormSrgb, None));
+    let mut ec = commands.spawn((
+        Name::new("Quality warm-up camera"),
+        WarmUpCamera,
+        Camera3d::default(),
+        Camera {
+            order: -10,
+            ..default()
+        },
+        RenderTarget::Image(image.into()),
+        proj.clone(),
+        *tf,
+        camera_look(),
+    ));
+    insert_quality(&mut ec, &quality_settings(q));
+    WarmUp {
+        entity: ec.id(),
+        quality: q,
+        started: now,
+        frames: 0,
+        calm: 0,
+    }
 }
 
 /// Put the per-quality camera components on `ec`.
@@ -530,7 +585,40 @@ fn apply_quality(
         }
         state.applied = Some(want);
         applied.0 = Some(want);
+        if !state.warmed.contains(&want) {
+            state.warmed.push(want);
+        }
         return;
+    }
+    let waiting = pending.as_ref().map_or(0, |p| p.0.load(Ordering::Relaxed));
+    // Compile the other levels' pipelines ahead, once, from the start.
+    if !state.prewarm_started {
+        state.prewarm_started = true;
+        for q in [GraphicsQuality::Low, GraphicsQuality::Medium, GraphicsQuality::High] {
+            if !state.warmed.contains(&q) {
+                let w = spawn_warm_up(&mut commands, &mut images, cam_tf, proj, q, now);
+                state.prewarm.push(w);
+            }
+        }
+    }
+    if !state.prewarm.is_empty() {
+        for w in &mut state.prewarm {
+            if let Ok(mut t) = warm_cams.get_mut(w.entity) {
+                *t = *cam_tf;
+            }
+            w.frames += 1;
+            w.calm = if waiting == 0 { w.calm + 1 } else { 0 };
+        }
+        let w = &state.prewarm[0];
+        if (w.frames >= 4 && w.calm >= 3) || now - w.started > 30.0 {
+            for w in std::mem::take(&mut state.prewarm) {
+                info!("graphics quality {:?} prepared after {} frames", w.quality, w.frames);
+                commands.entity(w.entity).despawn();
+                if !state.warmed.contains(&w.quality) {
+                    state.warmed.push(w.quality);
+                }
+            }
+        }
     }
     if state.applied == Some(want) {
         if let Some(w) = state.warm.take() {
@@ -538,33 +626,23 @@ fn apply_quality(
         }
         return;
     }
+    // Prepared ahead: switch at once.
+    if state.warmed.contains(&want) {
+        if let Some(w) = state.warm.take() {
+            commands.entity(w.entity).despawn();
+        }
+        info!("graphics quality {want:?} applied (prepared)");
+        apply(&mut commands, &mut shadow_map, want);
+        state.applied = Some(want);
+        applied.0 = Some(want);
+        return;
+    }
     // Start (or restart) warming up the requested quality.
     if state.warm.as_ref().is_none_or(|w| w.quality != want) {
         if let Some(w) = state.warm.take() {
             commands.entity(w.entity).despawn();
         }
-        let image = images.add(Image::new_target_texture(320, 180, TextureFormat::Bgra8UnormSrgb, None));
-        let mut ec = commands.spawn((
-            Name::new("Quality warm-up camera"),
-            WarmUpCamera,
-            Camera3d::default(),
-            Camera {
-                order: -10,
-                ..default()
-            },
-            RenderTarget::Image(image.into()),
-            proj.clone(),
-            *cam_tf,
-            camera_look(),
-        ));
-        insert_quality(&mut ec, &quality_settings(want));
-        state.warm = Some(WarmUp {
-            entity: ec.id(),
-            quality: want,
-            started: now,
-            frames: 0,
-            calm: 0,
-        });
+        state.warm = Some(spawn_warm_up(&mut commands, &mut images, cam_tf, proj, want, now));
         return;
     }
     let Some(w) = state.warm.as_mut() else { return };
@@ -572,7 +650,6 @@ fn apply_quality(
         *t = *cam_tf;
     }
     w.frames += 1;
-    let waiting = pending.map_or(0, |p| p.0.load(Ordering::Relaxed));
     w.calm = if waiting == 0 { w.calm + 1 } else { 0 };
     if (w.frames >= 4 && w.calm >= 3) || now - w.started > 20.0 {
         let entity = w.entity;
@@ -582,34 +659,37 @@ fn apply_quality(
         apply(&mut commands, &mut shadow_map, want);
         state.applied = Some(want);
         applied.0 = Some(want);
+        state.warmed.push(want);
     }
 }
 
 /// Fog and shadow cascades follow the zoom level: close up, crisp shadows
 /// over a small area and fog far away; zoomed out, shadows cover the map.
 fn tune_fog_and_shadows(
-    quality: Res<GraphicsQuality>,
+    requested: Res<GraphicsQuality>,
+    applied: Res<QualityApplied>,
     rigs: Query<&CameraRig>,
     mut fogs: Query<&mut DistanceFog, With<WorldCamera>>,
     mut suns: Query<&mut CascadeShadowConfig, With<Sun>>,
     mut last: Local<Option<(f32, GraphicsQuality)>>,
 ) {
     let Ok(rig) = rigs.single() else { return };
+    let quality = drawn_quality(Some(&applied), *requested);
     let d = rig.current.distance;
     if let Some((prev, q)) = *last
-        && q == *quality
+        && q == quality
         && (prev - d).abs() / d < 0.04
     {
         return;
     }
-    *last = Some((d, *quality));
+    *last = Some((d, quality));
     for mut fog in &mut fogs {
         fog.falloff = FogFalloff::Linear {
             start: d * 1.6 + 1200.0,
             end: d * 2.2 + 6500.0,
         };
     }
-    let s = quality_settings(*quality);
+    let s = quality_settings(quality);
     for mut cfg in &mut suns {
         *cfg = CascadeShadowConfigBuilder {
             num_cascades: s.cascades,

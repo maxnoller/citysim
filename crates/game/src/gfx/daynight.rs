@@ -323,7 +323,7 @@ fn lin4(c: Color, a: f32) -> Vec4 {
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn apply_materials(
     light: Res<DayLight>,
-    quality: Res<GraphicsQuality>,
+    (quality, applied): (Res<GraphicsQuality>, Option<Res<super::scene::QualityApplied>>),
     mats: Option<Res<WorldMaterials>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut sky: ResMut<Assets<SkyMaterial>>,
@@ -343,12 +343,13 @@ fn apply_materials(
         v.set_if_neq(want);
     }
     let Some(mats) = mats else { return };
-    let clouds = if quality_settings(*quality).cloud_shadows {
+    let quality = super::scene::drawn_quality(applied.as_deref(), *quality);
+    let clouds = if quality_settings(quality).cloud_shadows {
         0.28
     } else {
         0.0
     };
-    let now = (light.night, light.windows, light.elevation, clouds, *quality);
+    let now = (light.night, light.windows, light.elevation, clouds, quality);
     if let Some(prev) = *last
         && prev.4 == now.4
         && (prev.0 - now.0).abs() < 0.004

@@ -25,7 +25,7 @@ use super::noise::{self, Stream};
 use super::palette::{self, mix, shade};
 use super::props;
 use super::road_geom::chunk_of;
-use super::scene::{WorldMaterials, quality_settings};
+use super::scene::{QUALITY_REMESH_MS, QualityApplied, WorldMaterials, drawn_quality, quality_settings};
 use crate::shared::{CurveToolView, GameSet, GraphicsQuality, SimWorld};
 
 const CHUNK: i32 = 32;
@@ -41,15 +41,27 @@ const OUT_CHUNK: f32 = 512.0;
 /// Grid and roads keys.
 type Keys = ((u64, u64), (u64, u64));
 
+/// (keys and ghost key, chunk hashes, taken land).
+type Land = ((Keys, u64), HashMap<IVec2, u64>, Taken);
+
 #[derive(Default)]
 struct TreeChunks {
     key: Option<(Keys, GraphicsQuality, u64)>,
+    /// Some chunks still show another quality's density (a quality change
+    /// re-meshes a few chunks per frame, `QUALITY_REMESH_MS`).
+    stale: bool,
     /// Seconds since the last re-mesh for a changed road ghost.
     since_ghost: f32,
-    /// Chunk -> (cells hash, [near, far] entities, trees placed).
-    chunks: HashMap<IVec2, (u64, [Entity; 2], usize)>,
-    outside: Vec<Entity>,
+    /// Chunk -> (cells hash, [near, far] entities, trees placed, density
+    /// quality it was meshed for).
+    chunks: HashMap<IVec2, (u64, [Entity; 2], usize, GraphicsQuality)>,
+    /// Countryside chunks (by index) and the quality each was meshed for.
+    outside: Vec<(Option<Entity>, GraphicsQuality)>,
     outside_key: Option<(GraphicsQuality, Option<[u32; 2]>)>,
+    outside_entry: Option<[u32; 2]>,
+    /// Chunk hashes and the taken land for a (keys, ghost) key, kept while
+    /// a quality change is re-meshed over several frames.
+    land: Option<Land>,
 }
 
 /// Number of trees currently placed (for stats).
@@ -302,7 +314,7 @@ fn chunk_hashes(world: &World, ghost: &Ghost) -> HashMap<IVec2, u64> {
 fn rebuild_trees(
     mut commands: Commands,
     sim: Res<SimWorld>,
-    quality: Res<GraphicsQuality>,
+    (requested, applied): (Res<GraphicsQuality>, Option<Res<QualityApplied>>),
     mats: Res<WorldMaterials>,
     mut state: Local<TreeChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -311,32 +323,69 @@ fn rebuild_trees(
     (view, time): (Option<Res<CurveToolView>>, Res<Time<Real>>),
 ) {
     state.since_ghost += time.delta_secs();
+    let quality = drawn_quality(applied.as_deref(), *requested);
     let ghost = view.map(|v| Ghost::of(&v)).unwrap_or_default();
     let keys = (sim.key(sim.world.versions.grid), sim.key(sim.world.versions.roads));
-    let key = (keys, *quality, ghost.key());
-    if state.key == Some(key) {
+    let key = (keys, quality, ghost.key());
+    if state.key == Some(key) && !state.stale {
         return;
     }
     // Only the ghost moved: re-mesh at most a few times a second.
-    if state.key.is_some_and(|(k, q, _)| k == keys && q == *quality) && state.since_ghost < 0.2 {
+    let ghost_only = state
+        .key
+        .is_some_and(|(k, q, g)| k == keys && q == quality && g != key.2);
+    if ghost_only && state.since_ghost < 0.2 {
         return;
     }
-    state.since_ghost = 0.0;
-    let quality_changed = state.key.is_some_and(|(_, q, _)| q != *quality);
+    if ghost_only {
+        state.since_ghost = 0.0;
+    }
     state.key = Some(key);
     let world = &sim.world;
-    let hashes = chunk_hashes(world, &ghost);
-    let taken = Taken::new(world);
-    let dens = quality_settings(*quality).tree_density;
+    let land_key = (keys, key.2);
+    if state.land.as_ref().is_none_or(|(k, _, _)| *k != land_key) {
+        state.land = Some((land_key, chunk_hashes(world, &ghost), Taken::new(world)));
+    }
+    let (_, hashes, taken) = state.land.take().expect("land");
+    let dens = quality_settings(quality).tree_density;
     let n = MAP_CELLS / CHUNK;
-    let mut trees = Vec::new();
+    // Chunks whose land changed are re-meshed now; those that only show
+    // another quality's density a few per frame.
+    let mut changed = Vec::new();
+    let mut other_quality = Vec::new();
     for cy in 0..n {
         for cx in 0..n {
             let c = IVec2::new(cx, cy);
             let hash = hashes.get(&c).copied().unwrap_or(0);
-            if !quality_changed && state.chunks.get(&c).is_some_and(|(h, _, _)| *h == hash) {
-                continue;
+            match state.chunks.get(&c) {
+                Some((h, _, _, q)) if *h == hash => {
+                    if *q != quality {
+                        other_quality.push((c, hash));
+                    }
+                }
+                _ => changed.push((c, hash)),
             }
+        }
+    }
+    if changed.is_empty() && other_quality.is_empty() {
+        state.stale = false;
+        state.land = Some((land_key, hashes, taken));
+        return;
+    }
+    let start = std::time::Instant::now();
+    let mut trees = Vec::new();
+    let budget = other_quality.len();
+    let mut todo = changed;
+    todo.extend(other_quality);
+    let urgent = todo.len() - budget;
+    state.stale = false;
+    for (i, (c, hash)) in todo.into_iter().enumerate() {
+        if i >= urgent.max(1) && start.elapsed().as_secs_f64() * 1000.0 > QUALITY_REMESH_MS {
+            state.stale = true;
+            break;
+        }
+        let (cx, cy) = (c.x, c.y);
+        {
             let mut m = MeshBuilder::new();
             let mut far = MeshBuilder::new();
             let mut placed = 0;
@@ -359,7 +408,7 @@ fn rebuild_trees(
             let size = CHUNK as f32 * CELL_SIZE;
             let centre = Vec3::new((cx as f32 + 0.5) * size, 0.0, (cy as f32 + 0.5) * size);
             let ents = match state.chunks.get(&c) {
-                Some((_, e, _)) => *e,
+                Some((_, e, _, _)) => *e,
                 None => [TREE_LOD_NEAR, TREE_LOD_FAR].map(|range| {
                     commands
                         .spawn((
@@ -386,37 +435,60 @@ fn rebuild_trees(
                         .insert((Mesh3d(meshes.add(mb.build())), Visibility::Inherited));
                 }
             }
-            state.chunks.insert(c, (hash, ents, placed));
+            state.chunks.insert(c, (hash, ents, placed, quality));
         }
     }
-    count.0 = state.chunks.values().map(|(_, _, n)| n).sum();
+    count.0 = state.chunks.values().map(|(_, _, n, _)| n).sum();
+    // Kept only while chunks wait for the new quality.
+    if state.stale {
+        state.land = Some((land_key, hashes, taken));
+    }
 }
 
 /// Countryside trees around the map (static; rebuilt on quality change).
 fn rebuild_outside(
     mut commands: Commands,
     sim: Res<SimWorld>,
-    quality: Res<GraphicsQuality>,
+    (requested, applied): (Res<GraphicsQuality>, Option<Res<QualityApplied>>),
     mats: Res<WorldMaterials>,
     mut state: Local<TreeChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    let quality = drawn_quality(applied.as_deref(), *requested);
     let entry = highway_corridor(&sim.world);
-    let key = (*quality, entry.map(|(p, _)| [p.x.to_bits(), p.y.to_bits()]));
+    let entry_key = entry.map(|(p, _)| [p.x.to_bits(), p.y.to_bits()]);
+    let key = (quality, entry_key);
     if state.outside_key == Some(key) {
         return;
     }
-    state.outside_key = Some(key);
-    for e in state.outside.drain(..) {
-        commands.entity(e).despawn();
-    }
-    let dens = quality_settings(*quality).tree_density * 0.55;
     let lo = -OUTSIDE_REACH;
     let hi = MAP_SIZE_M + OUTSIDE_REACH;
     let n = ((hi - lo) / OUT_CHUNK).ceil() as i32;
+    // A new highway corridor (a new game, a load) re-meshes everything at
+    // once; a quality change a few chunks per frame, in place.
+    let urgent = state.outside_entry != entry_key || state.outside.is_empty();
+    if urgent {
+        for (e, _) in state.outside.drain(..) {
+            if let Some(e) = e {
+                commands.entity(e).despawn();
+            }
+        }
+        state.outside_entry = entry_key;
+    }
+    let dens = quality_settings(quality).tree_density * 0.55;
+    let start = std::time::Instant::now();
     let mut trees = Vec::new();
+    let mut done = true;
     for j in 0..n {
         for i in 0..n {
+            let index = (j * n + i) as usize;
+            if state.outside.get(index).is_some_and(|(_, q)| *q == quality) {
+                continue;
+            }
+            if !urgent && start.elapsed().as_secs_f64() * 1000.0 > QUALITY_REMESH_MS {
+                done = false;
+                continue;
+            }
             let (x0, z0) = (lo + i as f32 * OUT_CHUNK, lo + j as f32 * OUT_CHUNK);
             let mut m = MeshBuilder::new();
             let (c0x, c0y) = ((x0 / CELL_SIZE).floor() as i32, (z0 / CELL_SIZE).floor() as i32);
@@ -452,19 +524,39 @@ fn rebuild_outside(
                     }
                 }
             }
-            if m.is_empty() {
-                continue;
+            if state.outside.len() <= index {
+                state.outside.resize(index + 1, (None, quality));
             }
-            let e = commands
-                .spawn((
-                    Name::new("Countryside trees"),
-                    Mesh3d(meshes.add(m.build())),
-                    MeshMaterial3d(mats.lit.clone()),
-                    Transform::default(),
-                ))
-                .id();
-            state.outside.push(e);
+            let slot = &mut state.outside[index];
+            slot.1 = quality;
+            match (slot.0, m.is_empty()) {
+                (Some(e), true) => {
+                    commands.entity(e).insert(Visibility::Hidden); // never remove Mesh3d: see cursor.rs
+                }
+                (Some(e), false) => {
+                    commands
+                        .entity(e)
+                        .insert((Mesh3d(meshes.add(m.build())), Visibility::Inherited));
+                }
+                (None, true) => {}
+                (None, false) => {
+                    slot.0 = Some(
+                        commands
+                            .spawn((
+                                Name::new("Countryside trees"),
+                                Mesh3d(meshes.add(m.build())),
+                                MeshMaterial3d(mats.lit.clone()),
+                                Transform::default(),
+                                Visibility::Inherited,
+                            ))
+                            .id(),
+                    );
+                }
+            }
         }
+    }
+    if done {
+        state.outside_key = Some(key);
     }
 }
 
