@@ -1185,23 +1185,36 @@ fn steady_columns(
 /// never runs into the last slot.
 fn keep_tools_clear(
     root: Query<&ComputedNode, With<BarRoot>>,
-    mut groups: Query<(&BarGroup, &mut Node, &ComputedNode), Without<BarRoot>>,
+    mut groups: Query<(Entity, &BarGroup, &mut Node, &ComputedNode), Without<BarRoot>>,
+    children: Query<&Children>,
+    sizes: Query<(&ComputedNode, &bevy::ui::UiGlobalTransform), Without<BarRoot>>,
 ) {
     let mut w = [0.0f32; 3];
     let bar = root.single().map_or(0.0, |c| c.size.x * c.inverse_scale_factor);
-    for (g, _, c) in &groups {
-        let width = c.size.x * c.inverse_scale_factor;
+    let mut content = 0.0f32;
+    for (e, g, _, c) in &groups {
+        let inv = c.inverse_scale_factor;
         match g {
-            BarGroup::Vitals => w[0] = width,
-            BarGroup::Time => w[2] = width,
-            BarGroup::Tools => {}
+            BarGroup::Vitals => w[0] = c.size.x * inv,
+            BarGroup::Time => w[2] = c.size.x * inv,
+            // The slots' own extent: the row spans the bar, its children
+            // are centred in it.
+            BarGroup::Tools => {
+                let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+                for k in children.get(e).into_iter().flatten() {
+                    if let Ok((n, tf)) = sizes.get(*k)
+                        && n.size.x > 0.0
+                    {
+                        lo = lo.min(tf.translation.x - n.size.x * 0.5);
+                        hi = hi.max(tf.translation.x + n.size.x * 0.5);
+                    }
+                }
+                if hi > lo {
+                    content = (hi - lo) * inv;
+                }
+            }
         }
     }
-    // The slots' own width: the row spans the bar, its content is centred.
-    let content = groups
-        .iter()
-        .find(|g| *g.0 == BarGroup::Tools)
-        .map_or(0.0, |(_, _, c)| c.content_size.x * c.inverse_scale_factor);
     if bar <= 0.0 || content <= 0.0 {
         return;
     }
@@ -1210,7 +1223,7 @@ fn keep_tools_clear(
     let centred = (bar - content) * 0.5;
     let crowded = centred < left || centred < right;
     let (l, r) = if crowded { (px(left), px(right)) } else { (px(0), px(0)) };
-    for (g, mut n, _) in &mut groups {
+    for (_, g, mut n, _) in &mut groups {
         if *g == BarGroup::Tools && (n.left != l || n.right != r) {
             n.left = l;
             n.right = r;
