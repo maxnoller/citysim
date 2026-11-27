@@ -85,17 +85,11 @@ fn chunk_hash(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> u64 {
             p.y.to_bits().hash(&mut h);
         }
         // Outlines depend on the neighbours.
-        for n in neighbours(c.cell) {
+        for n in c.nbrs {
             zones.get(&n).hash(&mut h);
         }
     }
     h.finish()
-}
-
-/// The four same-lattice neighbours, in the order of the quad's edges:
-/// `-j` (corners 0-1), `+i` (1-2), `+j` (2-3), `-i` (3-0).
-pub fn neighbours(c: CellRef) -> [CellRef; 4] {
-    [c.offset(0, -1), c.offset(1, 0), c.offset(0, 1), c.offset(-1, 0)]
 }
 
 fn chunk_mesh(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> Option<Mesh> {
@@ -126,7 +120,7 @@ fn chunk_mesh(cells: &[CellView], zones: &HashMap<CellRef, Zone>) -> Option<Mesh
         m.quad_up(c.quad.map(|p| Vec3::new(p.x, y, p.y)), fill);
         // Outline on edges where the neighbour shows a different zone.
         let centre = c.center();
-        for (k, n) in neighbours(c.cell).into_iter().enumerate() {
+        for (k, n) in c.nbrs.into_iter().enumerate() {
             if zones.get(&n) == Some(&z) {
                 continue;
             }

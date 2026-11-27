@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use citysim_sim::zoning::{Lattice, ZoneCell};
-use citysim_sim::{CellRef, World, Zone};
+use citysim_sim::{CellRef, Facing, World, Zone};
 
 use super::road_geom;
 use crate::shared::{GameSet, SimWorld};
@@ -468,6 +468,10 @@ pub struct CellView {
     pub v: Vec2,
     /// Sides with a road in front (`ZoneCell::fronts`).
     pub fronts: u8,
+    /// The neighbouring cells in the order of the quad's edges: `-j`
+    /// (corners 0-1), `+i` (1-2), `+j` (2-3), `-i` (3-0); across the band
+    /// boundary of a block's grid the next band's cell.
+    pub nbrs: [CellRef; 4],
 }
 
 impl CellView {
@@ -530,6 +534,8 @@ pub fn cells_by_chunk(
                     u: Vec2::from(u),
                     v: Vec2::from(v),
                     fronts: zc.fronts,
+                    nbrs: [Facing::MinusY, Facing::PlusX, Facing::PlusY, Facing::MinusX]
+                        .map(|f| world.zoning.cell_across(cell, f)),
                 });
         }
     }

@@ -39,7 +39,7 @@ use citysim_sim::{
 };
 
 use super::UiState;
-use super::fsnap::{self, Anchor, OnNet, SnapOptions, Snapped, dist};
+use super::fsnap::{self, Anchor, OnNet, SnapOptions, Snapped, add, dist, dot, mul, sub};
 use super::plan::{self, Evaluated, Op, UndoRecord};
 use super::shapes::{Draft, GridFrame, Placed, Shape, Stretch};
 use super::toasts::{Toast, ToastKind};
@@ -633,17 +633,47 @@ fn stretch_part(world: &World, state: &ToolState, cursor: [f32; 2]) -> Option<(S
     }
 }
 
-/// Paint brush: cells whose centre is within about half a cell of `p`.
-fn brush_cells(world: &World, p: [f32; 2]) -> Vec<CellRef> {
-    let r = 4.5;
+/// Paint brush along the pointer's path from `a` to `b`: every cell the
+/// path crosses and every cell whose centre is within half a cell's
+/// diagonal of it, so a stroke is one band of cells sharing their sides
+/// (never a chain of cells touching at the corners, even drawn at 45
+/// degrees across the grid), however far the pointer moved since the last
+/// frame.
+fn brush_cells(world: &World, a: [f32; 2], b: [f32; 2]) -> Vec<CellRef> {
+    const R: f32 = citysim_sim::CELL_SIZE * 0.5 * std::f32::consts::SQRT_2 + 0.15;
+    // Candidates: centres within reach of the path.
+    let reach = R + 0.5;
+    let d = sub(b, a);
+    let len = dist(a, b);
+    let u = if len > 1e-3 { mul(d, 1.0 / len) } else { [1.0, 0.0] };
+    let n = [-u[1], u[0]];
+    let at = |s: f32, t: f32| add(add(a, mul(u, s)), mul(n, t));
     let q = [
-        [p[0] - r, p[1] - r],
-        [p[0] + r, p[1] - r],
-        [p[0] + r, p[1] + r],
-        [p[0] - r, p[1] + r],
+        at(-reach, -reach),
+        at(len + reach, -reach),
+        at(len + reach, reach),
+        at(-reach, reach),
     ];
-    let mut out = zoning::cells_in_quad(world, &q);
-    out.extend(world.zoning.cell_at(p));
+    let mut out: Vec<CellRef> = zoning::cells_in_quad(world, &q)
+        .into_iter()
+        .filter(|&c| {
+            let Some(ctr) = world.zoning.cell_center(c) else {
+                return false;
+            };
+            let t = dot(sub(ctr, a), u).clamp(0.0, len);
+            if dist(ctr, add(a, mul(u, t))) <= R {
+                return true;
+            }
+            // The path crosses the cell (or ends in it).
+            let Some(k) = world.zoning.cell_corners(c) else {
+                return false;
+            };
+            zoning::in_quad(&k, a)
+                || zoning::in_quad(&k, b)
+                || (0..4).any(|e| citysim_sim::curve::segments_meet(a, b, k[e], k[(e + 1) % 4]).is_some())
+        })
+        .collect();
+    out.extend(world.zoning.cell_at(b));
     out
 }
 
@@ -1195,6 +1225,22 @@ fn step_back(state: &mut ToolState) {
     }
 }
 
+/// Paint mode, button held: add the cells along the pointer's path since
+/// the last frame to the stroke.
+fn extend_stroke(state: &mut ToolState, tool: ActiveTool, mode: ZoneMode, world: &World) {
+    if !(matches!(tool, ActiveTool::Zone(_)) && mode == ZoneMode::Paint && state.press.is_some()) {
+        return;
+    }
+    let Some(c) = state.cursor else { return };
+    let from = state.stroke_last.unwrap_or(c);
+    for cell in brush_cells(world, from, c) {
+        if !state.stroke.contains(&cell) {
+            state.stroke.push(cell);
+        }
+    }
+    state.stroke_last = Some(c);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn use_tool(
     time: Res<Time<Real>>,
@@ -1228,6 +1274,8 @@ fn use_tool(
     // no longer held.
     let released = mouse.just_released(MouseButton::Left) || state.press.is_some() && !mouse.pressed(MouseButton::Left);
     let right = mouse.just_pressed(MouseButton::Right) && !over_ui.0;
+    // The stroke so far, before the preview of this frame.
+    extend_stroke(state, *tool, modes.zone, &sim.world);
     let p = pending(*tool, *modes, *kind, &opts, state, &sim.world);
     refresh_plan(state, &sim, p);
     if (keys.just_pressed(KeyCode::Escape) && !ui.tray_focus || right) && state.busy() {
@@ -1342,24 +1390,7 @@ fn use_tool(
                 state.stroke_last = None;
             }
             // Paint: add the cells under the pointer's path.
-            if matches!(*tool, ActiveTool::Zone(_))
-                && modes.zone == ZoneMode::Paint
-                && state.press.is_some()
-                && let Some(c) = state.cursor
-            {
-                let from = state.stroke_last.unwrap_or(c);
-                let n = (dist(from, c) / 3.0).ceil().max(1.0) as usize;
-                for k in 1..=n {
-                    let t = k as f32 / n as f32;
-                    let q = [from[0] + (c[0] - from[0]) * t, from[1] + (c[1] - from[1]) * t];
-                    for cell in brush_cells(&sim.world, q) {
-                        if !state.stroke.contains(&cell) {
-                            state.stroke.push(cell);
-                        }
-                    }
-                }
-                state.stroke_last = Some(c);
-            }
+            extend_stroke(state, *tool, modes.zone, &sim.world);
             if released && state.press.is_some() {
                 // The plan for the release position.
                 let p = pending(*tool, *modes, *kind, &opts, state, &sim.world);

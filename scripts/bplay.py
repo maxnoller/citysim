@@ -223,6 +223,29 @@ def shots(prefix, out, n0, suffix, names=None):
     return k
 
 
+def paint(out, k, suffix):
+    """A fast paint stroke (big jumps between frames, as at a low frame
+    rate) diagonally across a zoned block: pictured while held and after."""
+    play.focus()
+    top(12.6, 119.5, 150.0)
+    zone_tool("i")
+    zmode("Paint")
+    # A zig-zag of 45 degree jumps over the empty land west of the grid.
+    pts = [(10.3 + (4.8 if k % 2 else 0.0), 125.2 - 4.8 * k) for k in range(3)]
+    zplay.move(*pts[0])
+    play.press()
+    for p in pts[1:]:
+        zplay.move(*p)
+    play.wait_frames(3)
+    play.shot(os.path.join(out, f"zone-{k:02d}-{suffix}-paint-stroke-held.png"))
+    play.release()
+    play.wait_frames(3)
+    play.select_tool("inspect")
+    zone_tool("r")
+    play.wait_frames(3)
+    play.shot(os.path.join(out, f"zone-{k + 1:02d}-{suffix}-paint-stroke-done.png"))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctl", default="/tmp/ctl")
@@ -233,6 +256,11 @@ def main():
     play.CTL, play.DISPLAY = a.ctl, a.display
     if a.phase == "launch":
         zplay.launch(a.args[0])
+        if len(a.args) > 1 and a.args[1] == "load":
+            play.focus()
+            play.key("F9")
+            play.wait_frames(8)
+            play.log(play.cmd("stats"))
     elif a.phase == "roads":
         roads()
     elif a.phase == "zone":
@@ -245,6 +273,8 @@ def main():
     elif a.phase == "shots":
         names = a.args[4].split(",") if len(a.args) > 4 else None
         print(shots(a.args[0], a.args[1], int(a.args[2]), a.args[3], names))
+    elif a.phase == "paint":
+        paint(a.args[0], int(a.args[1]), a.args[2])
     elif a.phase == "site":
         site(a.args[0], a.args[1] if len(a.args) > 1 else "top")
     elif a.phase == "shot":

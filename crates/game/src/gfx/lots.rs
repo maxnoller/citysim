@@ -20,7 +20,7 @@ use super::land::{self, CellView, RoadEdges};
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix, shade};
 use super::scene::WorldMaterials;
-use super::zones::{full_overlay, neighbours, zone_color};
+use super::zones::{full_overlay, zone_color};
 use crate::shared::{ActiveTool, DisplaySettings, GameSet, OverlayMode, SimWorld};
 
 /// Chunk size, metres.
@@ -50,7 +50,7 @@ fn chunk_hash(cells: &[CellView], free: &HashMap<CellRef, Zone>) -> u64 {
             p.x.to_bits().hash(&mut h);
             p.y.to_bits().hash(&mut h);
         }
-        for n in neighbours(c.cell) {
+        for n in c.nbrs {
             free.get(&n).hash(&mut h);
         }
     }
@@ -116,7 +116,7 @@ fn chunk_mesh(cells: &[CellView], free: &HashMap<CellRef, Zone>) -> Option<Mesh>
         let tint = mix(base, Color::WHITE, 0.55);
         let paint = lin(mix(base, palette::GRASS_LIGHT, 0.62));
         let centre = c.center();
-        for (k, n) in neighbours(c.cell).into_iter().enumerate() {
+        for (k, n) in c.nbrs.into_iter().enumerate() {
             if free.get(&n) == Some(&z) {
                 continue;
             }
