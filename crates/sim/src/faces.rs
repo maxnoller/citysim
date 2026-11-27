@@ -581,6 +581,13 @@ pub fn leftover_faces(world: &crate::World) -> Vec<((SegmentId, bool), u64)> {
     let roads = &world.roads;
     let mut seen: std::collections::BTreeSet<Half> = std::collections::BTreeSet::new();
     let mut out = Vec::new();
+    // Blocks by segment (they are sorted by segment).
+    let blocks = &world.zoning.blocks;
+    let of = |s: SegmentId| {
+        let a = blocks.partition_point(|b| b.segment < s);
+        let e = blocks.partition_point(|b| b.segment <= s);
+        &blocks[a..e]
+    };
     for (s, _) in roads.segments.iter() {
         for h in [(s, true), (s, false)] {
             if seen.contains(&h) {
@@ -608,7 +615,7 @@ pub fn leftover_faces(world: &crate::World) -> Vec<((SegmentId, bool), u64)> {
                         p[1].to_bits().hash(&mut hs);
                     }
                 }
-                for b in world.zoning.blocks_of(x.0).filter(|b| b.side == side_of(x)) {
+                for b in of(x.0).iter().filter(|b| b.side == side_of(x)) {
                     (b.lattice, b.min, b.max).hash(&mut hs);
                     if let Some(l) = world.zoning.lattice(b.lattice) {
                         l.origin[0].to_bits().hash(&mut hs);
