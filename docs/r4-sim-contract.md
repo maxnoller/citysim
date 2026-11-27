@@ -425,8 +425,8 @@ Commute over free-flow time (`delay_factor`) · car trips given up · residents 
 ## 2026-11-26 (r5-sim: good roads pay, turn pockets, the day, people and jobs)
 
 Goal: a road hierarchy pays for itself, congestion costs a city visibly, rush hours line up with the day, jammed
-residents are unhappy and say so, and the demand bars tell the player what work land is missing. Charts `sim-01`..
-`sim-08` and `sim.mp4` in `/home/max/citysim-shots/r5/`, data in `sim-data/` there.
+residents are unhappy and say so, and the demand bars tell the player what work land is missing. (The charts `sim-01`..`sim-08` and the
+run data behind these figures are kept outside the repository.)
 
 ### Turn pockets (renderers: read this)
 

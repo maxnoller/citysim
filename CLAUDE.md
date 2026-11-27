@@ -31,7 +31,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - **Before pushing:** `scripts/ci-local.sh` runs what CI runs (≈3 min; sim tests through nextest, `sim` / `game` for
   one job); `--full` adds clippy on the game in all three feature sets. `cargo fmt --all --check` (width 120) and
   clippy warning-free.
-- CI: `.github/workflows/ci.yml` (fmt, clippy `-D warnings` + `cargo test` for the sim; `cargo check` of all three
+- Git: `main` changes only through pull requests, squash-merged (the PR title becomes the commit: one plain sentence
+  about what changes); both CI jobs must pass; merged branches are deleted. See `CONTRIBUTING.md`.
+- CI (on pull requests and on `main`): `.github/workflows/ci.yml` (fmt, clippy `-D warnings` + `cargo test` for the sim; `cargo check` of all three
   feature sets + tests for the game, with `Swatinem/rust-cache`; about 6 minutes, the sim tests on a two-core runner).
   CI's clippy is the latest stable: keep the sim lint-clean on it.
 - Ownership check (must stay warning-free): `cargo clippy -p citysim --no-default-features --features gfx`

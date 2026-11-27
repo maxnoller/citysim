@@ -2,6 +2,8 @@
 
 # CitySim
 
+[![CI](https://github.com/maxnoller/citysim/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/maxnoller/citysim/actions/workflows/ci.yml)
+
 A small, original 3D city-builder written in Rust with [Bevy](https://bevy.org) 0.20. Start on an empty map with a
 highway stub, draw straight and curved roads, zone homes, shops and industry along them, and watch a town grow. Every
 resident is a person with a home, a household, a job or school, a daily routine and a mood; every car on the road is
@@ -111,7 +113,8 @@ kept in `~/.config/citysim/settings.cfg` (the same folders on macOS and Windows;
   `shared.rs` (the only contract between the two), `dev/` (development scenarios, screenshots, scripted play).
 - `scripts/play.py` — scripted play-through driving the real game with OS input (development).
 
-See `CLAUDE.md` for developer notes and dev flags, and `THIRD_PARTY_NOTICES.md` for bundled font licences.
+See `CLAUDE.md` for developer notes and dev flags, `CONTRIBUTING.md` for how changes get in, and
+`THIRD_PARTY_NOTICES.md` for bundled font licences.
 
 ## Development shortcuts
 

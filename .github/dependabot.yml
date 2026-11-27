@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    # Bevy moves as a whole and by hand; everything else arrives as one grouped update.
+    ignore:
+      - dependency-name: "bevy*"
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
