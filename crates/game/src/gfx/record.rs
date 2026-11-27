@@ -8,7 +8,9 @@
 //! render and save. The camera flies a Catmull-Rom path through
 //! `CITYSIM_RECORD_PATH` keyframes `"t,x,z,yaw,pitch,distance;..."`
 //! (seconds, sim metres, radians, metres) and every frame is saved as
-//! `dir/frame_00000.png`; the run ends after the last keyframe. Join the
+//! `dir/frame_00000.png`; the run ends after the last keyframe.
+//! `CITYSIM_RECORD_HOURS=a,b` draws the time of day moving from hour `a`
+//! to hour `b` over the path (day into night in one flight). Join the
 //! frames with e.g. `ffmpeg -framerate 30 -i dir/frame_%05d.png -c:v
 //! libx264 -pix_fmt yuv420p out.mp4`.
 
@@ -36,6 +38,8 @@ struct Recorder {
     size: (u32, u32),
     fps: f32,
     keys: Vec<Key>,
+    /// `CITYSIM_RECORD_HOURS`: drawn hour at the start and end.
+    hours: Option<(f32, f32)>,
     image: Option<Handle<Image>>,
     /// Frames rendered since the scene was ready (warm-up first).
     frame: u32,
@@ -75,6 +79,10 @@ impl Plugin for RecordPlugin {
                 size,
                 fps,
                 keys,
+                hours: std::env::var("CITYSIM_RECORD_HOURS").ok().and_then(|s| {
+                    let (a, b) = s.split_once(',')?;
+                    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+                }),
                 image: None,
                 frame: 0,
                 saved: 0,
@@ -144,6 +152,7 @@ fn record(
     mut images: ResMut<Assets<Image>>,
     cams: Query<(Entity, Option<&RenderTarget>), With<WorldCamera>>,
     mut exit: MessageWriter<AppExit>,
+    mut hour: ResMut<super::daynight::PinnedHour>,
 ) {
     clock.paused = false;
     for (cam, target) in &cams {
@@ -157,6 +166,10 @@ fn record(
     let end = rec.keys.last().map_or(0.0, |k| k[0]);
     let t = rec.frame.saturating_sub(WARMUP) as f32 / rec.fps;
     camera.0 = Some(pose_at(&rec.keys, t));
+    if let Some((a, b)) = rec.hours {
+        let k = (t / end.max(1e-3)).clamp(0.0, 1.0);
+        hour.0 = Some(a + (b - a) * k);
+    }
     if !ready.0 {
         return;
     }
