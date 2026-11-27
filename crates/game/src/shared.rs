@@ -786,7 +786,11 @@ fn apply_commands(
         last.result = Some((cmd.clone(), res));
         last.at = time.elapsed_secs();
     }
-    let ms = if any { started.elapsed().as_secs_f32() * 1e3 } else { 0.0 };
+    let ms = if any {
+        started.elapsed().as_secs_f32() * 1e3
+    } else {
+        0.0
+    };
     took.set_if_neq(CommandTime(ms));
 }
 

@@ -46,9 +46,9 @@ use super::shapes::{Draft, GridFrame, Placed, Shape, Stretch};
 use super::toasts::{Toast, ToastKind};
 use super::widgets::UiAction;
 use crate::shared::{
-    ActiveTool, BulldozeMode, CurveToolView, GameSet, HoveredCell, PointerOverUi, PreviewKind, RoadChoice, RoadMode,
-    CommandTime, RoadStretch, ScriptPointer, SimClock, SimCommand, SimWorld, SnapFeedback, ToolModes, ToolPreview, WorldCamera,
-    WorldHighlight, WorldTarget, ZoneMode,
+    ActiveTool, BulldozeMode, CommandTime, CurveToolView, GameSet, HoveredCell, PointerOverUi, PreviewKind, RoadChoice,
+    RoadMode, RoadStretch, ScriptPointer, SimClock, SimCommand, SimWorld, SnapFeedback, ToolModes, ToolPreview,
+    WorldCamera, WorldHighlight, WorldTarget, ZoneMode,
 };
 
 // ---------------------------------------------------------------- options

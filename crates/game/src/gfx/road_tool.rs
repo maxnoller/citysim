@@ -364,7 +364,11 @@ fn plan_by_chunk(view: &CurveToolView) -> HashMap<IVec2, CurveToolView> {
     if !view.active {
         return out;
     }
-    fn at<'a>(out: &'a mut HashMap<IVec2, CurveToolView>, kind: Option<RoadKind>, p: [f32; 2]) -> &'a mut CurveToolView {
+    fn at<'a>(
+        out: &'a mut HashMap<IVec2, CurveToolView>,
+        kind: Option<RoadKind>,
+        p: [f32; 2],
+    ) -> &'a mut CurveToolView {
         out.entry(road_geom::chunk_of(Vec2::from(p), PLAN_CHUNK_M))
             .or_insert_with(|| CurveToolView {
                 active: true,
@@ -374,7 +378,9 @@ fn plan_by_chunk(view: &CurveToolView) -> HashMap<IVec2, CurveToolView> {
     }
     let kind = view.kind;
     for &(c, ch) in &view.pieces {
-        at(&mut out, kind, c.point_at(c.length() * 0.5, 0.0)).pieces.push((c, ch));
+        at(&mut out, kind, c.point_at(c.length() * 0.5, 0.0))
+            .pieces
+            .push((c, ch));
     }
     for &c in &view.refused {
         at(&mut out, kind, c.point_at(c.length() * 0.5, 0.0)).refused.push(c);
@@ -443,7 +449,12 @@ fn draw(
     let i = usize::from(dim);
     // The plan's squares: only those whose content changed are re-meshed.
     let by_chunk = plan_by_chunk(&view);
-    let gone: Vec<IVec2> = plan.chunks.keys().filter(|c| !by_chunk.contains_key(c)).copied().collect();
+    let gone: Vec<IVec2> = plan
+        .chunks
+        .keys()
+        .filter(|c| !by_chunk.contains_key(c))
+        .copied()
+        .collect();
     for c in gone {
         if let Some((_, ents)) = plan.chunks.remove(&c) {
             for e in ents {

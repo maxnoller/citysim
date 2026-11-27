@@ -105,6 +105,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   top-level pass, render-thread CPU ms, draw calls, main-pass triangles, mesh / car entities and how many are on
   screen, the game's GPU memory, card / backend / driver). Closed, gfx measures nothing: Bevy's render-diagnostics
   recorder is taken out of the render world while the graph runs.
+- `CommandTime(f32)`: real ms `apply_commands` took this frame (ui sends plans in parts by it, the benchmark records it).
 - `ScriptPointer(Option<Vec2>)`: dev scripts without a window (the benchmark) put the pointer here (viewport px); shared's
   hover and ui's tools read it when there is no primary window (`ScriptPointer::position`).
 - `SceneReady(bool)`: gfx sets it once the render pipelines are built (`gfx/loading.rs`); ui shows a loading card until
@@ -195,7 +196,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep).
 - Roads: `RoadKind::{Street, Highway, Avenue}` (`lane_count`, `lane_offset_m(lane)` right of travel, lane 0 = kerb,
   `half_width_m`, `upkeep_per_m`); `Command::BuildCurve { curve, kind }` (redrawing a built piece as the other kind
-  upgrades / downgrades it); `Command::SetNodeControl { node, control: JunctionSetting::{Auto, Signal, Priority} }`.
+  upgrades / downgrades it); `Command::SetNodeControl { node, control: JunctionSetting::{Auto, Signal, Priority} }`; `Command::RemoveRoads { parts }`
+  removes several segment parts as one road change (undo of a large road goes in batches of 32).
   `junction::{junction_view, junction_shape, signal_aspect, movement_aspect, junction_nodes, setback}`. Vehicles:
   `lane`, `lane_shift`, `junction: Option<JunctionMove>`, `braking`, `stopped()`, `route`; `drive::vehicle_pose(world,
   v)` = exact lane pose. Money: `economy.fiscal` (`FiscalState`, `reason.text()`, `service_level`). Renders:
@@ -294,7 +296,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   carrying on from the worlds after the operations a plan shares with the one before), `ui/planner.rs` (plans are checked
   on a worker thread: a frame waits at most `planner::WAIT`, 1 ms, then shows the last plan checked, `ToolPlan::stale`; a
   click, Enter, release or Ctrl+Z is a `Job` sent once its plan is checked, input waits meanwhile; its commands go out about
-  1 ms (by the time each took to check) of them a frame, at least one, with `SimClock::hold` set; undo stays one step), `ui/readout.rs` (the cursor card's words),
+  3 ms of real applying time a frame (each estimated by its check time scaled by `CommandTime`), at least one, with `SimClock::hold` set; undo stays one step), `ui/readout.rs` (the cursor card's words),
   `ui/people.rs` (names, portraits, person / place / car / city `Sheet`s with headline, trip bar (with lateness),
   mood reason, action links, `Section::folding` sections the panel lets the player fold, remembered in
   `panel::Folds`). One-line panel texts are cut with "…" by measured width (`panel::Ellipsis`). A plan is sent only when every step passes. `scripts/play.py road` presses Enter to build its
