@@ -72,6 +72,28 @@ impl SnapOptions {
 /// Two rows of lots back to back between two streets: 2 x (4 m road
 /// reserve + 2 cells) = 40 m between centre lines.
 pub const DEFAULT_PARALLEL_M: f32 = 40.0;
+/// Farthest parallel street the whole-rows guide is offered for (centre
+/// lines; 2 x 6 rows of lots between the kerbs and a little more).
+pub const MAX_ROWS_PARALLEL_M: f32 = 120.0;
+
+/// Rows of lots between two parallel streets `spacing` metres apart
+/// (centre lines; each street keeps half a cell of reserve).
+pub fn rows_between(spacing: f32) -> f32 {
+    (spacing - CELL_SIZE) / CELL_SIZE
+}
+
+/// The spacing nearest to `d` (centre lines, metres) that leaves a whole
+/// number of rows, at least two, between the kerbs: a multiple of a cell.
+pub fn whole_rows_spacing(d: f32) -> Option<f32> {
+    let rows = rows_between(d).round().max(2.0);
+    let s = (rows + 1.0) * CELL_SIZE;
+    (s <= MAX_ROWS_PARALLEL_M).then_some(s)
+}
+
+fn libm_sin(deg: f32) -> f32 {
+    deg.to_radians().sin()
+}
+
 /// Angle steps from the previous point.
 pub const ANGLE_STEP_DEG: f32 = 15.0;
 
@@ -482,41 +504,58 @@ pub fn snap(world: &World, anchor: Option<Anchor>, cursor: [f32; 2], radius: f32
             }
         }
     }
-    // Parallel to a nearby road at the set distance.
+    // Parallel to a nearby road: at the set distance, and at the nearest
+    // distance that leaves whole rows of lots between the two kerbs.
     if opts.parallel && opts.parallel_m > 0.0 {
-        let spacing = opts.parallel_m;
-        if let Some((s, d, dd)) = roads.nearest_segment(cursor, spacing + radius)
-            && (dd - spacing).abs() <= radius * reach(R_PARALLEL)
-        {
+        let far = opts.parallel_m.max(MAX_ROWS_PARALLEL_M) + radius;
+        if let Some((s, d, dd)) = roads.nearest_segment(cursor, far) {
             let seg = &roads.segments[s];
-            let pose = seg.pose(d, 0.0);
-            let side = if cross(pose.dir, sub(cursor, pose.pos)) > 0.0 {
-                1.0
-            } else {
-                -1.0
-            };
-            // `pose_at` offsets to the right of travel: +y-from-x is right.
-            let p = seg.curve.point_at(d, spacing * side);
-            let mut c = Cand::new(p, SnapTarget::Parallel, R_PARALLEL, cursor);
-            c.spacing = Some(spacing);
-            c.guides.push(Guide {
-                from: pose.pos,
-                to: p,
-                kind: GuideKind::Spacing,
+            // Whole rows only while the street being drawn runs along this
+            // one (within a few degrees), from a point already beside it.
+            let along = anchor.is_some_and(|a| {
+                let dir = seg.pose(d, 0.0).dir;
+                let to = sub(cursor, a.pos);
+                let l = dist(cursor, a.pos);
+                l > 8.0 && (cross(dir, to) / l).abs() < libm_sin(12.0)
             });
-            let len = seg.curve.length();
-            let (d0, d1) = ((d - 40.0).max(0.0), (d + 40.0).min(len));
-            let pts: Vec<[f32; 2]> = (0..=8)
-                .map(|k| seg.curve.point_at(d0 + (d1 - d0) * k as f32 / 8.0, spacing * side))
-                .collect();
-            for w in pts.windows(2) {
-                c.guides.push(Guide {
-                    from: w[0],
-                    to: w[1],
-                    kind: GuideKind::Parallel,
-                });
+            let whole = whole_rows_spacing(dd).filter(|_| along);
+            let mut spacings = vec![opts.parallel_m];
+            if whole.is_some_and(|w| (w - opts.parallel_m).abs() > 0.5) {
+                spacings.extend(whole);
             }
-            cands.push(c);
+            for spacing in spacings {
+                if (dd - spacing).abs() > radius * reach(R_PARALLEL) {
+                    continue;
+                }
+                let pose = seg.pose(d, 0.0);
+                let side = if cross(pose.dir, sub(cursor, pose.pos)) > 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                // `pose_at` offsets to the right of travel: +y-from-x is right.
+                let p = seg.curve.point_at(d, spacing * side);
+                let mut c = Cand::new(p, SnapTarget::Parallel, R_PARALLEL, cursor);
+                c.spacing = Some(spacing);
+                c.guides.push(Guide {
+                    from: pose.pos,
+                    to: p,
+                    kind: GuideKind::Spacing,
+                });
+                let len = seg.curve.length();
+                let (d0, d1) = ((d - 40.0).max(0.0), (d + 40.0).min(len));
+                let pts: Vec<[f32; 2]> = (0..=8)
+                    .map(|k| seg.curve.point_at(d0 + (d1 - d0) * k as f32 / 8.0, spacing * side))
+                    .collect();
+                for w in pts.windows(2) {
+                    c.guides.push(Guide {
+                        from: w[0],
+                        to: w[1],
+                        kind: GuideKind::Parallel,
+                    });
+                }
+                cands.push(c);
+            }
         }
     }
     // Cell centres of a nearby lattice.
@@ -715,6 +754,35 @@ mod tests {
         assert!(dist(s.point, [204.0, 820.0]) < 0.05, "{s:?}");
         assert!(s.matched.contains(&SnapTarget::Extension), "{:?}", s.matched);
         assert!(s.matched.contains(&SnapTarget::Perpendicular), "{:?}", s.matched);
+    }
+
+    #[test]
+    fn parallel_at_a_distance_of_whole_rows() {
+        let w = town();
+        // About 57 m from the street: 56 m leaves 6 rows (2 x 3) between.
+        let opts = SnapOptions {
+            angles: false,
+            lattice: false,
+            ..SnapOptions::default()
+        };
+        // Drawing along the street from a point beside it.
+        let a = Anchor {
+            pos: [230.0, 1028.0 + 55.5],
+            dir: None,
+        };
+        let s = snap(&w, Some(a), [280.0, 1028.0 + 57.0], 6.0, &opts);
+        assert_eq!(s.target, SnapTarget::Parallel, "{s:?}");
+        assert_eq!(s.spacing_m, Some(56.0));
+        // Not when crossing it.
+        let a = Anchor {
+            pos: [280.0, 1028.0 + 20.0],
+            dir: None,
+        };
+        let s = snap(&w, Some(a), [280.5, 1028.0 + 57.0], 6.0, &opts);
+        assert_ne!(s.spacing_m, Some(56.0), "{s:?}");
+        assert_eq!(rows_between(56.0), 6.0);
+        assert_eq!(whole_rows_spacing(70.0), Some(72.0));
+        assert_eq!(whole_rows_spacing(10.0), Some(24.0));
     }
 
     #[test]

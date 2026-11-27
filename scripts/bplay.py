@@ -246,6 +246,26 @@ def paint(out, k, suffix):
     play.shot(os.path.join(out, f"zone-{k + 1:02d}-{suffix}-paint-stroke-done.png"))
 
 
+def guide(out, k, suffix):
+    """The road tool drawing a street parallel to another: the guide offers
+    the distances that leave whole rows of lots."""
+    play.focus()
+    top(26.0, 101.0, 200.0)
+    play.road_mode("Straight")
+    for _ in range(3):
+        if play.stats()["road_kind"] == "Street":
+            break
+        play.key("r")
+    click_at(19.0, 99.6)
+    for p in [(24.0, 99.55), (29.0, 99.5), (33.0, 99.5)]:
+        zplay.move(*p)
+    play.wait_frames(4)
+    play.shot(os.path.join(out, f"zone-{k:02d}-{suffix}-road-parallel-guide.png"))
+    esc()
+    esc()
+    play.select_tool("inspect")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctl", default="/tmp/ctl")
@@ -273,6 +293,8 @@ def main():
     elif a.phase == "shots":
         names = a.args[4].split(",") if len(a.args) > 4 else None
         print(shots(a.args[0], a.args[1], int(a.args[2]), a.args[3], names))
+    elif a.phase == "guide":
+        guide(a.args[0], int(a.args[1]), a.args[2])
     elif a.phase == "paint":
         paint(a.args[0], int(a.args[1]), a.args[2])
     elif a.phase == "site":
