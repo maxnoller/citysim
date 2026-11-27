@@ -13,7 +13,7 @@ use citysim_sim::{Building, BuildingId, CELL_SIZE};
 use super::building_gen::{self, ModelKey, VARIANTS};
 use super::land::{self, Inset, Lot, RoadEdges};
 use super::scene::WorldMaterials;
-use crate::shared::{GameSet, SimWorld};
+use crate::shared::{GameSet, SimWorld, WorldCamera};
 
 const GROW_SECS: f32 = 0.75;
 const SHRINK_SECS: f32 = 0.35;
@@ -151,7 +151,14 @@ struct Spawned {
     /// Buildings rebuilt for a big level-up: sim tick the works started
     /// (they show a building site again, with a crane when tall).
     rebuilt: HashMap<BuildingId, u64>,
+    /// A new world (a load) is being filled in, `FILL_PER_FRAME` buildings
+    /// a frame nearest the camera first, without grow animations or sites.
+    filling: bool,
 }
+
+/// Buildings spawned per frame while a loaded world fills in (spawning all
+/// of a big city's at once took one frame 30-60 ms).
+const FILL_PER_FRAME: usize = 160;
 
 /// Rows of a lot the building itself stands on (the rest is its yard).
 fn built_rows(b: &Building) -> i32 {
@@ -174,6 +181,10 @@ pub fn lot_of(b: &Building) -> Lot {
 /// How a building is fitted on its lot: clear of the roads and, on a
 /// curve, inside the narrowing or widening lot with a little room to its
 /// neighbours.
+/// Beyond the lot's half diagonal, how far road edges can change its fit
+/// (generous: strip lots fit inside their lattice quad).
+const FIT_REACH_M: f32 = 12.0;
+
 fn fit_building(world: &citysim_sim::World, b: &Building, edges: &RoadEdges) -> Inset {
     let lot = lot_of(b);
     match world.zoning.lattice(b.footprint.lattice) {
@@ -259,13 +270,19 @@ fn sync_buildings(
     mut index: ResMut<BuildingEntities>,
     edges: Res<RoadEdges>,
     mut mouths: ResMut<DrivewayMouths>,
+    cams: Query<&GlobalTransform, With<WorldCamera>>,
 ) {
     let key = (sim.key(sim.world.versions.buildings), sim.key(sim.world.versions.roads));
-    if spawned.key == Some(key) {
+    if spawned.key == Some(key) && !spawned.filling {
         return;
     }
     let reloaded = spawned.key.is_some_and(|((g, _), _)| g != sim.generation);
     spawned.key = Some(key);
+    if reloaded {
+        spawned.filling = true;
+    }
+    // Spawning as if loaded: no grow animation, no building sites.
+    let fresh = spawned.filling;
     let sp = &mut *spawned;
     let now = time.elapsed_secs();
     let world = &sim.world;
@@ -273,7 +290,14 @@ fn sync_buildings(
     // Each building's fit changes only with the roads or its own lot.
     if sp.edges_key != edges.key {
         sp.edges_key = edges.key;
-        sp.insets.clear();
+        // Refit only the buildings near roads that changed.
+        sp.insets.retain(|id, _| {
+            buildings.get(*id).is_some_and(|b| {
+                let lot = lot_of(b);
+                let r = Vec2::splat(lot.half.length() + FIT_REACH_M);
+                edges.unchanged_in(lot.c - r, lot.c + r)
+            })
+        });
     }
     let mut insets = std::mem::take(&mut sp.insets);
     insets.retain(|id, _| buildings.contains_key(*id));
@@ -293,7 +317,7 @@ fn sync_buildings(
     sp.entities.retain(|id, (e, k, f, i)| {
         let keep = buildings
             .get(*id)
-            .is_some_and(|b| model_key(b) == *k && pose_key(b) == *f && inset_of(*id, b) == *i && !reloaded);
+            .is_some_and(|b| !reloaded && model_key(b) == *k && pose_key(b) == *f && inset_of(*id, b) == *i);
         if !keep
             && !reloaded
             && let Some(b) = buildings.get(*id)
@@ -312,19 +336,33 @@ fn sync_buildings(
     }
     sp.rebuilt
         .retain(|id, t| buildings.contains_key(*id) && tick.saturating_sub(*t) < SITE_TICKS && !reloaded);
-    for (id, b) in buildings.iter() {
-        if sp.entities.contains_key(&id) {
-            continue;
+    let mut missing: Vec<(BuildingId, &Building)> = buildings
+        .iter()
+        .filter(|(id, _)| !sp.entities.contains_key(id))
+        .collect();
+    if fresh {
+        let eye = cams
+            .single()
+            .map_or(Vec2::ZERO, |t| Vec2::new(t.translation().x, t.translation().z));
+        missing.sort_by(|a, b| {
+            let d = |b: &Building| Vec2::from(b.center()).distance_squared(eye);
+            d(a.1).total_cmp(&d(b.1))
+        });
+        if missing.len() <= FILL_PER_FRAME {
+            sp.filling = false;
         }
+        missing.truncate(FILL_PER_FRAME);
+    }
+    for (id, b) in missing {
         let mk = model_key(b);
-        let young = world.time.tick.saturating_sub(b.created_tick) < ANIMATE_IF_YOUNGER && !reloaded;
+        let young = world.time.tick.saturating_sub(b.created_tick) < ANIMATE_IF_YOUNGER && !fresh;
         let inset = inset_of(id, b);
         // The inset lives on the model children, so the grow animation can
         // scale the parent freely.
         let (tf, model_tf) = placement(b, inset);
         let start = sp.rebuilt.get(&id).copied().unwrap_or(b.created_tick);
         let age = world.time.tick.saturating_sub(start);
-        if !reloaded && let Some(stage) = site_stage(age) {
+        if !fresh && let Some(stage) = site_stage(age) {
             let mesh = models.site(mk, stage, &mut meshes);
             let mut ec = commands.spawn((
                 BuildingVisual,
@@ -378,6 +416,11 @@ fn sync_buildings(
         sp.entities.insert(id, (ec.id(), mk, pose_key(b), inset));
     }
     sp.insets = insets;
+    // Published once a loaded world has filled in (the roads re-mesh for
+    // them).
+    if sp.filling {
+        return;
+    }
     // Driveway mouths of every finished (or growing) building.
     let mut points = Vec::new();
     for (id, (_, key, _, inset)) in &sp.entities {

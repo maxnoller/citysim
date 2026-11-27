@@ -21,7 +21,7 @@ use super::palette::{self, lin, mix};
 use super::road_geom;
 use crate::shared::{
     ActiveTool, GameSet, GuideKind, RoadMode, SimWorld, SnapFeedback, SnapTarget, ToolModes, WorldCamera,
-    WorldHighlight, WorldTarget, cell_corners,
+    WorldHighlight, WorldTarget,
 };
 
 #[derive(Component)]
@@ -590,9 +590,6 @@ fn draw_highlight(
         }
     }
     let red = lin(mix(palette::TOOL_BAD, Color::WHITE, 0.1).with_alpha(0.45));
-    for c in &hl.doomed_road_cells {
-        m.quad_up(cell_corners(*c, 0.2, y), red);
-    }
     for (curve, kind) in &hl.doomed_roads {
         let w = road_geom::style(*kind).outer() * 2.0 + 0.6;
         let pts = curve.flatten(0.25);

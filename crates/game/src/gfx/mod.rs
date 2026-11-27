@@ -2,6 +2,7 @@
 //! game only through `crate::shared` (never import from `crate::ui`).
 
 mod bench;
+mod bench_script;
 mod building_gen;
 mod buildings;
 mod camera;
@@ -22,7 +23,6 @@ mod perf;
 mod props;
 mod record;
 mod road_geom;
-mod road_ghost;
 mod road_tool;
 mod roads;
 mod route;

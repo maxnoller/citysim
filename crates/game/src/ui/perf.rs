@@ -480,6 +480,15 @@ enum Meter {
 #[derive(Component)]
 struct PassRow(usize);
 
+/// The line under the meters saying what sets the pace (hidden while it
+/// has nothing to say).
+#[derive(Component)]
+struct LimitLine;
+
+/// The heading over the `PassRow`s.
+#[derive(Component)]
+struct PassHeading;
+
 /// The "60 fps" tag on the full graph's budget line.
 #[derive(Component)]
 struct BudgetTag;
@@ -497,7 +506,7 @@ fn value_text(fonts: &UiFonts, tag: Txt, size: f32) -> impl Bundle {
 }
 
 /// A caption with the accent tick.
-fn section(p: &mut ChildSpawnerCommands, fonts: &UiFonts, title: &str, top: f32) {
+fn section(p: &mut ChildSpawnerCommands, fonts: &UiFonts, title: &str, top: f32) -> Entity {
     p.spawn(layout(Node {
         align_items: AlignItems::Center,
         column_gap: px(8),
@@ -515,7 +524,8 @@ fn section(p: &mut ChildSpawnerCommands, fonts: &UiFonts, title: &str, top: f32)
             BackgroundColor(t::ACCENT),
         ));
         h.spawn(caps(fonts, title, t::FONT_CAP, t::TEXT));
-    });
+    })
+    .id()
 }
 
 /// Label left, live value right.
@@ -949,8 +959,15 @@ fn column_a(a: &mut ChildSpawnerCommands, fonts: &UiFonts, graphs: &mut Assets<G
     meter_row(a, fonts, "CPU · game update", Txt::CpuMain, Meter::CpuMain);
     meter_row(a, fonts, "CPU · render thread", Txt::CpuRender, Meter::CpuRender);
     meter_row(a, fonts, "GPU", Txt::Gpu, Meter::Gpu);
-    a.spawn((label(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED), Txt::Limit));
-    section(a, fonts, "Slowest GPU passes", 12.0);
+    a.spawn((
+        label(fonts, "", t::FONT_SMALL, t::W_MEDIUM, t::TEXT_MUTED),
+        Txt::Limit,
+        LimitLine,
+    ));
+    // Shown only with passes under it (none in the `ui`-only build, on a
+    // backend without timestamp queries, or before gfx's first sample).
+    let heading = section(a, fonts, "Slowest GPU passes", 12.0);
+    a.commands().entity(heading).insert(PassHeading);
     for i in 0..PASSES {
         a.spawn((
             layout(Node {
@@ -1402,6 +1419,14 @@ fn update_texts(
     mut texts: Query<(&Txt, &mut Text, &mut TextColor)>,
     mut meters: Query<(&Meter, &mut Node, &mut BackgroundColor), Without<PassRow>>,
     mut rows: Query<(&PassRow, &mut Node), Without<Meter>>,
+    mut heading: Query<
+        (&mut Node, Has<LimitLine>),
+        (
+            Or<(With<PassHeading>, With<LimitLine>)>,
+            Without<Meter>,
+            Without<PassRow>,
+        ),
+    >,
 ) {
     let now = time.elapsed_secs();
     if now - frames.text_t < TEXT_S && frames.text_t > 0.0 {
@@ -1456,6 +1481,14 @@ fn update_texts(
     }
     for (r, mut node) in &mut rows {
         let d = if r.0 < f.passes { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+        }
+    }
+    let limit_empty = f.texts.iter().any(|(t, s, _)| *t == Txt::Limit && s.is_empty());
+    for (mut node, limit) in &mut heading {
+        let on = if limit { !limit_empty } else { f.passes > 0 };
+        let d = if on { Display::Flex } else { Display::None };
         if node.display != d {
             node.display = d;
         }

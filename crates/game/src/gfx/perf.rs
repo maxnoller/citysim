@@ -71,6 +71,9 @@ pub(super) struct Counts {
 pub(super) struct RenderFrames {
     /// The last frame's draw calls (the benchmark reads these every frame).
     pub last: Counts,
+    /// The last frame's render-thread CPU time, ms, and frames so far.
+    pub last_cpu_ms: f64,
+    pub frame_seq: u64,
     /// Sums since the panel last read them.
     draws: (usize, usize),
     cpu_ms: f64,
@@ -192,9 +195,11 @@ fn frame_end(shared: Res<RenderShared>) {
     if let Ok(mut f) = shared.0.lock()
         && let Some(s) = f.start.take()
     {
-        let ms = s.elapsed().as_secs_f64() * 1000.0 - f.wait_ms;
-        f.cpu_ms += ms.max(0.0);
+        let ms = (s.elapsed().as_secs_f64() * 1000.0 - f.wait_ms).max(0.0);
+        f.cpu_ms += ms;
         f.frames += 1;
+        f.last_cpu_ms = ms;
+        f.frame_seq += 1;
     }
 }
 

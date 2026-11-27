@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use super::buildings::DrivewayMouths;
 use super::mesh_util::MeshBuilder;
 use super::road_geom::{self, chunk_of};
-use super::scene::WorldMaterials;
+use super::scene::{QUALITY_REMESH_MS, QualityApplied, WorldMaterials, drawn_quality};
 use crate::shared::{GameSet, GraphicsQuality, SimWorld};
 
 const CHUNK: f32 = 128.0;
@@ -108,17 +108,20 @@ fn rebuild_roads(
     mut meshes: ResMut<Assets<Mesh>>,
     mats: Res<WorldMaterials>,
     pools: Res<LampPools>,
-    quality: Res<GraphicsQuality>,
+    (requested, applied): (Res<GraphicsQuality>, Option<Res<QualityApplied>>),
     mouths: Res<DrivewayMouths>,
 ) {
+    let quality = drawn_quality(applied.as_deref(), *requested);
     let roads_key = sim.key(sim.world.versions.roads);
     let key = (roads_key, mouths.version);
-    if state.key == Some(key) && state.quality == Some(*quality) {
+    if state.key == Some(key) && state.quality == Some(quality) {
         return;
     }
+    // Only the quality changed (street furniture): a few chunks per frame.
+    let quality_only = state.key == Some(key);
     state.key = Some(key);
-    state.quality = Some(*quality);
-    let furniture: f32 = match *quality {
+    state.quality = Some(quality);
+    let furniture: f32 = match quality {
         GraphicsQuality::Low => 0.0,
         GraphicsQuality::Medium => 0.5,
         GraphicsQuality::High => 1.0,
@@ -175,9 +178,18 @@ fn rebuild_roads(
             }
         }
     }
-    for (&c, &hash) in &hashes {
+    let start = std::time::Instant::now();
+    // In a fixed order, so a quality change spread over frames finishes.
+    let mut order: Vec<(IVec2, u64)> = hashes.iter().map(|(c, h)| (*c, *h)).collect();
+    order.sort_by_key(|(c, _)| (c.y, c.x));
+    for (c, hash) in order {
         if state.chunks.get(&c).is_some_and(|(h, _, _)| *h == hash) {
             continue;
+        }
+        if quality_only && rebuilt > 0 && start.elapsed().as_secs_f64() * 1000.0 > QUALITY_REMESH_MS {
+            // The rest next frame.
+            state.quality = None;
+            break;
         }
         let mut m = MeshBuilder::new();
         let mut glow = MeshBuilder::new();

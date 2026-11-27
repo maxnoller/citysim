@@ -11,7 +11,7 @@
 //! * `WorldCamera` entity (and honouring `CameraOverride`): owned by `gfx`.
 //! * `CameraOverride`: written by dev tooling (scripted demo / autoshot).
 //! * Round 2, written by ui, drawn by gfx: `RoadChoice`, `ToolModes`,
-//!   `SnapFeedback`, `PathPreview`, `WorldHighlight`, `DisplaySettings`.
+//!   `SnapFeedback`, `WorldHighlight`, `DisplaySettings`.
 //! * Round 4, written by ui, drawn / honoured by gfx: `CurveToolView` (the
 //!   free-form road tool), `ToolPreview::area`, `WorldHighlight::doomed_roads`,
 //!   `WorldTarget::Vehicle`, `CameraFollow`, `CameraGoTo`.
@@ -24,8 +24,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use citysim_sim::command::{NodeChange, PieceChange};
 use citysim_sim::{
-    BuildingId, CELL_SIZE, Cell, CellRect, CellRef, Command, CommandError, Curve, NodeId, Outcome, RoadKind, SegmentId,
-    TICKS_PER_SECOND, VehicleId, World, Zone,
+    BuildingId, Cell, CellRef, Command, CommandError, Curve, NodeId, Outcome, RoadKind, SegmentId, TICKS_PER_SECOND,
+    VehicleId, World, Zone,
 };
 
 // ---------------------------------------------------------------- ordering
@@ -70,8 +70,10 @@ impl SimWorld {
 
     /// Swap in a different world (load / new game).
     pub fn replace(&mut self, world: World) {
-        self.world = world;
+        let old = std::mem::replace(&mut self.world, world);
         self.generation += 1;
+        // Freeing a big city takes milliseconds: not in this frame.
+        std::thread::spawn(move || drop(old));
     }
 }
 
@@ -194,30 +196,18 @@ pub enum PreviewKind {
 }
 
 /// What the current tool would do right now (from `World::preview`).
-/// Written by ui (only when it changes), drawn by gfx as the ghost.
-///
-/// Round 2: for the road tool `line`/`cells` are the leg under the cursor
-/// only; the whole multi-point path (or block grid) is in [`PathPreview`].
-/// Zoning in every mode (rectangle, frontage, fill) and the bulldozer put
-/// exactly the cells they change in `cells`; `rect` is set only for the
-/// rectangle modes.
+/// Written by ui (only when it changes), drawn by gfx as the ghost. The
+/// road tools' ghost is [`CurveToolView`]; zoning and the bulldozer fill
+/// `area` (marquee modes) and `zone_cells`.
 #[derive(Resource, Debug, Clone, PartialEq, Default)]
 pub struct ToolPreview {
     pub kind: PreviewKind,
-    /// Road tools: start and end cell.
-    pub line: Option<(Cell, Cell)>,
-    /// Rectangle tools: the dragged rectangle.
-    pub rect: Option<CellRect>,
     /// Marquee tools (zoning, bulldozer area): the dragged area, a
     /// rectangle along the lattice it started on, sim metres (corners in
     /// order). gfx draws its outline.
     pub area: Option<[[f32; 2]; 4]>,
-    /// Affected cells (valid: from the preview; invalid road: the straight
-    /// line's cells if it is straight, else empty).
-    pub cells: Vec<Cell>,
     /// Zoning tools: the zoning cells that would change, on any lattice
-    /// (`Preview::zone_cells`). When not empty gfx draws these (rotated
-    /// along their roads) instead of `cells`.
+    /// (`Preview::zone_cells`), drawn rotated along their roads.
     pub zone_cells: Vec<CellRef>,
     /// `None` when the command would succeed.
     pub error: Option<CommandError>,
@@ -422,38 +412,6 @@ pub struct SnapFeedback {
     pub suspended: bool,
 }
 
-/// One straight leg of a road being drawn (one `Command::BuildRoad`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct PathLeg {
-    pub from: Cell,
-    pub to: Cell,
-    /// `None` when the sim would accept this leg (from `World::preview`,
-    /// checked after the legs before it).
-    pub error: Option<CommandError>,
-    /// Cells of the leg that already carry a road of a different kind (an
-    /// avenue over a street previews as an upgrade).
-    pub upgrade_cells: Vec<Cell>,
-}
-
-/// The whole road being drawn: the multi-point path of the road tool, or
-/// every street of the block tool. Empty when not drawing.
-#[derive(Resource, Debug, Clone, PartialEq, Default)]
-pub struct PathPreview {
-    pub kind: RoadChoice,
-    /// Path corners in order (first = start, last = live end under the
-    /// cursor). Empty for the block tool.
-    pub points: Vec<Cell>,
-    /// Corners already placed (the rest of `points` follows the cursor).
-    pub placed: usize,
-    /// Every leg that would be built, in build order.
-    pub legs: Vec<PathLeg>,
-    /// Total length in metres and total price (new road + upgrades).
-    pub length_m: f32,
-    pub cost: i64,
-    /// First error of any leg (the whole path builds only when `None`).
-    pub error: Option<CommandError>,
-}
-
 /// What the free-form road tool shows right now (sim metres). Written by ui
 /// while a road is being drawn (also the upgrade mode: pieces marked
 /// `PieceChange::Upgrade` / `Downgrade`), drawn by gfx. The snap marker and
@@ -518,8 +476,6 @@ pub struct WorldHighlight {
     pub selected: Option<WorldTarget>,
     /// Bulldozer preview: buildings that would be removed (tint red).
     pub doomed_buildings: Vec<BuildingId>,
-    /// Bulldozer preview: road cells that would be removed (tint red).
-    pub doomed_road_cells: Vec<Cell>,
     /// Bulldozer preview: the parts of roads that would be removed (centre
     /// lines and kinds; tint red over the road's width).
     pub doomed_roads: Vec<(Curve, RoadKind)>,
@@ -669,22 +625,6 @@ pub fn zone_cell_corners(world: &World, c: CellRef, inset: f32, height: f32) -> 
     }))
 }
 
-/// Corners of a cell (inset by `inset` metres) at `height`, in order around
-/// the edge.
-pub fn cell_corners(c: Cell, inset: f32, height: f32) -> [Vec3; 4] {
-    let (x0, z0) = (c.x as f32 * CELL_SIZE + inset, c.y as f32 * CELL_SIZE + inset);
-    let (x1, z1) = (
-        (c.x + 1) as f32 * CELL_SIZE - inset,
-        (c.y + 1) as f32 * CELL_SIZE - inset,
-    );
-    [
-        Vec3::new(x0, height, z0),
-        Vec3::new(x1, height, z0),
-        Vec3::new(x1, height, z1),
-        Vec3::new(x0, height, z1),
-    ]
-}
-
 // ---------------------------------------------------------------- performance panel
 
 /// How much the performance panel shows (written by ui). gfx measures its
@@ -773,7 +713,6 @@ impl Plugin for SharedPlugin {
         .init_resource::<RoadChoice>()
         .init_resource::<ToolModes>()
         .init_resource::<SnapFeedback>()
-        .init_resource::<PathPreview>()
         .init_resource::<WorldHighlight>()
         .init_resource::<DisplaySettings>()
         .init_resource::<CurveToolView>()

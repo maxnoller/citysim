@@ -1,5 +1,8 @@
 //! One save slot in the platform's data directory. F5 / the menu saves,
-//! F9 / the menu loads; a toast reports the result.
+//! F9 / the menu loads; a toast reports the result. Writing the file, and
+//! reading and decoding a save, run on a background task (a big city took a
+//! frame of 15-25 ms otherwise); a load asked for while a save is still being
+//! written waits for it.
 //!
 //! Location: `$XDG_DATA_HOME/citysim` (default `~/.local/share/citysim`) on
 //! Linux, `~/Library/Application Support/CitySim` on macOS,
@@ -8,6 +11,8 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
+use bevy::tasks::futures::check_ready;
+use bevy::tasks::{IoTaskPool, Task, block_on};
 use citysim_sim::World;
 
 use super::UiState;
@@ -21,7 +26,8 @@ pub struct SaveLoadPlugin;
 
 impl Plugin for SaveLoadPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, save_load.in_set(GameSet::Input));
+        app.init_resource::<Pending>()
+            .add_systems(Update, save_load.in_set(GameSet::Input));
     }
 }
 
@@ -71,8 +77,19 @@ fn read_save() -> Result<World, String> {
     World::load(&bytes).map_err(|e| format!("Couldn't load: {e}"))
 }
 
+/// Save and load work under way on background tasks.
+#[derive(Resource, Default)]
+pub(super) struct Pending {
+    save: Option<Task<std::io::Result<PathBuf>>>,
+    load: Option<Task<Result<World, String>>>,
+    /// A load waits for the save before it.
+    load_wanted: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn save_load(
     keys: Res<ButtonInput<KeyCode>>,
+    mut pending: ResMut<Pending>,
     mut actions: MessageReader<UiAction>,
     mut sim: ResMut<SimWorld>,
     mut clock: ResMut<SimClock>,
@@ -86,19 +103,31 @@ pub(super) fn save_load(
         load |= *a == UiAction::Load;
     }
     if save {
-        match write_save(&sim.world.save()) {
-            Ok(path) => {
-                info!("saved to {}", path.display());
-                toasts.write(Toast::new(ToastKind::Success, "City saved"));
-            }
-            Err(e) => {
-                error!("save failed: {e}");
-                toasts.write(Toast::new(ToastKind::Error, format!("Couldn't save: {e}")));
-            }
+        // Encoding needs the world (here, between frames); the file is written
+        // on a task.
+        if let Some(t) = pending.save.take() {
+            report_save(block_on(t), &mut toasts);
         }
+        let bytes = sim.world.save();
+        pending.save = Some(IoTaskPool::get().spawn(async move { write_save(&bytes) }));
     }
-    if load {
-        match read_save() {
+    if let Some(t) = pending.save.as_mut()
+        && let Some(res) = check_ready(t)
+    {
+        pending.save = None;
+        report_save(res, &mut toasts);
+    }
+    pending.load_wanted |= load;
+    if pending.load_wanted && pending.save.is_none() && pending.load.is_none() {
+        pending.load_wanted = false;
+        pending.load = Some(IoTaskPool::get().spawn(async { read_save() }));
+    }
+    let loaded = pending.load.as_mut().and_then(check_ready);
+    if loaded.is_some() {
+        pending.load = None;
+    }
+    if let Some(res) = loaded {
+        match res {
             Ok(world) => {
                 let day = world.time.day;
                 sim.replace(world);
@@ -120,6 +149,19 @@ pub(super) fn save_load(
                 };
                 toasts.write(Toast::new(kind, e));
             }
+        }
+    }
+}
+
+fn report_save(res: std::io::Result<PathBuf>, toasts: &mut MessageWriter<Toast>) {
+    match res {
+        Ok(path) => {
+            info!("saved to {}", path.display());
+            toasts.write(Toast::new(ToastKind::Success, "City saved"));
+        }
+        Err(e) => {
+            error!("save failed: {e}");
+            toasts.write(Toast::new(ToastKind::Error, format!("Couldn't save: {e}")));
         }
     }
 }
