@@ -776,13 +776,13 @@ fn steps() -> Vec<Step> {
                                 .cell(*c)
                                 .is_some_and(|z| z.zone.is_none() && z.building.is_none())
                     })
-                    .filter_map(|(_, p)| {
+                    .map(|(_, p)| {
                         let n = p.len() as f32;
                         let at = [
                             p.iter().map(|q| q[0]).sum::<f32>() / n,
                             p.iter().map(|q| q[1]).sum::<f32>() / n,
                         ];
-                        Some((dist(at, f), at))
+                        (dist(at, f), at)
                     })
                     .min_by(|a, b| a.0.total_cmp(&b.0));
                 let Some((_, at)) = cut else { return };
