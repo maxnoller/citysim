@@ -181,17 +181,12 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `undo`, `shot`; `CPLAY_FRAME=0.9` on a software renderer).
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
-<<<<<<< HEAD
-- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5, roundabouts in block 7;
-  version 6 loads, its zoning
-=======
 - People on foot (`citysim_sim::walk`, contract section "r7-walk"): walking network derived from the roads (pavements,
   junction and mid-block zebras, `walk::midblock_positions`), walkers in `world.walking.walkers` (`walker_of`, pose
   `pos` / `heading` / `state`, `walked_m`), cars give way at zebras, people cross signals with the parallel green.
   gfx draws them in `gfx/people.rs` (figures from `gfx/person_gen.rs`: 8 builds x 8 walk poses + standing, colours
   per person by `MeshTag` and the palette lists in the day buffer, `city.wesl` kinds 10-13); ui hovers / follows them.
-- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5, walkers in block 6; version 6 loads, its zoning
->>>>>>> origin/main
+- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5, walkers in block 6, roundabouts in block 7 (wrapping 6); version 6 loads, its zoning
   is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
   `crates/sim/tests/data/round1_town.citysave`), version 5 is refused; `World::load` rejects structurally damaged
   saves. Round-1 saves keep their old second-row buildings until they are rebuilt.
@@ -212,7 +207,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   and its reason; takes the buildings on its land by the roads' rule, `Preview::buildings`, refundable `road_cost`).
   The road graph stays; arms end at give-way lines outside the ring, movements are ring paths (`Movement::ring_path()`,
   draw them with `Movement::points`, never `curve`), `JunctionControl::Roundabout`, `roundabout::{ring, sizes,
-  plan_ring, roundabout}`. Land: a disc of `RingDims::reserve_r()` blocked for zoning. Saved in extension block 7.
+  plan_ring, roundabout}`. Land: a disc of `RingDims::reserve_r()` blocked for zoning. Saved in extension block 7
+  (wrapping block 6). People walk round rings: pavement round the outside, a zebra per arm `RING_ZEBRA_M` out from the
+  give-way line (`walk::Crossing::ring`, mid-block rules; cars leaving stop between ring and zebra).
   gfx draws rings in `gfx/ring_geom.rs` (island planting by seed, lamps), the tool's ghost in `gfx/cursor.rs`
   (`ToolPreview::roundabout`); ui: junction drawer's "Ring" row (`ToolOptions::ring_brush`, `UiAction::RingBrush`),
   undo `plan::UndoRecord::Junction`. Demo `CITYSIM_DEMO=rings` (`dev/rings.rs`), UI shots `ring-fits|ring-refused|

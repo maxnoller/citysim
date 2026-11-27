@@ -912,6 +912,23 @@ room (a new junction on an arm too near) makes it an ordinary junction again (it
   `topdown rings` (each size at a street and an avenue crossing), `headless` scenarios `rings`, `street_rings`,
   `minis`, `street_minis`.
 
+### People on foot (with r7-walk)
+
+- The walking network (`walk::build`) runs a pavement round each ring (from an arm's right-hand pavement in to the ring,
+  round it at `outer_r + pavement / 2`, out along the next arm's left-hand one) and a zebra across each arm one car
+  length out from the give-way line (`balance::RING_ZEBRA_M` 6.2 m to its middle; `walk::zebra_line_at(world, node,
+  segment)` gives any arm's zebra line). Ring zebras are `Crossing { node: None, ring: Some(node), key.at: 0 | 1 }`:
+  cars treat them as mid-block zebras (`walk::zebra_ahead`: an entering car stops short of it for people, and keeps it
+  clear), and a car leaving the ring by that arm stops between the ring and the zebra
+  (`walk::ring_exit_held`; it blocks the ring by at most a car length). People waiting there see the cars in the ring
+  that will leave by their arm (`eval_crossing`) and never step in front of one that cannot stop.
+- `capacity::Bench::walkers(per_min)` puts people on the bench's pavements (`walk::bench_walk`: walkers with no
+  citizen behind them, `Walker::bench`, never saved, gone on arrival); `jbench rings` with `JBENCH_WALKERS=n`,
+  `ringprobe` with `RING_WALKERS=n` (also counts car bodies over people).
+- Test: `tests/walking.rs` `people_walk_round_roundabouts_and_cars_wait_for_them` (the rings demo town at the morning
+  rush: a zebra on every ring arm set back from the ring, a way round the large ring on foot, people crossing, cars
+  held, no car body over a person).
+
 ### Renderers
 
 - `roundabout::ring(world, node) -> Option<&Ring>`: `size`, `center`, `dims`, `arms: Vec<RingArm { segment, kind,
@@ -921,10 +938,10 @@ room (a new junction on an arm too near) makes it an ordinary junction again (it
 
 ### Saves
 
-Extension block **7** (`ExtensionV7`: block 5, the roundabouts `(node, size)`, yesterday's roundabout upkeep). Block 6
-belongs to the pedestrians' work on another branch: when the two meet, block 7 wraps block 6. Format 7, versions 6, 4
-and 3 load as before. The pinned checksum moved only because block 7 is written (with block 5 the state hashes as
-before).
+Extension block **7** (`ExtensionV7`: block 6 (people on foot), the roundabouts `(node, size)`, yesterday's
+roundabout upkeep); the rings are restored before the walking network is made for them. Blocks 1-6 load; format 7,
+versions 6, 4 and 3 load as before. The pinned checksum moved only because block 7 is written (with block 6 written the
+state hashes as on main: `0x69ea187edd9a577e`; now `0x21260e95e52f11b1`).
 
 ### Measured (release, this 8-core machine)
 
