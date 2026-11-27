@@ -470,6 +470,9 @@ pub enum WorldTarget {
     },
     /// A car or truck (follows it as it drives).
     Vehicle(VehicleId),
+    /// A person walking on the map (any of a walking party; gfx draws the
+    /// ring and marker on the drawn figure, `citysim_sim::walk::walker_of`).
+    Walker(citysim_sim::CitizenId),
 }
 
 /// What gfx should highlight in the world (issue 6): the hovered and the
@@ -500,9 +503,13 @@ pub enum RouteState {
     /// A trip that has not started yet (a person at home, at work...): the
     /// way they would drive now, from the building they are in.
     Planned,
-    /// Under way where the map draws nothing (on foot, a lift, a car beyond
-    /// the cars shown): the way a car would take, start to end.
+    /// Under way where the map draws nothing (a lift, a car beyond the
+    /// cars shown, a walk timed off the map): the way a car would take,
+    /// start to end.
     Unseen,
+    /// On foot on the map: `points` start at the person and follow the
+    /// pavements and zebras they will take (gfx draws a narrower line).
+    Walking,
 }
 
 /// One end of a [`RouteView`]: a ground point (sim metres) and the

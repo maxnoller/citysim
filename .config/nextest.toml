@@ -36,6 +36,8 @@ not (
   | test(=economy_books_taxes_and_upkeep_daily)
   | test(=enormous_dead_end_tree)
   | test(=fuzz_a_busy_city_through_rush_hour)
+  | test(=nobody_is_run_over_on_a_zebra)
+  | test(=people_cross_signals_only_with_the_parallel_green_and_call_it)
   | test(=fuzz_commands_and_steps_keep_the_world_consistent)
   | test(=fuzz_is_deterministic_and_save_load_keeps_lockstep)
   | test(=growth_is_gradual)

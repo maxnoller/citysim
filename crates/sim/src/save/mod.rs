@@ -51,8 +51,7 @@ const UNLOADABLE_VERSIONS: [u32; 1] = [5];
 /// Oldest version that still loads.
 pub const OLDEST_LOADABLE_VERSION: u32 = 3;
 /// Version of the extension block after the body (see the module docs).
-/// 6 belongs to the pedestrians' block (another branch); 7 adds the
-/// roundabouts.
+/// 6: people on foot; 7: version 6 plus the roundabouts.
 pub const EXTENSION_VERSION: u32 = 7;
 
 /// Every field of a [`Budget`], including those its own serde skips.
@@ -253,13 +252,43 @@ impl ExtensionV5 {
     }
 }
 
-/// Extension block, version 7: version 5 plus the roundabouts (node and
+/// Extension block, version 6: version 5 plus people on foot (the walkers
+/// under way, the crossings' turn-taking timers by crossing, the day's
+/// walking counts).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ExtensionV6 {
+    v5: ExtensionV5,
+    walkers: Vec<(crate::CitizenId, crate::walk::Walker)>,
+    timers: Vec<(crate::walk::CrossingKey, crate::walk::CrossTimers)>,
+    stats: crate::walk::WalkStats,
+    /// `walk::Walking::routes_for`.
+    routes_for: u64,
+}
+
+impl ExtensionV6 {
+    pub(crate) fn of(w: &World) -> ExtensionV6 {
+        let net = &w.walking.net;
+        ExtensionV6 {
+            v5: ExtensionV5::of(w),
+            walkers: w.walking.walkers.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            timers: net
+                .crossings
+                .iter()
+                .zip(&w.walking.timers)
+                .filter(|(_, t)| **t != crate::walk::CrossTimers::default())
+                .map(|(c, t)| (c.key, *t))
+                .collect(),
+            stats: w.walking.stats.clone(),
+            routes_for: w.walking.routes_for,
+        }
+    }
+}
+
+/// Extension block, version 7: version 6 plus the roundabouts (node and
 /// size; their geometry is rebuilt) and yesterday's roundabout upkeep.
-/// (Version 6 is the pedestrians' block on another branch: when the two
-/// meet, this one wraps it.)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct ExtensionV7 {
-    v5: ExtensionV5,
+    v6: ExtensionV6,
     rings: Vec<(crate::NodeId, crate::roundabout::RoundaboutSize)>,
     roundabout_upkeep: [i64; 2],
 }
@@ -267,7 +296,7 @@ pub(crate) struct ExtensionV7 {
 impl ExtensionV7 {
     pub(crate) fn of(w: &World) -> ExtensionV7 {
         ExtensionV7 {
-            v5: ExtensionV5::of(w),
+            v6: ExtensionV6::of(w),
             rings: w
                 .traffic
                 .junction_states
@@ -281,11 +310,14 @@ impl ExtensionV7 {
         }
     }
 
-    pub(crate) fn restore(self, w: &mut World) {
-        self.v5.restore(w);
+    /// Everything but the walkers (they follow once the network is made
+    /// for the roads and rings): returns their block.
+    pub(crate) fn restore(mut self, w: &mut World) -> ExtensionV6 {
+        std::mem::take(&mut self.v6.v5).restore(w);
         w.economy.last_day_costs.roundabouts = self.roundabout_upkeep[0];
         w.economy.last_day_costs.roundabout_count = self.roundabout_upkeep[1] as u32;
         crate::roundabout::restore(w, &self.rings);
+        self.v6
     }
 }
 
@@ -365,6 +397,7 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     if version >= 5 {
         check_people(&world).map_err(LoadError::Corrupt)?;
     }
+    let mut walking: Option<ExtensionV6> = None;
     if !rest.is_empty() {
         let (ext_version, rest): (u32, &[u8]) =
             postcard::take_from_bytes(rest).map_err(|e| LoadError::Corrupt(format!("extension: {e}")))?;
@@ -392,9 +425,15 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
             5 => postcard::from_bytes::<ExtensionV5>(rest)
                 .map_err(bad)?
                 .restore(&mut world),
-            7 => postcard::from_bytes::<ExtensionV7>(rest)
-                .map_err(bad)?
-                .restore(&mut world),
+            6 => {
+                let mut e = postcard::from_bytes::<ExtensionV6>(rest).map_err(bad)?;
+                std::mem::take(&mut e.v5).restore(&mut world);
+                walking = Some(e);
+            }
+            7 => {
+                let e = postcard::from_bytes::<ExtensionV7>(rest).map_err(bad)?;
+                walking = Some(e.restore(&mut world));
+            }
             _ => {}
         }
     }
@@ -422,6 +461,11 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     }
     if version < 5 {
         upgrade_people(&mut world);
+    }
+    // People on foot: the network for these roads, then the walkers under
+    // way (older saves: their walks stay timed off screen).
+    if let Some(e) = walking {
+        crate::walk::restore(&mut world, e.walkers, e.timers, e.stats, e.routes_for);
     }
     Ok(world)
 }

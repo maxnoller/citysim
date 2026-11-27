@@ -289,6 +289,9 @@ pub struct SegLayout {
     /// `(entry or stop line, stop line or entry)` metres from `a`, sorted:
     /// `[0]` for travel `a -> b` (at `b`), `[1]` for `b -> a` (at `a`).
     pub pockets: [Option<(f32, f32)>; 2],
+    /// Mid-block zebra crossings, metres from `a`
+    /// (`citysim_sim::walk::midblock_positions`).
+    pub zebras: Vec<f32>,
 }
 
 impl SegLayout {
@@ -307,6 +310,7 @@ impl SegLayout {
             box_b: false,
             avoid: Vec::new(),
             pockets: [None; 2],
+            zebras: Vec::new(),
         }
     }
 
@@ -431,6 +435,7 @@ pub fn layout(world: &World) -> RoadLayout {
             avoid: Vec::new(),
             pockets: [true, false]
                 .map(|fwd| citysim_sim::junction::turn_pocket(world, sid, fwd).map(|p| p.from_a(seg.length))),
+            zebras: citysim_sim::walk::midblock_positions(world, sid),
         });
     }
     // The highway continues off the map into the fog.
@@ -450,6 +455,7 @@ pub fn layout(world: &World) -> RoadLayout {
                 box_b: false,
                 avoid: Vec::new(),
                 pockets: [None; 2],
+                zebras: Vec::new(),
             });
         }
     }
@@ -840,6 +846,25 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
     }
     let st = s.style;
     let h = st.h;
+    // Mid-block zebras: white bars across the carriageway, over the lane
+    // markings.
+    let half = citysim_sim::balance::ZEBRA_WIDTH_M * 0.5;
+    for &z in &s.zebras {
+        let (p, d) = f.pose(z);
+        let n = perp(d);
+        let white = lin(palette::MARKING);
+        let mut o = -h + 0.45;
+        while o + 0.5 <= h - 0.45 + 1e-3 {
+            let q = [
+                p + d * half + n * o,
+                p - d * half + n * o,
+                p - d * half + n * (o + 0.5),
+                p + d * half + n * (o + 0.5),
+            ];
+            m.quad_up(q.map(|v| lift(v, MARK_Y + 0.004)), white);
+            o += 1.0;
+        }
+    }
     let asphalt = lin(if st.highway {
         palette::ASPHALT_HIGHWAY
     } else {
@@ -1504,6 +1529,7 @@ mod tests {
                         WALK_Y,
                         MARK_Y,
                         MARK_Y + 0.002,
+                        MARK_Y + 0.004,
                         ROAD_Y + 0.13,
                         0.025,
                         ROAD_Y + 0.004,
