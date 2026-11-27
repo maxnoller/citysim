@@ -8,6 +8,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::palette::lin;
 
@@ -45,6 +46,18 @@ pub enum Glow {
     PersonHair = 11,
     PersonTop = 12,
     PersonBottom = 13,
+    // Surfaces (not lights): a faint procedural pattern in the shader,
+    // faded out with distance. Only the detailed models carry them.
+    /// Roof tiles: courses along the slope, a little variation per tile.
+    Roof = 20,
+    /// Weatherboard / siding: horizontal boards.
+    Siding = 21,
+    /// Brick: courses and staggered joints.
+    Brick = 22,
+    /// Profiled metal cladding: vertical ribs.
+    Cladding = 23,
+    /// Flat roof membrane / concrete: faint panel seams.
+    Membrane = 24,
 }
 
 /// Flat-shaded, vertex-coloured triangle soup.
@@ -64,11 +77,17 @@ pub struct MeshBuilder {
     pub ground_ao: f32,
     /// Building the distant level of detail: generators skip small things.
     pub lod: bool,
+    /// Building the near level of detail: generators add fine trim (sills,
+    /// glazing bars, door panels, small props). Never set with `lod`.
+    pub fine: bool,
     /// Smoke emitters (chimney tops) in model space, for `smoke`.
     pub emitters: Vec<Vec3>,
     /// Driveways meeting the lot's front edge (`+z`): their model-space x
     /// ranges, so street furniture keeps clear of them.
     pub driveways: Vec<(f32, f32)>,
+    /// Front doors (the threshold, on the ground) in model space: where
+    /// people go in and out. Every level of detail records the same.
+    pub doors: Vec<Vec3>,
 }
 
 impl MeshBuilder {
@@ -117,6 +136,26 @@ impl MeshBuilder {
         f(self);
         if self.lod {
             self.rollback(mark);
+        }
+    }
+
+    /// Run `f`, keeping its geometry only in the near model (`fine`).
+    /// Random numbers are drawn either way.
+    pub fn fine_only(&mut self, f: impl FnOnce(&mut MeshBuilder)) {
+        let mark = self.mark();
+        f(self);
+        if !self.fine {
+            self.rollback(mark);
+        }
+    }
+
+    /// Run `f` with its surfaces tagged `kind` (a pattern in the shader),
+    /// except in the distant model, which keeps its `Body` tag.
+    pub fn surface(&mut self, kind: Glow, f: impl FnOnce(&mut MeshBuilder)) {
+        if self.lod {
+            f(self);
+        } else {
+            self.glow(kind, 0.0, f);
         }
     }
 
@@ -346,12 +385,71 @@ impl MeshBuilder {
     }
 
     pub fn build(self) -> Mesh {
-        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        self.build_with(RenderAssetUsages::default())
+    }
+
+    /// The mesh for the GPU only: Bevy drops its CPU copy once uploaded
+    /// (it keeps the bounding box for culling). Use for models nothing
+    /// reads back (buildings, vehicles); [`gpu_mesh_stats`] still counts
+    /// them.
+    pub fn build_gpu(self) -> Mesh {
+        let tris = self.idx.len() / 3;
+        let bytes = self.pos.len() * (12 + 12 + 16 + 8) + self.idx.len() * 4;
+        GPU_ONLY_TRIS.fetch_add(tris, Ordering::Relaxed);
+        GPU_ONLY_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        self.build_with(RenderAssetUsages::RENDER_WORLD)
+    }
+
+    fn build_with(self, usage: RenderAssetUsages) -> Mesh {
+        Mesh::new(PrimitiveTopology::TriangleList, usage)
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.pos)
             .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.nrm)
             .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.col)
             .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uv)
             .with_inserted_indices(Indices::U32(self.idx))
+    }
+}
+
+static GPU_ONLY_TRIS: AtomicUsize = AtomicUsize::new(0);
+static GPU_ONLY_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Triangles and bytes of every mesh built with
+/// [`MeshBuilder::build_gpu`] so far (their CPU copies are gone; for the
+/// benchmark's geometry totals).
+pub fn gpu_mesh_stats() -> (usize, usize) {
+    (
+        GPU_ONLY_TRIS.load(Ordering::Relaxed),
+        GPU_ONLY_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+fn gpu_registry() -> &'static std::sync::Mutex<std::collections::HashMap<AssetId<Mesh>, usize>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<AssetId<Mesh>, usize>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Add a mesh built with [`MeshBuilder::build_gpu`], noting its triangle
+/// count (its index data is gone from the main world once uploaded).
+pub fn add_gpu(meshes: &mut Assets<Mesh>, mesh: Mesh) -> Handle<Mesh> {
+    let tris = mesh.try_indices_option().ok().flatten().map_or(0, |i| i.len() / 3);
+    let h = meshes.add(mesh);
+    if let Ok(mut r) = gpu_registry().lock() {
+        r.insert(h.id(), tris);
+    }
+    h
+}
+
+/// Triangles of a mesh: from its data, or from the registry when it is a
+/// GPU-only mesh.
+pub fn mesh_triangles(id: AssetId<Mesh>, mesh: &Mesh) -> usize {
+    match mesh.try_indices_option() {
+        Ok(i) => i.map_or(0, |i| i.len() / 3),
+        Err(_) => gpu_registry()
+            .lock()
+            .ok()
+            .and_then(|r| r.get(&id).copied())
+            .unwrap_or(0),
     }
 }
 

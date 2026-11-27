@@ -3,7 +3,10 @@
 
 mod bench;
 mod bench_script;
+mod building_com;
 mod building_gen;
+mod building_ind;
+mod building_res;
 mod buildings;
 mod camera;
 mod city_material;
@@ -16,6 +19,7 @@ mod loading;
 mod lot_props;
 mod lots;
 mod mesh_util;
+mod model_sheet;
 mod noise;
 mod overlay;
 mod palette;
@@ -79,6 +83,7 @@ impl Plugin for GfxPlugin {
             route::RoutePlugin,
             yards::YardsPlugin,
             greens::GreensPlugin,
+            model_sheet::ModelSheetPlugin,
             people::PeoplePlugin,
         ));
     }
@@ -164,11 +169,11 @@ mod reload_tests {
         let (mut roads, mut zones) = (0, 0);
         // Hidden entities keep their last mesh (Mesh3d is never removed).
         for (name, mesh, _) in q.iter(w).filter(|(_, _, v)| v.is_none_or(|v| *v != Visibility::Hidden)) {
-            let n = meshes.get(&mesh.0).map_or(0, |m| m.count_vertices());
+            let n = || meshes.get(&mesh.0).map_or(0, |m| m.count_vertices());
             if name.as_str().starts_with("Roads") {
-                roads += n;
+                roads += n();
             } else if name.as_str() == "Zones" {
-                zones += n;
+                zones += n();
             }
         }
         let buildings = w
