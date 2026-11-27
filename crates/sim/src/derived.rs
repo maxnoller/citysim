@@ -72,6 +72,9 @@ pub(crate) struct Derived {
     /// the one left by in `node.segments` (`drive::build_route_turns`),
     /// built with `route_delay`.
     pub route_turns: Vec<Vec<f32>>,
+    /// The routing heuristic's bound for the roads, built with
+    /// `route_delay`.
+    pub(crate) route_bound: crate::path::Bound,
     places_key: Option<(u64, usize)>,
     /// Buildings by kind, in slot order (for random picks of shops, venues,
     /// factories and free homes), for `versions.buildings`.

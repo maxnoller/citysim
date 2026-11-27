@@ -864,6 +864,7 @@ pub fn planned_route(world: &World, from: BuildingId, to: BuildingId) -> Option<
         &world.cache.route_turns,
         &sources,
         crate::path::Target::Access(end),
+        crate::path::Bound::SAFE,
         &mut budget,
     )?;
     Some(PlannedRoute {

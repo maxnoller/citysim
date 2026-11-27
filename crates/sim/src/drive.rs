@@ -194,6 +194,7 @@ pub(crate) fn ensure_tables(world: &mut World) {
     if world.cache.route_delay_key != Some(key) {
         world.cache.route_delay = build_route_delays(&world.roads, &world.traffic.junction_states);
         world.cache.route_turns = build_route_turns(&world.roads, &world.traffic.junction_states);
+        world.cache.route_bound = crate::path::Bound::of(&world.roads);
         world.cache.route_delay_key = Some(key);
     }
 }

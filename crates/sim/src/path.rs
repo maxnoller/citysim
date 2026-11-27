@@ -71,6 +71,55 @@ pub(crate) fn edge_cost(roads: &RoadNetwork, delays: &[[f32; 2]], s: SegmentId, 
 
 const TARGET_SLOT: u32 = u32::MAX;
 
+/// What the A* heuristic may assume: no road is faster than `speed` (m/s)
+/// except stretches that save at most `slack` seconds in all (the highway
+/// stub), so `distance / speed - slack` never overestimates a route's cost
+/// (every other cost, junction waits and turns, only adds). Tight bounds
+/// make searches expand far fewer nodes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Bound {
+    pub speed: f32,
+    pub slack: f32,
+}
+
+impl Default for Bound {
+    fn default() -> Bound {
+        Bound::SAFE
+    }
+}
+
+impl Bound {
+    /// Valid for any network.
+    pub const SAFE: Bound = Bound {
+        speed: balance::HIGHWAY_SPEED_LIMIT,
+        slack: 0.0,
+    };
+
+    /// The bound for `roads`: the fastest road that is not a highway, and
+    /// what the highways' extra speed could save on top.
+    pub fn of(roads: &RoadNetwork) -> Bound {
+        let city = roads
+            .segments
+            .values()
+            .filter(|s| s.kind != crate::RoadKind::Highway)
+            .map(|s| s.speed_limit)
+            .fold(0.0f32, f32::max);
+        if city <= 0.0 {
+            return Bound::SAFE;
+        }
+        let slack: f32 = roads
+            .segments
+            .values()
+            .filter(|s| s.kind == crate::RoadKind::Highway && s.speed_limit > city)
+            .map(|s| s.length * (1.0 / city - 1.0 / s.speed_limit))
+            .sum();
+        Bound {
+            speed: city.max(balance::STREET_SPEED_LIMIT),
+            slack,
+        }
+    }
+}
+
 impl PathScratch {
     fn prepare(&mut self, n: usize) {
         if self.g.len() < n {
@@ -110,6 +159,7 @@ impl PathScratch {
         turns: &[Vec<f32>],
         sources: &[(NodeId, f32)],
         target: Target,
+        bound: Bound,
         budget: &mut i64,
     ) -> Option<Found> {
         let (goal_pos, end_seg) = match target {
@@ -119,8 +169,7 @@ impl PathScratch {
                 (crate::derived::access_pos(roads, a)?, Some((a, seg.a, seg.b)))
             }
         };
-        let max_speed = balance::HIGHWAY_SPEED_LIMIT.max(balance::STREET_SPEED_LIMIT);
-        let h = |p: [f32; 2]| geom::dist(p, goal_pos) / max_speed;
+        let h = |p: [f32; 2]| (geom::dist(p, goal_pos) / bound.speed - bound.slack).max(0.0);
         self.prepare(roads.nodes.slot_count());
         for &(n, c) in sources {
             if roads.nodes.contains_key(n) {
