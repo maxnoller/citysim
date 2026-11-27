@@ -149,7 +149,9 @@ fn commuters_on_time(seed: u64) -> (u32, u32) {
                     // Arrived before the shift's start (plus the daily
                     // wobble): the shift has at least its length left.
                     let job = c.job.unwrap();
-                    let left = c.until_tick - w.time.tick;
+                    // (The shift's end, not a lunch break before it.)
+                    let until = inspect::plan(&w, id).and_then(|p| p.until_tick).unwrap_or(c.until_tick);
+                    let left = until - w.time.tick;
                     let wobble = (balance::SHIFT_DAILY_WOBBLE_H * balance::TICKS_PER_HOUR as f32) as u64;
                     if left + wobble >= job.shift.length as u64 {
                         on_time += 1;

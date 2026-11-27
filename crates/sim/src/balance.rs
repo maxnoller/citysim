@@ -518,7 +518,7 @@ pub const MOVE_IN_FILL_PER_HOUR: f32 = 2.4;
 pub const MOVE_IN_MAX_PER_HOUR: f32 = 480.0;
 /// Newcomers arrive between these hours; at night at this share of the
 /// mean rate (the day's total is unchanged).
-pub const MOVE_IN_DAY_H: [f32; 2] = [6.0, 22.0];
+pub const MOVE_IN_DAY_H: [f32; 2] = [6.0, 21.0];
 pub const MOVE_IN_NIGHT_SHARE: f32 = 0.2;
 /// ... and only while the city's attractiveness (residential demand
 /// ignoring empty housing) is above this.
@@ -780,7 +780,11 @@ pub const JOB_DIST_SCALE_M: f32 = 1000.0;
 pub const INDUSTRY_START_H: [f32; 2] = [6.5, 8.5];
 pub const OFFICE_START_H: [f32; 2] = [8.5, 9.5];
 pub const SHOP_START_H: [f32; 2] = [8.0, 9.5];
-pub const LATE_SHIFT_OFFSET_H: f32 = 4.5;
+pub const LATE_SHIFT_OFFSET_H: f32 = 3.0;
+/// The late shift's personal offset, +- hours (triangular; narrower than
+/// [`SHIFT_PERSONAL_SPREAD_H`]: it ends after the evening rush, with the
+/// shops).
+pub const LATE_SHIFT_SPREAD_H: f32 = 0.75;
 /// Shop workers on the late shift (shops stay staffed into the evening).
 pub const LATE_SHIFT_SHARE: f32 = 0.35;
 /// Industrial workers on the night shift (from ~21:00).
@@ -850,12 +854,17 @@ pub const LEISURE_GO_NEED: f32 = 0.55;
 /// two hours before [`LEISURE_CLOSE_H`]; above this need they go earlier.
 pub const LEISURE_URGENT_NEED: f32 = 0.85;
 pub const LEISURE_OPEN_H: f32 = 10.0;
-pub const LEISURE_CLOSE_H: f32 = 19.5;
+pub const LEISURE_CLOSE_H: f32 = 19.0;
 /// Venues close at this hour: nights out end then at the latest, and
 /// nobody sets off who would not have at least [`LEISURE_DURATION_H`] there
 /// before it.
-pub const LEISURE_LAST_H: f32 = 21.5;
+pub const LEISURE_LAST_H: f32 = 21.0;
 pub const LEISURE_FREE_H: f32 = 4.0;
+/// Nights out are planned to be home by this hour in today's traffic
+/// (`traffic::delay_factor` on the drive both ways): nobody sets off who
+/// would not make it with a full visit, and a visit ends in time for it
+/// (it lasts at least a quarter of an hour).
+pub const LEISURE_HOME_BY_H: f32 = 22.0;
 /// A night out lasts this long plus up to the spread (personal), hours.
 pub const LEISURE_DURATION_H: f32 = 1.25;
 pub const LEISURE_DURATION_SPREAD_H: f32 = 1.0;
@@ -863,6 +872,36 @@ pub const LEISURE_DURATION_SPREAD_H: f32 = 1.0;
 /// rate over `1 + distance / this`.
 pub const LEISURE_SAMPLES: usize = 6;
 pub const LEISURE_DIST_SCALE_M: f32 = 400.0;
+/// The same for a midday visit (lunch nearby).
+pub const MIDDAY_DIST_SCALE_M: f32 = 150.0;
+/// The middle of the day: someone at home with the day free (no shift
+/// before [`MIDDAY_FREE_H`] hours from now: a day off, or no job) goes out
+/// for lunch on a share of days ([`MIDDAY_OUT_SHARE`]), setting off at a
+/// personal time in `MIDDAY_OUT_H` (an hour's window: one look at home falls
+/// in it, `HOME_RECHECK_H`), to a venue chosen like a night out; the visit
+/// lasts [`MIDDAY_VISIT_H`] plus up to [`MIDDAY_VISIT_SPREAD_H`]. Children
+/// at home come along.
+pub const MIDDAY_OUT_H: [f32; 2] = [10.0, 13.0];
+pub const MIDDAY_FREE_H: f32 = 4.0;
+pub const MIDDAY_OUT_SHARE: f32 = 0.25;
+pub const MIDDAY_VISIT_H: f32 = 0.75;
+pub const MIDDAY_VISIT_SPREAD_H: f32 = 0.5;
+/// Lunch breaks: on a share of days ([`LUNCH_BREAK_SHARE`], per worker and
+/// day) a worker whose shift runs over the middle of the day leaves work at
+/// a personal time in `LUNCH_BREAK_H` for the nearest of a few venues
+/// (`LUNCH_SAMPLES`; not their own workplace) at most [`LUNCH_MAX_TRIP_H`]
+/// away, stays [`LUNCH_BREAK_VISIT_H`] and goes back to work (only with
+/// the car they came in, or on foot; the shift's end is unchanged). Not
+/// when less than [`LUNCH_MIN_LEFT_H`] of the shift would be left.
+pub const LUNCH_BREAK_SHARE: f32 = 0.3;
+pub const LUNCH_BREAK_H: [f32; 2] = [11.0, 12.5];
+pub const LUNCH_BREAK_VISIT_H: f32 = 0.5;
+pub const LUNCH_MAX_TRIP_H: f32 = 0.75;
+pub const LUNCH_MIN_LEFT_H: f32 = 2.0;
+pub const LUNCH_SAMPLES: usize = 6;
+/// A visit to a venue that starts before this hour is a midday visit (its
+/// length above; later ones are nights out).
+pub const MIDDAY_VISIT_BEFORE_H: f32 = 15.5;
 /// No longer used by the sim (every car trip is drawn while the vehicle
 /// budget allows, [`MAX_VEHICLES`]); kept for compatibility.
 pub const SHOP_DRIVE_SHARE: f32 = 1.0;

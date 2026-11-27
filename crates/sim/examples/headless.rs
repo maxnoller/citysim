@@ -172,15 +172,18 @@ struct HourAcc {
     occupied: u64,
     trucks: u64,
     pending: u64,
+    /// Cars on the road by trip purpose (`TripPurpose::ALL` order).
+    by_purpose: [u64; TripPurpose::COUNT],
 }
 
-/// One hourly row: `day,hour,population,money,cars_mean,cars_peak,occupied_share,trucks_mean,given_up,pending_mean`.
+/// One hourly row: `day,hour,population,money,cars_mean,cars_peak,occupied_share,trucks_mean,given_up,pending_mean`,
+/// then the mean cars on the road by purpose (`HOUR_PURPOSES`).
 fn hour_row(w: &World, a: &HourAcc, out: &mut String) {
     let n = a.ticks.max(1) as f64;
     let people_cars = a.cars.saturating_sub(a.trucks).max(1) as f64;
     let _ = writeln!(
         out,
-        "{},{},{},{},{:.2},{},{:.4},{:.2},{},{:.2}",
+        "{},{},{},{},{:.2},{},{:.4},{:.2},{},{:.2}{}",
         w.time.day,
         w.time.hour().floor() as u32,
         w.stats.population,
@@ -190,9 +193,16 @@ fn hour_row(w: &World, a: &HourAcc, out: &mut String) {
         a.occupied as f64 / people_cars,
         a.trucks as f64 / n,
         w.traffic.stuck_removed,
-        a.pending as f64 / n
+        a.pending as f64 / n,
+        a.by_purpose.iter().fold(String::new(), |mut s, &c| {
+            let _ = write!(s, ",{:.2}", c as f64 / n);
+            s
+        })
     );
 }
+
+/// Column names of the per-purpose car counts in the hourly CSV.
+const HOUR_PURPOSES: &str = ",to_work,to_home,move_in,move_out,shopping,goods,leisure";
 
 fn sample(w: &World, a: &mut HourAcc) {
     a.ticks += 1;
@@ -201,6 +211,7 @@ fn sample(w: &World, a: &mut HourAcc) {
     a.peak = a.peak.max(n);
     a.pending += w.traffic.pending.len() as u64;
     for t in w.traffic.trips.values() {
+        a.by_purpose[t.purpose.index()] += 1;
         if t.purpose == TripPurpose::Goods {
             a.trucks += 1;
         } else if t.citizen.is_some_and(|c| w.citizens.contains_key(c)) {
@@ -251,9 +262,10 @@ fn start(sc: &Scenario, w: &mut World) -> Option<GridPlayer> {
 fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
     let mut w = World::new(seed);
     let mut player = start(sc, &mut w);
-    let mut hours = String::from(
-        "day,hour,population,money,cars_mean,cars_peak,occupied_share,trucks_mean,given_up,pending_mean\n",
-    );
+    let mut hours =
+        String::from("day,hour,population,money,cars_mean,cars_peak,occupied_share,trucks_mean,given_up,pending_mean");
+    hours.push_str(HOUR_PURPOSES);
+    hours.push('\n');
     let mut acc = HourAcc::default();
     let total = days as u64 * balance::TICKS_PER_DAY as u64;
     let (mut sum_ns, mut max_ns, mut n) = (0u128, 0u128, 0u64);

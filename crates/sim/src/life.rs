@@ -110,6 +110,7 @@ pub(crate) fn shift_for(world: &mut World, b: BuildingId, part_time: bool) -> Sh
     let bs = bld.seed;
     let base = |lo: f32, hi: f32| lo + habit(bs, 0x5A1F7) * (hi - lo);
     let r = world.rng.next_f32();
+    let mut spread = balance::SHIFT_PERSONAL_SPREAD_H;
     let (start_h, len_h) = if part_time {
         (base(15.0, 17.0), balance::PART_TIME_SHIFT_H)
     } else {
@@ -123,10 +124,13 @@ pub(crate) fn shift_for(world: &mut World, b: BuildingId, part_time: bool) -> Sh
                 base(balance::OFFICE_START_H[0], balance::OFFICE_START_H[1]),
                 balance::SHIFT_H,
             ),
-            _ if r < balance::LATE_SHIFT_SHARE => (
-                base(balance::SHOP_START_H[0], balance::SHOP_START_H[1]) + balance::LATE_SHIFT_OFFSET_H,
-                balance::SHIFT_H,
-            ),
+            _ if r < balance::LATE_SHIFT_SHARE => {
+                spread = balance::LATE_SHIFT_SPREAD_H;
+                (
+                    base(balance::SHOP_START_H[0], balance::SHOP_START_H[1]) + balance::LATE_SHIFT_OFFSET_H,
+                    balance::SHIFT_H,
+                )
+            }
             _ => (
                 base(balance::SHOP_START_H[0], balance::SHOP_START_H[1]),
                 balance::SHIFT_H,
@@ -134,7 +138,7 @@ pub(crate) fn shift_for(world: &mut World, b: BuildingId, part_time: bool) -> Sh
         }
     };
     // Triangular personal offset.
-    let o = (world.rng.next_f32() + world.rng.next_f32() - 1.0) * balance::SHIFT_PERSONAL_SPREAD_H;
+    let o = (world.rng.next_f32() + world.rng.next_f32() - 1.0) * spread;
     let start = (start_h + o).rem_euclid(24.0);
     let first_off = world.rng.below(balance::DAYS_PER_WEEK);
     let days_off = if part_time {

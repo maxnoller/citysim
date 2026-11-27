@@ -941,8 +941,7 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         }
         let (start, stop) = lane_range(setbacks, s, v.forward, seg.length);
         let d_line = stop - p;
-        if d_line > balance::LANE_PREPARE_M
-            || d_line < balance::MERGE_MIN_LINE_M
+        if !(balance::MERGE_MIN_LINE_M..=balance::LANE_PREPARE_M).contains(&d_line)
             || p < start + balance::NO_LANE_CHANGE_AFTER_BOX_M
         {
             continue;

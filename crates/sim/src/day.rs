@@ -309,8 +309,28 @@ fn away(world: &mut World, id: CitizenId, b: BuildingId) {
             return;
         }
     }
-    // Leaving work: maybe shopping on the way.
     let (activity, hid) = (c.activity, c.household);
+    let now = world.time.tick as i64;
+    let left = |end: i64| end - now > hours(balance::LUNCH_MIN_LEFT_H) as i64;
+    match (activity, on_shift(world, id)) {
+        // Lunch time at work (the shift goes on): out for lunch, or back
+        // to work if there is nowhere to go.
+        (Activity::Working, Some(end)) if left(end) => {
+            if !go_lunch(world, id) {
+                people::set_until(world, id, at(end));
+            }
+            return;
+        }
+        // Lunch is over: back to work.
+        (Activity::Leisure, Some(end)) if end > now + HOUR as i64 / 4 => {
+            if let Some(wp) = world.citizens[id].workplace() {
+                go(world, id, wp, TripPurpose::Leisure, &[]);
+                return;
+            }
+        }
+        _ => {}
+    }
+    // Leaving work: maybe shopping on the way.
     if activity == Activity::Working && wants_to_shop(world, id, true) && go_shopping(world, id) {
         return;
     }
@@ -364,6 +384,92 @@ fn wants_to_shop(world: &World, id: CitizenId, on_the_way: bool) -> bool {
         && (on_the_way || tod >= usual)
 }
 
+/// Out for lunch today, and is it the time? A share of days
+/// (`MIDDAY_OUT_SHARE`, per person and day), at a personal hour in
+/// `MIDDAY_OUT_H` (a window of `HOME_RECHECK_H`: one look at home falls in
+/// it). Not in austerity.
+fn goes_out_for_lunch(world: &World, id: CitizenId, tod: f32) -> bool {
+    let c = &world.citizens[id];
+    let [lo, hi] = balance::MIDDAY_OUT_H;
+    let start = lo + habit(c.seed, 0x1C4) * (hi - lo - balance::HOME_RECHECK_H);
+    (start..start + balance::HOME_RECHECK_H).contains(&tod)
+        && daily(c.seed, world.time.day, 0x1C4B) < balance::MIDDAY_OUT_SHARE
+        && !world.households[c.household].austerity
+}
+
+/// The end of the shift `id` is at or on a break from (they set off to
+/// it and it is not over), absolute tick.
+pub(crate) fn on_shift(world: &World, id: CitizenId) -> Option<i64> {
+    let c = &world.citizens[id];
+    let job = c.job?;
+    let now = world.time.tick as i64;
+    if c.worked_day == 0 || c.worked_day + 1 < world.time.day {
+        return None;
+    }
+    let (_, _, end) = shift_times(world, id, job.shift, c.worked_day);
+    (now < end).then_some(end)
+}
+
+/// When a worker leaves work for lunch on the shift of day `d` (`start`
+/// and `end` ticks), if they take a break that day.
+fn lunch_tick(world: &World, id: CitizenId, d: u32, start: i64, end: i64) -> Option<i64> {
+    let seed = world.citizens[id].seed;
+    if daily(seed, d, 0x10C4) >= balance::LUNCH_BREAK_SHARE {
+        return None;
+    }
+    let [lo, hi] = balance::LUNCH_BREAK_H;
+    let t = midnight(world, d) + hours(lo + habit(seed, 0x10C5) * (hi - lo)) as i64;
+    (t > start + HOUR as i64 && t + (hours(balance::LUNCH_MIN_LEFT_H) as i64) < end).then_some(t)
+}
+
+/// Out of work for lunch: to the nearest of a few open venues, by the car
+/// they came in or on foot. False if there is none near enough.
+fn go_lunch(world: &mut World, id: CitizenId) -> bool {
+    let c = &world.citizens[id];
+    let Some(from) = c.location.building() else {
+        return false;
+    };
+    let car = c.has_car && c.drives();
+    let fp = pos_of(world, Some(from));
+    world.cache.ensure_places(&world.buildings, world.versions.buildings);
+    let n = world.cache.shops.len();
+    if n == 0 {
+        return false;
+    }
+    let mut best: Option<(f32, BuildingId)> = None;
+    for _ in 0..balance::LUNCH_SAMPLES {
+        let b = world.cache.shops[world.rng.below(n as u32) as usize];
+        if b == from {
+            continue;
+        }
+        let Some(p) = world.people.places.get(b) else { continue };
+        if p.staff_present == 0 {
+            continue;
+        }
+        let Some(bb) = world.buildings.get(b) else { continue };
+        let d = geom::dist(fp, rect_center(bb.footprint));
+        if (!car && d > balance::WALK_MAX_M) || !crate::households::connected(world, bb.footprint) {
+            continue;
+        }
+        if best.is_none_or(|x| d < x.0) {
+            best = Some((d, b));
+        }
+    }
+    let Some((_, venue)) = best else { return false };
+    let trip_h = secs_to_ticks(estimate_s(fp, pos_of(world, Some(venue)))) as f32 / HOUR as f32;
+    if trip_h > balance::LUNCH_MAX_TRIP_H {
+        return false;
+    }
+    go(world, id, venue, TripPurpose::Leisure, &[]);
+    true
+}
+
+/// A visit to a venue starting at `tod` (hours) is a midday visit (lunch
+/// out), not a night out.
+pub(crate) fn midday_visit(tod: f32) -> bool {
+    tod < balance::MIDDAY_VISIT_BEFORE_H
+}
+
 /// Decisions at home.
 fn at_home(world: &mut World, id: CitizenId) {
     let now = world.time.tick;
@@ -387,6 +493,9 @@ fn at_home(world: &mut World, id: CitizenId) {
     let night = tod >= bed || tod < wake;
     if !night && c.stage != LifeStage::Child {
         if free_h >= balance::SHOP_FREE_H && wants_to_shop(world, id, false) && go_shopping(world, id) {
+            return;
+        }
+        if free_h >= balance::MIDDAY_FREE_H && goes_out_for_lunch(world, id, tod) && go_leisure(world, id) {
             return;
         }
         let c = &world.citizens[id];
@@ -484,8 +593,8 @@ fn go_shopping(world: &mut World, id: CitizenId) -> bool {
     let Some(shop) = pick_shop(world, fp, want) else {
         return false;
     };
-    // Only if they get there before the shop shuts.
-    let arrive_h = world.time.hour() + secs_to_ticks(estimate_s(fp, pos_of(world, Some(shop)))) as f32 / HOUR as f32;
+    // Only if they get there (in today's traffic) before the shop shuts.
+    let arrive_h = world.time.hour() + secs_to_ticks(road_s(world, fp, pos_of(world, Some(shop)))) as f32 / HOUR as f32;
     if arrive_h > balance::SHOP_CLOSE_H - balance::SHOP_LAST_ENTRY_BEFORE_CLOSE_H {
         return false;
     }
@@ -514,8 +623,16 @@ pub(crate) fn go_leisure(world: &mut World, id: CitizenId) -> bool {
         balance::CARLESS_TIME_FACTOR
     };
     let trip_h = secs_to_ticks(estimate_s(fp, vp) * factor) as f32 / HOUR as f32;
+    // In today's traffic (by car), there and back.
+    let road_h = if car {
+        trip_h * traffic::delay_factor(world)
+    } else {
+        trip_h
+    };
+    let hour = world.time.hour();
     if trip_h > balance::LEISURE_DURATION_H
-        || world.time.hour() + trip_h + balance::LEISURE_DURATION_H > balance::LEISURE_LAST_H
+        || hour + road_h + balance::LEISURE_DURATION_H > balance::LEISURE_LAST_H
+        || hour + 2.0 * road_h + balance::LEISURE_DURATION_H > balance::LEISURE_HOME_BY_H
     {
         return false;
     }
@@ -561,8 +678,14 @@ pub(crate) fn restore_rate(level: u8) -> f32 {
     balance::LEISURE_RESTORE_PER_HOUR[(level.clamp(1, 3) - 1) as usize]
 }
 
-/// Best of a few random open venues by restoration over travel.
+/// Best of a few random open venues by restoration over travel (a midday
+/// visit stays nearer, `MIDDAY_DIST_SCALE_M`).
 fn pick_venue(world: &mut World, from: [f32; 2]) -> Option<BuildingId> {
+    let scale = if midday_visit(world.time.hour()) {
+        balance::MIDDAY_DIST_SCALE_M
+    } else {
+        balance::LEISURE_DIST_SCALE_M
+    };
     world.cache.ensure_places(&world.buildings, world.versions.buildings);
     let n = world.cache.shops.len();
     if n == 0 {
@@ -580,7 +703,7 @@ fn pick_venue(world: &mut World, from: [f32; 2]) -> Option<BuildingId> {
             continue;
         }
         let d = geom::dist(from, rect_center(bb.footprint));
-        let score = restore_rate(bb.level) / (1.0 + d / balance::LEISURE_DIST_SCALE_M);
+        let score = restore_rate(bb.level) / (1.0 + d / scale);
         if best.is_none_or(|x| score > x.0) {
             best = Some((score, b));
         }
@@ -958,6 +1081,14 @@ fn arrive(world: &mut World, id: CitizenId) {
         return;
     }
     let c = &world.citizens[id];
+    if j.purpose == TripPurpose::Leisure
+        && c.workplace() == Some(to)
+        && let Some(end) = on_shift(world, id)
+    {
+        // Back from a lunch break: work until the shift ends.
+        people::set_place(world, id, Activity::Working, Location::In(to), at(end));
+        return;
+    }
     match j.purpose {
         TripPurpose::ToWork if c.workplace() == Some(to) => {
             let job = c.job.expect("checked");
@@ -965,7 +1096,11 @@ fn arrive(world: &mut World, id: CitizenId) {
             let left = (end - now as i64).clamp(0, job.shift.length as i64) as u64;
             world.economy.attendance.worked_ticks += left;
             if end > now as i64 + HOUR as i64 / 4 {
-                people::set_place(world, id, Activity::Working, Location::In(to), at(end));
+                let (_, start, _) = shift_times(world, id, job.shift, c.worked_day);
+                let until = lunch_tick(world, id, c.worked_day, start, end)
+                    .filter(|&t| t > now as i64)
+                    .map_or(end, |t| t.min(end));
+                people::set_place(world, id, Activity::Working, Location::In(to), at(until));
             } else {
                 // Too late for the shift: turn round.
                 people::set_place(world, id, Activity::Home, Location::In(to), now);
@@ -992,14 +1127,27 @@ fn arrive(world: &mut World, id: CitizenId) {
             }
             let close = now + hours(balance::LEISURE_LAST_H - tod) as u64;
             let c = &world.citizens[id];
-            let d = balance::LEISURE_DURATION_H + habit(c.seed, 0x1E1) * balance::LEISURE_DURATION_SPREAD_H;
+            let d = if on_shift(world, id).is_some() {
+                balance::LUNCH_BREAK_VISIT_H
+            } else if midday_visit(tod) {
+                balance::MIDDAY_VISIT_H + habit(c.seed, 0x1E1) * balance::MIDDAY_VISIT_SPREAD_H
+            } else {
+                balance::LEISURE_DURATION_H + habit(c.seed, 0x1E1) * balance::LEISURE_DURATION_SPREAD_H
+            };
             if c.drives() {
                 let h = &mut world.households[hid];
                 h.money -= balance::LEISURE_COST;
                 h.ledger.leisure += balance::LEISURE_COST;
                 h.today.leisure += balance::LEISURE_COST;
             }
-            let end = (now + hours(d) as u64).min(close.max(now + 1));
+            // Home by `LEISURE_HOME_BY_H` in today's traffic, if the
+            // visit can still be a short one.
+            let trip_home = secs_to_ticks(road_s(world, pos_of(world, Some(to)), pos_of(world, Some(home))));
+            let home_by =
+                at(midnight(world, world.time.day) + hours(balance::LEISURE_HOME_BY_H) as i64 - trip_home as i64);
+            let end = (now + hours(d) as u64)
+                .min(close.max(now + 1))
+                .min(home_by.max(now + HOUR / 4));
             people::set_place(world, id, Activity::Leisure, Location::In(to), end);
         }
         _ => people::set_place(world, id, Activity::Home, Location::In(to), now),
