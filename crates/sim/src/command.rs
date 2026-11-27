@@ -93,6 +93,13 @@ pub enum Command {
     /// any other inner command is refused (`NotARoadCommand`). The inner
     /// commands alone are unchanged: a building in the way refuses them.
     Clearing(Box<Command>),
+    /// Give back a payment of `amount` that a road command (`BuildRoad`,
+    /// `BuildCurve`, `SetRoadKind`, `Clearing`) made at `tick` for its road
+    /// (`Preview::road_cost`), once: the interface's undo sends it after
+    /// taking the road back. The session's latest
+    /// `economy::RECEIPTS_KEPT` payments are kept (never saved); refused
+    /// (`NoSuchReceipt`) for any other.
+    Refund { tick: u64, amount: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,6 +174,9 @@ pub enum CommandError {
     CannotRestore(crate::restore::RestoreProblem),
     /// `Clearing` around a command that does not build or change a road.
     NotARoadCommand,
+    /// `Refund`: no such payment (refunded already, too old, or from
+    /// before the game was loaded).
+    NoSuchReceipt,
 }
 
 impl CommandError {
@@ -219,6 +229,7 @@ impl fmt::Display for CommandError {
             CommandError::TooManyArms { arms, .. } => write!(f, "{arms} roads cannot meet at one junction"),
             CommandError::CannotRestore(p) => write!(f, "cannot put the building back: {p}"),
             CommandError::NotARoadCommand => write!(f, "only roads clear their way"),
+            CommandError::NoSuchReceipt => write!(f, "nothing to refund"),
         }
     }
 }
@@ -259,6 +270,9 @@ pub struct Preview {
     /// Roads clearing their way: the part of `cost` that pays for taking
     /// down `buildings` (the bulldozer's price).
     pub demolition_cost: i64,
+    /// Road commands: the part of `cost` paid for road (the rest is
+    /// `demolition_cost`); `Command::Refund` can give it back.
+    pub road_cost: i64,
     /// Zoning: the cells that get (un)zoned.
     pub zone_cells: Vec<CellRef>,
 }
@@ -352,6 +366,10 @@ pub(crate) enum Plan {
         rec: Box<crate::restore::BuildingRecord>,
         footprint: crate::Footprint,
     },
+    Refund {
+        tick: u64,
+        amount: i64,
+    },
 }
 
 fn cells_m(m: f32) -> u32 {
@@ -372,6 +390,7 @@ impl Plan {
                 length_m: plan.new_m,
                 buildings: plan.clears.clone(),
                 demolition_cost: plan.clear_cost,
+                road_cost: plan.cost - plan.clear_cost,
                 ..Preview::default()
             },
             Plan::Kind {
@@ -388,6 +407,7 @@ impl Plan {
                 cost: *cost,
                 buildings: clears.clone(),
                 demolition_cost: *clear_cost,
+                road_cost: cost - clear_cost,
                 upgraded: cells_m(*up_m),
                 downgraded: cells_m(*down_m),
                 pieces: if old == kind {
@@ -453,6 +473,10 @@ impl Plan {
                     ..Preview::default()
                 }
             }
+            Plan::Refund { amount, .. } => Preview {
+                cost: -amount,
+                ..Preview::default()
+            },
         }
     }
 }
@@ -592,6 +616,12 @@ pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
             } => plan_kind(world, segment, from_m, to_m, kind, true),
             _ => Err(CommandError::NotARoadCommand),
         },
+        &Command::Refund { tick, amount } => {
+            if !world.economy.receipts.holds(tick, amount) {
+                return Err(CommandError::NoSuchReceipt);
+            }
+            Ok(Plan::Refund { tick, amount })
+        }
     }
 }
 
@@ -823,6 +853,8 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
                 world.versions.roads += 1;
             }
             world.economy.money -= plan.cost;
+            let tick = world.time.tick;
+            world.economy.receipts.issue(tick, preview.road_cost);
         }
         Plan::Kind {
             part,
@@ -838,6 +870,8 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
                 world.versions.roads += 1;
             }
             world.economy.money -= cost;
+            let tick = world.time.tick;
+            world.economy.receipts.issue(tick, preview.road_cost);
         }
         Plan::Remove {
             parts,
@@ -880,6 +914,11 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
         Plan::Tax(r) => world.economy.tax_rate = r,
         Plan::Restore { rec, footprint } => {
             crate::restore::execute(world, &rec, footprint);
+        }
+        Plan::Refund { tick, amount } => {
+            if world.economy.receipts.redeem(tick, amount) {
+                world.economy.money += amount;
+            }
         }
         Plan::Junction { change, .. } => {
             crate::traffic::sync_junctions(world);

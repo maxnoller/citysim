@@ -199,6 +199,19 @@ pub(crate) fn buildings_near(world: &World, c: &Curve, reach: f32) -> Vec<(Build
     out
 }
 
+impl World {
+    /// The buildings standing in the reserve a road of `kind` would need
+    /// along `curve` (measured as a road command measures what is in its
+    /// way), in id order. Which of them give way:
+    /// `Building::gives_way_to_roads`.
+    pub fn buildings_in_reserve(&self, curve: &Curve, kind: RoadKind) -> Vec<BuildingId> {
+        buildings_near(self, curve, reserve_reach(kind))
+            .into_iter()
+            .map(|x| x.0)
+            .collect()
+    }
+}
+
 /// The nearest of `buildings_near`'s list (the first of equals), with the
 /// curve point nearest to its centre.
 fn nearest_of(list: &[(BuildingId, f32, [f32; 2])]) -> Option<(BuildingId, [f32; 2])> {
@@ -211,6 +224,12 @@ fn nearest_of(list: &[(BuildingId, f32, [f32; 2])]) -> Option<(BuildingId, [f32;
     best.map(|b| (b.0, b.2))
 }
 
+/// How near a building may come to a road's centre line before it stands
+/// in the road's reserve.
+fn reserve_reach(kind: RoadKind) -> f32 {
+    kind.reserve_half_width_m() - 0.05
+}
+
 /// Buildings in the reserve a road of `kind` needs along `c`: added to
 /// `clears` when the road clears its way (`clear`) and they give way to
 /// roads; otherwise the nearest one that does not refuses the road.
@@ -221,7 +240,7 @@ pub(crate) fn clear_way(
     clear: bool,
     clears: &mut Vec<BuildingId>,
 ) -> Result<(), CommandError> {
-    let near = buildings_near(world, c, kind.reserve_half_width_m() - 0.05);
+    let near = buildings_near(world, c, reserve_reach(kind));
     let stays: Vec<(BuildingId, f32, [f32; 2])> = near
         .iter()
         .copied()

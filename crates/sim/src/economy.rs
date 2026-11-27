@@ -221,6 +221,55 @@ pub struct Economy {
     /// day's real budget less this. Saved in the extension block.
     #[serde(skip)]
     pub advanced_today: i64,
+    /// What the latest road commands paid for their roads, so the
+    /// interface's undo can give it back (`Command::Refund`). Session only:
+    /// never saved (a loaded game has nothing to refund), ignored by `==`.
+    #[serde(skip)]
+    pub receipts: Receipts,
+}
+
+/// Receipts kept (the latest road payments of the session).
+pub const RECEIPTS_KEPT: usize = 512;
+
+/// What road commands paid for their roads (not for the buildings they
+/// took down: `Command::RestoreBuilding` refunds those): the tick and the
+/// amount of each, the latest `RECEIPTS_KEPT`.
+#[derive(Debug, Clone, Default)]
+pub struct Receipts {
+    paid: std::collections::VecDeque<(u64, i64)>,
+}
+
+impl PartialEq for Receipts {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Receipts {
+    /// Is a payment of `amount` at `tick` there to refund?
+    pub fn holds(&self, tick: u64, amount: i64) -> bool {
+        self.paid.contains(&(tick, amount))
+    }
+
+    pub(crate) fn issue(&mut self, tick: u64, amount: i64) {
+        if amount <= 0 {
+            return;
+        }
+        self.paid.push_back((tick, amount));
+        if self.paid.len() > RECEIPTS_KEPT {
+            self.paid.pop_front();
+        }
+    }
+
+    pub(crate) fn redeem(&mut self, tick: u64, amount: i64) -> bool {
+        match self.paid.iter().position(|&r| r == (tick, amount)) {
+            Some(k) => {
+                self.paid.remove(k);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// What congestion cost the city in a day: commuters' time beyond
@@ -317,6 +366,7 @@ impl Default for Economy {
             traffic_today: TrafficLoss::default(),
             last_day_traffic: TrafficLoss::default(),
             advanced_today: 0,
+            receipts: Receipts::default(),
         }
     }
 }
