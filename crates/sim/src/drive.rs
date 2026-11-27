@@ -815,8 +815,12 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     crate::walk::blocks_entry(walking, roads, node, f.arm, j.arm_of(f.to).map(|b| b as u8))
             {
                 ok = false;
-                cache.walk_holds[usize::from(j.control != JunctionControl::Signal)] += 1;
                 if f.speed < balance::WAIT_SPEED && f.d_line < f.back + 2.0 {
+                    // Diagnostics: entering at signals / elsewhere, by the
+                    // zebra of its own arm or the one it turns onto.
+                    let own = crate::walk::held_at(walking, roads, node, f.arm, true);
+                    let k = usize::from(j.control != JunctionControl::Signal) + if own { 0 } else { 5 };
+                    cache.walk_holds[k] += 1;
                     cache.walk_waits.push(ci);
                 }
             }

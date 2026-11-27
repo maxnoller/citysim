@@ -465,6 +465,11 @@ pub fn door(b: &crate::Building) -> [f32; 2] {
     [b.footprint.center[0] + f[0] * k, b.footprint.center[1] + f[1] * k]
 }
 
+/// An arm of a node while building the network: (angle, segment, direction
+/// away from the node, its pavements' end points `[left, right]` looking
+/// away from the node).
+type ArmEnds = (f32, SegmentId, [f32; 2], Option<[u32; 2]>);
+
 /// Build the network for the current roads.
 pub fn build(world: &World) -> WalkNet {
     let roads = &world.roads;
@@ -567,7 +572,7 @@ pub fn build(world: &World) -> WalkNet {
     for (n, node) in roads.nodes.iter() {
         let deg = node.segments.len();
         // (angle, segment, dir away, [left point, right point] or none)
-        let mut arms: Vec<(f32, SegmentId, [f32; 2], Option<[u32; 2]>)> = node
+        let mut arms: Vec<ArmEnds> = node
             .segments
             .iter()
             .filter_map(|&s| {
@@ -915,7 +920,7 @@ pub struct CrossTimers {
 }
 
 /// Per crossing, this tick (derived from walkers and cars).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CrossNow {
     /// People on it or stepping onto it hold each half of the road
     /// (`[side 0, side 1]`: cars driving `b -> a` use side 0).
@@ -923,9 +928,9 @@ pub struct CrossNow {
     pub people: u16,
     /// A car is over it or cannot stop short of it.
     pub hazard: bool,
-    /// A moving car reaches it within `PED_GAP_S` (people without signals
-    /// wait for a gap unless they have waited `PED_PATIENCE_S`).
-    pub coming: bool,
+    /// Seconds until the next moving car reaches it (infinite: none near;
+    /// people without signals wait for a gap, see `may_cross`).
+    pub coming: f32,
     /// A car stands waiting for it.
     pub car_waiting: bool,
     /// Someone waits at its kerb.
@@ -1030,6 +1035,21 @@ impl FromIterator<(CitizenId, Walker)> for Walkers {
     }
 }
 
+impl Default for CrossNow {
+    fn default() -> Self {
+        CrossNow {
+            held: [false; 2],
+            people: 0,
+            hazard: false,
+            coming: f32::INFINITY,
+            car_waiting: false,
+            calling: false,
+            active: false,
+            evaluated: false,
+        }
+    }
+}
+
 /// Everything about people on foot (`world.walking`): walkers and crossing
 /// timers are saved (extension block 6); the network and the per-tick
 /// crossing states are derived.
@@ -1046,6 +1066,9 @@ pub struct Walking {
     calls: Vec<(usize, u8)>,
     /// The tick `now` / `calls` were gathered for.
     prepared_for: u64,
+    /// `versions.roads` the walkers' routes were found on (they find their
+    /// way again when the roads change; saved).
+    pub routes_for: u64,
     /// Walks made today / yesterday on the map, timed off screen, and car
     /// trips started (for the share of trips on foot), and by hour today.
     pub stats: WalkStats,
@@ -1088,6 +1111,10 @@ impl WalkStats {
 /// The walking network, rebuilt if the roads changed.
 pub(crate) fn ensure_net(world: &mut World) {
     if world.walking.net.roads_version == world.versions.roads && !world.walking.net.points.is_empty() {
+        if world.walking.routes_for != world.versions.roads {
+            world.walking.routes_for = world.versions.roads;
+            reroute_all(world);
+        }
         return;
     }
     crate::traffic::sync_junctions(world);
@@ -1100,12 +1127,12 @@ pub(crate) fn ensure_net(world: &mut World) {
             timers[i as usize] = t;
         }
     }
-    let changed = world.walking.net.roads_version != 0;
     world.walking.net = net;
     world.walking.timers = timers;
     world.walking.now = vec![CrossNow::default(); world.walking.net.crossings.len()];
     world.walking.touched.clear();
-    if changed {
+    if world.walking.routes_for != world.versions.roads {
+        world.walking.routes_for = world.versions.roads;
         reroute_all(world);
     }
 }
@@ -1116,8 +1143,13 @@ pub(crate) fn restore(
     walkers: Vec<(CitizenId, Walker)>,
     timers: Vec<(CrossingKey, CrossTimers)>,
     stats: WalkStats,
+    routes_for: u64,
 ) {
+    // The network now; the walkers find their way again where they would
+    // have (the first time the network is looked at after a road edit).
+    world.walking.routes_for = world.versions.roads;
     ensure_net(world);
+    world.walking.routes_for = routes_for;
     world.walking.walkers = walkers.into_iter().collect();
     for (k, t) in timers {
         if let Some((i, _)) = world.walking.net.crossing(k) {
@@ -1237,7 +1269,7 @@ fn reroute_all(world: &mut World) {
             Some(r) => {
                 let w = world.walking.walkers.get_mut(&id).expect("walker");
                 let walked = w.walked_m;
-                w.route = Box::new(r);
+                *w.route = r;
                 w.leg = 0;
                 w.along = 0.0;
                 w.leg_start_m = 0.0;
@@ -1443,7 +1475,26 @@ fn may_cross(world: &World, ci: u32, cross_s: f32, waited: u32) -> bool {
     }
     // Without signals: wait for a gap in the traffic (for a while), join a
     // group still stepping on, else start a new one.
-    if st.coming && waited < secs(balance::PED_PATIENCE_S) as u32 {
+    // A gap long enough to cross before the next car comes (cars give way
+    // to people on the zebra, people do not make them stop if they can
+    // help it), for up to `PED_MAIN_PATIENCE_S` on a main road (the major
+    // road of a give-way junction, a mid-block crossing), `PED_PATIENCE_S`
+    // elsewhere.
+    let main = match (c.node, c.arm) {
+        (Some(n), Some(arm)) => world
+            .traffic
+            .junction_states
+            .get(n)
+            .is_some_and(|j| j.arms.get(arm as usize).is_some_and(|a| a.major) && j.arms.iter().any(|a| !a.major)),
+        _ => true,
+    };
+    let gap = cross_s + 1.0;
+    let patience = if main {
+        balance::PED_MAIN_PATIENCE_S
+    } else {
+        balance::PED_PATIENCE_S
+    };
+    if st.coming < gap && waited < secs(patience) as u32 {
         return false;
     }
     st.people == 0 || tick < t.group_start + secs(balance::PED_GROUP_S) || !st.car_waiting
@@ -1460,9 +1511,12 @@ pub fn signal_walk(j: &crate::junction::JunctionState, arm: u8, cross_s: f32) ->
         return false;
     };
     let el = j.signal.ticks as f32 / TICKS_PER_SECOND as f32;
+    // People start in the walk interval at the start of the green (the
+    // turning cars have the rest of it).
     j.signal.stage == SignalStage::Green
         && !phase.left_only
         && !phase.arms.contains(&arm)
+        && el <= balance::WALK_INTERVAL_S
         && el + cross_s <= phase.max_green_s.max(phase.min_green_s + cross_s)
 }
 
@@ -1489,14 +1543,14 @@ fn secs(s: f32) -> u64 {
 /// only at the cars on its road and, at a junction, on the junction's
 /// arms and in its box (`Derived::walk_lanes` / `walk_boxed`, filled by
 /// the driving step).
-fn eval_crossing(world: &World, ci: u32) -> (bool, bool, bool) {
+fn eval_crossing(world: &World, ci: u32) -> (bool, f32, bool) {
     let net = &world.walking.net;
     let roads = &world.roads;
     let states = &world.traffic.junction_states;
     let c = &net.crossings[ci as usize];
     let st = world.walking.now[ci as usize];
     let zw = balance::ZEBRA_WIDTH_M;
-    let (mut hazard, mut coming, mut waiting) = (false, false, false);
+    let (mut hazard, mut coming, mut waiting) = (false, f32::INFINITY, false);
     let lanes = &world.cache.walk_lanes;
     let mut check = |v: &crate::Vehicle, l: f32, near: f32, front: f32, rear: f32, half: usize| {
         // A standing car can stop (it sees the people before it moves).
@@ -1510,7 +1564,14 @@ fn eval_crossing(world: &World, ci: u32) -> (bool, bool, bool) {
         let _ = l;
         hazard |= over || (0.0..sd).contains(&ahead);
         waiting |= v.speed < balance::WAIT_SPEED && (-0.5..12.0).contains(&ahead) && st.held[half];
-        coming |= v.speed > 2.0 && ahead >= 0.0 && ahead < v.speed * balance::PED_GAP_S;
+        // Moving cars, a crawling queue right before it, and a car at its
+        // line that has just been let into the junction are coming.
+        if ahead >= 0.0 && (v.speed > 2.0 || (v.speed > balance::WAIT_SPEED && ahead < 8.0)) {
+            coming = coming.min(ahead / v.speed.max(1.0));
+        }
+        if v.go && v.junction.is_none() && (-0.5..15.0).contains(&ahead) {
+            coming = 0.0;
+        }
     };
     // Cars on lanes of segment slot `slot`.
     let on = |slot: usize| {
@@ -1615,7 +1676,7 @@ fn evaluate(world: &mut World, ci: u32) {
     let st = &mut world.walking.now[ci as usize];
     st.evaluated = true;
     st.hazard |= h;
-    st.coming |= c;
+    st.coming = st.coming.min(c);
     st.car_waiting |= w;
 }
 
@@ -1818,6 +1879,13 @@ pub fn people_on_crossings(world: &World) -> Vec<([f32; 2], f32)> {
     out
 }
 
+/// Car ticks held by people on zebras so far (see `Derived::walk_holds`):
+/// entering at signals, entering elsewhere, in a box, mid-block (people),
+/// mid-block (no room beyond).
+pub fn debug_holds(world: &World) -> [u64; 8] {
+    world.cache.walk_holds
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1837,11 +1905,4 @@ mod tests {
         assert_eq!(poly_slice(&p, 15.0, 5.0), vec![[10.0, 5.0], [10.0, 0.0], [5.0, 0.0]]);
         assert!((poly_len(&p) - 20.0).abs() < 1e-5);
     }
-}
-
-/// Car ticks held by people on zebras so far (see `Derived::walk_holds`):
-/// entering at signals, entering elsewhere, in a box, mid-block (people),
-/// mid-block (no room beyond).
-pub fn debug_holds(world: &World) -> [u64; 5] {
-    world.cache.walk_holds
 }

@@ -102,7 +102,7 @@ pub(crate) struct Derived {
     /// signal, entering at a priority junction, in a box before the exit
     /// zebra, before a mid-block zebra (people on it), before a mid-block
     /// zebra (no room beyond).
-    pub walk_holds: [u64; 5],
+    pub walk_holds: [u64; 8],
     /// Crossings a car stood waiting for this tick (front cars refused at
     /// their line), for `walk::tick`.
     pub walk_waits: Vec<u32>,

@@ -63,8 +63,19 @@ pub(crate) fn expected_commute_ticks(world: &World, id: CitizenId) -> u64 {
         // Before the first trip: the free-flow estimate, but at least most
         // of what a commute in this city takes these days.
         let home = world.households.get(c.household).map(|h| h.home);
-        let est = secs_to_ticks(estimate_s(pos_of(world, home), pos_of(world, c.workplace()))) as f32;
-        est.max(world.traffic.avg_commute_s * 0.75 * TICKS_PER_SECOND as f32)
+        let (a, b) = (pos_of(world, home), pos_of(world, c.workplace()));
+        let est = secs_to_ticks(estimate_s(a, b)) as f32;
+        // Someone who will walk it: about the walking time.
+        let d = geom::dist(a, b) * balance::OFFSCREEN_ROUTE_FACTOR;
+        let walks = c.stage != LifeStage::Child
+            && habit(c.seed, 0x3A1F)
+                < balance::WALK_COMMUTE_FACTOR * crate::walk::walk_share(d, c.stage == LifeStage::Senior)
+            && d / crate::walk::pace(world, id) <= balance::WALK_COMMUTE_MAX_H * HOUR as f32 / TICKS_PER_SECOND as f32;
+        if walks {
+            secs_to_ticks(d / crate::walk::pace(world, id)) as f32
+        } else {
+            est.max(world.traffic.avg_commute_s * 0.75 * TICKS_PER_SECOND as f32)
+        }
     };
     (t * balance::COMMUTE_TIME_MARGIN).min(MAX_PLANNED_TRIP_H * balance::TICKS_PER_HOUR as f32) as u64
 }
@@ -753,9 +764,7 @@ pub(crate) fn go(world: &mut World, id: CitizenId, to: BuildingId, purpose: Trip
     let c = &world.citizens[id];
     let mode = if walk.is_some() {
         TravelMode::Walking
-    } else if c.has_car && c.drives() {
-        TravelMode::Driving
-    } else if c.drives() && at_home && world.households[hid].free_cars(world) > 0 {
+    } else if (c.has_car && c.drives()) || (c.drives() && at_home && world.households[hid].free_cars(world) > 0) {
         TravelMode::Driving
     } else {
         TravelMode::NoCar
@@ -1026,6 +1035,13 @@ fn walk_choice(
     if draw >= k * crate::walk::walk_share(0.0, senior) {
         return None;
     }
+    // Not further than they walk in `WALK_MAX_H`.
+    let hours = if commute {
+        balance::WALK_COMMUTE_MAX_H
+    } else {
+        balance::WALK_MAX_H
+    };
+    let max = max.min(hours * HOUR as f32 / TICKS_PER_SECOND as f32 * crate::walk::pace(world, id));
     let route = crate::walk::route_between(world, from, to, max)?;
     (draw < k * crate::walk::walk_share(route.len, senior)).then_some(route)
 }

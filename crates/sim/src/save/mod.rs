@@ -260,6 +260,8 @@ pub(crate) struct ExtensionV6 {
     walkers: Vec<(crate::CitizenId, crate::walk::Walker)>,
     timers: Vec<(crate::walk::CrossingKey, crate::walk::CrossTimers)>,
     stats: crate::walk::WalkStats,
+    /// `walk::Walking::routes_for`.
+    routes_for: u64,
 }
 
 impl ExtensionV6 {
@@ -276,6 +278,7 @@ impl ExtensionV6 {
                 .map(|(c, t)| (c.key, *t))
                 .collect(),
             stats: w.walking.stats.clone(),
+            routes_for: w.walking.routes_for,
         }
     }
 }
@@ -420,7 +423,7 @@ pub(crate) fn load(bytes: &[u8]) -> Result<World, LoadError> {
     // People on foot: the network for these roads, then the walkers under
     // way (older saves: their walks stay timed off screen).
     if let Some(e) = walking {
-        crate::walk::restore(&mut world, e.walkers, e.timers, e.stats);
+        crate::walk::restore(&mut world, e.walkers, e.timers, e.stats, e.routes_for);
     }
     Ok(world)
 }

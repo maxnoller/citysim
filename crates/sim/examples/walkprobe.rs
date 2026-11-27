@@ -10,7 +10,11 @@ fn main() {
     let pop = args.first().copied().unwrap_or(10_000);
     let hours = args.get(1).copied().unwrap_or(4);
     let mut w = World::new(std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1));
-    let mut p = GridPlayer::hierarchy();
+    let mut p = if std::env::var("STREETS").is_ok() {
+        GridPlayer::new(&Zone::ALL)
+    } else {
+        GridPlayer::hierarchy()
+    };
     while w.stats.population < pop {
         p.act(&mut w);
         w.step();
@@ -35,9 +39,9 @@ fn main() {
             .count() as u64;
     }
     let h1 = walk::debug_holds(&w);
-    let d: Vec<u64> = (0..5).map(|i| h1[i] - h0[i]).collect();
+    let d: Vec<u64> = (0..8).map(|i| h1[i] - h0[i]).collect();
     println!(
-        "pop {} cars {:.0} walkers {:.0} waiting {:.0} | car-ticks held: signal entry {} priority entry {} box {} mid people {} mid full {} ({:.1} % of car ticks) | df {:.2}",
+        "pop {} cars {:.0} walkers {:.0} waiting {:.0} | car-ticks held: signal own arm {} priority own arm {} box {} mid people {} mid full {} signal exit {} priority exit {} ({:.1} % of car ticks) | df {:.2}",
         w.stats.population,
         cars as f64 / n as f64,
         walkers as f64 / n as f64,
@@ -47,6 +51,8 @@ fn main() {
         d[2],
         d[3],
         d[4],
+        d[5],
+        d[6],
         100.0 * d.iter().sum::<u64>() as f64 / cars.max(1) as f64,
         w.traffic.delay_factor
     );

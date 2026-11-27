@@ -984,16 +984,21 @@ pub const MAX_TRIP_H: f32 = 2.0;
 /// of these distances.
 pub const WALK_MAX_M: f32 = 650.0;
 pub const WALK_NEAR_M: f32 = 120.0;
-pub const WALK_SHARE_NEAR: f32 = 0.75;
-pub const WALK_DECAY_M: f32 = 160.0;
+pub const WALK_SHARE_NEAR: f32 = 0.95;
+pub const WALK_DECAY_M: f32 = 200.0;
 pub const WALK_COMMUTE_FACTOR: f32 = 0.6;
+/// Nobody walks a way that takes longer than this many in-game hours at
+/// their pace (people walk in real time like the cars drive: 4 h is about
+/// 160 s, some 280 m), to work `WALK_COMMUTE_MAX_H`.
+pub const WALK_MAX_H: f32 = 4.0;
+pub const WALK_COMMUTE_MAX_H: f32 = 3.0;
 pub const WALK_SENIOR_RANGE: f32 = 0.7;
 /// A worker's lunch on foot: venues within this straight-line distance,
 /// at most `LUNCH_WALK_MAX_TRIP_H` in-game hours away on foot.
 pub const WALK_LUNCH_MAX_M: f32 = 260.0;
 pub const LUNCH_WALK_MAX_TRIP_H: f32 = 1.5;
 /// A walk to a venue for leisure takes at most this many in-game hours.
-pub const WALK_TRIP_MAX_H: f32 = 3.0;
+pub const WALK_TRIP_MAX_H: f32 = WALK_MAX_H;
 /// Walking pace of an adult, m/s (vehicles move in real time, so do
 /// people; a few blocks take a couple of in-game hours, like a drive across
 /// town), varied by `WALK_SPEED_SPREAD` per person, and by stage of life
@@ -1017,7 +1022,7 @@ pub const MIDBLOCK_MIN_M: f32 = 150.0;
 pub const MIDBLOCK_SPACING_M: f32 = 130.0;
 /// Route choice: a crossing costs this many metres of pavement (people
 /// do not cross back and forth for nothing).
-pub const WALK_CROSSING_COST_M: f32 = 6.0;
+pub const WALK_CROSSING_COST_M: f32 = 8.0;
 /// The door: the middle of a lot's front edge, this far inside the lot.
 pub const DOOR_INSET_M: f32 = 1.5;
 /// People walked in full on the map per 1,000 residents (and at least
@@ -1032,10 +1037,17 @@ pub const MAX_WALKERS: usize = 8_000;
 /// `CAR_TURN_S` before they step on again.
 pub const PED_GROUP_S: f32 = 2.0;
 /// Without signals people let a moving car that would reach the zebra
-/// within `PED_GAP_S` pass first, for up to `PED_PATIENCE_S` (then they step
-/// out and it stops, if it can).
-pub const PED_GAP_S: f32 = 3.0;
-pub const PED_PATIENCE_S: f32 = 10.0;
+/// before they are across pass first, for up to `PED_PATIENCE_S` (then
+/// they step out and it stops, if it can).
+pub const PED_PATIENCE_S: f32 = 40.0;
+/// Crossing a main road without signals (the major road of a give-way
+/// junction, a mid-block zebra): people wait for a gap long enough to
+/// cross before the next car arrives, for up to this many seconds.
+pub const PED_MAIN_PATIENCE_S: f32 = 40.0;
+/// At signals people step onto the zebra only in the first this many
+/// seconds of the green that lets them cross (the walk light; then it
+/// flashes and the turning cars have the rest of the green).
+pub const WALK_INTERVAL_S: f32 = 6.0;
 pub const CAR_PATIENCE_S: f32 = 3.0;
 pub const CAR_TURN_S: f32 = 6.0;
 /// A car that cannot stop short of a zebra: its braking distance plus this

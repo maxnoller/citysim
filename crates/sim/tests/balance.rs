@@ -277,12 +277,12 @@ fn real_s(ticks: u64) -> f64 {
     ticks as f64 / TICKS_PER_SECOND as f64 / 2.5
 }
 
-/// Plays `p` for 7 days (112 minutes at 1x); returns the most money held
+/// Plays `p` for 9 days (144 minutes at 1x); returns the most money held
 /// before reaching 5,000 residents, the lowest money at any tick and the
 /// tick it reached 5,000 residents.
 fn play(w: &mut World, p: &mut GridPlayer) -> (i64, i64, u64) {
     let (mut most, mut lowest, mut reached) = (i64::MIN, i64::MAX, None);
-    while w.time.tick < 7 * DAY {
+    while w.time.tick < 9 * DAY {
         p.act(w);
         w.step();
         lowest = lowest.min(w.economy.money);
@@ -308,9 +308,10 @@ fn money_stays_a_constraint_for_a_player_who_keeps_expanding() {
     let minutes = real_s(reached) / 60.0;
     eprintln!("5,000 after {minutes:.1} min, most ${most}, lowest ${lowest}");
     // (Streets-only: since residential streets carry less and the middle
-    // of the day has its own trips, a street grid grows a little slower.)
+    // of the day has its own trips, a street grid grows a little slower;
+    // cars giving way to people at its zebras slow it further.)
     assert!(
-        (24.0..=40.0).contains(&minutes),
+        (24.0..=48.0).contains(&minutes),
         "5,000 residents after {minutes:.1} min"
     );
     assert!(
@@ -344,7 +345,8 @@ fn building_a_district_up_front_is_viable() {
     assert_eq!(p.build_ahead(&mut w, [8, 3, 3]), 14);
     assert!(w.economy.money < balance::STARTING_MONEY / 2, "${}", w.economy.money);
     let (most, lowest, reached) = play(&mut w, &mut p);
-    assert!(real_s(reached) / 60.0 <= 42.0, "{:.1} min", real_s(reached) / 60.0);
+    // (Cars giving way to people at a street grid's zebras slow its growth.)
+    assert!(real_s(reached) / 60.0 <= 54.0, "{:.1} min", real_s(reached) / 60.0);
     assert!(lowest > 0, "lowest cash ${lowest}");
     assert!(most <= 40_000, "${most}");
     assert!(real_s(p.longest_money_wait_ticks) <= 60.0);
