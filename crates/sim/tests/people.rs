@@ -242,7 +242,8 @@ fn read_api_matches_the_state() {
         if c.activity == Activity::Working {
             let n = plan.next.unwrap();
             assert_eq!(n.purpose, Some(TripPurpose::ToHome));
-            assert_eq!(n.at_tick, Some(c.until_tick.max(w.time.tick)));
+            // (A lunch break may come before the shift's end.)
+            assert!(n.at_tick.unwrap() >= c.until_tick.max(w.time.tick));
         }
         if let Some(t) = plan.trip {
             assert_eq!(plan.next.unwrap().place, Some(t.to));

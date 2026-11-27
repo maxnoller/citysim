@@ -396,6 +396,8 @@ struct Front {
     /// `COURTESY_WAIT_S` at its line and every conflicting car with
     /// priority is creeping (a slow queue lets one in).
     courtesy: bool,
+    /// Cars the pocket of this approach holds (0 without one).
+    pocket_room: u16,
 }
 
 /// Has the front car come to a stop at its line (all-way stops: it stood
@@ -602,6 +604,9 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                 0
             },
             courtesy: false,
+            pocket_room: pockets
+                .get(key_index(s))
+                .map_or(0, |p| (p[usize::from(!v.forward)] / balance::VEHICLE_SPACING_M) as u16),
         });
     }
     fronts.sort_by_key(|f| (key_index(f.node), f.idx));
@@ -1389,6 +1394,7 @@ fn tick_signals(
                     d.through_left = true;
                     d.hold_left |= near;
                     d.pocket = d.pocket.max(f.pocket_cars);
+                    d.pocket_full |= f.pocket_cars > 0 && f.pocket_cars + 1 >= f.pocket_room;
                 } else {
                     d.through = true;
                     d.hold_through |= near;

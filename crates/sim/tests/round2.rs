@@ -805,5 +805,7 @@ fn long_scripted_run_has_a_pinned_checksum() {
 
 /// Moved by six-row zoning blocks and save format 7 (blocks and the save
 /// layout are part of the state), then by extension block 5 (the traffic
-/// losses per booked day; the state itself was unchanged).
-const PINNED_CHECKSUM: u64 = 0xdce4ee73a136bade;
+/// losses per booked day), then by the r6 rules: the day (lunch breaks,
+/// midday outings, the late shift, nights out), signals by pressure and
+/// queue, courtesy at arterial give-ways, street headway, pocket lengths.
+const PINNED_CHECKSUM: u64 = 0x05a52eb25a2cc8f9;

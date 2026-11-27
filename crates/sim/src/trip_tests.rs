@@ -319,6 +319,8 @@ fn nobody_goes_out_for_longer_on_the_way_than_at_the_venue() {
             w.households[hid].cars = 0;
         }
         w.time.tick_of_day = 17 * balance::TICKS_PER_HOUR;
+        // (Traffic is fine: this is about the trip's length.)
+        w.traffic.delay_factor = 1.0;
         let est = day::estimate_s(centre(&w, home), centre(&w, far));
         let hours = |s: f32| s * crate::TICKS_PER_SECOND as f32 / balance::TICKS_PER_HOUR as f32;
         assert!(

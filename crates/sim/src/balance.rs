@@ -358,6 +358,8 @@ pub const POCKET_CALL_CARS: u16 = 3;
 /// time is spread over more cars).
 pub const POCKET_LEFT_MAX_GREEN_S: f32 = 14.0;
 pub const POCKET_MAIN_MAX_GREEN_S: f32 = 40.0;
+/// ... but no longer than this while one of its pockets is full.
+pub const POCKET_FULL_MAX_GREEN_S: f32 = 30.0;
 /// Right turns of the other road go during a left-arrow phase.
 pub const RIGHT_TURN_OVERLAP: bool = true;
 /// Routing: a left turn from a turn pocket costs this share of the usual
