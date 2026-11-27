@@ -2,6 +2,8 @@
 
 # CitySim
 
+[![CI](https://github.com/maxnoller/citysim/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/maxnoller/citysim/actions/workflows/ci.yml)
+
 A small, original 3D city-builder written in Rust with [Bevy](https://bevy.org) 0.20. Start on an empty map with a
 highway stub, draw straight and curved roads, zone homes, shops and industry along them, and watch a town grow. Every
 resident is a person with a home, a household, a job or school, a daily routine and a mood; every car on the road is
@@ -130,3 +132,9 @@ checksum), and builds and tests the game crate in all three feature sets.
 Performance (GTX 1080, 1920x1080, windowless benchmark `CITYSIM_BENCH`, a ~10,000-resident city with about 850 cars on
 the road): about 110 fps on High (99th-percentile frame 11 ms) and 220 fps on Low at 1x, and still above 100 fps on
 High at 12x.
+
+## Licence
+
+The source is published to be read. No licence is granted for now: all rights reserved. The project is developed by
+its owner; outside pull requests are not accepted. The bundled fonts keep their own licences
+(`THIRD_PARTY_NOTICES.md`).
