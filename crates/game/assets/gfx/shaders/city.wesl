@@ -195,7 +195,11 @@ fn fragment(
         } else if kind == 12u {
             idx = 16u + ((tag >> 1u) & 15u);
         }
-        pbr_input.material.base_color = vec4<f32>(base * city.people[idx].rgb, 1.0);
+        let col = base * city.people[idx].rgb;
+        pbr_input.material.base_color = vec4<f32>(col, 1.0);
+        // Under the street lights at night: a faint lift so people read
+        // against the dark pavement (not a glow).
+        glow = col * (0.22 * city.night);
         } else if kind == 7u {
         // Shop fronts: a warm interior glow, kept low so a whole glazed
         // ground floor does not bloom into a white panel.

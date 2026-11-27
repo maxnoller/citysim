@@ -30,10 +30,8 @@ pub const STAND: usize = WALK_POSES;
 pub const BUILDS: usize = 8;
 
 /// Metres covered by one full walk cycle (two steps) of a 1.75 m adult.
-pub const STRIDE_M: f32 = 1.55;
+pub const STRIDE_M: f32 = 1.4;
 
-/// Height of the model, metres (before the per-person scale).
-pub const HEIGHT_M: f32 = 1.76;
 
 /// A body type.
 #[derive(Debug, Clone, Copy)]
