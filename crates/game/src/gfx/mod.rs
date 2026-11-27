@@ -19,7 +19,9 @@ mod mesh_util;
 mod noise;
 mod overlay;
 mod palette;
+mod people;
 mod perf;
+mod person_gen;
 mod props;
 mod record;
 mod road_geom;
@@ -77,6 +79,7 @@ impl Plugin for GfxPlugin {
             route::RoutePlugin,
             yards::YardsPlugin,
             greens::GreensPlugin,
+            people::PeoplePlugin,
         ));
     }
 }

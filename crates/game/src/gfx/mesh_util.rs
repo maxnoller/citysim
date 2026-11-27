@@ -38,6 +38,13 @@ pub enum Glow {
     /// on a faint warm glow by the share of lit windows, so a town zoomed
     /// all the way out (windows a pixel or less) still reads as lit.
     Body = 9,
+    /// People's colour slots: the colour comes from the palette by the
+    /// entity's `MeshTag` (`person_gen::person_tag`), the vertex colour
+    /// only shades it. Never glows.
+    PersonSkin = 10,
+    PersonHair = 11,
+    PersonTop = 12,
+    PersonBottom = 13,
 }
 
 /// Flat-shaded, vertex-coloured triangle soup.
