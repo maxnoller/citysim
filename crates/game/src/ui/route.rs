@@ -198,7 +198,8 @@ fn trace_route(
                     .then(|| junction::turn_pocket(world, seg_id, fwd).map(|p| p.start_m + 8.0))
                     .flatten();
                 trace_segment(world, seg_id, fwd, progress, stop.max(progress), off, want, by, out);
-                for p in m.curve.flatten(0.2) {
+                // (Round a roundabout's ring, not across its island.)
+                for p in m.points(0.5) {
                     push(out, p);
                 }
                 lane = m.to_lane;

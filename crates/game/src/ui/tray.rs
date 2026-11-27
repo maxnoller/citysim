@@ -1179,7 +1179,7 @@ fn zone_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts, hatch: &MaterialNode
 
 fn junction_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
     page(p, Page::Junction, |pg| {
-        title_block(pg, fonts, "Junctions", "Lights & signs", false);
+        title_block(pg, fonts, "Junctions", "Lights, signs & roundabouts", false);
         tray_rule(pg);
         options(pg, |o| {
             opt_row(o, fonts, "Click", |r| {
@@ -1224,10 +1224,69 @@ fn junction_page(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
                     ],
                 );
             });
+            opt_row(o, fonts, "Ring", |r| {
+                use citysim_sim::RoundaboutSize as R;
+                let tip = |s: R, title: &'static str, desc: &'static str| {
+                    let mut t = Tooltip::new(title, desc);
+                    t.price = Some(format!(
+                        "{} · {} a day",
+                        super::format::money(s.cost()),
+                        super::format::money(s.upkeep_per_day())
+                    ));
+                    Some(t)
+                };
+                spawn_segments(
+                    r,
+                    fonts,
+                    &[
+                        (
+                            UiAction::RingBrush(R::Mini),
+                            None,
+                            "Mini",
+                            tip(
+                                R::Mini,
+                                "Mini roundabout",
+                                "17 m across, about a street crossing's land; a low island trucks drive over. Streets only.",
+                            ),
+                        ),
+                        (
+                            UiAction::RingBrush(R::Small),
+                            None,
+                            "Small",
+                            tip(
+                                R::Small,
+                                "Small roundabout",
+                                "26 m across, one lane round a planted island.",
+                            ),
+                        ),
+                        (
+                            UiAction::RingBrush(R::Medium),
+                            None,
+                            "Medium",
+                            tip(
+                                R::Medium,
+                                "Medium roundabout",
+                                "38 m across, two lanes: an avenue meeting streets. Lane by exit.",
+                            ),
+                        ),
+                        (
+                            UiAction::RingBrush(R::Large),
+                            None,
+                            "Large",
+                            tip(
+                                R::Large,
+                                "Large roundabout",
+                                "54 m across, two wide lanes round a big island: avenues crossing.",
+                            ),
+                        ),
+                    ],
+                );
+            });
             o.spawn((
                 paragraph(
                     fonts,
-                    "Point at a junction of three or more roads to see its phases and queues; click to apply.",
+                    "Point at a junction of three or more roads to see its phases and queues; click to apply. \
+                     A ring takes the land it needs; Ctrl+Z puts everything back.",
                     t::FONT_BODY,
                     t::W_MEDIUM,
                     t::TEXT_MUTED,

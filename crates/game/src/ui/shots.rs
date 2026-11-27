@@ -179,6 +179,7 @@ fn reset(world: &mut World) {
     world.resource_mut::<ToolState>().reset();
     *world.resource_mut::<ToolModes>() = ToolModes::default();
     *world.resource_mut::<RoadChoice>() = RoadChoice::Street;
+    world.resource_mut::<super::tools::ToolOptions>().ring_brush = None;
     world.resource_mut::<WorldHighlight>().selected = None;
     let mut ui = world.resource_mut::<UiState>();
     ui.tray = None;
@@ -714,6 +715,43 @@ fn steps() -> Vec<Step> {
                     look(w, j, 160.0);
                 }
                 point(w, j);
+            },
+        },
+        // The junction tool with a roundabout size: a junction where it
+        // fits, one where it does not, one where it takes buildings down,
+        // and an existing roundabout (`CITYSIM_DEMO=rings`).
+        Step {
+            name: "ring-fits",
+            wait: 1.5,
+            setup: |w| ring_shot(w, |p| p.as_ref().is_ok_and(|p| p.buildings.is_empty()), 170.0),
+        },
+        Step {
+            name: "ring-refused",
+            wait: 1.5,
+            setup: |w| ring_shot(w, |p| p.is_err(), 170.0),
+        },
+        Step {
+            name: "ring-buildings",
+            wait: 1.5,
+            setup: |w| ring_shot(w, |p| p.as_ref().is_ok_and(|p| !p.buildings.is_empty()), 190.0),
+        },
+        Step {
+            name: "ring-existing",
+            wait: 1.5,
+            setup: |w| {
+                reset(w);
+                *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+                w.resource_mut::<ToolModes>().road = RoadMode::Junction;
+                let s = sim(w);
+                let f = town_focus(w);
+                let j = citysim_sim::junction::junction_nodes(s)
+                    .filter(|&n| citysim_sim::roundabout::roundabout(s, n) == Some(citysim_sim::RoundaboutSize::Small))
+                    .map(|n| s.roads.nodes[n].pos)
+                    .min_by(|a, b| dist(*a, f).total_cmp(&dist(*b, f)));
+                if let Some(j) = j {
+                    look(w, j, 150.0);
+                    point(w, Some(j));
+                }
             },
         },
         Step {
@@ -1672,4 +1710,33 @@ fn run_tour(world: &mut World) {
         world.write_message(AppExit::Success);
     }
     world.insert_resource(tour);
+}
+
+/// Junction tool, ring brush: the junction nearest the town's focus whose
+/// preview of some size passes `want` (bigger sizes first), hovered.
+fn ring_shot(w: &mut World, want: fn(&Result<citysim_sim::Preview, citysim_sim::CommandError>) -> bool, dist_m: f32) {
+    use citysim_sim::RoundaboutSize as R;
+    reset(w);
+    *w.resource_mut::<ActiveTool>() = ActiveTool::Road;
+    w.resource_mut::<ToolModes>().road = RoadMode::Junction;
+    let s = sim(w);
+    let f = town_focus(w);
+    let mut nodes: Vec<citysim_sim::NodeId> = citysim_sim::junction::junction_nodes(s)
+        .filter(|&n| citysim_sim::roundabout::roundabout(s, n).is_none())
+        .collect();
+    nodes.sort_by(|a, b| dist(s.roads.nodes[*a].pos, f).total_cmp(&dist(s.roads.nodes[*b].pos, f)));
+    let found = nodes.iter().find_map(|&n| {
+        [R::Large, R::Medium, R::Small, R::Mini].into_iter().find_map(|size| {
+            let p = s.preview(&citysim_sim::Command::SetRoundabout {
+                node: n,
+                size: Some(size),
+            });
+            want(&p).then_some((n, size))
+        })
+    });
+    let Some((n, size)) = found else { return };
+    let at = sim(w).roads.nodes[n].pos;
+    w.resource_mut::<super::tools::ToolOptions>().ring_brush = Some(size);
+    look(w, at, dist_m);
+    point(w, Some(at));
 }

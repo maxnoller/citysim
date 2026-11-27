@@ -142,12 +142,28 @@ fn strips(roads: &RoadNetwork, layout: &RoadLayout) -> MeshBuilder {
             ring.push(arm.at(0.0, -h));
             ring.push(arm.at(0.0, h));
         }
+        let col = lin(congestion_color(worst));
+        if let Some(r) = &node.ring {
+            // Round the ring (the island stays clear), and the arm throats.
+            let (c, r0, r1) = (r.center, r.dims.inner_r + 0.2, r.dims.outer_r - 0.15);
+            let n = ((r1 * std::f32::consts::TAU) / 2.0).ceil().max(24.0) as usize;
+            let at = |k: usize, rad: f32| {
+                let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                Vec3::new(c.x + rad * a.cos(), STRIP_Y, c.y + rad * a.sin())
+            };
+            for k in 0..n {
+                m.quad_up([at(k, r0), at(k + 1, r0), at(k + 1, r1), at(k, r1)], col);
+            }
+            for arm in &node.arms {
+                let h = arm.style.h - 0.15;
+                let inner = (arm.center - c).length() - r1 + 0.5;
+                let q = [arm.at(0.0, -h), arm.at(0.0, h), arm.at(-inner, h), arm.at(-inner, -h)];
+                m.quad_up(q.map(|p| Vec3::new(p.x, STRIP_Y, p.y)), col);
+            }
+            continue;
+        }
         let ring: Vec<Vec3> = ring.iter().map(|p| Vec3::new(p.x, STRIP_Y, p.y)).collect();
-        m.fan_up(
-            Vec3::new(node.pos.x, STRIP_Y, node.pos.y),
-            &ring,
-            lin(congestion_color(worst)),
-        );
+        m.fan_up(Vec3::new(node.pos.x, STRIP_Y, node.pos.y), &ring, col);
     }
     m
 }

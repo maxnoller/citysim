@@ -292,12 +292,24 @@ pub enum UndoRecord {
         label: String,
         restore: Vec<(CellRef, Option<Zone>)>,
     },
+    /// A junction tool click: the roundabout and setting before it, the
+    /// buildings a ring took down and the zones of the land it took.
+    Junction {
+        label: String,
+        node: citysim_sim::NodeId,
+        ring: Option<citysim_sim::RoundaboutSize>,
+        setting: citysim_sim::JunctionSetting,
+        buildings: Vec<BuildingRecord>,
+        zones: Vec<(CellRef, Option<Zone>)>,
+    },
 }
 
 impl UndoRecord {
     pub fn label(&self) -> &str {
         match self {
-            UndoRecord::Roads { label, .. } | UndoRecord::Zones { label, .. } => label,
+            UndoRecord::Roads { label, .. } | UndoRecord::Zones { label, .. } | UndoRecord::Junction { label, .. } => {
+                label
+            }
         }
     }
 }
@@ -376,6 +388,46 @@ pub fn undo_ops(world: &World, rec: &UndoRecord) -> Vec<Op> {
             }
             for (c, k) in rebuild {
                 ops.push(Op::Cmd(Command::BuildCurve { curve: *c, kind: *k }));
+            }
+            for b in buildings {
+                ops.push(Op::Cmd(Command::RestoreBuilding(Box::new(b.clone()))));
+            }
+            ops
+        }
+        UndoRecord::Junction {
+            node,
+            ring,
+            setting,
+            buildings,
+            zones,
+            ..
+        } => {
+            let mut ops = Vec::new();
+            let Some(j) = citysim_sim::junction::junction(world, *node) else {
+                return ops;
+            };
+            if j.ring != *ring {
+                ops.push(Op::Cmd(Command::SetRoundabout {
+                    node: *node,
+                    size: *ring,
+                }));
+            }
+            if j.setting != *setting {
+                ops.push(Op::Cmd(Command::SetNodeControl {
+                    node: *node,
+                    control: *setting,
+                }));
+            }
+            // The land a ring took gets its zones back, then its buildings.
+            let mut by_zone: BTreeMap<u8, (Option<Zone>, Vec<CellRef>)> = BTreeMap::new();
+            for &(c, z) in zones {
+                if z.is_some() {
+                    let key = z.map_or(0, |z| z as u8 + 1);
+                    by_zone.entry(key).or_insert((z, Vec::new())).1.push(c);
+                }
+            }
+            for (zone, cells) in by_zone.into_values() {
+                ops.push(Op::Cmd(Command::ZoneCells { cells, zone }));
             }
             for b in buildings {
                 ops.push(Op::Cmd(Command::RestoreBuilding(Box::new(b.clone()))));

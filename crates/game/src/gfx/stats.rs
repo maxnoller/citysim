@@ -174,6 +174,7 @@ fn tool_demo(
                 zone_cells: p.as_ref().map(|p| p.zone_cells.clone()).unwrap_or_default(),
                 error: p.as_ref().err().cloned(),
                 cost: p.as_ref().map_or(0, |p| p.cost),
+                roundabout: None,
             });
         }
         _ => {

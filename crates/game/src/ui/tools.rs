@@ -82,6 +82,8 @@ pub struct ToolOptions {
     pub zone_depth: u8,
     /// What a click with the junction tool sets (None: the next setting).
     pub junction_brush: Option<JunctionSetting>,
+    /// The junction tool builds roundabouts of this size instead.
+    pub ring_brush: Option<citysim_sim::RoundaboutSize>,
 }
 
 impl Default for ToolOptions {
@@ -92,6 +94,7 @@ impl Default for ToolOptions {
             parallel: 2,
             zone_depth: balance::BLOCK_DEPTH,
             junction_brush: None,
+            ring_brush: None,
         }
     }
 }
@@ -290,6 +293,9 @@ pub struct ToolState {
     /// A plan was sent this frame (its parts' results are summarised by
     /// the tool, not toasted one by one).
     pub batch_frame: bool,
+    /// The junction tool's roundabout preview under the cursor: junction,
+    /// size, world versions and money it was made for, and the result.
+    pub ring_preview: Option<(RingKey, Result<citysim_sim::Preview, CommandError>)>,
 }
 
 impl ToolState {
@@ -1052,6 +1058,104 @@ fn commit(state: &mut ToolState, sim: &SimWorld, out: &mut MessageWriter<SimComm
     (toast, true)
 }
 
+/// What a roundabout preview was made for.
+pub type RingKey = (NodeId, citysim_sim::RoundaboutSize, u64, u64, u64, i64);
+
+/// A click of the junction tool on `node`: a roundabout of the brush's
+/// size, or a control setting (taking a roundabout away). The commands go
+/// out as one plan; returns the message and the undo record.
+fn junction_click(
+    world: &World,
+    node: NodeId,
+    opts: &ToolOptions,
+    out: &mut MessageWriter<SimCommand>,
+) -> (Toast, Option<UndoRecord>) {
+    let Some(j) = citysim_sim::junction::junction(world, node) else {
+        return (Toast::new(ToastKind::Error, "Not a junction"), None);
+    };
+    let (ring_before, setting_before) = (j.ring, j.setting);
+    let mut cmds: Vec<Command> = Vec::new();
+    let text;
+    match opts.ring_brush {
+        Some(size) => {
+            cmds.push(Command::SetRoundabout { node, size: Some(size) });
+            text = format!("{} built", super::context::ring_name(size));
+        }
+        None => {
+            let next = opts.junction_brush.unwrap_or_else(|| {
+                if ring_before.is_some() {
+                    setting_before
+                } else {
+                    super::context::next_setting(setting_before)
+                }
+            });
+            if ring_before.is_some() {
+                cmds.push(Command::SetRoundabout { node, size: None });
+            }
+            if next != setting_before || ring_before.is_none() {
+                cmds.push(Command::SetNodeControl { node, control: next });
+            }
+            text = match (ring_before.is_some(), next) {
+                (true, JunctionSetting::Auto) => "Roundabout taken away: an ordinary junction again".into(),
+                (true, s) => format!(
+                    "Roundabout taken away: {}",
+                    super::context::setting_name(s).to_lowercase()
+                ),
+                (false, JunctionSetting::Auto) => "Junction back to automatic".into(),
+                (false, s) => format!("Junction set to {}", super::context::setting_name(s).to_lowercase()),
+            };
+        }
+    }
+    // Check the whole plan on a copy, and record what undo needs.
+    let mut scratch = world.clone();
+    let mut buildings = Vec::new();
+    let mut zones: Vec<(CellRef, Option<Zone>)> = Vec::new();
+    for cmd in &cmds {
+        match scratch.preview(cmd) {
+            Ok(p) => {
+                buildings.extend(p.buildings.iter().filter_map(|&b| world.building_record(b)));
+                zones.extend(
+                    p.zone_cells
+                        .iter()
+                        .filter_map(|&c| Some((c, world.zoning.cell(c)?.zone))),
+                );
+            }
+            Err(e) => return (Toast::new(ToastKind::Error, super::context::error_text(&e)), None),
+        }
+        let _ = scratch.apply(cmd.clone());
+    }
+    for cmd in cmds {
+        out.write(SimCommand(cmd));
+    }
+    let label = match (opts.ring_brush, ring_before) {
+        (Some(_), _) => "roundabout".to_string(),
+        (None, Some(_)) => "roundabout's removal".to_string(),
+        (None, None) => "junction change".to_string(),
+    };
+    let text = if buildings.is_empty() {
+        text
+    } else {
+        format!(
+            "{text} · {} building{} taken down (Ctrl+Z brings {} back)",
+            buildings.len(),
+            if buildings.len() == 1 { "" } else { "s" },
+            if buildings.len() == 1 { "it" } else { "them" }
+        )
+    };
+    let toast = Toast::new(ToastKind::Info, text);
+    (
+        toast,
+        Some(UndoRecord::Junction {
+            label,
+            node,
+            ring: ring_before,
+            setting: setting_before,
+            buildings,
+            zones,
+        }),
+    )
+}
+
 fn push_undo(state: &mut ToolState, rec: UndoRecord) {
     state.undo.push(rec);
     if state.undo.len() > UNDO_DEPTH {
@@ -1431,33 +1535,11 @@ fn use_tool(
                 && let Some(c) = state.cursor
                 && let Some((node, _)) = junction_near(&sim.world, c, state.radius.max(8.0))
             {
-                let setting = citysim_sim::junction::junction(&sim.world, node)
-                    .map(|j| j.setting)
-                    .unwrap_or_default();
-                let next = opts
-                    .junction_brush
-                    .unwrap_or_else(|| super::context::next_setting(setting));
-                let cmd = Command::SetNodeControl { node, control: next };
-                match sim.world.preview(&cmd) {
-                    Ok(p) => {
-                        out.write(SimCommand(cmd));
-                        let now_control = p.junction.map(|j| j.control_after);
-                        let text = match (next, now_control) {
-                            (JunctionSetting::Auto, Some(ctl)) => format!(
-                                "Junction back to automatic: {}",
-                                super::context::control_name(ctl).to_lowercase()
-                            ),
-                            (_, Some(ctl)) => {
-                                format!("Junction set to {}", super::context::control_name(ctl).to_lowercase())
-                            }
-                            _ => "Junction control changed".into(),
-                        };
-                        toasts.write(Toast::new(ToastKind::Info, text));
-                    }
-                    Err(e) => {
-                        toasts.write(Toast::new(ToastKind::Error, super::context::error_text(&e)));
-                    }
+                let (toast, rec) = junction_click(&sim.world, node, &opts, &mut out);
+                if let Some(rec) = rec {
+                    push_undo(state, rec);
                 }
+                toasts.write(toast);
             }
         }
         _ => {
@@ -1644,6 +1726,7 @@ fn publish(
     ),
     mut last_view: Local<CurveToolView>,
     mut hover: Local<(Option<HoverKey>, Option<WorldTarget>)>,
+    mut ring_cache: Local<Option<(RingKey, Result<citysim_sim::Preview, CommandError>)>>,
 ) {
     let state = state.as_mut();
     let w = &sim.world;
@@ -1703,7 +1786,6 @@ fn publish(
             }
         }
     }
-    preview.set_if_neq(tp);
     let fb = match &state.live {
         Some(s) if state.on_map || state.busy() => SnapFeedback {
             point: Some(s.point),
@@ -1738,6 +1820,43 @@ fn publish(
             _ => junction_near(w, c, state.radius.max(8.0)).map(|(node, pos)| WorldTarget::Junction { node, pos }),
         });
     }
+    // The junction tool with a roundabout size: the ring it would build.
+    state.ring_preview = None;
+    if *tool == ActiveTool::Road
+        && modes.road == RoadMode::Junction
+        && let Some(size) = opts.ring_brush
+        && let Some(WorldTarget::Junction { node, .. }) = &hover.1
+    {
+        let key: RingKey = (
+            *node,
+            size,
+            w.versions.roads,
+            w.versions.buildings,
+            w.versions.grid,
+            w.economy.money,
+        );
+        if ring_cache.as_ref().is_none_or(|c| c.0 != key) {
+            *ring_cache = Some((
+                key,
+                w.preview(&Command::SetRoundabout {
+                    node: *node,
+                    size: Some(size),
+                }),
+            ));
+        }
+        if let Some((_, res)) = ring_cache.as_ref() {
+            tp.roundabout = Some((*node, size));
+            match res {
+                Ok(p) => {
+                    tp.cost = p.cost;
+                    doomed_buildings = p.buildings.clone();
+                }
+                Err(e) => tp.error = Some(e.clone()),
+            }
+        }
+        state.ring_preview = ring_cache.clone();
+    }
+    preview.set_if_neq(tp);
     let mut hl = WorldHighlight {
         hovered: hover.1.clone(),
         selected: highlight.selected.clone(),
