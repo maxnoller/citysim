@@ -46,6 +46,26 @@ const SCENARIOS: &[Scenario] = &[
         days: 15,
     },
     Scenario {
+        name: "rings",
+        about: "the avenue city, every junction on an avenue a roundabout (the biggest that fits) as it is built",
+        days: 15,
+    },
+    Scenario {
+        name: "street_rings",
+        about: "the streets-only city, every junction a roundabout (the biggest that fits) as it is built",
+        days: 15,
+    },
+    Scenario {
+        name: "minis",
+        about: "the avenue city, every junction of streets a mini roundabout as it is built",
+        days: 15,
+    },
+    Scenario {
+        name: "street_minis",
+        about: "the streets-only city, every junction a mini roundabout as it is built",
+        days: 15,
+    },
+    Scenario {
         name: "streets",
         about: "round 2: the same blocks with streets only, grows to 10,000",
         days: 15,
@@ -117,22 +137,40 @@ const SCENARIOS: &[Scenario] = &[
     },
 ];
 
+/// Money the `rings` players keep for the city before building roundabouts.
+const RING_RESERVE: i64 = 20_000;
+
 /// Day the `rescue` city's main streets become avenues.
 const RESCUE_DAY: u32 = 8;
 
 /// The `rescue` scenario's upgrade, at the start of `RESCUE_DAY`; the player
 /// builds avenues from then on.
-fn rescue(sc: &Scenario, w: &mut World, player: &mut Option<GridPlayer>) {
+/// (Returns what roundabouts cost this tick.)
+fn rescue(sc: &Scenario, w: &mut World, player: &mut Option<GridPlayer>) -> i64 {
+    // Roundabouts as the city is built (once an in-game hour, after the
+    // player has laid its roads).
+    if w.time.tick % balance::TICKS_PER_HOUR as u64 == 1 {
+        use citysim_sim::RoundaboutSize as R;
+        let (avenue, street): (&[R], &[R]) = match sc.name {
+            "rings" => (&[R::Large, R::Medium], &[]),
+            "street_rings" => (&[], &[R::Small, R::Mini]),
+            "minis" | "street_minis" => (&[], &[R::Mini]),
+            _ => (&[], &[]),
+        };
+        if !avenue.is_empty() || !street.is_empty() {
+            return scenarios::add_roundabouts_of(w, avenue, street, RING_RESERVE).1;
+        }
+    }
     if sc.name == "bypass" && w.time.day == RESCUE_DAY && w.time.tick_of_day == 0 {
         let (built, cost) = scenarios::add_gateway_bypass(w, citysim_sim::RoadKind::Street);
         eprintln!(
             "bypass: day {} pop {}: {built} relief roads, ${cost}",
             w.time.day, w.stats.population
         );
-        return;
+        return 0;
     }
     if sc.name != "rescue" || w.time.day != RESCUE_DAY || w.time.tick_of_day != 0 {
-        return;
+        return 0;
     }
     let (ok, refused, cost) = scenarios::upgrade_to_hierarchy(w);
     if let Some(p) = player.as_mut() {
@@ -142,6 +180,7 @@ fn rescue(sc: &Scenario, w: &mut World, player: &mut Option<GridPlayer>) {
         "rescue: day {} pop {}: {ok} pieces upgraded to avenues, {refused} refused, ${cost}",
         w.time.day, w.stats.population
     );
+    0
 }
 
 fn minutes(tick: u64) -> f64 {
@@ -151,6 +190,10 @@ fn minutes(tick: u64) -> f64 {
 /// Per-day traffic and people measurements, taken just before midnight.
 #[derive(Default, Clone, Copy)]
 struct DayExtra {
+    /// Roundabouts standing, money spent on them so far, usable zone cells.
+    rings: u32,
+    ring_spend: i64,
+    usable_cells: u32,
     given_up: u32,
     trips: u32,
     happiness: f32,
@@ -239,7 +282,8 @@ fn sample(w: &World, a: &mut HourAcc) {
 fn start(sc: &Scenario, w: &mut World) -> Option<GridPlayer> {
     match sc.name {
         "grid" | "streets" | "rescue" | "bypass" => Some(GridPlayer::new(&Zone::ALL)),
-        "hierarchy" => Some(GridPlayer::hierarchy()),
+        "hierarchy" | "rings" | "minis" => Some(GridPlayer::hierarchy()),
+        "street_rings" | "street_minis" => Some(GridPlayer::new(&Zone::ALL)),
         "single_artery" => Some(GridPlayer::single_artery()),
         "upfront" => {
             let mut p = GridPlayer::new(&Zone::ALL);
@@ -290,6 +334,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
     let mut losses: Vec<citysim_sim::TrafficLoss> = Vec::new();
     let mut extra: Vec<DayExtra> = Vec::new();
     let (mut given_up_before, mut day_ns_before) = (0u32, 0u128);
+    let mut ring_spend = 0i64;
     while w.time.tick < total {
         if let Some(p) = player.as_mut() {
             p.act(&mut w);
@@ -300,7 +345,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         if sc.name == "short_industry_fixed" && w.time.day == 3 && w.time.tick_of_day == 0 {
             scenarios::add_industry_land(&mut w);
         }
-        rescue(sc, &mut w, &mut player);
+        ring_spend += rescue(sc, &mut w, &mut player);
         let t0 = Instant::now();
         w.step();
         let dt = t0.elapsed().as_nanos();
@@ -315,6 +360,11 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         if w.time.tick_of_day == balance::TICKS_PER_DAY - 1 {
             // Just before midnight: the day's trips and give-ups.
             extra.push(DayExtra {
+                rings: citysim_sim::junction::junction_nodes(&w)
+                    .filter(|&n| citysim_sim::roundabout::roundabout(&w, n).is_some())
+                    .count() as u32,
+                ring_spend,
+                usable_cells: w.zoning.cells().filter(|(_, c)| c.usable()).count() as u32,
                 given_up: w.traffic.stuck_removed - given_up_before,
                 trips: w.traffic.trips_today,
                 happiness: w.people.stats.avg_happiness,
@@ -358,7 +408,7 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
          streets,avenues,highway,signals,signal_count,services_base,services_city_size,services_density,\
          given_up,trips,happiness,avg_commute_s,step_mean_us,delay_factor,worked_share,\
          journeys,journey_mean_h,journey_over3h,journey_over4h,journey_over8h,journey_max_h,journey_max_purpose,journey_max_offscreen,commute_over4h,\
-         unhappy_commute_share,commute_happiness,traffic_lost_tax,traffic_lost_per_commute_s,walked,other_trips\n",
+         unhappy_commute_share,commute_happiness,traffic_lost_tax,traffic_lost_per_commute_s,walked,other_trips,roundabouts,roundabout_spend,usable_cells\n",
     );
     for (i, h) in w.economy.history.iter().enumerate() {
         let b = h.budget;
@@ -419,11 +469,14 @@ fn run_seed(sc: &Scenario, seed: u64, days: u32, out_dir: &str) -> String {
         let l = losses.get(i).copied().unwrap_or_default();
         let _ = writeln!(
             daily,
-            ",{},{:.1},{},{}",
+            ",{},{:.1},{},{},{},{},{}",
             l.business_tax,
             l.per_commute_s(),
             e.walked,
-            e.other
+            e.other,
+            e.rings,
+            e.ring_spend,
+            e.usable_cells
         );
     }
     std::fs::write(format!("{out_dir}/{}_seed{seed}_days.csv", sc.name), daily).expect("write csv");
@@ -509,7 +562,7 @@ fn run(sc: &Scenario, out_dir: &str) {
         if sc.name == "short_industry_fixed" && w.time.day == 3 && w.time.tick_of_day == 0 {
             scenarios::add_industry_land(&mut w);
         }
-        rescue(sc, &mut w, &mut player);
+        let _ = rescue(sc, &mut w, &mut player);
         let t0 = Instant::now();
         w.step();
         let dt = t0.elapsed().as_nanos();

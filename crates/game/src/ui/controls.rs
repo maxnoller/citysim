@@ -260,7 +260,11 @@ fn handle_actions(
             UiAction::Snap(r) => opts.toggle(r),
             UiAction::ParallelStep(d) => opts.step_parallel(d),
             UiAction::ZoneDepth(d) => opts.zone_depth = d,
-            UiAction::JunctionBrush(b) => opts.junction_brush = b,
+            UiAction::JunctionBrush(b) => {
+                opts.junction_brush = b;
+                opts.ring_brush = None;
+            }
+            UiAction::RingBrush(s) => opts.ring_brush = Some(s),
             UiAction::OpenSettings => {
                 ui.settings_open = true;
                 ui.keys_open = false;

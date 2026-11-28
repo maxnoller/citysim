@@ -458,12 +458,27 @@ pub enum UndoRecord {
         label: String,
         restore: Vec<(CellRef, Option<Zone>)>,
     },
+    /// A junction tool click: the roundabout and setting before it, the
+    /// buildings a ring took down and the zones of the land it took.
+    Junction {
+        label: String,
+        node: citysim_sim::NodeId,
+        ring: Option<citysim_sim::RoundaboutSize>,
+        setting: citysim_sim::JunctionSetting,
+        buildings: Vec<BuildingRecord>,
+        /// Zoning the ring's land took (cell centres), as for roads.
+        zones: Vec<([f32; 2], Zone)>,
+        /// What the ring cost and when (`Command::Refund`).
+        paid: Vec<(u64, i64)>,
+    },
 }
 
 impl UndoRecord {
     pub fn label(&self) -> &str {
         match self {
-            UndoRecord::Roads { label, .. } | UndoRecord::Zones { label, .. } => label,
+            UndoRecord::Roads { label, .. } | UndoRecord::Zones { label, .. } | UndoRecord::Junction { label, .. } => {
+                label
+            }
         }
     }
 }
@@ -572,6 +587,48 @@ pub fn undo_ops(world: &World, rec: &UndoRecord) -> Vec<Op> {
             for (c, k) in rebuild {
                 ops.push(Op::Cmd(Command::BuildCurve { curve: *c, kind: *k }));
             }
+            let mut by_zone: BTreeMap<u8, (Zone, Vec<[f32; 2]>)> = BTreeMap::new();
+            for &(p, z) in zones {
+                by_zone.entry(z as u8).or_insert((z, Vec::new())).1.push(p);
+            }
+            for (z, points) in by_zone.into_values() {
+                ops.push(Op::ZoneAt(points, z));
+            }
+            for b in buildings {
+                ops.push(Op::Cmd(Command::RestoreBuilding(Box::new(b.clone()))));
+            }
+            for &(tick, amount) in paid {
+                ops.push(Op::Cmd(Command::Refund { tick, amount }));
+            }
+            ops
+        }
+        UndoRecord::Junction {
+            node,
+            ring,
+            setting,
+            buildings,
+            zones,
+            paid,
+            ..
+        } => {
+            let mut ops = Vec::new();
+            let Some(j) = citysim_sim::junction::junction(world, *node) else {
+                return ops;
+            };
+            if j.ring != *ring {
+                ops.push(Op::Cmd(Command::SetRoundabout {
+                    node: *node,
+                    size: *ring,
+                }));
+            }
+            if j.setting != *setting {
+                ops.push(Op::Cmd(Command::SetNodeControl {
+                    node: *node,
+                    control: *setting,
+                }));
+            }
+            // The land a ring took gets its zones back, then its buildings,
+            // then the money.
             let mut by_zone: BTreeMap<u8, (Zone, Vec<[f32; 2]>)> = BTreeMap::new();
             for &(p, z) in zones {
                 by_zone.entry(z as u8).or_insert((z, Vec::new())).1.push(p);

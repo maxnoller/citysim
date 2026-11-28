@@ -837,6 +837,154 @@ meant).
   zoning the road's land took back (`ZoneCells`) and restoring the buildings (`RestoreBuilding`, which refunds the
   demolitions). Undoing a road still pays the bulldozer's dollar a cell to take it away.
 
+## 2026-11-27 (r7-roundabout: a junction upgraded to a roundabout)
+
+### Representation
+
+A roundabout is a **setting of a junction node**, not road pieces: `JunctionState::ring: Option<RoundaboutSize>`
+(`#[serde(skip)]`, saved in extension block 7). The road graph, the zoning lattices along the roads and the save body
+stay as they are. With a ring the node's arms end at give-way lines just outside the ring
+(`RING_GIVE_WAY_OUTSIDE_M` beyond the outer kerb, `Arm::setback`), and every movement is a **ring path**
+(`roundabout::RingPath`): an entry curve from the give-way line onto a ring lane, an arc of that lane in the direction
+of circulation, an exit curve onto the out-lane (`Movement::ring_path()`; `Movement::pose_at` and
+`Movement::points(step)` follow it; `Movement::curve` then only joins its two ends: **draw ring movements with
+`points`, never `curve`**). Traffic drives on the right, so the ring runs with the island on the driver's left: in sim
+axes the angle round the centre decreases along the circulation (counter-clockwise on screen). One-way ring road
+pieces were not used: they would need one-way roads, would grow zoning frontage on the ring and cut blocks.
+
+`JunctionControl::Roundabout` is the control in force (signals, plans and auto control do not apply; `JunctionState::
+setting` is what the junction returns to without the ring). In the save body a roundabout's control is written as
+`Priority` (older builds read the save; the ring comes back from block 7 and the junction is rebuilt on load).
+
+### Sizes (`roundabout::RoundaboutSize`, `dims()` -> `RingDims`)
+
+| Size | Outer kerb radius | Lanes (width) | Island | Price / upkeep a day | Fits |
+|---|---|---|---|---|---|
+| Mini | 8.5 m | 1 (5.0 m) | 3.5 m, mountable painted dome | $1,200 / $15 | streets only |
+| Small | 13 m | 1 (5.5 m) | 6 m + 1.5 m apron | $3,000 / $25 | streets; an avenue T, not two avenues |
+| Medium | 19 m | 2 (4.5 m) | 8.5 m + 1.5 m apron | $6,500 / $40 | avenue meeting streets |
+| Large | 27 m | 2 (4.75 m) | 16 m + 1.5 m apron | $11,000 / $60 | avenues crossing |
+
+Land taken: a disc of `RingDims::reserve_r()` (outer kerb + `RING_PAVEMENT_M` 2.5 + `RING_VERGE_M` 0.5). Speed on a
+ring lane: `sqrt(RING_LATERAL_ACCEL * r)` (mini 3.7 m/s ... large outer lane 7.7 m/s), trucks `RING_TRUCK_SPEED` of it.
+
+### Which sizes fit (`roundabout::fit`, `roundabout::sizes(world, node)`, `roundabout::plan_ring`)
+
+`RingProblem` (`Display` and `at()`): `TooFewArms` (a bend or road end), `TooManyArms` (> `RING_MAX_ARMS` 6),
+`Highway`, `AvenueOnMini`, `ArmsTooClose { degrees, at }` (one arm's entry and the next arm's exit need room round the
+ring), `NeighbourTooClose { at }` (an arm keeps `RING_MIN_ARM_M` 10 m of road between the give-way line and the next
+junction's box), `RoadInTheWay { at }`, `OffMap`, `AlreadyThatSize`, `NotARoundabout`. A road edit that leaves a ring no
+room (a new junction on an arm too near) makes it an ordinary junction again (its land goes back to zoning).
+
+### Command
+
+- `Command::SetRoundabout { node, size: Option<RoundaboutSize> }` (`None`: an ordinary junction again). Refused with
+  `CommandError::Roundabout(RingProblem)`, `InsufficientFunds`, or `BuildingInTheWay` for a building on its land that
+  does not `gives_way_to_roads()` (the roads' rule). `Preview::roundabout: Option<RoundaboutChange { node, before,
+  after }>`, `buildings` (taken down, the bulldozer's way), `zone_cells` (lose their land), `road_cost` (the ring's
+  price, refundable by `Command::Refund` as for roads: a receipt is issued), `demolition_cost`, `cost` (both).
+  Removal refunds nothing and is never refused for money. `preview` agrees with `apply`.
+- On apply: buildings on its land go, the junction is rebuilt (`versions.roads` bumps: renderers rebuild), zone cells
+  under the disc are blocked (`Blocked::Road`, their zone cleared as under any road), cars standing past the new
+  give-way line go back to it one behind another (turn-pocket cars into the inner lane; cars that no longer fit on a
+  short arm are lifted off the road). Undo (the interface): `SetRoundabout(before)`, `SetNodeControl(before)`, zones by
+  cell centre (`plan::Op::ZoneAt`), `RestoreBuilding` for each, `Refund`.
+- Money: `economy::RunningCosts::{roundabouts, roundabout_count}` (part of `road_upkeep()`, saved in block 7).
+
+### Rules of the ring (`roundabout` + `drive`)
+
+- **Entry**: a front car gives way to every car whose path passes its merge point(s) (on the ring, or entering
+  upstream, or let in this tick elsewhere): it goes only when that car reaches the point at least `RING_SAFETY_S`
+  (0.8 s) after the entering car's rear has cleared it, judged from both cars' distance, speed and acceleration (about
+  3.5 s critical gap from a stand). It needs exit room as at any junction (cars in the ring heading to the same exit
+  count), the ring just beyond its merge not standing, and the start of its own path free.
+- **On the ring**: cars follow whatever their path runs into, tested with oriented car boxes along the path
+  (`RING_FRONT_GAP_M` 1 m ahead, `RING_SIDE_GAP_M` 0.3 m to the sides), headway `RING_HEADWAY_S` 1.0 s; oncoming cars
+  on an arm's own lanes are ignored; two cars in each other's way: the one whose front is further ahead goes, as far as
+  it can without touching. Stopping on the ring happens only behind a car (waiting at a blocked exit).
+- **Lane by exit** (two-lane rings): the first exit and every exit onto a road with one lane out from the outer lane;
+  from an avenue's inner lane, the inner ring lane for later exits (straight on from both lanes where the exit has two);
+  an avenue exit takes both ring lanes side by side (outer -> kerb lane, inner -> inner lane). A car leaving from the
+  inner lane across the outer one waits for a gap there (`RING_CROSS_SAFETY_S`), never cutting across a car beside it.
+- Routing: `ROUTE_RING_S` (2.5 s) to enter, plus each turn's time round the ring beyond crossing the box.
+- Diagnostics: `examples/ringprobe.rs` (one bench ring, overlaps, stuck cars), `examples/ringjam.rs` (a busy junction of
+  the jam town or the rings demo with each size), `jbench rings` (the capacity table), `overlap rings|street_minis`,
+  `topdown rings` (each size at a street and an avenue crossing), `headless` scenarios `rings`, `street_rings`,
+  `minis`, `street_minis`.
+
+### People on foot (with r7-walk)
+
+- The walking network (`walk::build`) runs a pavement round each ring (from an arm's right-hand pavement in to the ring,
+  round it at `outer_r + pavement / 2`, out along the next arm's left-hand one) and a zebra across each arm one car
+  length out from the give-way line (`balance::RING_ZEBRA_M` 6.2 m to its middle; `walk::zebra_line_at(world, node,
+  segment)` gives any arm's zebra line). Ring zebras are `Crossing { node: None, ring: Some(node), key.at: 0 | 1 }`:
+  cars treat them as mid-block zebras (`walk::zebra_ahead`: an entering car stops short of it for people, and keeps it
+  clear), and a car leaving the ring by that arm stops between the ring and the zebra
+  (`walk::ring_exit_held`; it blocks the ring by at most a car length). People waiting there see the cars in the ring
+  that will leave by their arm (`eval_crossing`) and never step in front of one that cannot stop.
+- `capacity::Bench::walkers(per_min)` puts people on the bench's pavements (`walk::bench_walk`: walkers with no
+  citizen behind them, `Walker::bench`, never saved, gone on arrival); `jbench rings` with `JBENCH_WALKERS=n`,
+  `ringprobe` with `RING_WALKERS=n` (also counts car bodies over people).
+- Test: `tests/walking.rs` `people_walk_round_roundabouts_and_cars_wait_for_them` (the rings demo town at the morning
+  rush: a zebra on every ring arm set back from the ring, a way round the large ring on foot, people crossing, cars
+  held, no car body over a person).
+
+### Renderers
+
+- `roundabout::ring(world, node) -> Option<&Ring>`: `size`, `center`, `dims`, `arms: Vec<RingArm { segment, kind,
+  setback, angle, splitter }>`. `junction::junction_shape` of a ring node: the arm cuts joined by kerb fillets onto the
+  outer kerb circle (the island is not cut out: draw it over).
+- `capacity::Bench::roundabout(size)`, `BenchResult::mean_wait_s`.
+
+### Saves
+
+Extension block **7** (`ExtensionV7`: block 6 (people on foot), the roundabouts `(node, size)`, yesterday's
+roundabout upkeep); the rings are restored before the walking network is made for them. Blocks 1-6 load; format 7,
+versions 6, 4 and 3 load as before. The pinned checksum moved only because block 7 is written (with block 6 written the
+state hashes as on main: `0x69ea187edd9a577e`; now `0x21260e95e52f11b1`).
+
+### Measured (release, this 8-core machine)
+
+Capacity (`jbench rings`, cars a minute with every approach queued / seconds a car stands at a moderate demand of 6
+cars a minute per street approach, 18-20 per avenue approach; 10 / 30 / 50 % turning):
+
+| | give-way | signals | mini | small | medium | large |
+|---|---|---|---|---|---|---|
+| street x street, sat. | 28 / 25 / 25 | 27 / 25 / 24 | 33 / 34 / 34 | 39 / 39 / 39 | 43 / 44 / 44 | 46 / 47 / 47 |
+| street x street, wait | 18.6 / 6.7 / 5.8 | 3.0 / 4.8 / 5.7 | 1.8 / 1.8 / 1.4 | 0.7 / 0.8 / 1.0 | 0.5 / 0.5 / 0.5 | 0.4 / 0.4 / 0.4 |
+| avenue x street, sat. | 106 / 71 / 65 * | 101 / 69 / 53 | - | 45 / 42 / 40 | 55 / 57 / 56 | 64 / 63 / 60 |
+| avenue x street, wait | 7.0 / 8.0 / 11.3 | 4.7 / 11.5 / 17.7 | - | 19.5 / 12.3 / 19.7 | 1.2 / 2.1 / 4.8 | 0.8 / 1.1 / 1.4 |
+| avenue x avenue, sat. | 28 / 28 / 30 | 140 / 117 / 104 | - | - | 72 / 72 / 72 | 90 / 82 / 84 |
+| avenue x avenue, wait | 175 / 163 / 186 | 6.2 / 11.2 / 14.1 | - | - | 19.7 / 16.3 / 19.2 | 4.2 / 4.8 / 6.8 |
+
+\* give-way on an avenue lets 0-4 % of the cars in from the side street; rings serve every arm (22-51 %).
+
+With 12 people a minute walking past every junction (`JBENCH_WALKERS=12`; saturated cars a minute / moderate wait in
+seconds, 10 / 30 / 50 % turning): street x street give-way 24 / 21 / 20 (13.6 / 37.1 / 33.2 s), signals 27 / 23 / 23
+(3.1 / 7.5 / 15.0 s), mini 32 / 32 / 32 (2.0 / 1.7 / 2.0 s), small 36 / 37 / 35 (0.9 / 1.2 / 1.1 s), medium 40 / 41 / 41,
+large 43 / 43 / 44 (0.4-0.5 s); avenue x street signals 103 / 69 / 52 (10.4 / 13.7 / 25.7 s), medium 60 / 54 / 56
+(2.3 / 3.3 / 9.7 s), large 72 / 60 / 58 (1.7 / 2.5 / 5.0 s); avenue x avenue signals 132 / 109 / 104 (7.0 / 15.7 /
+19.7 s), large 91 / 86 / 81 (9.8 / 16.9 / 9.8 s). Car bodies over people at the bench rings: none.
+
+Scripted cities (10 seeds, 15 days; commute over free flow / car trips given up, by residents): avenue city 9-11k
+1.47x / 0.25 %, with two-lane rings on its avenue junctions 1.71x / 0.28 %, with mini rings at its street junctions
+1.59x / 0.40 %; streets city 9-11k 3.22x / 2.18 %, with small/mini rings everywhere 3.34x / 1.97 %, with mini rings
+everywhere 2.82x / 1.58 %. On these 80 x 40 m blocks a two-lane ring leaves 10 m of road to the next junction and takes
+23 % of the zoned land (final residents 16.3k vs 18.2k); mini rings take 1-9 %. Step time (`bench`, 20,000 citizens,
+no rings): unchanged (808-851 us mean against 815-846 us). Overlapping car bodies over a 07:00-09:00 rush: avenue city
+with rings 1 pair-tick (0.05 m), streets city with minis 7 (at most 0.09 m).
+
+With people walking (r7-walk merged; 10 seeds, 15 days; commute over free flow / trips given up at 9-11k residents):
+avenue city 1.90x / 0.43 %, with two-lane rings 2.13x / 0.52 %, with mini rings 1.89x / 0.42 %; streets city 3.43x /
+2.25 %, with small/mini rings 3.56x / 2.67 %, with mini rings everywhere 2.86x / 2.10 %.
+
+Incremental junction sync (plan-preview-fast): a junction whose own roads are unchanged (`JunctionInputs`) only has
+its control and queues reset; a ring junction is always built again (its paths and land depend on the arms' far ends
+and its neighbours), and `roundabout::set` drops the node's inputs, so setting or removing a ring rebuilds it.
+`RemoveRoads` taking an arm, and an edit that leaves a ring no room, go through the same `sync_junctions` as any road
+edit (the ring is dropped, its reserve's cars and land handed back). Checked in lockstep against rebuilding every
+junction: `traffic::junction_sync_tests::incremental_junction_sync_with_roundabouts`.
+
 ## 2026-11-27 (r7-walk: people walk)
 
 Citizens walk on the map: they leave a door, walk the pavements, wait at the kerb, cross on the zebras and go in at

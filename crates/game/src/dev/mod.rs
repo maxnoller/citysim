@@ -16,6 +16,7 @@
 
 mod autoshot;
 mod control;
+mod rings;
 mod scenario;
 mod shapes;
 pub mod sheet;
@@ -41,6 +42,8 @@ pub enum DemoKind {
     /// gfx's road-shape test town (`shapes`): odd-angle junctions, a
     /// rotated grid, a ring, cul-de-sacs.
     Shapes,
+    /// A town with roundabouts of every size (`rings`).
+    Rings,
     /// The model sheet (`sheet`): every generated model lined up.
     Models,
 }
@@ -93,10 +96,13 @@ impl DevConfig {
             Some("hierarchy") => Some(DemoKind::Hierarchy),
             Some("organic") => Some(DemoKind::Organic),
             Some("shapes") => Some(DemoKind::Shapes),
+            Some("rings") => Some(DemoKind::Rings),
             Some("models") => Some(DemoKind::Models),
             Some("" | "0") | None => None,
             Some(other) => {
-                eprintln!("unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy, organic, shapes, models or jam)");
+                eprintln!(
+                    "unknown CITYSIM_DEMO={other:?} (use town, city, hierarchy, organic, shapes, rings, models or jam)"
+                );
                 None
             }
         };
@@ -138,6 +144,19 @@ impl Plugin for DevPlugin {
         let c = &self.config;
         if let Some(kind) = c.demo {
             app.add_plugins(scenario::ScenarioPlugin { kind });
+        }
+        // `CITYSIM_FRAME_STEP=fps`: every frame advances exactly 1 / fps of
+        // game time, however long it took (real play recorded on a slow
+        // renderer: drop the repeated frames of a screen capture and play
+        // the rest at `fps` for smooth motion).
+        if let Some(fps) = std::env::var("CITYSIM_FRAME_STEP")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|f| *f > 0.0)
+        {
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f64(1.0 / fps),
+            ));
         }
         if std::env::var("CITYSIM_LOG_FPS").is_ok_and(|v| !v.is_empty() && v != "0") {
             app.add_plugins((

@@ -106,7 +106,7 @@ pub fn large_loss(buildings: usize, people: usize) -> bool {
 /// line: "Demolishes 3 homes, 11 residents · $6", "2 homes, 1 shop · 23
 /// residents, 6 jobs"; for a large loss a warning line too. `cost`: what the demolition adds to a
 /// road's price (shown with the buildings when not zero).
-fn loss_lines(world: &World, ids: &[citysim_sim::BuildingId], cost: Option<i64>) -> Vec<Line> {
+pub fn loss_lines(world: &World, ids: &[citysim_sim::BuildingId], cost: Option<i64>) -> Vec<Line> {
     let mut lines = Vec::new();
     if ids.is_empty() {
         return lines;

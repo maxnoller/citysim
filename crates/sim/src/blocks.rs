@@ -744,6 +744,16 @@ impl Ctx {
             roads.add(polys.len() as u32, [lo[0] - r, lo[1] - r], [hi[0] + r, hi[1] + r]);
             polys.push((pts, r, lo, hi));
         }
+        // Roundabouts keep the land of their ring clear, as a road does.
+        for (_, c, r) in crate::roundabout::reserves(world) {
+            let (lo, hi) = ([c[0] - r, c[1] - r], [c[0] + r, c[1] + r]);
+            if !mask.touches(lo, hi, m) {
+                continue;
+            }
+            let (pts, half) = ring_poly(c, r);
+            roads.add(polys.len() as u32, lo, hi);
+            polys.push((pts, half, lo, hi));
+        }
         let mut buildings = Tiles::new();
         let mut bpolys = Vec::new();
         for (id, b) in world.buildings.iter() {
@@ -831,6 +841,41 @@ fn poly_quad_dist(pts: &[[f32; 2]], q: &[[f32; 2]; 4]) -> f32 {
 
 fn in_quad_strict(q: &[[f32; 2]; 4], p: [f32; 2]) -> bool {
     crate::zoning::in_quad(q, p)
+}
+
+/// The land of a ring of radius `r` round `c` as a road reserve: a circle
+/// of half the radius and a reserve of half the radius cover the disc.
+fn ring_poly(c: [f32; 2], r: f32) -> (Vec<[f32; 2]>, f32) {
+    let half = r * 0.5;
+    let pts = (0..=48)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::TAU / 48.0;
+            [c[0] + half * libm::cosf(a), c[1] + half * libm::sinf(a)]
+        })
+        .collect();
+    (pts, half)
+}
+
+/// Zone cells a ring of radius `r` round `c` would cover (measured as the
+/// reserve of a road is: their square shrunk by `ROAD_SHRINK`).
+pub(crate) fn cells_under_ring(world: &World, c: [f32; 2], r: f32) -> Vec<CellRef> {
+    let e = r + CELL_SIZE;
+    let quad = [
+        [c[0] - e, c[1] - e],
+        [c[0] + e, c[1] - e],
+        [c[0] + e, c[1] + e],
+        [c[0] - e, c[1] + e],
+    ];
+    let (pts, half) = ring_poly(c, r);
+    crate::zoning::cells_in_quad(world, &quad)
+        .into_iter()
+        .filter(|cr| {
+            world
+                .zoning
+                .lattice(cr.lattice)
+                .is_some_and(|l| poly_quad_dist(&pts, &square(l, cr.i, cr.j, ROAD_SHRINK)) < half)
+        })
+        .collect()
 }
 
 /// Is cell `(i, j)` of `l` under a road's reserve?

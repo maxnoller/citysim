@@ -241,6 +241,12 @@ pub struct ToolPreview {
     pub error: Option<CommandError>,
     /// Money it would cost.
     pub cost: i64,
+    /// Junction tool with a roundabout size picked, over a junction: the
+    /// ring it would build there (gfx draws it from
+    /// `roundabout::plan_ring`: outline and island, in the tool's colour,
+    /// red with `error`; the buildings it takes are
+    /// `WorldHighlight::doomed_buildings`).
+    pub roundabout: Option<(citysim_sim::NodeId, citysim_sim::RoundaboutSize)>,
 }
 
 impl ToolPreview {

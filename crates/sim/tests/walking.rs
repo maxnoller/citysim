@@ -214,3 +214,97 @@ fn a_road_edit_under_walking_people_reroutes_them() {
     }
     w.check_sim_invariants().unwrap();
 }
+
+#[allow(dead_code)]
+mod rings_demo {
+    include!("../../game/src/dev/rings.rs");
+}
+
+/// The roundabouts' walks: a pavement round each ring and a zebra across
+/// each arm a car length out; people cross there, cars leaving and entering
+/// the ring wait for them and never touch them.
+#[test]
+fn people_walk_round_roundabouts_and_cars_wait_for_them() {
+    let mut w = World::new(4);
+    scenarios::prebuilt(&mut w, |w| {
+        let refused = rings_demo::rings(w);
+        assert!(refused.is_empty(), "{refused:?}");
+    });
+    let until = 2 * DAY + 7 * HOUR - balance::START_TICK_OF_DAY as u64;
+    while w.time.tick < until {
+        w.step();
+    }
+    // Every ring arm has its zebra, and the pavement goes round.
+    let rings: Vec<NodeId> = junction::junction_nodes(&w)
+        .filter(|&n| roundabout::roundabout(&w, n).is_some())
+        .collect();
+    assert_eq!(rings.len(), 5);
+    let net = walk::network(&w).expect("network").clone();
+    for &n in &rings {
+        let arms = w.roads.nodes[n].segments.len();
+        let zebras = net.crossings.iter().filter(|c| c.ring == Some(n)).count();
+        assert_eq!(zebras, arms, "a zebra across every arm of ring {n:?}");
+        for c in net.crossings.iter().filter(|c| c.ring == Some(n)) {
+            let d = geom::dist(c.center, w.roads.nodes[n].pos);
+            let r = roundabout::ring(&w, n).unwrap().dims.outer_r;
+            assert!(
+                d > r + balance::RING_ZEBRA_M - 1.5,
+                "zebra set back from the ring: {d} vs {r}"
+            );
+        }
+    }
+    // Round the large ring on foot from one arm's pavement to the opposite one.
+    let large = rings
+        .iter()
+        .copied()
+        .find(|&n| roundabout::roundabout(&w, n) == Some(RoundaboutSize::Large))
+        .unwrap();
+    let c = w.roads.nodes[large].pos;
+    let mut net2 = net.clone();
+    let route = net2
+        .route([c[0] - 34.0, c[1] - 12.0], [c[0] + 34.0, c[1] + 12.0], 400.0)
+        .expect("a way round the ring");
+    assert!(
+        route
+            .pts
+            .iter()
+            .all(|p| geom::dist(*p, c) > roundabout::ring(&w, large).unwrap().dims.outer_r)
+    );
+    // Two hours of the morning: nobody run over, people cross the ring
+    // zebras and cars wait for them.
+    let ring_cross: Vec<walk::CrossingKey> = net
+        .crossings
+        .iter()
+        .filter(|c| c.ring.is_some())
+        .map(|c| c.key)
+        .collect();
+    let held0 = walk::debug_holds(&w);
+    let (mut crossed, mut hits) = (0u64, Vec::new());
+    for _ in 0..2 * HOUR {
+        w.step();
+        let people = walk::people_on_crossings(&w);
+        let bodies = traffic::car_bodies(&w);
+        for &(p, r) in &people {
+            for (id, q) in &bodies {
+                if circle_hits_quad(p, r, q) && hits.len() < 10 {
+                    hits.push(format!("tick {} person at {p:?} car {id:?}", w.time.tick));
+                }
+            }
+        }
+        crossed += w
+            .walking
+            .walkers
+            .values()
+            .filter(|x| x.state == WalkState::Crossing && x.crossing().is_some_and(|k| ring_cross.contains(&k)))
+            .count() as u64;
+    }
+    let held = walk::debug_holds(&w)[3] - held0[3];
+    eprintln!(
+        "ring zebras: {crossed} person-ticks crossing, cars held {held} car-ticks at zebras, {} hits",
+        hits.len()
+    );
+    assert!(hits.is_empty(), "cars over people:\n{}", hits.join("\n"));
+    assert!(crossed > 0, "people crossed the ring zebras");
+    assert!(held > 0, "cars waited at zebras");
+    w.check_sim_invariants().unwrap();
+}

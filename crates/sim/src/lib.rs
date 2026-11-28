@@ -53,6 +53,7 @@ pub mod people;
 pub mod restore;
 pub mod rng;
 pub mod roads;
+pub mod roundabout;
 pub mod save;
 pub mod scenarios;
 pub mod side;
@@ -96,6 +97,7 @@ pub use people::{CommuteMoves, LifeCounts, People, PeopleDay, PlacePeople, TripT
 pub use restore::{BuildingRecord, RestoreProblem};
 pub use rng::Rng;
 pub use roads::{NodeId, RoadKind, RoadNetwork, RoadNode, RoadSegment, SegmentId};
+pub use roundabout::{RingProblem, RoundaboutSize};
 pub use save::LoadError;
 pub use side::SideTable;
 pub use stats::Stats;

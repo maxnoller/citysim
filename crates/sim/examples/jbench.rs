@@ -2,11 +2,78 @@
 //! through one junction of each kind, saturated from every approach.
 //!
 //! `cargo run -p citysim_sim --release --example jbench [csv]`
+//! `cargo run -p citysim_sim --release --example jbench rings [csv]`: give-way,
+//! signals and every roundabout size at a street crossing, an avenue
+//! crossing a street and two avenues, at 10, 30 and 50 % turning (half
+//! left, half right): cars per minute with every approach saturated, and
+//! the mean wait per car at a moderate demand.
 
 use citysim_sim::capacity::{Bench, Load, run};
 use citysim_sim::{JunctionSetting as S, RoadKind as K};
 
+fn rings(csv: Option<String>) {
+    use citysim_sim::RoundaboutSize as R;
+    let roads = [
+        ("street x street", K::Street, K::Street, (6.0, 6.0)),
+        ("avenue x street", K::Avenue, K::Street, (18.0, 6.0)),
+        ("avenue x avenue", K::Avenue, K::Avenue, (20.0, 20.0)),
+    ];
+    let controls: [(&str, S, Option<R>); 6] = [
+        ("give-way", S::Priority, None),
+        ("signals", S::Signal, None),
+        ("mini", S::Priority, Some(R::Mini)),
+        ("small", S::Priority, Some(R::Small)),
+        ("medium", S::Priority, Some(R::Medium)),
+        ("large", S::Priority, Some(R::Large)),
+    ];
+    // `JBENCH_WALKERS=n`: people a minute walking past every junction.
+    let walkers: f32 = std::env::var("JBENCH_WALKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let mut out = String::from("roads,turning,control,saturated_per_min,cross_share,gave_up,moderate_wait_s\n");
+    for (name, main, cross, (rm, rc)) in roads {
+        for turning in [0.1f32, 0.3, 0.5] {
+            for (cname, setting, ring) in controls {
+                let mut b = Bench::crossing(main, cross, setting)
+                    .turning(turning * 0.5, turning * 0.5)
+                    .walkers(walkers);
+                if let Some(r) = ring {
+                    let (w, n) = citysim_sim::capacity::build(&Bench::crossing(main, cross, setting));
+                    if n.is_some_and(|n| citysim_sim::roundabout::sizes(&w, n)[r as usize].1.is_err()) {
+                        println!("{name:16} {:3.0}% {cname:9} does not fit", turning * 100.0);
+                        continue;
+                    }
+                    b = b.roundabout(r);
+                }
+                let sat = run(&b, 7, 120, 600);
+                let moderate = run(&b.clone().loads(Load::Rate(rm), Load::Rate(rc)), 7, 120, 600);
+                let share = sat.cross_per_minute / sat.per_minute.max(1e-3);
+                println!(
+                    "{name:16} {:3.0}% {cname:9} saturated {:6.1}/min (side roads {:4.0}%, gave up {:3})  moderate: wait {:5.1} s",
+                    turning * 100.0,
+                    sat.per_minute,
+                    share * 100.0,
+                    sat.gave_up,
+                    moderate.mean_wait_s
+                );
+                out.push_str(&format!(
+                    "{name},{turning},{cname},{:.1},{:.3},{},{:.2}\n",
+                    sat.per_minute, share, sat.gave_up, moderate.mean_wait_s
+                ));
+            }
+        }
+    }
+    if let Some(p) = csv {
+        std::fs::write(p, out).unwrap();
+    }
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("rings") {
+        rings(std::env::args().nth(2));
+        return;
+    }
     let csv = std::env::args().nth(1).filter(|a| !a.starts_with("only="));
     let only: Option<String> = std::env::args().find_map(|a| a.strip_prefix("only=").map(str::to_string));
     let cases: Vec<(&str, Bench)> = vec![

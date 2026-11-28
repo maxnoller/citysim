@@ -87,6 +87,20 @@ pub enum Command {
     /// not settled elsewhere, and the demolition cost refunded. Refused
     /// (`CannotRestore`) when the lot has changed. See [`crate::restore`].
     RestoreBuilding(Box<crate::restore::BuildingRecord>),
+    /// Make the junction at `node` a roundabout of `size`, or (`None`) an
+    /// ordinary junction again (its control setting as before). The roads
+    /// stay; the arms end at the ring. Buildings on the ring's land are
+    /// taken down (`Preview::buildings`, the bulldozer's price is part of
+    /// `cost`), zone cells under it are blocked. Refused with
+    /// `CommandError::Roundabout` and the reason when that size does not
+    /// fit (see `roundabout::fit`). Priced by size
+    /// (`balance::ROUNDABOUT_COST`); a change of size pays the new size,
+    /// taking a roundabout away refunds nothing and is never refused for
+    /// money.
+    SetRoundabout {
+        node: NodeId,
+        size: Option<crate::roundabout::RoundaboutSize>,
+    },
     /// A road command (`BuildRoad`, `BuildCurve`, `SetRoadKind`) that clears
     /// its way: the buildings standing in the reserve the road needs
     /// (`RoadKind::reserve_half_width_m`, measured as the refusal measures
@@ -179,6 +193,8 @@ pub enum CommandError {
     },
     /// `RestoreBuilding`: the building cannot be put back, and why.
     CannotRestore(crate::restore::RestoreProblem),
+    /// `SetRoundabout`: why that roundabout does not fit there.
+    Roundabout(crate::roundabout::RingProblem),
     /// `Clearing` around a command that does not build or change a road.
     NotARoadCommand,
     /// `Refund`: no such payment (refunded already, too old, or from
@@ -201,6 +217,7 @@ impl CommandError {
             | CommandError::BuildingInTheWay { at, .. }
             | CommandError::OffMap { at }
             | CommandError::TooManyArms { at, .. } => Some(at),
+            CommandError::Roundabout(p) => p.at(),
             _ => None,
         }
     }
@@ -235,6 +252,7 @@ impl fmt::Display for CommandError {
             CommandError::NotANode => write!(f, "no junction there"),
             CommandError::TooManyArms { arms, .. } => write!(f, "{arms} roads cannot meet at one junction"),
             CommandError::CannotRestore(p) => write!(f, "cannot put the building back: {p}"),
+            CommandError::Roundabout(p) => write!(f, "{p}"),
             CommandError::NotARoadCommand => write!(f, "only roads clear their way"),
             CommandError::NoSuchReceipt => write!(f, "nothing to refund"),
         }
@@ -262,6 +280,8 @@ pub struct Preview {
     pub downgraded: u32,
     /// Junction control: what changes.
     pub junction: Option<JunctionChange>,
+    /// `SetRoundabout`: what changes.
+    pub roundabout: Option<RoundaboutChange>,
     /// Roads: the pieces built or changed, as they will be (split at every
     /// node they will have).
     pub pieces: Vec<PlannedPiece>,
@@ -274,11 +294,12 @@ pub struct Preview {
     /// Removal, and roads clearing their way (`Command::Clearing`):
     /// buildings demolished, in id order.
     pub buildings: Vec<BuildingId>,
-    /// Roads clearing their way: the part of `cost` that pays for taking
-    /// down `buildings` (the bulldozer's price).
+    /// Roads clearing their way and roundabouts: the part of `cost` that
+    /// pays for taking down `buildings` (the bulldozer's price).
     pub demolition_cost: i64,
-    /// Road commands: the part of `cost` paid for road (the rest is
-    /// `demolition_cost`); `Command::Refund` can give it back.
+    /// Road commands and `SetRoundabout`: the part of `cost` paid for road
+    /// or ring (the rest is `demolition_cost`); `Command::Refund` can give
+    /// it back.
     pub road_cost: i64,
     /// Zoning: the cells that get (un)zoned.
     pub zone_cells: Vec<CellRef>,
@@ -330,6 +351,14 @@ pub struct JunctionChange {
     pub control_after: JunctionControl,
 }
 
+/// Effect of `Command::SetRoundabout`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RoundaboutChange {
+    pub node: NodeId,
+    pub before: Option<crate::roundabout::RoundaboutSize>,
+    pub after: Option<crate::roundabout::RoundaboutSize>,
+}
+
 /// What a command did. Returned by `World::apply`; equals the preview.
 pub type Outcome = Preview;
 
@@ -372,6 +401,12 @@ pub(crate) enum Plan {
     Restore {
         rec: Box<crate::restore::BuildingRecord>,
         footprint: crate::Footprint,
+    },
+    Roundabout {
+        change: RoundaboutChange,
+        buildings: Vec<BuildingId>,
+        zone_cells: Vec<CellRef>,
+        cost: i64,
     },
     Refund {
         tick: u64,
@@ -464,6 +499,20 @@ impl Plan {
             Plan::Junction { cell, change } => Preview {
                 cells: vec![*cell],
                 junction: Some(*change),
+                ..Preview::default()
+            },
+            Plan::Roundabout {
+                change,
+                buildings,
+                zone_cells,
+                cost,
+            } => Preview {
+                cost: *cost,
+                roundabout: Some(*change),
+                road_cost: change.after.map_or(0, |s| s.cost()),
+                demolition_cost: build::demolition_price(world, buildings),
+                buildings: buildings.clone(),
+                zone_cells: zone_cells.clone(),
                 ..Preview::default()
             },
             Plan::Restore { rec, footprint } => {
@@ -633,6 +682,7 @@ pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
             }
             plan_junction(world, node, Cell::from_pos(n.pos), control)
         }
+        &Command::SetRoundabout { node, size } => plan_roundabout(world, node, size),
         Command::RestoreBuilding(rec) => {
             let footprint = crate::restore::plan(world, rec).map_err(CommandError::CannotRestore)?;
             Ok(Plan::Restore {
@@ -837,12 +887,71 @@ fn plan_area(world: &World, quad: &[[f32; 2]; 4], rect: Option<CellRect>) -> Res
     })
 }
 
+/// A roundabout of `size` at `node` (or none).
+fn plan_roundabout(
+    world: &World,
+    node: NodeId,
+    size: Option<crate::roundabout::RoundaboutSize>,
+) -> Result<Plan, CommandError> {
+    use crate::roundabout::RingProblem;
+    let deg = world
+        .roads
+        .nodes
+        .get(node)
+        .ok_or(CommandError::NotANode)?
+        .segments
+        .len();
+    let before = world.traffic.junction_states.get(node).and_then(|j| j.ring);
+    if before == size {
+        return Err(CommandError::Roundabout(if size.is_none() {
+            RingProblem::NotARoundabout
+        } else {
+            RingProblem::AlreadyThatSize
+        }));
+    }
+    let change = RoundaboutChange {
+        node,
+        before,
+        after: size,
+    };
+    let Some(size) = size else {
+        return Ok(Plan::Roundabout {
+            change,
+            buildings: Vec::new(),
+            zone_cells: Vec::new(),
+            cost: 0,
+        });
+    };
+    if deg < 3 {
+        return Err(CommandError::Roundabout(RingProblem::TooFewArms));
+    }
+    crate::roundabout::fit(&world.roads, &world.traffic.junction_states, node, size)
+        .map_err(CommandError::Roundabout)?;
+    let (zone_cells, buildings) = crate::roundabout::land_taken(world, node, size);
+    // The rule roads use: buildings that give way to roads are taken down,
+    // any other refuses the ring.
+    if let Some(&building) = buildings.iter().find(|&&b| !world.buildings[b].gives_way_to_roads()) {
+        return Err(CommandError::BuildingInTheWay {
+            at: world.buildings[building].center(),
+            building,
+        });
+    }
+    let cost = size.cost() + build::demolition_price(world, &buildings);
+    afford(world, cost)?;
+    Ok(Plan::Roundabout {
+        change,
+        buildings,
+        zone_cells,
+        cost,
+    })
+}
+
 fn plan_junction(world: &World, node: NodeId, cell: Cell, setting: JunctionSetting) -> Result<Plan, CommandError> {
     let fresh;
     let state = match world.traffic.junction_states.get(node) {
         Some(j) if j.arms.len() == world.roads.nodes[node].segments.len() => j,
         old => {
-            fresh = crate::junction::build_state(&world.roads, node, old);
+            fresh = crate::junction::build_state(&world.roads, &world.traffic.junction_states, node, old);
             &fresh
         }
     };
@@ -949,6 +1058,21 @@ pub(crate) fn execute(world: &mut World, plan: Plan) -> Outcome {
         Plan::Tax(r) => world.economy.tax_rate = r,
         Plan::Restore { rec, footprint } => {
             crate::restore::execute(world, &rec, footprint);
+        }
+        Plan::Roundabout {
+            change,
+            buildings,
+            cost,
+            ..
+        } => {
+            crate::growth::remove_buildings(world, &buildings);
+            crate::roundabout::set(world, change.node, change.after);
+            world.economy.money -= cost;
+            // The ring's price can be given back by undo (`Refund`).
+            if preview.road_cost > 0 {
+                let tick = world.time.tick;
+                world.economy.receipts.issue(tick, preview.road_cost);
+            }
         }
         Plan::Refund { tick, amount } => {
             if world.economy.receipts.redeem(tick, amount) {

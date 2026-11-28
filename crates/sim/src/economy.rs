@@ -372,7 +372,7 @@ impl Default for Economy {
 }
 
 /// A day's running costs by what they pay for (whole dollars, positive),
-/// for the budget panel. `streets + avenues + highway + signals` is
+/// for the budget panel. `streets + avenues + highway + signals + roundabouts` is
 /// [`Budget::road_upkeep`], `services_base + services_city_size +
 /// services_density` is [`Budget::services`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -387,6 +387,12 @@ pub struct RunningCosts {
     pub signals: i64,
     /// How many junctions have traffic lights.
     pub signal_count: u32,
+    /// Roundabouts at `ROUNDABOUT_UPKEEP_PER_DAY` by size (saved in the
+    /// extension block).
+    #[serde(skip)]
+    pub roundabouts: i64,
+    #[serde(skip)]
+    pub roundabout_count: u32,
     /// Residents at `SERVICES_COST_PER_RESIDENT_PER_DAY`.
     pub services_base: i64,
     /// The extra cost of a big city's services
@@ -400,7 +406,7 @@ pub struct RunningCosts {
 
 impl RunningCosts {
     pub fn road_upkeep(&self) -> i64 {
-        self.streets + self.avenues + self.highway + self.signals
+        self.streets + self.avenues + self.highway + self.signals + self.roundabouts
     }
 
     pub fn services(&self) -> i64 {
@@ -429,6 +435,12 @@ pub fn running_costs(world: &World) -> RunningCosts {
         .values()
         .filter(|j| j.control == crate::JunctionControl::Signal)
         .count() as u32;
+    let (roundabout_count, roundabouts) = world
+        .traffic
+        .junction_states
+        .values()
+        .filter_map(|j| j.ring)
+        .fold((0u32, 0i64), |(n, c), r| (n + 1, c + r.upkeep_per_day()));
     let s = &world.stats;
     let highway_cells = (balance::HIGHWAY_STUB_CELLS as u32).min(s.road_cells);
     let street_cells = s.road_cells.saturating_sub(s.avenue_cells + highway_cells);
@@ -438,6 +450,8 @@ pub fn running_costs(world: &World) -> RunningCosts {
         highway: highway_cells as i64 * balance::ROAD_UPKEEP_PER_CELL_PER_DAY,
         signals: signal_count as i64 * balance::SIGNAL_UPKEEP_PER_DAY,
         signal_count,
+        roundabouts,
+        roundabout_count,
         services_base: (res as f64 * balance::SERVICES_COST_PER_RESIDENT_PER_DAY as f64 * level).round() as i64,
         services_city_size: (res as f64 * size * level).round() as i64,
         services_density: (dense * level).round() as i64,

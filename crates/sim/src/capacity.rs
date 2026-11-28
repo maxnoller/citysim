@@ -53,7 +53,16 @@ pub struct Bench {
     /// Demand on the main road's approaches and on the cross road's.
     pub main_load: Load,
     pub cross_load: Load,
+    /// A roundabout of this size at the junction (over `control`).
+    pub ring: Option<crate::roundabout::RoundaboutSize>,
+    /// People a minute walking past the junction (from a pavement of one
+    /// arm, `WALK_FROM_M` out, to one of another arm or the other side of
+    /// the same one, over the zebras on the way).
+    pub walkers_per_min: f32,
 }
+
+/// Where the bench's people start and end, metres from the junction.
+const WALK_FROM_M: f32 = 55.0;
 
 impl Bench {
     pub fn crossing(main: RoadKind, cross: RoadKind, control: JunctionSetting) -> Bench {
@@ -66,7 +75,21 @@ impl Bench {
             right: 0.0,
             main_load: Load::Saturated,
             cross_load: Load::Saturated,
+            ring: None,
+            walkers_per_min: 0.0,
         }
+    }
+
+    /// People walking past the junction, a minute.
+    pub fn walkers(mut self, per_min: f32) -> Bench {
+        self.walkers_per_min = per_min;
+        self
+    }
+
+    /// The junction as a roundabout of `size`.
+    pub fn roundabout(mut self, size: crate::roundabout::RoundaboutSize) -> Bench {
+        self.ring = Some(size);
+        self
     }
 
     pub fn turning(mut self, left: f32, right: f32) -> Bench {
@@ -109,6 +132,9 @@ pub struct BenchResult {
     pub main_by_lane: [f32; 2],
     /// Entries by turn (straight, right, left, U-turn), cars per minute.
     pub by_turn: [f32; 4],
+    /// Mean seconds a car entering the junction stood (below
+    /// `WAIT_SPEED`) on its way there (queueing and waiting at the line).
+    pub mean_wait_s: f32,
 }
 
 struct ArmInfo {
@@ -147,6 +173,13 @@ pub fn build(b: &Bench) -> (World, Option<NodeId>) {
             control: b.control,
         })
         .expect("bench junction control");
+        if let Some(size) = b.ring {
+            w.apply(Command::SetRoundabout {
+                node: n,
+                size: Some(size),
+            })
+            .expect("bench roundabout");
+        }
     }
     w.economy.money = i64::MAX / 4;
     // Settle the junction tables.
@@ -237,8 +270,44 @@ pub fn run_traced(
     let mut green_ticks = [0u64; 4];
     let mut green_entries = [0u64; 4];
     let mut gave_up_base = w.traffic.stuck_removed;
+    let mut standing: std::collections::BTreeMap<VehicleId, u32> = Default::default();
+    let (mut wait_sum, mut wait_n) = (0u64, 0u64);
+    let mut walk_acc = 0.0f32;
+    let mut walk_n = 0u32;
+    let walk_spots: Vec<[f32; 2]> = arms
+        .iter()
+        .zip(dirs)
+        .filter_map(|(a, (dx, dy))| {
+            let a = a.as_ref()?;
+            let kind = w.roads.segments[a.segment].kind;
+            let off = kind.half_width_m() + crate::walk::pavement_m(kind) * 0.5;
+            let c = cell(0, 0).center();
+            let (d, r) = ([dx as f32, dy as f32], [-dy as f32, dx as f32]);
+            Some([1.0f32, -1.0].map(|side| {
+                [
+                    c[0] + d[0] * WALK_FROM_M + r[0] * off * side,
+                    c[1] + d[1] * WALK_FROM_M + r[1] * off * side,
+                ]
+            }))
+        })
+        .flatten()
+        .collect();
     for t in 0..total_s * tps {
         let measuring = t >= warmup_s * tps;
+        // People walking past.
+        if b.walkers_per_min > 0.0 && walk_spots.len() >= 2 {
+            walk_acc += b.walkers_per_min / 60.0 / tps as f32;
+            while walk_acc >= 1.0 {
+                walk_acc -= 1.0;
+                let i = rng.below(walk_spots.len() as u32) as usize;
+                let mut j = rng.below(walk_spots.len() as u32 - 1) as usize;
+                if j >= i {
+                    j += 1;
+                }
+                walk_n += 1;
+                crate::walk::bench_walk(&mut w, walk_spots[i], walk_spots[j], walk_n);
+            }
+        }
         if t == warmup_s * tps {
             gave_up_base = w.traffic.stuck_removed;
         }
@@ -286,6 +355,11 @@ pub fn run_traced(
         }
         w.step();
         trace(&w, node, t);
+        for (id, v) in w.vehicles.iter() {
+            if v.junction.is_none() && v.speed < crate::balance::WAIT_SPEED {
+                *standing.entry(id).or_default() += 1;
+            }
+        }
         // Entries into the box.
         if let Some(n) = node {
             let mut now_in: Vec<VehicleId> = Vec::new();
@@ -293,6 +367,8 @@ pub fn run_traced(
                 if let Some(jm) = v.junction.filter(|jm| jm.node == n) {
                     now_in.push(id);
                     if measuring && !in_box.contains(&id) {
+                        wait_sum += standing.get(&id).copied().unwrap_or(0) as u64;
+                        wait_n += 1;
                         let from = arms
                             .iter()
                             .position(|a| a.as_ref().is_some_and(|a| a.segment == jm.from));
@@ -352,6 +428,7 @@ pub fn run_traced(
         control,
         main_by_lane: lane_count.map(|c| c as f32 / mins),
         by_turn: turn_count.map(|c| c as f32 / mins),
+        mean_wait_s: wait_sum as f32 / wait_n.max(1) as f32 / tps as f32,
     }
 }
 

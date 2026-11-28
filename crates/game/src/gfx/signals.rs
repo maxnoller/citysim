@@ -240,8 +240,9 @@ fn furniture(
                     heads.push((arm.seg, c, face, true));
                 }
             }
-            JunctionControl::Priority => {
-                if major.get(&arm.seg).copied().unwrap_or(true) {
+            // Every arm of a roundabout gives way to the ring.
+            JunctionControl::Priority | JunctionControl::Roundabout => {
+                if control == JunctionControl::Priority && major.get(&arm.seg).copied().unwrap_or(true) {
                     continue;
                 }
                 // Give-way line (dashed) with triangles ("shark teeth")

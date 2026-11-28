@@ -28,6 +28,7 @@ mod perf;
 mod person_gen;
 mod props;
 mod record;
+mod ring_geom;
 mod road_geom;
 mod road_tool;
 mod roads;

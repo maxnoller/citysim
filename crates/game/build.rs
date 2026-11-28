@@ -38,6 +38,7 @@ fn main() {
         "Cargo.lock",
         "crates/game/src/dev/scenario.rs",
         "crates/game/src/dev/shapes.rs",
+        "crates/game/src/dev/rings.rs",
     ] {
         files.push(root.join(f));
     }

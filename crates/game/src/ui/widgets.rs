@@ -67,6 +67,8 @@ pub enum UiAction {
     ZoneDepth(u8),
     /// What a click with the junction tool does (None = next setting).
     JunctionBrush(Option<citysim_sim::JunctionSetting>),
+    /// The junction tool builds roundabouts of this size.
+    RingBrush(citysim_sim::RoundaboutSize),
     /// Set the control of the junction shown in the side panel.
     SetJunction(citysim_sim::JunctionSetting),
     /// People views: show a person, a building's people, a car.
@@ -670,7 +672,8 @@ pub fn is_active(action: UiAction, cx: &ActiveCtx<'_>) -> bool {
         UiAction::Perf(d) => cx.state.perf_choice == d,
         UiAction::Snap(r) => cx.opts.rule(r),
         UiAction::ZoneDepth(d) => matches!(cx.tool, ActiveTool::Zone(_)) && cx.opts.zone_depth == d,
-        UiAction::JunctionBrush(b) => cx.opts.junction_brush == b,
+        UiAction::JunctionBrush(b) => cx.opts.ring_brush.is_none() && cx.opts.junction_brush == b,
+        UiAction::RingBrush(s) => cx.opts.ring_brush == Some(s),
         UiAction::Follow => cx.state.following,
         UiAction::Keys => cx.state.keys_open,
         UiAction::OpenSettings => cx.state.settings_open,

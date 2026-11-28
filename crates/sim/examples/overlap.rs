@@ -6,7 +6,9 @@
 //! ```text
 //! cargo run -p citysim_sim --release --example overlap -- organic 6
 //! ```
-//! Arguments: scenario (`organic`, `hierarchy`, `streets`), days to grow
+//! Arguments: scenario (`organic`, `hierarchy`, `streets`; `rings`: the
+//! hierarchy city with two-lane rings on its avenue junctions,
+//! `street_minis`: the streets city with mini rings), days to grow
 //! first, hour to start (default 7). It then measures the next two in-game
 //! hours.
 
@@ -21,8 +23,8 @@ fn main() {
     let mut w = World::new(11);
     let mut p = None;
     match which.as_str() {
-        "hierarchy" => p = Some(GridPlayer::hierarchy()),
-        "streets" => p = Some(GridPlayer::new(&Zone::ALL)),
+        "hierarchy" | "rings" => p = Some(GridPlayer::hierarchy()),
+        "streets" | "street_minis" => p = Some(GridPlayer::new(&Zone::ALL)),
         _ => scenarios::prebuilt(&mut w, |w| {
             scenarios::organic(w);
         }),
@@ -30,10 +32,21 @@ fn main() {
     let hour: u64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(7);
     let start = days as u64 * balance::TICKS_PER_DAY as u64 + hour * balance::TICKS_PER_HOUR as u64
         - balance::START_TICK_OF_DAY as u64;
+    let rings = |w: &mut World| {
+        use citysim_sim::RoundaboutSize as R;
+        if w.time.tick % balance::TICKS_PER_HOUR as u64 == 1 {
+            match which.as_str() {
+                "rings" => drop(scenarios::add_roundabouts_of(w, &[R::Large, R::Medium], &[], 20_000)),
+                "street_minis" => drop(scenarios::add_roundabouts_of(w, &[], &[R::Mini], 20_000)),
+                _ => {}
+            }
+        }
+    };
     while w.time.tick < start {
         if let Some(p) = p.as_mut() {
             p.act(&mut w);
         }
+        rings(&mut w);
         w.step();
     }
     let (mut pairs, mut worst, mut ticks, mut cars) = (0u64, 0usize, 0u64, 0u64);
@@ -43,6 +56,7 @@ fn main() {
         if let Some(p) = p.as_mut() {
             p.act(&mut w);
         }
+        rings(&mut w);
         w.step();
         ticks += 1;
         let bodies = traffic::car_bodies(&w);
@@ -103,7 +117,9 @@ fn main() {
                     }
                 }
             }
+            let on_ring = |v: &Vehicle| v.junction.is_some_and(|j| roundabout::roundabout(&w, j.node).is_some());
             let k = match (va.junction.is_some(), vb.junction.is_some()) {
+                _ if on_ring(va) || on_ring(vb) => "a roundabout",
                 (true, true) => "both in a junction box",
                 (true, false) | (false, true) => "box and lane",
                 _ if va.segment == vb.segment && va.forward == vb.forward && va.lane == vb.lane => "same lane",

@@ -212,7 +212,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   gfx draws them in `gfx/people.rs` (figures from `gfx/person_gen.rs`: 8 builds x 8 walk poses + standing, colours
   per person by `MeshTag` and the palette lists in the day buffer, `city.wesl` kinds 10-13; sampled every fixed update
   and drawn at the cars' drawn moment); ui hovers / follows them (`FollowOn::Walker`, `DrawnPoses::walkers`).
-- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5, walkers in block 6; version 6 loads, its zoning
+- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5, walkers in block 6, roundabouts in block 7 (wrapping 6); version 6 loads, its zoning
   is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
   `crates/sim/tests/data/round1_town.citysave`), version 5 is refused; `World::load` rejects structurally damaged
   saves. Round-1 saves keep their old second-row buildings until they are rebuilt.
@@ -229,6 +229,22 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `lane`, `lane_shift`, `junction: Option<JunctionMove>`, `braking`, `stopped()`, `route`; `drive::vehicle_pose(world,
   v)` = exact lane pose. Money: `economy.fiscal` (`FiscalState`, `reason.text()`, `service_level`). Renders:
   `cargo run -p citysim_sim --release --example topdown -- signal|lots|video|watch out`.
+- Roundabouts (`docs/r4-sim-contract.md`, "r7-roundabout"): a setting of a junction node, `Command::SetRoundabout { node,
+  size: Option<RoundaboutSize::{Mini, Small, Medium, Large}> }` (refused with `CommandError::Roundabout(RingProblem)`
+  and its reason; takes the buildings on its land by the roads' rule, `Preview::buildings`, refundable `road_cost`).
+  The road graph stays; arms end at give-way lines outside the ring, movements are ring paths (`Movement::ring_path()`,
+  draw them with `Movement::points`, never `curve`), `JunctionControl::Roundabout`, `roundabout::{ring, sizes,
+  plan_ring, roundabout}`. Land: a disc of `RingDims::reserve_r()` blocked for zoning. Saved in extension block 7
+  (wrapping block 6). People walk round rings: pavement round the outside, a zebra per arm `RING_ZEBRA_M` out from the
+  give-way line (`walk::Crossing::ring`, mid-block rules; cars leaving stop between ring and zebra).
+  gfx draws rings in `gfx/ring_geom.rs` (island planting by seed, lamps), the tool's ghost in `gfx/cursor.rs`
+  (`ToolPreview::roundabout`); ui: junction drawer's "Ring" row (`ToolOptions::ring_brush`, `UiAction::RingBrush`),
+  undo `plan::UndoRecord::Junction`; a click made while a plan is still going out in parts waits for its last part
+  (`ToolState::junction_wait`, the simulation held), ring previews are checked on-frame (≤ 0.13 ms at 10,000 residents, cached).
+  The incremental junction sync (`JunctionInputs`) always rebuilds a ring junction (its land depends on its
+  neighbours); `roundabout::set` drops the node's inputs. Demo `CITYSIM_DEMO=rings` (`dev/rings.rs`), UI shots `ring-fits|ring-refused|
+  ring-buildings|ring-existing`; `CITYSIM_FRAME_STEP=fps` (dev: every frame advances 1/fps of game time) and
+  `scripts/rplay.py` record real play smoothly on a slow renderer; control `find-ring-car X Y`.
 - Junction rules: a junction's stop lines sit `JUNCTION_MARGIN_M` (2.5 m) beyond the crossing
   carriageways (a bend: `BEND_MARGIN_M`), which leaves room for the zebra crossings gfx draws there; two movements
   conflict when their paths cross *or* come within `MOVEMENT_CLEARANCE_M` (car width plus room), so cars never
@@ -250,7 +266,7 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   target/debug/citysim` (≈7 s for one shot, ≈10 s for four, demo cached; 4-5 s of it is building the render
   pipelines). Nothing is hovered (no cursor): interface states with hover or tools still need `CITYSIM_UI_SHOTS` under
   Xvfb (the demo cache makes those ≈10 s too).
-- `CITYSIM_DEMO=town` (~1,500 residents) · `city` (~5,000, streets only) · `hierarchy` (`GridPlayer::hierarchy`,
+- `CITYSIM_DEMO=town` (~1,500 residents) · `rings` (roundabouts of every size, ~3,300) · `city` (~5,000, streets only) · `hierarchy` (`GridPlayer::hierarchy`,
   ~10,000 with avenues, ~50 s to build) · `jam` (bad layout, one overloaded junction): real towns built by
   `citysim_sim::scenarios` through commands and fast-forwarded before the first frame. `CITYSIM_DEMO_POP=n` target,
   `CITYSIM_DEMO_HOUR=h` stop time (default 8 = morning rush). `organic` = the sim's free-form town

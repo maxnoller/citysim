@@ -417,7 +417,91 @@ fn draw_ghost(
             }
         }
     }
+    if let Some((node, size)) = preview.roundabout {
+        ring_ghost(
+            &mut m,
+            &sim.world,
+            node,
+            size,
+            valid,
+            preview.error.as_ref().and_then(|e| e.at()),
+        );
+    }
     // Hide rather than remove `Mesh3d`: an entity whose Mesh3d was removed
     // and later re-inserted was never drawn again (seen with Bevy 0.20.1).
     show_mesh(&mut commands, &mut meshes, entity, &mut vis, m);
+}
+
+/// The roundabout the junction tool would build: its carriageway and
+/// island, the edge of the land it takes, the arms' give-way lines; red
+/// (with the trouble spot marked) when that size does not fit.
+fn ring_ghost(
+    m: &mut MeshBuilder,
+    world: &World,
+    node: citysim_sim::NodeId,
+    size: citysim_sim::RoundaboutSize,
+    valid: bool,
+    trouble: Option<[f32; 2]>,
+) {
+    use std::f32::consts::TAU;
+    let Some(pos) = world.roads.nodes.get(node).map(|n| Vec2::from(n.pos)) else {
+        return;
+    };
+    let dims = size.dims();
+    let plan = citysim_sim::roundabout::plan_ring(world, node, size).ok();
+    let y = heights::GHOST;
+    let base = if valid { palette::TOOL_OK } else { palette::TOOL_BAD };
+    let fill = lin(base.with_alpha(if valid { 0.42 } else { 0.3 }));
+    let edge = lin(mix(base, Color::WHITE, 0.35).with_alpha(0.95));
+    let island = lin(mix(palette::MEDIAN_GRASS, base, 0.35).with_alpha(0.55));
+    let ring = |m: &mut MeshBuilder, r0: f32, r1: f32, y: f32, c: [f32; 4]| {
+        let n = ((r1 * TAU) / 1.2).ceil().max(24.0) as usize;
+        for i in 0..n {
+            let (a, b) = (i as f32 / n as f32 * TAU, (i + 1) as f32 / n as f32 * TAU);
+            let d = |t: f32| Vec2::new(t.cos(), t.sin());
+            let q = [pos + d(a) * r0, pos + d(b) * r0, pos + d(b) * r1, pos + d(a) * r1];
+            m.quad_up(q.map(|v| Vec3::new(v.x, y, v.y)), c);
+        }
+    };
+    ring(m, dims.inner_r, dims.outer_r, y, fill);
+    ring(m, 0.0, dims.island_r, y, island);
+    ring(m, dims.outer_r - 0.25, dims.outer_r + 0.25, y + 0.01, edge);
+    // The edge of the land it takes: dashes.
+    let r = dims.reserve_r();
+    let n = ((r * TAU) / 3.0).ceil() as usize;
+    for i in (0..n).step_by(2) {
+        let (a, b) = (i as f32 / n as f32 * TAU, (i + 1) as f32 / n as f32 * TAU);
+        let d = |t: f32| Vec2::new(t.cos(), t.sin());
+        let q = [
+            pos + d(a) * (r - 0.2),
+            pos + d(b) * (r - 0.2),
+            pos + d(b) * (r + 0.2),
+            pos + d(a) * (r + 0.2),
+        ];
+        m.quad_up(q.map(|v| Vec3::new(v.x, y + 0.01, v.y)), edge);
+    }
+    // Give-way lines where the arms will end.
+    if let Some(p) = &plan {
+        for a in &p.arms {
+            let Some(seg) = world.roads.segments.get(a.segment) else {
+                continue;
+            };
+            let pose = seg.pose_dir(seg.a == node, a.setback, 0.0);
+            let (c, d) = (Vec2::from(pose.pos), Vec2::from(pose.dir));
+            let n = Vec2::new(-d.y, d.x) * a.kind.half_width_m();
+            let q = [c - n - d * 0.3, c + n - d * 0.3, c + n + d * 0.3, c - n + d * 0.3];
+            m.quad_up(q.map(|v| Vec3::new(v.x, y + 0.02, v.y)), edge);
+        }
+    }
+    if let Some(t) = trouble {
+        let t = Vec2::from(t);
+        let bad = lin(palette::TOOL_BAD.with_alpha(0.9));
+        let n = 20;
+        for i in 0..n {
+            let (a, b) = (i as f32 / n as f32 * TAU, (i + 1) as f32 / n as f32 * TAU);
+            let d = |s: f32| Vec2::new(s.cos(), s.sin());
+            let q = [t + d(a) * 1.2, t + d(b) * 1.2, t + d(b) * 2.2, t + d(a) * 2.2];
+            m.quad_up(q.map(|v| Vec3::new(v.x, y + 0.03, v.y)), bad);
+        }
+    }
 }

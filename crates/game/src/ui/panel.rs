@@ -454,6 +454,10 @@ fn people_input(
                 if let Some(WorldTarget::Junction { node, .. }) = highlight.selected {
                     let cmd = Command::SetNodeControl { node, control: s };
                     if sim.world.preview(&cmd).is_ok() {
+                        // A roundabout becomes an ordinary junction again.
+                        if citysim_sim::roundabout::roundabout(&sim.world, node).is_some() {
+                            cmds.write(SimCommand(Command::SetRoundabout { node, size: None }));
+                        }
                         cmds.write(SimCommand(cmd));
                     } else {
                         toasts.write(Toast::new(ToastKind::Error, "This junction can't be changed"));

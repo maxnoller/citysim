@@ -148,6 +148,7 @@ pub fn error_text(e: &CommandError) -> String {
             citysim_sim::RestoreProblem::Rezoned => "the lot isn't zoned for it any more".into(),
             citysim_sim::RestoreProblem::NoRoad => "no road reaches the lot any more".into(),
         },
+        CommandError::Roundabout(p) => ring_problem_text(p),
         CommandError::NotARoadCommand => "Only roads clear their way".into(),
         CommandError::NoSuchReceipt => "There's nothing to refund".into(),
     }
@@ -293,9 +294,51 @@ pub fn tool_card(
                 card.hint = "Lights or priority signs are chosen automatically".into();
                 return Some(card);
             };
+            // A roundabout size picked: what that ring would be here.
+            if let Some(size) = opts.ring_brush {
+                let mut card = Card::new(icon::WAYPOINTS, t::ACCENT);
+                let ways = world.roads.nodes.get(*node).map_or(0, |n| n.segments.len());
+                card.title = format!("{} · {ways} ways", ring_name(size));
+                let now = junction::junction(world, *node).and_then(|j| j.ring);
+                if let Some(now) = now {
+                    card.rows.push(Row::new("Now", ring_name(now), t::TEXT_MUTED));
+                }
+                match state.ring_preview.as_ref().filter(|p| p.0.0 == *node && p.0.1 == size) {
+                    Some((_, Ok(p))) => {
+                        card.rows.push(Row::new("Price", format::money(p.cost), t::TEXT));
+                        card.rows.push(Row::new(
+                            "Upkeep",
+                            format!("{} a day", format::money(size.upkeep_per_day())),
+                            t::TEXT_MUTED,
+                        ));
+                        // The land it takes, as a road clearing its way says it.
+                        for l in readout::loss_lines(world, &p.buildings, Some(p.demolition_cost)) {
+                            card.rows
+                                .push(Row::new(l.label.clone(), l.value.clone(), tone_color(l.tone)));
+                        }
+                        card.hint = "Click: build it · Ctrl+Z: undo".into();
+                    }
+                    Some((_, Err(e))) => {
+                        card.title_color = t::NEGATIVE;
+                        card.color = t::NEGATIVE;
+                        card.rows.push(Row::line(error_text(e), t::NEGATIVE));
+                        card.hint = "Pick another size, or another junction".into();
+                    }
+                    None => {}
+                }
+                card.rows.truncate(MAX_ROWS);
+                return Some(card);
+            }
             // The tray shows the phases and queues; the tag stays short.
             let mut card = junction_card(world, *node)?;
             card.rows.truncate(1);
+            if junction::junction(world, *node).is_some_and(|j| j.ring.is_some()) {
+                let s = opts
+                    .junction_brush
+                    .map_or("an ordinary junction".to_string(), |b| setting_name(b).to_lowercase());
+                card.hint = format!("Click: back to {s}");
+                return Some(card);
+            }
             let setting = junction::junction(world, *node).map(|j| j.setting).unwrap_or_default();
             card.hint = format!(
                 "Click: switch to {}",
@@ -703,6 +746,29 @@ pub fn control_name(c: JunctionControl) -> &'static str {
     match c {
         JunctionControl::Signal => "Traffic lights",
         JunctionControl::Priority => "Priority (give way)",
+        JunctionControl::Roundabout => "Roundabout",
+    }
+}
+
+/// "Roundabout, medium".
+pub fn ring_name(s: citysim_sim::RoundaboutSize) -> String {
+    format!("Roundabout, {}", s.name())
+}
+
+/// Why a roundabout does not fit, in the readout's words.
+pub fn ring_problem_text(p: &citysim_sim::RingProblem) -> String {
+    use citysim_sim::RingProblem as P;
+    match p {
+        P::TooFewArms => "A roundabout needs three or more roads".into(),
+        P::TooManyArms => "Too many roads meet here for a roundabout".into(),
+        P::Highway => "Not where the highway meets".into(),
+        P::AvenueOnMini => "Too small for an avenue: pick a bigger size".into(),
+        P::ArmsTooClose { degrees, .. } => format!("Roads meet at {degrees:.0}°: too sharp for this size"),
+        P::NeighbourTooClose { .. } => "Too close to the next junction for this size".into(),
+        P::RoadInTheWay { .. } => "Another road passes through the ring".into(),
+        P::OffMap => "Too close to the edge of the map".into(),
+        P::AlreadyThatSize => "Already this roundabout".into(),
+        P::NotARoundabout => "Not a roundabout".into(),
     }
 }
 
@@ -732,13 +798,21 @@ pub fn junction_card(world: &World, n: citysim_sim::NodeId) -> Option<Card> {
     let mut card = Card::new(icon::WAYPOINTS, if signal { t::WARNING } else { t::ACCENT });
     card.title = format!(
         "{} · {} ways",
-        if signal { "Traffic lights" } else { "Priority junction" },
+        match state.ring {
+            Some(r) => ring_name(r),
+            None if signal => "Traffic lights".into(),
+            None => "Priority junction".into(),
+        },
         view.approaches.len()
     );
     card.rows.push(Row::new(
         "Control",
-        match view.setting {
-            JunctionSetting::Auto => format!("{} · automatic", control_name(view.control)),
+        match (state.ring, view.setting) {
+            (Some(r), _) => format!(
+                "Give way to the ring · {} m across",
+                (r.dims().outer_r * 2.0).round() as i64
+            ),
+            (None, JunctionSetting::Auto) => format!("{} · automatic", control_name(view.control)),
             _ => format!("{} · set by you", control_name(view.control)),
         },
         t::TEXT,

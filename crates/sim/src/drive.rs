@@ -85,6 +85,7 @@ pub(crate) fn build_route_delays(
                         balance::ROUTE_SIGNAL_SIDE_S
                     }
                 }
+                JunctionControl::Roundabout => balance::ROUTE_RING_S,
                 JunctionControl::Priority => {
                     if j.arms[arm].major {
                         balance::ROUTE_MAJOR_S
@@ -142,6 +143,18 @@ pub(crate) fn build_route_turns(
                 let turn = j.movements_between(a, b).next().map(|(_, m)| m.turn);
                 let c = match (j.control, turn) {
                     (_, None) => 0.0,
+                    // Round the ring: the time beyond crossing its box at
+                    // the speed limit.
+                    (JunctionControl::Roundabout, Some(_)) => j
+                        .movements_between(a, b)
+                        .find(|(_, m)| m.preferred)
+                        .and_then(|(i, m)| {
+                            let ring = j.ring_geom.0.as_ref()?;
+                            let v = crate::roundabout::path_speed(ring, j, i);
+                            let straight = (j.arms[a].setback + j.arms[b].setback) / balance::STREET_SPEED_LIMIT;
+                            Some((m.length / v - straight).max(0.0))
+                        })
+                        .unwrap_or(0.0),
                     (JunctionControl::Signal, Some(Turn::Left)) => balance::ROUTE_LEFT_PER_LANE_S * oncoming,
                     (JunctionControl::Signal, Some(Turn::Right)) => balance::ROUTE_RIGHT_S,
                     (JunctionControl::Signal, _) => 0.0,
@@ -272,6 +285,11 @@ fn turn_speed(turn: Turn, exit_limit: f32) -> f32 {
         Turn::Right | Turn::Left => balance::JUNCTION_SPEED,
         Turn::UTurn => balance::UTURN_SPEED,
     }
+}
+
+/// [`arrival_s`] for the ring's rules.
+pub(crate) fn arrival_time(d: f32, v: f32, vmax: f32) -> f32 {
+    arrival_s(d, v, vmax)
 }
 
 /// Seconds to cover `d` metres starting at `v` m/s, accelerating up to
@@ -413,6 +431,7 @@ fn at_stop(f: &Front) -> bool {
 fn class(j: &JunctionState, f: &Front) -> u8 {
     let left = matches!(f.turn, Turn::Left | Turn::UTurn);
     match j.control {
+        JunctionControl::Roundabout => 1,
         JunctionControl::Signal => {
             if j.protected(f.movement) {
                 3
@@ -447,6 +466,7 @@ fn gap_s(j: &JunctionState, mine: u8, theirs: u8) -> f32 {
     }
     match j.control {
         JunctionControl::Signal => balance::PERMISSIVE_GAP_S,
+        JunctionControl::Roundabout => balance::GIVE_WAY_GAP_S,
         JunctionControl::Priority if theirs > mine => {
             if mine <= 1 {
                 balance::GIVE_WAY_GAP_S
@@ -671,6 +691,106 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
         }
         let denials = &mut cache.denials;
         let j = traffic.junction_states.get_mut(node).expect("front has a junction");
+        // A roundabout: entering traffic gives way to the ring.
+        if let Some(ring) = j.ring_geom.0.clone() {
+            let j: &JunctionState = j;
+            let mut ring_cars: Vec<crate::roundabout::RingCar> = boxed[b0..b1]
+                .iter()
+                .map(|b| {
+                    let v = &vehicles[b.3];
+                    let jm = v.junction.expect("boxed");
+                    let half = stop_back_m(is_truck(traffic.trips.get(b.3))) - balance::STOP_LINE_M;
+                    crate::roundabout::RingCar::new(j, jm.movement as usize, jm.distance, v.speed, half)
+                })
+                .collect();
+            let mut order: Vec<usize> = (k..e).collect();
+            order.sort_by(|&x, &y| {
+                let (fx, fy) = (&fronts[x], &fronts[y]);
+                fy.go_before
+                    .cmp(&fx.go_before)
+                    .then(fx.eta.total_cmp(&fy.eta))
+                    .then(fx.idx.cmp(&fy.idx))
+            });
+            // (front, its car in `ring_cars`), and whether its exit had room.
+            let mut let_in: Vec<(usize, usize)> = Vec::new();
+            let mut rooms = vec![true; e - k];
+            for fi in order {
+                let f = fronts[fi];
+                let half = f.back - balance::STOP_LINE_M;
+                let mlen = j.movements[f.movement].length;
+                let room = exit_room(roads, &f, mlen, &rear, &rear_speed, &on_lane, &inbox);
+                rooms[fi - k] = room;
+                // Let go and too close to stop: keeps going.
+                let committed = f.go_before && f.speed * f.speed / (2.0 * balance::BRAKING) > f.d_line - f.back + 0.3;
+                // A car not in its path's own lane (a turn pocket the ring
+                // has no use for) waits while that lane has a car at the line.
+                let car = &vehicles[cars[f.idx].2];
+                let mv_lane = j.movements[f.movement].from_lane;
+                let lane_busy = mv_lane != car.lane && {
+                    let other = lane_key(car.segment.expect("on a lane"), car.forward, mv_lane);
+                    lane_front[other] > car.progress + f.d_line - stop_back_m(false) - balance::MIN_GAP_M
+                };
+                let ok = committed
+                    || (room
+                        && !lane_busy
+                        && crate::roundabout::may_enter(&ring, j, f.movement, f.d_line, f.speed, half, &ring_cars));
+                fronts[fi].permit = ok;
+                if ok {
+                    let_in.push((fi, ring_cars.len()));
+                    ring_cars.push(crate::roundabout::RingCar::new(j, f.movement, -f.d_line, f.speed, half));
+                    if f.reaches {
+                        inbox[f.exit_key] = inbox[f.exit_key].saturating_add(1);
+                    }
+                }
+            }
+            // Entries let in this tick give way to each other too: one whose
+            // merge another's path passes too soon waits (unless it can no
+            // longer stop).
+            for &(fi, x) in &let_in {
+                let f = fronts[fi];
+                let committed = f.go_before && f.speed * f.speed / (2.0 * balance::BRAKING) > f.d_line - f.back + 0.3;
+                if committed {
+                    continue;
+                }
+                let others: Vec<crate::roundabout::RingCar> = ring_cars
+                    .iter()
+                    .enumerate()
+                    .filter(|&(y, c)| y != x && c.movement != usize::MAX)
+                    .map(|(_, c)| *c)
+                    .collect();
+                if !crate::roundabout::may_enter(&ring, j, f.movement, f.d_line, f.speed, ring_cars[x].half, &others) {
+                    fronts[fi].permit = false;
+                    ring_cars[x].movement = usize::MAX;
+                    if f.reaches {
+                        inbox[f.exit_key] = inbox[f.exit_key].saturating_sub(1);
+                    }
+                }
+            }
+            for fi in k..e {
+                let f = fronts[fi];
+                if f.permit {
+                    if let Some(x) = cache.last_denial.get_mut(key_index(cars[f.idx].2)) {
+                        *x = 255;
+                    }
+                } else if f.d_line < f.back + 1.0 {
+                    let reason = if rooms[fi - k] { 3 } else { 1 };
+                    denials[reason] += 1;
+                    let slot = key_index(node);
+                    if cache.node_denials.len() <= slot {
+                        cache.node_denials.resize(slot + 1, [0; 4]);
+                    }
+                    cache.node_denials[slot][reason] += 1;
+                    let vs = key_index(cars[f.idx].2);
+                    if cache.last_denial.len() <= vs {
+                        cache.last_denial.resize(vs + 1, 255);
+                    }
+                    cache.last_denial[vs] = reason as u8;
+                }
+            }
+            b0 = b1;
+            k = e;
+            continue;
+        }
         j.ensure_clear();
         // (movement, lane the car really came from, distance along)
         let mut occupied: Vec<(usize, usize, f32)> = boxed[b0..b1]
@@ -799,6 +919,8 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                         }
                         _ => false,
                     },
+                    // (Roundabouts decide above.)
+                    JunctionControl::Roundabout => true,
                     // All-way stop (no major road): every car halts at
                     // the line before it goes; once let go it pulls up to
                     // the line and in (it stands a little back from it).
@@ -919,6 +1041,101 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
     let mut i = 0;
     while i < boxed.len() {
         let (slot, mv, _, _) = boxed[i];
+        // Roundabouts: every car of the ring at once.
+        let node = vehicles[boxed[i].3].junction.expect("boxed").node;
+        if let Some(ring) = traffic.junction_states.get(node).and_then(|j| j.ring_geom.0.clone()) {
+            let mut e = i;
+            while e < boxed.len() && boxed[e].0 == slot {
+                e += 1;
+            }
+            let j = traffic.junction_states.get(node).expect("ring junction");
+            let ids: Vec<VehicleId> = boxed[i..e].iter().map(|b| b.3).collect();
+            let ring_cars: Vec<crate::roundabout::RingCar> = ids
+                .iter()
+                .map(|&id| {
+                    let v = &vehicles[id];
+                    let jm = v.junction.expect("boxed");
+                    let half = stop_back_m(is_truck(traffic.trips.get(id))) - balance::STOP_LINE_M;
+                    crate::roundabout::RingCar::new(j, jm.movement as usize, jm.distance, v.speed, half)
+                })
+                .collect();
+            let free = crate::roundabout::free_ahead(&ring, j, &ring_cars);
+            for (x, &id) in ids.iter().enumerate() {
+                let hold = crate::roundabout::crossing_hold(&ring, j, &ring_cars[x], &ring_cars);
+                let truck = is_truck(traffic.trips.get(id));
+                let v = &mut vehicles[id];
+                let mut jm = v.junction.expect("boxed");
+                let Some(m) = j.movements.get(jm.movement as usize) else {
+                    continue;
+                };
+                let Some(path) = m.ring_path() else { continue };
+                let exit_seg = &roads.segments[jm.to];
+                let (exit_start, _) = lane_range(setbacks, jm.to, jm.to_forward, exit_seg.length);
+                let ek = lane_key(jm.to, jm.to_forward, jm.to_lane);
+                let lane_v = ring.size.lane_speed(path.ring_lane) * if truck { balance::RING_TRUCK_SPEED } else { 1.0 };
+                let mut target = if jm.distance < path.entry_len + path.arc_len {
+                    lane_v
+                } else {
+                    // Leaving: speeding up to the road's limit.
+                    let out = jm.distance - path.entry_len - path.arc_len;
+                    (lane_v + out * 0.8).min(exit_seg.speed_limit)
+                } * driver(v.seed);
+                let f = free[x];
+                if f.is_finite() {
+                    target = target.min(f / balance::RING_HEADWAY_S).min(stop_speed(f - 0.2));
+                }
+                if let Some(h) = hold {
+                    target = target.min(stop_speed(h));
+                }
+                // People on the zebra of its exit: stop between the ring and
+                // the zebra, a car length out (walk.rs).
+                if crate::walk::ring_exit_held(walking, roads, jm.node, jm.to) {
+                    let half = if truck {
+                        balance::TRUCK_BODY_M[0]
+                    } else {
+                        balance::CAR_BODY_M[0]
+                    } * 0.5;
+                    let stop =
+                        m.length + balance::RING_ZEBRA_M - balance::ZEBRA_WIDTH_M * 0.5 - balance::STOP_LINE_M - half;
+                    if jm.distance <= stop + 0.05 {
+                        target = target.min(stop_speed(stop - jm.distance));
+                    }
+                }
+                if rear[ek].is_finite() {
+                    let hw = headway_of(exit_seg.kind);
+                    target = target.min(follow_speed(m.length - jm.distance + rear[ek] - exit_start, hw));
+                }
+                let speed = (v.speed + balance::ACCELERATION * DT).min(target).max(0.0);
+                v.braking = speed + 0.01 < v.speed;
+                v.speed = speed;
+                jm.distance += speed * DT;
+                if jm.distance >= m.length {
+                    let over = jm.distance - m.length;
+                    v.junction = None;
+                    v.segment = Some(jm.to);
+                    v.forward = jm.to_forward;
+                    v.lane = jm.to_lane;
+                    v.lane_shift = 0.0;
+                    let mut p = exit_start + over;
+                    if rear[ek].is_finite() {
+                        p = p.min((rear[ek] - balance::MIN_GAP_M).max(exit_start));
+                    }
+                    v.progress = p.min(exit_seg.length);
+                    if v.route.first() == Some(&jm.to) {
+                        v.route.remove(0);
+                    }
+                    traffic::set_pose(roads, v);
+                    rear[ek] = rear[ek].min(v.progress);
+                } else {
+                    let (p, d) = m.pose_at(jm.distance);
+                    v.pos = p;
+                    v.heading = libm::atan2f(d[1], d[0]);
+                    v.junction = Some(jm);
+                }
+            }
+            i = e;
+            continue;
+        }
         let mut lead: Option<f32> = None;
         while i < boxed.len() && boxed[i].0 == slot && boxed[i].1 == mv {
             let id = boxed[i].3;
@@ -1143,7 +1360,10 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
             } else if let Some(f) = front {
                 let j = traffic.junction_states.get(f.node).expect("front junction");
                 let m = &j.movements[f.movement];
-                let tv = turn_speed(f.turn, roads.segments[f.to].speed_limit);
+                let tv = match j.ring_geom.0.as_ref() {
+                    Some(ring) => crate::roundabout::path_speed(ring, j, f.movement),
+                    None => turn_speed(f.turn, roads.segments[f.to].speed_limit),
+                };
                 target = target.min((tv * tv + 2.0 * balance::BRAKING * f.d_line).sqrt());
                 if f.permit {
                     // The nearest car ahead from this lane inside the box,
@@ -1168,6 +1388,17 @@ pub(crate) fn step(world: &mut World, ended: &mut Vec<Ended>) {
                     }
                 } else {
                     target = target.min(stop_speed(f.d_line - f.back));
+                    // At a roundabout the car just let in from this lane may
+                    // stand right beyond the line: keep the gap to it.
+                    if j.ring_geom.0.is_some() {
+                        let here = key as usize;
+                        let at = box_from.partition_point(|b| b.0 < here);
+                        if let Some(&(k, d)) = box_from.get(at)
+                            && k == here
+                        {
+                            target = target.min(follow_speed(f.d_line + d, hw));
+                        }
+                    }
                     // A car standing just beyond a short box (a bend, a join
                     // of curves) is closer than the stop line: keep the gap.
                     if rear[f.exit_key].is_finite() {

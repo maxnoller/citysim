@@ -280,6 +280,8 @@ impl JunctionStateV5 {
             clear_at: self.clear_at,
             last_served: self.last_served,
             phase_count: self.phase_count,
+            ring: None,
+            ring_geom: Default::default(),
         }
     }
 
