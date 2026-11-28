@@ -17,6 +17,8 @@
 //!   `WorldTarget::Vehicle`, `CameraFollow`, `CameraGoTo`.
 //! * Round 5, written by ui, drawn by gfx: `RouteView` (the trip of the
 //!   selected car or person).
+//! * Following (round 7): `CameraFollow::on` written by ui, `DrawnPoses`
+//!   written by gfx (the drawn bodies ui's marks hang on).
 //! * Performance panel: `PerfProbe::detail` written by ui, `PerfProbe::render`
 //!   filled by gfx.
 
@@ -24,8 +26,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use citysim_sim::command::{NodeChange, PieceChange};
 use citysim_sim::{
-    BuildingId, Cell, CellRef, Command, CommandError, Curve, NodeId, Outcome, RoadKind, SegmentId, TICKS_PER_SECOND,
-    VehicleId, World, Zone,
+    BuildingId, Cell, CellRef, CitizenId, Command, CommandError, Curve, NodeId, Outcome, RoadKind, SegmentId,
+    TICKS_PER_SECOND, VehicleId, World, Zone,
 };
 
 // ---------------------------------------------------------------- ordering
@@ -534,6 +536,15 @@ pub struct RouteView {
     /// share of the trip's time gone. `points` then start there and gfx
     /// draws the line as for a car, with a marker here (`gfx/route.rs`).
     pub traveller: Option<[f32; 2]>,
+    /// The sim tick `traveller` was estimated at, and how far the traveller
+    /// moves along `points` per sim tick (metres): gfx moves the marker on
+    /// smoothly from there between updates (and trims the line behind it).
+    pub traveller_tick: u64,
+    pub traveller_pace: f32,
+    /// `Driving`: the car (gfx starts the line at its drawn body).
+    pub vehicle: Option<VehicleId>,
+    /// `Walking`: the person on foot (gfx starts the line at their figure).
+    pub walker: Option<CitizenId>,
 }
 
 /// Player display settings that gfx honours (written by ui from the
@@ -582,13 +593,73 @@ impl CameraPose {
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct CameraOverride(pub Option<CameraPose>);
 
-/// While `focus` is `Some`, gfx's camera keeps its focus on that ground
-/// point (sim metres), easing after it as it moves; zoom and rotation stay
-/// with the player, panning keys are ignored (ui stops following on them).
-/// Written by ui every frame while following a person or car.
+/// While `focus` is `Some`, gfx's camera keeps its focus on what is
+/// followed; zoom and rotation stay with the player, panning keys are
+/// ignored (ui stops following on them). Written by ui every frame while
+/// following a person or car.
+///
+/// `focus` is the ground point (sim metres) as the sim has it; `on` says
+/// what it is, so gfx can hold the camera on that thing as it draws it this
+/// frame (a car's body between sim ticks, the off-map traveller's marker)
+/// and only falls back to `focus` when it draws nothing there. The camera
+/// glides onto a new target (starting to follow, a car handing over to its
+/// owner) and then stays locked on it.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct CameraFollow {
     pub focus: Option<[f32; 2]>,
+    pub on: FollowOn,
+}
+
+/// What [`CameraFollow::focus`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FollowOn {
+    /// A fixed point (a building, a person inside).
+    #[default]
+    Point,
+    /// A car or truck: gfx follows its drawn body.
+    Vehicle(VehicleId),
+    /// The person under way off the map of [`RouteView::traveller`]: gfx
+    /// follows its marker.
+    Traveller,
+    /// A person walking on the map: gfx follows their drawn figure.
+    Walker(CitizenId),
+}
+
+/// A vehicle as gfx draws it this frame (sim metres): the centre of its
+/// body (the sim's `vehicle_pose` is the front of the car, one sim tick
+/// ahead of the drawn body at most), its heading (radians, as
+/// `Vehicle::heading`) and half its length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawnVehicle {
+    pub pos: [f32; 2],
+    pub heading: f32,
+    pub half_length: f32,
+}
+
+/// Where gfx draws what the interface points at, this frame: the vehicles
+/// and people on foot of `WorldHighlight::{selected, hovered}`,
+/// `CameraFollow::on` and `RouteView::{vehicle, walker}`, and the off-map
+/// traveller's marker. Written by gfx
+/// in `GameSet::Render` (every frame, after it placed the cars); ui reads
+/// it later in the frame (`PostUpdate`: the panel's leader line) so its
+/// marks sit on the drawn body. Empty without gfx: use the sim's poses.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct DrawnPoses {
+    pub vehicles: Vec<(VehicleId, DrawnVehicle)>,
+    pub traveller: Option<[f32; 2]>,
+    /// People walking on the map (`WorldTarget::Walker`, `FollowOn::Walker`,
+    /// `RouteView::walker`): where their figure stands this frame.
+    pub walkers: Vec<(CitizenId, [f32; 2])>,
+}
+
+impl DrawnPoses {
+    pub fn vehicle(&self, id: VehicleId) -> Option<DrawnVehicle> {
+        self.vehicles.iter().find(|(v, _)| *v == id).map(|(_, d)| *d)
+    }
+
+    pub fn walker(&self, id: CitizenId) -> Option<[f32; 2]> {
+        self.walkers.iter().find(|(c, _)| *c == id).map(|(_, p)| *p)
+    }
 }
 
 /// Move the camera's focus to a ground point (sim metres), and zoom to
@@ -713,6 +784,7 @@ impl Plugin for SharedPlugin {
         .init_resource::<DisplaySettings>()
         .init_resource::<CurveToolView>()
         .init_resource::<CameraFollow>()
+        .init_resource::<DrawnPoses>()
         .init_resource::<RouteView>()
         .init_resource::<PerfProbe>()
         .add_message::<CameraGoTo>()

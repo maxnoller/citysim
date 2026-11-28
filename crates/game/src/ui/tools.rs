@@ -1560,15 +1560,23 @@ pub fn junction_near(world: &World, p: [f32; 2], reach: f32) -> Option<(NodeId, 
     best.map(|b| (b.1, b.2))
 }
 
-/// The vehicle nearest to `p` within `reach` metres (at its drawn pose).
+/// How far behind the sim's point (the front of a car) its body reaches
+/// for picking: a car's length plus what it is drawn behind (gfx draws one
+/// fixed update back).
+const PICK_BODY_M: f32 = 5.0;
+
+/// The vehicle nearest to `p` within `reach` metres of its body (from the
+/// sim's point at its front back along its heading).
 pub fn vehicle_near(world: &World, p: [f32; 2], reach: f32) -> Option<citysim_sim::VehicleId> {
     let mut best: Option<(f32, citysim_sim::VehicleId)> = None;
     for (id, v) in world.vehicles.iter() {
         if (v.pos[0] - p[0]).abs() > reach + 10.0 || (v.pos[1] - p[1]).abs() > reach + 10.0 {
             continue;
         }
-        let (pos, _) = citysim_sim::drive::vehicle_pose(world, v);
-        let d = dist(pos, p);
+        let (front, dir) = citysim_sim::drive::vehicle_pose(world, v);
+        let (f, dir, q) = (Vec2::from(front), Vec2::from(dir).normalize_or(Vec2::X), Vec2::from(p));
+        let back = (f - q).dot(dir).clamp(0.0, PICK_BODY_M);
+        let d = q.distance(f - dir * back);
         if d <= reach && best.is_none_or(|b| d < b.0) {
             best = Some((d, id));
         }

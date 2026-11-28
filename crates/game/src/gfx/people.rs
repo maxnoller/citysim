@@ -2,9 +2,13 @@
 //! (`world.walking.walkers`: a leader and the children with them), drawn
 //! with the shared figure models of `person_gen`.
 //!
-//! Like the cars (`vehicles.rs`), poses are sampled once per sim tick and
-//! interpolated between ticks, one fixed update behind, so people move
-//! evenly at every speed. The walk cycle follows the metres walked (no
+//! Like the cars (`vehicles.rs`), poses are sampled after every fixed
+//! update that moved the sim and drawn at the cars' drawn moment
+//! (`vehicles::DrawClock`, one update behind with real time), so people move
+//! evenly at every speed and whatever the frame times, and stop without a
+//! jump on pause. Where the people the interface points at are drawn goes
+//! to `shared::DrawnPoses::walkers` (the camera, the leader line, the
+//! route's start). The walk cycle follows the metres walked (no
 //! sliding feet); people waiting at a kerb stand. Children walk beside the
 //! adult. Up close the detailed model, from `LOD_FAR` the simple one, beyond
 //! `CUT_OFF_M` nobody is drawn; at the door people step in and out (hidden
@@ -21,7 +25,10 @@ use super::noise::hash;
 use super::person_gen::{self, BUILDS, POSES, STAND, WALK_POSES};
 use super::road_geom::{ROAD_Y, WALK_Y};
 use super::scene::WorldMaterials;
-use crate::shared::{GameSet, SimWorld, WorldCamera};
+use super::vehicles::{DrawClock, DrawnSet, sample_vehicles};
+use crate::shared::{
+    CameraFollow, DrawnPoses, FollowOn, RouteView, SimStep, SimWorld, WorldCamera, WorldHighlight, WorldTarget,
+};
 
 /// Camera distance beyond which people use the simple model, and beyond
 /// which they are not drawn at all (with a little hysteresis).
@@ -56,12 +63,9 @@ pub struct PersonVisual {
     /// The walker (its leader) and the place in its party (0: the leader).
     pub leader: CitizenId,
     pub slot: u8,
-    /// (ground point, heading, metres walked, height) at the previous and
-    /// the latest sim tick.
-    prev: (Vec2, f32, f32, f32),
-    cur: (Vec2, f32, f32, f32),
-    standing: bool,
-    hidden: bool,
+    /// (ground point, heading, metres walked, height) and (standing,
+    /// hidden) at the last three samples (`DrawClock`), newest last.
+    poses: [Sample; 3],
     build: usize,
     scale: f32,
     /// What the entity shows: (pose, far), visible.
@@ -70,6 +74,9 @@ pub struct PersonVisual {
     /// Drawn pose this frame (for the selection ring and the camera).
     pub drawn: Vec3,
 }
+
+/// A person's state at one sample.
+type Sample = ((Vec2, f32, f32, f32), bool, bool);
 
 /// Where a walker's person `slot` stands this tick: ground point, heading,
 /// metres walked, height of the ground; hidden in the doorway.
@@ -108,31 +115,21 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
 }
 
 struct SyncState {
-    entities: HashMap<(CitizenId, u8), Entity>,
     timing: bool,
     spent: f64,
     frames: u32,
     spent_since: std::time::Instant,
-    last_fixed: f64,
-    last_tick: u64,
     generation: u64,
-    moving: bool,
-    span: u32,
 }
 
 impl Default for SyncState {
     fn default() -> Self {
         SyncState {
-            entities: HashMap::new(),
             timing: std::env::var("CITYSIM_PEOPLE_TIMING").is_ok(),
             spent: 0.0,
             frames: 0,
             spent_since: std::time::Instant::now(),
-            last_fixed: 0.0,
-            last_tick: 0,
             generation: 0,
-            moving: false,
-            span: 0,
         }
     }
 }
@@ -145,14 +142,59 @@ fn seed_of(world: &World, id: CitizenId, fallback: u32) -> u32 {
     world.citizens.get(id).map_or(fallback, |c| c.seed)
 }
 
+/// The entity drawing each person on foot: (walker, place in the party).
+#[derive(Resource, Default)]
+pub struct PeopleEntities(pub HashMap<(CitizenId, u8), Entity>);
+
+/// After every fixed update that moved the sim (`sample_vehicles` counts
+/// them): a new sample of every drawn person.
+fn sample_people(
+    sim: Res<SimWorld>,
+    clock: Res<DrawClock>,
+    entities: Res<PeopleEntities>,
+    mut q: Query<&mut PersonVisual>,
+    mut last: Local<u64>,
+) {
+    if clock.newest() == *last || clock.generation() != sim.generation {
+        *last = clock.newest();
+        return;
+    }
+    *last = clock.newest();
+    let walkers = &sim.world.walking.walkers;
+    for (&(id, slot), &e) in &entities.0 {
+        if let Ok(mut vis) = q.get_mut(e)
+            && let Some(w) = walkers.get(&id)
+        {
+            let now = sample(w, slot);
+            vis.poses = if vis.poses[2].0.0.distance(now.0.0) > TELEPORT_M {
+                [now; 3]
+            } else {
+                [vis.poses[1], vis.poses[2], now]
+            };
+        }
+    }
+}
+
+/// Interpolate two samples at `t`.
+fn mix(a: &Sample, b: &Sample, t: f32) -> (Vec2, f32, f32, f32) {
+    let (a, b) = (a.0, b.0);
+    (
+        a.0.lerp(b.0, t),
+        lerp_angle(a.1, b.1, t),
+        a.2 + (b.2 - a.2) * t,
+        a.3 + (b.3 - a.3) * t,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sync_people(
     mut commands: Commands,
     sim: Res<SimWorld>,
-    fixed: Res<Time<Fixed>>,
+    clock: Res<DrawClock>,
     models: Res<PeopleModels>,
     mats: Res<WorldMaterials>,
     mut state: Local<SyncState>,
+    mut entities: ResMut<PeopleEntities>,
     cams: Query<&GlobalTransform, With<WorldCamera>>,
     mut q: Query<(&mut PersonVisual, &mut Transform, &mut Mesh3d, &mut Visibility)>,
 ) {
@@ -160,96 +202,61 @@ fn sync_people(
     let cam = cams.single().map_or(Vec3::ZERO, |c| c.translation());
     let world = &sim.world;
     if state.generation != sim.generation {
-        for (_, e) in state.entities.drain() {
+        for (_, e) in entities.0.drain() {
             commands.entity(e).despawn();
         }
         state.generation = sim.generation;
     }
     let walkers = &world.walking.walkers;
-    state.entities.retain(|(id, slot), e| {
+    entities.0.retain(|(id, slot), e| {
         let keep = walkers.get(id).is_some_and(|w| (*slot as usize) <= w.party.len());
         if !keep {
             commands.entity(*e).despawn();
         }
         keep
     });
-    let fixed_now = fixed.elapsed_secs_f64();
-    let stepped = fixed_now != state.last_fixed;
-    let tick = world.time.tick;
-    let advanced = tick != state.last_tick;
-    if stepped {
-        let period = fixed.timestep().as_secs_f64().max(1e-6);
-        state.span = (((fixed_now - state.last_fixed) / period).round() as u32).clamp(1, 16);
-        state.moving = advanced;
-    }
-    state.last_fixed = fixed_now;
-    state.last_tick = tick;
-    let alpha = if state.moving {
-        let span = state.span.max(1) as f32;
-        ((span - 1.0 + fixed.overstep_fraction().clamp(0.0, 1.0)) / span).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let tick_now = stepped && advanced;
+    // The drawn moment: samples after the oldest kept (0..=2).
+    let k = clock.k();
     for (&id, w) in walkers.iter() {
         for slot in 0..=w.party.len().min(4) as u8 {
-            match state.entities.get(&(id, slot)) {
-                Some(&e) => {
-                    let Ok((mut vis, _, _, _)) = q.get_mut(e) else { continue };
-                    if tick_now {
-                        let (now, standing, hidden) = sample(w, slot);
-                        vis.prev = vis.cur;
-                        vis.cur = now;
-                        vis.standing = standing;
-                        vis.hidden = hidden;
-                        if vis.prev.0.distance(vis.cur.0) > TELEPORT_M {
-                            vis.prev = vis.cur;
-                        }
-                    } else if stepped {
-                        vis.prev = vis.cur;
-                    }
-                }
-                None => {
-                    let person = if slot == 0 { id } else { w.party[slot as usize - 1] };
-                    let (build, scale, tag) =
-                        looks(seed_of(world, person, w.seed ^ slot as u32), stage_of(world, person));
-                    let (now, standing, hidden) = sample(w, slot);
-                    let e = commands
-                        .spawn((
-                            PersonVisual {
-                                leader: id,
-                                slot,
-                                prev: now,
-                                cur: now,
-                                standing,
-                                hidden,
-                                build,
-                                scale,
-                                shown: None,
-                                far: false,
-                                drawn: Vec3::new(now.0.x, now.3, now.0.y),
-                            },
-                            Mesh3d(models.mesh(build, STAND, false)),
-                            MeshMaterial3d(mats.lit.clone()),
-                            MeshTag::new(tag),
-                            Transform::from_xyz(now.0.x, now.3, now.0.y),
-                            Visibility::Hidden,
-                        ))
-                        .id();
-                    state.entities.insert((id, slot), e);
-                }
+            if entities.0.contains_key(&(id, slot)) {
+                continue;
             }
+            let person = if slot == 0 { id } else { w.party[slot as usize - 1] };
+            let (build, scale, tag) = looks(seed_of(world, person, w.seed ^ slot as u32), stage_of(world, person));
+            let now = sample(w, slot);
+            let e = commands
+                .spawn((
+                    PersonVisual {
+                        leader: id,
+                        slot,
+                        poses: [now; 3],
+                        build,
+                        scale,
+                        shown: None,
+                        far: false,
+                        drawn: Vec3::new(now.0.0.x, now.0.3, now.0.0.y),
+                    },
+                    Mesh3d(models.mesh(build, STAND, false)),
+                    MeshMaterial3d(mats.lit.clone()),
+                    MeshTag::new(tag),
+                    Transform::from_xyz(now.0.0.x, now.0.3, now.0.0.y),
+                    Visibility::Hidden,
+                ))
+                .id();
+            entities.0.insert((id, slot), e);
         }
     }
     for (mut vis, mut t, mut mesh, mut visibility) in &mut q {
-        let p = vis.prev.0.lerp(vis.cur.0, alpha);
-        let h = lerp_angle(vis.prev.1, vis.cur.1, alpha);
-        let walked = vis.prev.2 + (vis.cur.2 - vis.prev.2) * alpha;
-        let y = vis.prev.3 + (vis.cur.3 - vis.prev.3) * alpha;
+        let (from, to, f) = if k <= 1.0 { (0, 1, k) } else { (1, 2, k - 1.0) };
+        let (p, h, walked, y) = mix(&vis.poses[from], &vis.poses[to], f);
+        // Standing or in the doorway as at the newer of the two samples.
+        let (_, standing, hidden) = vis.poses[to];
+        let moved = (vis.poses[to].0.2 - vis.poses[from].0.2).abs() >= 1e-4;
         let pos = Vec3::new(p.x, y, p.y);
         vis.drawn = pos;
         let d = cam.distance(pos);
-        let show = !vis.hidden && d < CUT_OFF_M;
+        let show = !hidden && d < CUT_OFF_M;
         visibility.set_if_neq(if show {
             Visibility::Inherited
         } else {
@@ -268,7 +275,7 @@ fn sync_people(
         vis.far = far;
         // The walk cycle by the metres walked (shorter legs, shorter
         // strides); standing at the kerb.
-        let pose = if vis.standing || (vis.cur.2 - vis.prev.2).abs() < 1e-4 && state.moving {
+        let pose = if standing || !moved && clock.moving() {
             STAND
         } else {
             let stride = person_gen::STRIDE_M * vis.scale;
@@ -290,7 +297,7 @@ fn sync_people(
             info!(
                 "people: {} walkers, {} figures, sync {:.0} us a frame",
                 walkers.len(),
-                state.entities.len(),
+                entities.0.len(),
                 state.spent / state.frames.max(1) as f64 * 1e6
             );
             state.spent = 0.0;
@@ -300,12 +307,57 @@ fn sync_people(
     }
 }
 
+/// Where the people on foot the interface points at are drawn this frame
+/// (`DrawnPoses::walkers`).
+fn publish_walkers(
+    sim: Res<SimWorld>,
+    hl: Res<WorldHighlight>,
+    follow: Res<CameraFollow>,
+    route: Res<RouteView>,
+    entities: Res<PeopleEntities>,
+    q: Query<&PersonVisual>,
+    mut drawn: ResMut<DrawnPoses>,
+) {
+    let mut ids: Vec<CitizenId> = Vec::with_capacity(4);
+    for t in [&hl.selected, &hl.hovered] {
+        if let Some(WorldTarget::Walker(c)) = t {
+            ids.push(*c);
+        }
+    }
+    if let FollowOn::Walker(c) = follow.on {
+        ids.push(c);
+    }
+    ids.extend(route.walker);
+    let mut out = Vec::with_capacity(ids.len());
+    for c in ids {
+        if out.iter().any(|(x, _)| *x == c) {
+            continue;
+        }
+        let Some((leader, w)) = citysim_sim::walk::walker_of(&sim.world, c) else {
+            continue;
+        };
+        let slot = if c == leader {
+            0
+        } else {
+            w.party.iter().position(|&p| p == c).map_or(0, |i| i as u8 + 1)
+        };
+        if let Some(v) = entities.0.get(&(leader, slot)).and_then(|e| q.get(*e).ok()) {
+            out.push((c, [v.drawn.x, v.drawn.z]));
+        }
+    }
+    if drawn.walkers != out {
+        drawn.walkers = out;
+    }
+}
+
 pub struct PeoplePlugin;
 
 impl Plugin for PeoplePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup)
-            .add_systems(Update, sync_people.in_set(GameSet::Render));
+        app.init_resource::<PeopleEntities>()
+            .add_systems(Startup, setup)
+            .add_systems(FixedUpdate, sample_people.after(SimStep).after(sample_vehicles))
+            .add_systems(Update, (sync_people, publish_walkers).chain().in_set(DrawnSet::People));
         if let Some(at) = std::env::var("CITYSIM_GFX_PEOPLE_SHOWCASE").ok().and_then(|s| {
             let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             (v.len() >= 2).then(|| Vec2::new(v[0], v[1]))
