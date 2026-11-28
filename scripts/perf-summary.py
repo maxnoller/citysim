@@ -2,7 +2,7 @@
 """Table of `scripts/perf-check.sh`'s results: python3 scripts/perf-summary.py DIR.
 
 Reads the benchmark reports in DIR (quality.json, actions10k.json, speed1.json,
-speed12.json, plain20k.json, actions20k.json; missing ones are skipped) and
+speed12.json, plain20k.json, actions20k.json, tools14k.json; missing ones are skipped) and
 prints one row per figure: target, result, PASS / FAIL, and for hitches where
 the worst frame's time went (main world, render thread, waiting for the GPU)
 and what happened in it.
@@ -66,11 +66,29 @@ if q:
     if len(applied) != len(sw):
         row("quality switch: switches that never applied", "0", str(len(sw) - len(applied)), False)
 
-for name, pop in (("actions10k", "10k"), ("actions20k", "20k")):
+# The tools' own work per frame (tool systems, their commands, gfx drawing
+# their feedback): at most 4 ms in the owner's city (10k and 13.8k runs), 8 ms
+# at 20,000 residents with a 20 x 20 grid.
+TOOL_ACTS = ("grid", "build the", "undo the", "chain", "zone fill", "zone marquee", "area bulldozer",
+             "bulldoze the district")
+for name, pop, limit in (("actions10k", "10k", 4.0), ("tools14k", "13.8k", 4.0), ("actions20k", "20k", 8.0)):
     a = load(name)
     if not a:
         continue
-    target_ok = pop == "10k"
+    for act in a.get("actions", []):
+        tt = act.get("tool_total_ms")
+        if not tt or not act["action"].startswith(TOOL_ACTS):
+            continue
+        row(f"{pop} {act['action']}: tool work per frame, worst", f"<= {limit:.0f} ms",
+            f"{tt['max']:.2f} ms (avg {tt['avg']:.2f})", tt["max"] <= limit,
+            f"tools {act['tools_ms']['max']:.2f} / commands {act['sim_cmds_ms']['max']:.2f} / "
+            f"drawing {act['tool_draw_ms']['max']:.2f} ms")
+
+for name, pop in (("actions10k", "10k"), ("actions20k", "20k"), ("tools14k", "13.8k")):
+    a = load(name)
+    if not a:
+        continue
+    target_ok = pop != "20k"
     for act in a.get("actions", []):
         if act["action"] == "end":
             continue

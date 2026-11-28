@@ -177,6 +177,7 @@ impl Evaluated {
     }
 
     /// The commands to send (only meaningful when `ok`).
+    #[cfg(test)]
     pub fn cmds(&self) -> Vec<Command> {
         self.steps.iter().filter_map(|s| s.cmd.clone()).collect()
     }
@@ -257,7 +258,10 @@ impl Evaluated {
 /// order.
 fn removed_kinds(w: &World, cmd: &Command) -> Vec<RoadKind> {
     match cmd {
-        Command::RemoveRoad { .. } | Command::BulldozeArea { .. } | Command::Bulldoze { .. } => w
+        Command::RemoveRoad { .. }
+        | Command::RemoveRoads { .. }
+        | Command::BulldozeArea { .. }
+        | Command::Bulldoze { .. } => w
             .preview(cmd)
             .map(|p| {
                 p.removed
@@ -270,55 +274,160 @@ fn removed_kinds(w: &World, cmd: &Command) -> Vec<RoadKind> {
     }
 }
 
+/// Segments an undo takes away per command (`Command::RemoveRoads`).
+const REMOVE_BATCH: usize = 32;
+
+/// Check operation `i` on `w` (applying what is accepted), adding its
+/// steps to `steps`.
+fn eval_op(w: &mut World, i: usize, op: &Op, steps: &mut Vec<Step>) {
+    let mut push = |cmd: Command, res: Result<Preview, CommandError>, kinds: Vec<RoadKind>| {
+        steps.push(Step {
+            op: i,
+            cmd: Some(cmd),
+            result: res,
+            removed_kinds: kinds,
+        })
+    };
+    if let Op::RemoveSerials(lo, hi) = op {
+        // A batch of segments at a time (`REMOVE_BATCH`): one road change
+        // each, so a large road goes in a few commands. Looked up again for
+        // each batch: a removal may merge the others.
+        for _ in 0..10_000 {
+            let mut parts: Vec<(citysim_sim::SegmentId, f32, f32)> = w
+                .roads
+                .segments
+                .iter()
+                .filter(|(_, s)| (*lo..*hi).contains(&s.serial))
+                .map(|(s, seg)| (s, 0.0, seg.length))
+                .collect();
+            if parts.is_empty() {
+                break;
+            }
+            parts.truncate(REMOVE_BATCH);
+            let cmd = if parts.len() == 1 {
+                let (segment, from_m, to_m) = parts[0];
+                Command::RemoveRoad { segment, from_m, to_m }
+            } else {
+                Command::RemoveRoads { parts }
+            };
+            let kinds = removed_kinds(w, &cmd);
+            let res = w.apply(cmd.clone());
+            let failed = res.is_err();
+            push(cmd, res, kinds);
+            if failed {
+                break;
+            }
+        }
+        return;
+    }
+    match resolve(w, op) {
+        Ok(cmd) => {
+            let kinds = removed_kinds(w, &cmd);
+            let res = w.apply(cmd.clone());
+            push(cmd, res, kinds);
+        }
+        Err(e) => steps.push(Step {
+            op: i,
+            cmd: None,
+            result: Err(e),
+            removed_kinds: Vec::new(),
+        }),
+    }
+}
+
+impl Evaluated {
+    fn of(steps: Vec<Step>) -> Evaluated {
+        let mut out = Evaluated::default();
+        for st in steps {
+            match st.cmd.clone() {
+                Some(cmd) => out.push_step(st.op, cmd, st.result, st.removed_kinds),
+                None => out.steps.push(st),
+            }
+        }
+        out
+    }
+}
+
 /// Check `ops` in order on a copy of `base`; steps that fail are left out
 /// and the rest carry on (so the valid part can still be drawn). Returns
-/// the checked plan and the world after it.
+/// the checked plan and the world after it. The reference for
+/// [`Prefixes::evaluate`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn evaluate(base: &World, ops: &[Op]) -> (Evaluated, World) {
     let mut w = base.clone();
-    let mut out = Evaluated::default();
+    let mut steps = Vec::new();
     for (i, op) in ops.iter().enumerate() {
-        if let Op::RemoveSerials(lo, hi) = op {
-            // One segment at a time: a removal may merge the others.
-            for _ in 0..10_000 {
-                let Some((s, len)) = w
-                    .roads
-                    .segments
-                    .iter()
-                    .find(|(_, s)| (*lo..*hi).contains(&s.serial))
-                    .map(|(s, seg)| (s, seg.length))
-                else {
-                    break;
-                };
-                let cmd = Command::RemoveRoad {
-                    segment: s,
-                    from_m: 0.0,
-                    to_m: len,
-                };
-                let kinds = removed_kinds(&w, &cmd);
-                let res = w.apply(cmd.clone());
-                let failed = res.is_err();
-                out.push_step(i, cmd, res, kinds);
-                if failed {
-                    break;
-                }
-            }
-            continue;
-        }
-        match resolve(&w, op) {
-            Ok(cmd) => {
-                let kinds = removed_kinds(&w, &cmd);
-                let res = w.apply(cmd.clone());
-                out.push_step(i, cmd, res, kinds);
-            }
-            Err(e) => out.steps.push(Step {
-                op: i,
-                cmd: None,
-                result: Err(e),
-                removed_kinds: Vec::new(),
-            }),
-        }
+        eval_op(&mut w, i, op, &mut steps);
     }
-    (out, w)
+    (Evaluated::of(steps), w)
+}
+
+/// Snapshots kept at most (one per operation of the last plan).
+const MAX_SNAPSHOTS: usize = 96;
+
+/// The last plan checked on a base world, with the world after each of
+/// its operations: a plan that starts with the same operations on the
+/// same base carries on from there (a chain of pieces where only the live
+/// one changes is one command to check, not all of them). Gives exactly
+/// what [`evaluate`] gives: the world after an operation depends only on
+/// the base and the operations before it.
+#[derive(Default)]
+pub struct Prefixes {
+    base: Option<u64>,
+    ops: Vec<Op>,
+    /// World after operation `i` (`after.len() <= ops.len()`).
+    after: Vec<World>,
+    /// Steps of operation `i`, and the time it took (ms).
+    steps: Vec<(Vec<Step>, f32)>,
+}
+
+impl Prefixes {
+    /// Check `ops` on `base` (identified by `base_id`: a new id for every
+    /// new base world). Returns the plan, the world after it and each
+    /// step's time to check (ms, parallel to the steps).
+    pub fn evaluate(&mut self, base_id: u64, base: &World, ops: &[Op]) -> (Evaluated, World, Vec<f32>) {
+        if self.base != Some(base_id) {
+            *self = Prefixes {
+                base: Some(base_id),
+                ..Default::default()
+            };
+        }
+        let keep = self
+            .ops
+            .iter()
+            .zip(ops)
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(self.after.len());
+        self.ops.truncate(keep);
+        self.after.truncate(keep);
+        self.steps.truncate(keep);
+        let mut w = match keep {
+            0 => base.clone(),
+            k => self.after[k - 1].clone(),
+        };
+        for (i, op) in ops.iter().enumerate().skip(keep) {
+            let t = std::time::Instant::now();
+            let mut steps = Vec::new();
+            eval_op(&mut w, i, op, &mut steps);
+            let ms = t.elapsed().as_secs_f32() * 1e3;
+            self.ops.push(op.clone());
+            self.steps.push((steps, ms));
+            if self.after.len() + 1 == self.ops.len() && self.after.len() < MAX_SNAPSHOTS && i + 1 < ops.len() {
+                self.after.push(w.clone());
+            }
+        }
+        // The last world is not kept as a snapshot (the caller owns it):
+        // the next plan usually differs in its last operation.
+        let mut all = Vec::new();
+        let mut times = Vec::new();
+        for (steps, ms) in &self.steps {
+            let n = steps.len().max(1) as f32;
+            times.extend(std::iter::repeat_n(ms / n, steps.len()));
+            all.extend(steps.iter().cloned());
+        }
+        (Evaluated::of(all), w, times)
+    }
 }
 
 // ---------------------------------------------------------------- undo
@@ -719,6 +828,78 @@ mod tests {
             w.apply(c).unwrap();
         }
         assert!(cells.iter().all(|&c| w.zoning.cell(c).unwrap().zone.is_none()));
+    }
+
+    /// A tiny deterministic generator for the random plans below.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 40) as f32 / (1u64 << 24) as f32
+        }
+    }
+
+    #[test]
+    fn prefixes_check_plans_exactly_as_the_plain_evaluation() {
+        // A town to draw on, then plans the way the tools change them: a
+        // chain growing piece by piece, its live end moving, pieces taken
+        // back, and plans that have nothing in common.
+        let mut w = World::new(9);
+        citysim_sim::scenarios::prebuilt(&mut w, |w| citysim_sim::scenarios::two_districts(w, true));
+        for _ in 0..600 {
+            w.step();
+        }
+        let base = scratch(&w);
+        let mut rng = Lcg(42);
+        let mut pre = Prefixes::default();
+        let mut ops: Vec<Op> = Vec::new();
+        let mut checked = 0;
+        for round in 0..60 {
+            let r = rng.next();
+            if r < 0.15 && !ops.is_empty() {
+                ops.truncate((rng.next() * ops.len() as f32) as usize);
+            } else if r < 0.2 {
+                ops.clear();
+            } else if r < 0.5 {
+                ops.pop();
+            }
+            // New pieces: straight or curved streets and avenues across
+            // the town (many cross roads, some are refused).
+            for _ in 0..1 + (rng.next() * 3.0) as usize {
+                let p = |rng: &mut Lcg| [60.0 + rng.next() * 500.0, 860.0 + rng.next() * 340.0];
+                let (a, c, b) = (p(&mut rng), p(&mut rng), p(&mut rng));
+                let curve = if rng.next() < 0.6 {
+                    Curve::straight(a, b)
+                } else {
+                    Curve::through_corner(a, c, b)
+                };
+                let kind = if rng.next() < 0.8 {
+                    RoadKind::Street
+                } else {
+                    RoadKind::Avenue
+                };
+                ops.push(if rng.next() < 0.1 {
+                    Op::Remove(Curve::straight(a, b))
+                } else {
+                    Op::Cmd(Command::BuildCurve { curve, kind })
+                });
+            }
+            let (want, want_after) = evaluate(&base, &ops);
+            let (got, got_after, times) = pre.evaluate(1, &base, &ops);
+            assert_eq!(got, want, "round {round}");
+            assert_eq!(times.len(), got.steps.len());
+            assert!(got_after == want_after, "round {round}: the world after differs");
+            assert_eq!(got_after.roads.segments.len(), want_after.roads.segments.len());
+            checked += ops.len();
+        }
+        assert!(checked > 100);
+        // A new base drops what was kept.
+        let (got, _, _) = pre.evaluate(2, &scratch(&w), &ops);
+        assert_eq!(got, evaluate(&base, &ops).0);
     }
 
     // ------------------------------------------- roads through buildings

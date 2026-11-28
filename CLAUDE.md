@@ -61,7 +61,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - Asset root resolves to `crates/game/assets` for `cargo run -p citysim` and for the binary run directly.
 
 ## shared.rs contract (summary)
-- `SimWorld { world, generation }` (`key(version)`, `replace(world)`: frees the old world on a thread), `SimClock { paused, speed }`, `SPEEDS = [1, 3,
+- `SimWorld { world, generation }` (`key(version)`, `replace(world)`: frees the old world on a thread), `SimClock { paused, speed,
+  hold }` (`hold`: ui is sending a plan in parts over a few frames, no steps until it is all applied; not a pause), `SPEEDS = [1, 3,
   6, 12]` (a day is 16 min at 1x, 80 s at 12x), `SimCommand(Command)` message → applied in `GameSet::Sim`, result in
   `LastCommand`. `World::step` runs in `FixedUpdate` (`SimStep` set): the fixed rate is `TICKS_PER_SECOND` times
   `SimClock::fixed_per_tick()` (fast speeds split a tick's steps over up to `MAX_FIXED_HZ` = 120 updates a second, so
@@ -94,10 +95,12 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   (`RoadMode::{Straight, Curve, Continuous, Grid, Upgrade, Junction}`, `ZoneMode::{Paint, Frontage, Fill, Marquee}`,
   `BulldozeMode::{Road, Area}`), `SnapFeedback` (snapped point, `SnapTarget`, `Guide`s in sim metres, spacing),
   `CurveToolView` (the free-form road being drawn: pieces with `PieceChange`, refused curves, `error_at`, control
-  points, handles, tightest bend, planned nodes; written only when it changes), `ToolPreview::{kind, area,
-  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, `Walker(CitizenId)` (a person on foot: gfx rings
-  the drawn figure, `gfx/guides.rs` `walker_drawn`), doomed buildings (the bulldozer's and those a
-  road being drawn takes), `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells` and
+  points, handles, tightest bend, planned nodes, `stale`: the plan shown is the last one checked while a newer one has
+  been in the works for 0.15 s, gfx dims it; written only when it changes), `ToolPreview::{kind, area,
+  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, `Walker(CitizenId)` (a
+  person on foot: gfx rings the drawn figure, `gfx/guides.rs` `walker_drawn`), doomed buildings (the bulldozer's and
+  those a road being drawn takes), `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`,
+  `WorldHighlight::doomed_road_cells` and
   `shared::cell_corners` / `zone_cell_corners` are gone: nothing wrote or used them any more.)
 - `RouteView { state: RouteState::{None, Driving, Planned, Unseen, Walking}, points, origin, destination, traveller,
   traveller_tick, traveller_pace, vehicle, walker }` (`Walking`: a person on foot on the map, `points` along the
@@ -123,6 +126,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   top-level pass, render-thread CPU ms, draw calls, main-pass triangles, mesh / car entities and how many are on
   screen, the game's GPU memory, card / backend / driver). Closed, gfx measures nothing: Bevy's render-diagnostics
   recorder is taken out of the render world while the graph runs.
+- `CommandTime(f32)`: real ms `apply_commands` took this frame (ui sends plans in parts by it, the benchmark records it).
+- `ScriptPointer(Option<Vec2>)`: dev scripts without a window (the benchmark) put the pointer here (viewport px); shared's
+  hover and ui's tools read it when there is no primary window (`ScriptPointer::position`).
 - `SceneReady(bool)`: gfx sets it once the render pipelines are built (`gfx/loading.rs`); ui shows a loading card until
   then, autoshot counts its delay from it.
 
@@ -217,7 +223,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - `IdMap` (slotmap-like, serialises its free list so loads stay in lockstep).
 - Roads: `RoadKind::{Street, Highway, Avenue}` (`lane_count`, `lane_offset_m(lane)` right of travel, lane 0 = kerb,
   `half_width_m`, `upkeep_per_m`); `Command::BuildCurve { curve, kind }` (redrawing a built piece as the other kind
-  upgrades / downgrades it); `Command::SetNodeControl { node, control: JunctionSetting::{Auto, Signal, Priority} }`.
+  upgrades / downgrades it); `Command::SetNodeControl { node, control: JunctionSetting::{Auto, Signal, Priority} }`; `Command::RemoveRoads { parts }`
+  removes several segment parts as one road change (undo of a large road goes in batches of 32).
   `junction::{junction_view, junction_shape, signal_aspect, movement_aspect, junction_nodes, setback}`. Vehicles:
   `lane`, `lane_shift`, `junction: Option<JunctionMove>`, `braking`, `stopped()`, `route`; `drive::vehicle_pose(world,
   v)` = exact lane pose. Money: `economy.fiscal` (`FiscalState`, `reason.text()`, `service_level`). Renders:
@@ -264,9 +271,16 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `=actions` plays a fixed round of player actions through real commands, resources and keys during the camera path
   (build / zone / bulldoze a street, signals, overlays, day and night, city window, select a car, 12x, a fast zoom,
   save / load only with `CITYSIM_SAVE_DIR` set; `gfx/bench_script.rs`; `CITYSIM_BENCH_SCRIPT_SCALE=0.1` shortens it
-  for a software renderer). **`scripts/perf-check.sh [dir]`** builds the release game and runs both scripts on the
-  10,000- and 20,000-resident cities plus 1x / 12x: one table (quality switch <= 50 ms, any action <= 33 ms, 60 fps at
-  20,000, 12x < 2 ms over 1x; about 4.5 min on the owner's desktop; `PERF_CHECK_ONLY=quality,actions10k`).
+  for a software renderer), then the tool acts (`=tools` runs only those): a street grid (`CITYSIM_BENCH_GRID=8x13`
+  blocks) drawn beside the city through the real tools (`ScriptPointer`, mouse buttons, keys), pending while the camera
+  pans and zooms and while the pointer moves, built and undone; a chain of a dozen curves; zone fill and marquee; the
+  area bulldozer over a district; each undone. Per action: `tools_ms` (`GameSet::Tools`), `sim_cmds_ms` (`GameSet::Sim`),
+  `tool_draw_ms` (gfx drawing tool feedback, `bench::ToolDrawTime`), `tool_total_ms`. The sim side alone: `cargo run -p
+  citysim_sim --release --example planbench -- [pop] [nu] [nv]`. **`scripts/perf-check.sh [dir]`** builds the release
+  game and runs the scripts on the 10,000- and 20,000-resident cities (tool acts alone at 13,800: `tools14k`) plus 1x /
+  12x: one table (quality switch <= 50 ms, any action <= 33 ms, tool work per frame <= 4 ms at 10,000 / 13,800, <= 8 ms
+  at 20,000 with a 20 x 20 grid, 60 fps at 20,000, 12x < 2 ms over 1x; about 6 min on the owner's desktop;
+  `PERF_CHECK_ONLY=quality,actions10k`).
   `CITYSIM_BENCH_UI=1` draws the interface into the image too (else there is no UI without a window; with
   `CITYSIM_PERF=off|small|full` it measures the performance panel's cost); `CITYSIM_BENCH_GPU=0` leaves GPU pass timing
   to the panel, as in a game (on only while it is full). Tail
@@ -328,9 +342,13 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   cell with the fill tool, `people-lunch` (with `CITYSIM_DEMO_HOUR=12`) a driver on a lunch trip).
 - ui tools: plain modules know nothing of layout: `ui/fsnap.rs` (snapping: nodes, T onto roads, angles from the start
   road and 15° steps, whole-cell lengths, zoning lattices, parallel at a set distance, extensions, line meetings),
-  `ui/shapes.rs` (`Draft` chains of straight / curve / continuous pieces, `GridFrame`, `Stretch` of road between
-  junctions), `ui/plan.rs` (`Op`s checked in order on a scratch copy; road parts named by centre line and resolved
-  when their turn comes; undo by serials / curves / zone cells), `ui/readout.rs` (the cursor card's words),
+  `ui/shapes.rs` (`Draft` chains of straight / curve / continuous pieces, `GridFrame` (its streets across are built in
+  pieces of `GRID_PIECE_BLOCKS` = 4 blocks, one command each), `Stretch` of road between junctions), `ui/plan.rs` (`Op`s checked in order on a scratch copy; road parts named by centre line and resolved
+  when their turn comes; undo by serials / curves / zone cells; `plan::evaluate` is the reference, `plan::Prefixes` the same
+  carrying on from the worlds after the operations a plan shares with the one before), `ui/planner.rs` (plans are checked
+  on a worker thread: a frame waits at most `planner::WAIT`, 1 ms, then shows the last plan checked, `ToolPlan::stale`; a
+  click, Enter, release or Ctrl+Z is a `Job` sent once its plan is checked, input waits meanwhile; its commands go out about
+  3 ms of real applying time a frame (each estimated by its check time scaled by `CommandTime`), at least one, with `SimClock::hold` set; undo stays one step), `ui/readout.rs` (the cursor card's words),
   `ui/people.rs` (names, portraits, person / place / car / city `Sheet`s with headline, trip bar (with lateness),
   mood reason, action links, `Section::folding` sections the panel lets the player fold, remembered in
   `panel::Folds`). One-line panel texts are cut with "…" by measured width (`panel::Ellipsis`). A plan is sent only when every step passes. `scripts/play.py road` presses Enter to build its
@@ -414,7 +432,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - gfx roads: `road_geom::Frame` samples a segment's curve (two points when straight); everything along a road is a
   ribbon over it between the arm cuts of `junction::junction_shape`. `gfx/land.rs`: one index of drawn road edges per
   roads version; building lots, lot markers and zone cells are fitted clear of it in their own frame (`land::fit`).
-  The free-form road tool is drawn from `shared::CurveToolView` (filled by ui's road tool).
+  The free-form road tool is drawn from `shared::CurveToolView` (filled by ui's road tool): the plan in 128 m squares,
+  each re-meshed only when its pieces change (positions to the centimetre), the points / handles / snap as one small
+  mesh; a stale plan swaps to dimmed copies of the tool's own materials. Road chunks changed by an edit are re-meshed
+  within `QUALITY_REMESH_MS` a frame (a new world all at once), tree chunks row by row within it.
   Trees under the road being drawn are left out of their chunks while `CurveToolView` is active (re-meshed at most
   every 0.2 s). A selected vehicle (`WorldHighlight::selected`) gets white + accent ground rings and a floating
   diamond above it that grows with camera distance (unlit, readable at night); gfx's accent is the ui purple.

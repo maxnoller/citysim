@@ -343,7 +343,9 @@ fn draw_snap(
     mut markers: Query<(Entity, &mut Visibility, &mut Transform), (With<SnapMarker>, Without<GuideLines>)>,
     mut lines: Query<(Entity, &mut Visibility), (With<GuideLines>, Without<SnapMarker>)>,
     camera: Query<&GlobalTransform, With<WorldCamera>>,
+    tool_time: Option<Res<super::bench::ToolDrawTime>>,
 ) {
+    let _timed = tool_time.as_deref().map(|t| t.time());
     if !snap.is_changed() {
         return;
     }
@@ -542,7 +544,9 @@ fn draw_highlight(
     mut meshes: ResMut<Assets<Mesh>>,
     mut ground: Query<(Entity, &mut Visibility), With<HighlightGround>>,
     mut state: Local<HighlightState>,
+    tool_time: Option<Res<super::bench::ToolDrawTime>>,
 ) {
+    let _timed = tool_time.as_deref().map(|t| t.time());
     let world = &sim.world;
     // A junction's control can change under the cursor (junction tool).
     let control = match &hl.hovered {

@@ -14,6 +14,10 @@
 //! bending too tightly, `6`: a road the sim refuses for running along
 //! another).
 
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use bevy::light::NotShadowCaster;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline};
@@ -79,54 +83,71 @@ impl Plugin for RoadToolPlugin {
     }
 }
 
+/// The tool's materials, normal and dimmed (a stale plan): road, marks,
+/// x-ray marks. Only the tool's own entities use them: swapping a handle
+/// re-specialises nothing else.
+#[derive(Resource)]
+struct ToolMats {
+    road: [Handle<StandardMaterial>; 2],
+    marks: [Handle<StandardMaterial>; 2],
+    xray: [Handle<XrayMaterial>; 2],
+}
+
 fn setup(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut xray: ResMut<Assets<XrayMaterial>>,
 ) {
-    // 0: the road (lit, translucent); 1: marks over everything nearby.
-    let road = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.86, 0.93, 1.0, 0.75),
+    let road = |alpha: f32| StandardMaterial {
+        base_color: Color::srgba(0.86, 0.93, 1.0, alpha),
         emissive: LinearRgba::rgb(0.2, 0.24, 0.3),
         alpha_mode: AlphaMode::Blend,
         perceptual_roughness: 0.9,
         depth_bias: 20.0,
         ..default()
-    });
-    let marks = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
+    };
+    let marks = |alpha: f32| StandardMaterial {
+        base_color: Color::srgba(1.0, 1.0, 1.0, alpha),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         depth_bias: 40.0,
         ..default()
-    });
-    for (i, m) in [road, marks].into_iter().enumerate() {
-        commands.spawn((
-            Name::new("Curve tool"),
-            ToolPart(i),
-            MeshMaterial3d(m),
-            Transform::default(),
-            Visibility::Hidden,
-            NotShadowCaster,
-        ));
-    }
-    // 2: the marks again, faint, through whatever hides them.
+    };
+    let ghost = |alpha: f32| ExtendedMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgba(1.0, 1.0, 1.0, alpha),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        },
+        extension: XrayExt {},
+    };
+    let mats = ToolMats {
+        road: [materials.add(road(0.75)), materials.add(road(0.32))],
+        marks: [materials.add(marks(1.0)), materials.add(marks(0.4))],
+        xray: [xray.add(ghost(0.32)), xray.add(ghost(0.13))],
+    };
+    // The plan is drawn by chunks (`PlanChunks`: 0 the road, lit and
+    // translucent, 1 its marks over everything nearby, 2 those through
+    // whatever hides them); 3: the live marks (points, handles, snap).
     commands.spawn((
-        Name::new("Curve tool (x-ray)"),
-        ToolPart(2),
-        MeshMaterial3d(xray.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgba(1.0, 1.0, 1.0, 0.32),
-                alpha_mode: AlphaMode::Blend,
-                unlit: true,
-                ..default()
-            },
-            extension: XrayExt {},
-        })),
+        Name::new("Curve tool"),
+        ToolPart(3),
+        MeshMaterial3d(mats.marks[0].clone()),
         Transform::default(),
         Visibility::Hidden,
         NotShadowCaster,
     ));
+    // 4: the live marks again, faint, through whatever hides them.
+    commands.spawn((
+        Name::new("Curve tool (x-ray)"),
+        ToolPart(4),
+        MeshMaterial3d(mats.xray[0].clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
+    commands.insert_resource(mats);
 }
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
@@ -174,7 +195,17 @@ fn line(m: &mut MeshBuilder, a: Vec2, b: Vec2, w: f32, y: f32, dash: f32, c: [f3
 
 /// The marks for one view: (road mesh, marks mesh). `k` scales the marks
 /// (points, handles, lines) so they stay readable when zoomed out.
+#[cfg(test)]
 pub fn meshes(view: &CurveToolView, k: f32) -> (MeshBuilder, MeshBuilder) {
+    let (road, mut marks) = plan_meshes(view, k);
+    marks.append(&live_marks(view, k), Vec3::ZERO, 0.0, Vec3::ONE, [1.0; 4]);
+    (road, marks)
+}
+
+/// The plan's part of a view (the road as it will be, refused stretches,
+/// the junctions): (road mesh, marks mesh). Changes only when the plan
+/// does.
+fn plan_meshes(view: &CurveToolView, k: f32) -> (MeshBuilder, MeshBuilder) {
     let mut road = MeshBuilder::new();
     let mut marks = MeshBuilder::new();
     let kind = view.kind.unwrap_or(RoadKind::Street);
@@ -221,6 +252,25 @@ pub fn meshes(view: &CurveToolView, k: f32) -> (MeshBuilder, MeshBuilder) {
             line(&mut marks, p - d, p + d, 0.45 * k, y + 0.03, 0.0, RED);
         }
     }
+    // Junctions it makes: rings sized and coloured by kind.
+    for (p, change) in &view.nodes {
+        let p = Vec2::from(*p);
+        let (r, c) = match change {
+            NodeChange::End => (1.2, SOFT),
+            NodeChange::Join => (outer + 1.0, BLUE),
+            NodeChange::Split => (outer + 1.0, [0.4, 1.0, 0.85, 0.95]),
+            NodeChange::Crossing => (outer + 1.5, AMBER),
+        };
+        ring(&mut marks, p, r.max(1.2 * k), 0.4 * k, y + 0.03, c);
+    }
+    (road, marks)
+}
+
+/// The live part of a view (follows the pointer): the tightest bend,
+/// handles, control points, snap marker and guides.
+fn live_marks(view: &CurveToolView, k: f32) -> MeshBuilder {
+    let mut marks = MeshBuilder::new();
+    let y = road_geom::WALK_Y + 0.08;
     // The tightest bend: an arc of its circle through the point.
     if let Some((p, c, r, bad)) = view.tightest {
         let (p, c) = (Vec2::from(p), Vec2::from(c));
@@ -266,17 +316,6 @@ pub fn meshes(view: &CurveToolView, k: f32) -> (MeshBuilder, MeshBuilder) {
         disc(&mut marks, p, r, y + 0.05, WHITE);
         ring(&mut marks, p, r, 0.25 * k, y + 0.05, [0.1, 0.12, 0.15, 0.9]);
     }
-    // Junctions it makes: rings sized and coloured by kind.
-    for (p, change) in &view.nodes {
-        let p = Vec2::from(*p);
-        let (r, c) = match change {
-            NodeChange::End => (1.2, SOFT),
-            NodeChange::Join => (outer + 1.0, BLUE),
-            NodeChange::Split => (outer + 1.0, [0.4, 1.0, 0.85, 0.95]),
-            NodeChange::Crossing => (outer + 1.5, AMBER),
-        };
-        ring(&mut marks, p, r.max(1.2 * k), 0.4 * k, y + 0.03, c);
-    }
     // Snap marker: a diamond; guides dashed.
     if let Some((p, _)) = view.snap {
         let p = Vec2::from(p);
@@ -299,48 +338,213 @@ pub fn meshes(view: &CurveToolView, k: f32) -> (MeshBuilder, MeshBuilder) {
             c,
         );
     }
-    (road, marks)
+    marks
 }
 
+/// Side of the squares the plan is drawn in (a plan that changes at one
+/// end, a grid one block deeper, re-meshes only the squares there).
+const PLAN_CHUNK_M: f32 = 128.0;
+
+/// The plan's meshes by square: content hash and the road, marks and
+/// x-ray entities.
+#[derive(Default)]
+struct PlanChunks {
+    chunks: HashMap<IVec2, (u64, [Entity; 3])>,
+    k: f32,
+    dim: bool,
+}
+
+/// The plan's parts in each square, as views of their own.
+fn plan_by_chunk(view: &CurveToolView) -> HashMap<IVec2, CurveToolView> {
+    let mut out: HashMap<IVec2, CurveToolView> = HashMap::new();
+    if !view.active {
+        return out;
+    }
+    fn at(out: &mut HashMap<IVec2, CurveToolView>, kind: Option<RoadKind>, p: [f32; 2]) -> &mut CurveToolView {
+        out.entry(road_geom::chunk_of(Vec2::from(p), PLAN_CHUNK_M))
+            .or_insert_with(|| CurveToolView {
+                active: true,
+                kind,
+                ..default()
+            })
+    }
+    let kind = view.kind;
+    for &(c, ch) in &view.pieces {
+        at(&mut out, kind, c.point_at(c.length() * 0.5, 0.0))
+            .pieces
+            .push((c, ch));
+    }
+    for &c in &view.refused {
+        at(&mut out, kind, c.point_at(c.length() * 0.5, 0.0)).refused.push(c);
+    }
+    for &(p, ch) in &view.nodes {
+        at(&mut out, kind, p).nodes.push((p, ch));
+    }
+    if let Some(p) = view.error_at {
+        at(&mut out, kind, p).error_at = Some(p);
+    }
+    out
+}
+
+/// Content hash of a square of the plan. Positions are rounded to a
+/// centimetre: a plan checked again (a grid one block deeper) gives the same
+/// pieces with float noise in their ends, which must not re-mesh them.
+fn chunk_hash(v: &CurveToolView, k: f32) -> u64 {
+    let mut h = DefaultHasher::new();
+    let q = |x: f32| (x * 100.0).round() as i64;
+    k.to_bits().hash(&mut h);
+    v.kind.hash(&mut h);
+    let curve = |c: &Curve, h: &mut DefaultHasher| {
+        for p in c.p {
+            (q(p[0]), q(p[1])).hash(h);
+        }
+    };
+    for (c, ch) in &v.pieces {
+        curve(c, &mut h);
+        (*ch as u8).hash(&mut h);
+    }
+    0xffu8.hash(&mut h);
+    for c in &v.refused {
+        curve(c, &mut h);
+    }
+    for (p, ch) in &v.nodes {
+        (q(p[0]), q(p[1]), *ch as u8).hash(&mut h);
+    }
+    v.error_at.map(|p| (q(p[0]), q(p[1]))).hash(&mut h);
+    h.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw(
     mut commands: Commands,
     view: Res<CurveToolView>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut parts: Query<(Entity, &ToolPart, &mut Visibility)>,
+    mut mats: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    mut xmats: Query<&mut MeshMaterial3d<XrayMaterial>>,
+    tool_mats: Option<Res<ToolMats>>,
     rigs: Query<&super::camera::CameraRig>,
-    mut last_k: Local<f32>,
+    mut plan: Local<PlanChunks>,
+    tool_time: Option<Res<super::bench::ToolDrawTime>>,
 ) {
+    let _timed = tool_time.as_deref().map(|t| t.time());
+    let Some(tm) = tool_mats else { return };
     // Marks grow with the zoom (in steps, so they are not re-meshed every
     // frame while zooming).
     let dist = rigs.iter().next().map_or(150.0, |r| r.current.distance);
     let k = 2f32.powf((dist / 140.0).max(1.0).log2().round().min(3.0));
-    if !view.is_changed() && k == *last_k {
+    let k_changed = k != plan.k;
+    if !view.is_changed() && !k_changed {
         return;
     }
-    *last_k = k;
-    let (road, marks) = if view.active {
-        meshes_of(&view, k)
+    plan.k = k;
+    let dim = view.active && view.stale;
+    let i = usize::from(dim);
+    // The plan's squares: only those whose content changed are re-meshed.
+    let by_chunk = plan_by_chunk(&view);
+    let gone: Vec<IVec2> = plan
+        .chunks
+        .keys()
+        .filter(|c| !by_chunk.contains_key(c))
+        .copied()
+        .collect();
+    for c in gone {
+        if let Some((_, ents)) = plan.chunks.remove(&c) {
+            for e in ents {
+                commands.entity(e).despawn();
+            }
+        }
+    }
+    for (c, sub) in &by_chunk {
+        let hash = chunk_hash(sub, k);
+        if plan.chunks.get(c).is_some_and(|(h, _)| *h == hash) {
+            continue;
+        }
+        let (road, marks) = meshes_of(sub, k);
+        let built = [road, marks.clone(), marks];
+        let ents = match plan.chunks.get(c) {
+            Some((_, e)) => *e,
+            None => {
+                let mut spawn = |name: &str, part: usize| {
+                    let mut e = commands.spawn((
+                        Name::new(name.to_string()),
+                        ToolPart(part),
+                        Transform::default(),
+                        Visibility::Hidden,
+                        NotShadowCaster,
+                    ));
+                    match part {
+                        0 => e.insert(MeshMaterial3d(tm.road[i].clone())),
+                        1 => e.insert(MeshMaterial3d(tm.marks[i].clone())),
+                        _ => e.insert(MeshMaterial3d(tm.xray[i].clone())),
+                    };
+                    e.id()
+                };
+                [
+                    spawn("Curve tool plan", 0),
+                    spawn("Curve tool plan marks", 1),
+                    spawn("Curve tool plan (x-ray)", 2),
+                ]
+            }
+        };
+        for (e, m) in ents.into_iter().zip(built) {
+            if m.is_empty() {
+                commands.entity(e).insert(Visibility::Hidden);
+            } else {
+                // Never remove Mesh3d (see cursor.rs): replace it.
+                commands
+                    .entity(e)
+                    .insert((Mesh3d(meshes.add(m.build())), Visibility::Inherited));
+            }
+        }
+        plan.chunks.insert(*c, (hash, ents));
+    }
+    // The live part: points, handles, snap (small; follows the pointer).
+    let mut live = if view.active {
+        live_marks(&view, k)
     } else {
-        (MeshBuilder::new(), MeshBuilder::new())
+        MeshBuilder::new()
     };
-    let xray = marks.clone();
-    let mut built = [Some(road), Some(marks), Some(xray)];
+    live.translate(Vec3::Y * marks_lift());
+    let mut built = [Some(live.clone()), Some(live)];
     for (e, part, mut vis) in &mut parts {
-        let Some(m) = built[part.0].take() else { continue };
+        if part.0 < 3 {
+            continue;
+        }
+        let Some(m) = built[part.0 - 3].take() else { continue };
         if m.is_empty() {
             vis.set_if_neq(Visibility::Hidden);
         } else {
-            // Never remove Mesh3d (see cursor.rs): replace it.
             commands.entity(e).insert(Mesh3d(meshes.add(m.build())));
             vis.set_if_neq(Visibility::Inherited);
         }
     }
+    // A stale plan is drawn dimmed: swap the plan parts' materials (only
+    // the tool's own materials: nothing else is re-specialised).
+    if dim != plan.dim {
+        plan.dim = dim;
+        for (_, ents) in plan.chunks.values() {
+            if let Ok(mut m) = mats.get_mut(ents[0]) {
+                m.0 = tm.road[i].clone();
+            }
+            if let Ok(mut m) = mats.get_mut(ents[1]) {
+                m.0 = tm.marks[i].clone();
+            }
+            if let Ok(mut m) = xmats.get_mut(ents[2]) {
+                m.0 = tm.xray[i].clone();
+            }
+        }
+    }
+}
+
+/// Marks sit just above the zone overlay's height range.
+fn marks_lift() -> f32 {
+    (heights::GHOST - road_geom::WALK_Y - 0.08).max(0.0)
 }
 
 fn meshes_of(view: &CurveToolView, k: f32) -> (MeshBuilder, MeshBuilder) {
-    let (road, mut marks) = meshes(view, k);
-    // Marks sit just above the zone overlay's height range.
-    marks.translate(Vec3::Y * (heights::GHOST - road_geom::WALK_Y - 0.08).max(0.0));
+    let (road, mut marks) = plan_meshes(view, k);
+    marks.translate(Vec3::Y * marks_lift());
     (road, marks)
 }
 
@@ -470,6 +674,7 @@ mod tests {
                 kind: GuideKind::Extension,
             }],
             nodes: vec![([80.0, 80.0], NodeChange::Split), ([0.0, 0.0], NodeChange::End)],
+            stale: false,
         };
         let (road, marks) = meshes(&v, 1.0);
         assert!(road.triangle_count() > 10 && marks.triangle_count() > 50);

@@ -50,13 +50,14 @@ use bevy::render::render_resource::{PipelineCache, PollType, TextureFormat};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
-use super::bench_script::{self as script, Act, ScriptKind, Street, Switch};
+use super::bench_script::{self as script, Act, ScriptKind, Street, Switch, ToolAct, ToolSite};
 use super::city_material::CityMaterial;
 use super::daynight::PinnedHour;
 use super::scene::QualityApplied;
 use crate::shared::{
-    CameraOverride, CameraPose, GameSet, GraphicsQuality, OverlayMode, SceneReady, SimClock, SimCommand, SimStep,
-    SimWorld, WorldCamera, WorldHighlight,
+    ActiveTool, BulldozeMode, CameraOverride, CameraPose, GameSet, GraphicsQuality, OverlayMode, RoadChoice, RoadMode,
+    SceneReady, ScriptPointer, SimClock, SimCommand, SimStep, SimWorld, ToolModes, WorldCamera, WorldHighlight,
+    ZoneMode,
 };
 
 /// `CITYSIM_BENCH` is set: the app runs windowless (see `main.rs`).
@@ -72,6 +73,7 @@ pub struct BenchPlugin;
 
 impl Plugin for BenchPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<ToolDrawTime>();
         if !enabled() {
             return;
         }
@@ -86,7 +88,7 @@ impl Plugin for BenchPlugin {
         // Render diagnostics and draw counts: `perf.rs` (always on here).
         let script = ScriptKind::from_env();
         let frames = match script {
-            Some(ScriptKind::Actions) => script::actions_frames(),
+            Some(k @ (ScriptKind::Actions | ScriptKind::Tools)) => script::actions_frames(k),
             // Ends when the last switch is done.
             Some(ScriptKind::Quality) => u32::MAX,
             None => env("CITYSIM_BENCH_FRAMES").unwrap_or(1500),
@@ -127,8 +129,10 @@ impl Plugin for BenchPlugin {
             Update,
             (
                 main_mark::<1>.before(GameSet::Input),
-                main_mark::<2>.after(GameSet::Sim).before(GameSet::Render),
-                main_mark::<3>.after(GameSet::Render),
+                main_mark::<2>.after(GameSet::Hover).before(GameSet::Tools),
+                main_mark::<3>.after(GameSet::Tools).before(GameSet::Sim),
+                main_mark::<4>.after(GameSet::Sim).before(GameSet::Render),
+                main_mark::<5>.after(GameSet::Render),
             ),
         )
         .add_systems(PreUpdate, press_keys.after(InputSystems))
@@ -199,10 +203,39 @@ fn main_end(mut t: ResMut<MainTiming>, mut m: ResMut<MainMarks>) {
     if let Some(s) = t.0.take() {
         t.1 = s.elapsed().as_secs_f64() * 1000.0;
     }
-    if let Some(prev) = m.0[3] {
-        m.1[3] = prev.elapsed().as_secs_f64() * 1000.0;
+    let last = MAIN_PARTS.len() - 1;
+    if let Some(prev) = m.0[last] {
+        m.1[last] = prev.elapsed().as_secs_f64() * 1000.0;
     }
     m.2 = m.1;
+}
+
+/// CPU time gfx spent this frame drawing the tools' feedback (the road
+/// tool's preview, the cursor, guides and highlights, trees cleared under a
+/// road being drawn), nanoseconds: each of those systems adds its own time
+/// (shared access, so they still run side by side).
+#[derive(Resource, Default)]
+pub struct ToolDrawTime(std::sync::atomic::AtomicU64);
+
+/// Adds the time until it is dropped to a [`ToolDrawTime`].
+pub struct Timed<'a>(&'a ToolDrawTime, Instant);
+
+impl ToolDrawTime {
+    pub fn time(&self) -> Timed<'_> {
+        Timed(self, Instant::now())
+    }
+
+    /// The time added since the last call, ms.
+    fn take_ms(&self) -> f64 {
+        self.0.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6
+    }
+}
+
+impl Drop for Timed<'_> {
+    fn drop(&mut self) {
+        let ns = self.1.elapsed().as_nanos() as u64;
+        self.0.0.fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Parts of the render world's frame, ms: extract commands and asset
@@ -210,10 +243,12 @@ fn main_end(mut t: ResMut<MainTiming>, mut m: ResMut<MainMarks>) {
 /// (buffers, batches, bind groups), the render graph with the submit.
 const RENDER_PARTS: [&str; 6] = ["assets", "specialize", "queue", "sort", "prepare", "graph"];
 /// Parts of the main world's update, ms: from `First` up to the game's
-/// `Update` sets (input, fixed-step simulation), the sets up to and with
-/// `GameSet::Sim` (tools, commands), `GameSet::Render` (gfx rebuilds, HUD),
-/// and the rest (`PostUpdate`: transforms, visibility, UI layout; `Last`).
-const MAIN_PARTS: [&str; 4] = ["pre", "tools_sim", "render_set", "post"];
+/// `Update` sets (input, fixed-step simulation), `GameSet::{Input, Hover}`
+/// (camera, the bench itself, hover), `GameSet::Tools` (the tools: their
+/// plans and previews), `GameSet::Sim` (commands applied),
+/// `GameSet::Render` (gfx rebuilds, HUD), and the rest (`PostUpdate`:
+/// transforms, visibility, UI layout; `Last`).
+const MAIN_PARTS: [&str; 6] = ["pre", "input", "tools", "sim_cmds", "render_set", "post"];
 
 /// What the render world measured in its last frame.
 #[derive(Default, Clone, Copy)]
@@ -253,7 +288,7 @@ fn render_mark<const I: usize>(out: Res<Pipelines>) {
 /// Time stamps of the main world's parts (see `MAIN_PARTS`), the parts of
 /// this update and of the last whole one.
 #[derive(Resource, Default)]
-struct MainMarks([Option<Instant>; 4], [f64; 4], [f64; 4]);
+struct MainMarks([Option<Instant>; 6], [f64; 6], [f64; 6]);
 
 fn main_mark<const I: usize>(mut m: ResMut<MainMarks>) {
     let now = Instant::now();
@@ -270,9 +305,22 @@ fn main_mark<const I: usize>(mut m: ResMut<MainMarks>) {
 struct Keys {
     press: Vec<KeyCode>,
     held: Vec<KeyCode>,
+    /// Mouse buttons to press / let go of this frame (held until let go).
+    mouse_press: Vec<MouseButton>,
+    mouse_release: Vec<MouseButton>,
 }
 
-fn press_keys(mut bench: ResMut<Bench>, mut keys: ResMut<ButtonInput<KeyCode>>) {
+fn press_keys(
+    mut bench: ResMut<Bench>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+) {
+    for b in std::mem::take(&mut bench.keys.mouse_release) {
+        mouse.release(b);
+    }
+    for b in std::mem::take(&mut bench.keys.mouse_press) {
+        mouse.press(b);
+    }
     for k in std::mem::take(&mut bench.keys.held) {
         keys.release(k);
     }
@@ -299,7 +347,11 @@ struct FrameRec {
     new_pipelines: usize,
     compiling: usize,
     /// See `MAIN_PARTS` / `RENDER_PARTS`.
-    main_parts: [f64; 4],
+    main_parts: [f64; 6],
+    /// gfx drawing the tools' feedback ([`ToolDrawTime`]), ms.
+    tool_draw_ms: f64,
+    /// Commands applied (`shared::CommandTime`), ms.
+    cmd_ms: f64,
     render_parts: [f64; 6],
     gpu_wait_ms: f64,
     tags: Vec<String>,
@@ -383,6 +435,17 @@ struct Bench {
     zoom: Option<(u32, CameraPose)>,
     /// Where each action's frames start (record index, name).
     acts: Vec<(usize, String)>,
+    /// The tool acts: where they work, the act in progress (with the frame
+    /// it started), its camera pose and where the pointer is (sim metres).
+    site: Option<ToolSite>,
+    tool_act: Option<(ToolAct, u32)>,
+    tool_pose: Option<CameraPose>,
+    pointer_at: Option<Vec2>,
+    /// The image the world camera renders to.
+    image: Option<Handle<Image>>,
+    /// `Pan`: the pointer's window position, held still.
+    pointer_px: Option<Vec2>,
+    tool_log_at: u32,
     versions: Option<(u64, u64, u64, usize)>,
     pipelines_seen: usize,
     frame: u32,
@@ -473,6 +536,15 @@ fn path_pose(u: f32, centre: Vec2, radius: f32) -> CameraPose {
     }
 }
 
+/// Where `CITYSIM_BENCH_SHOTS` saves measured frame `frame`, if it does.
+fn shot_at(frame: u32) -> Option<String> {
+    let list = std::env::var("CITYSIM_BENCH_SHOTS").ok()?;
+    list.split(';').find_map(|e| {
+        let (f, p) = e.split_once('=')?;
+        (f.trim().parse::<u32>().ok()? == frame).then(|| p.trim().to_string())
+    })
+}
+
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -485,7 +557,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 fn drive(
     mut commands: Commands,
     mut bench: ResMut<Bench>,
-    sim: Res<SimWorld>,
+    mut sim: ResMut<SimWorld>,
     ready: Res<SceneReady>,
     mut clock: ResMut<SimClock>,
     mut quality: ResMut<GraphicsQuality>,
@@ -519,6 +591,7 @@ fn drive(
         if !matches!(target, Some(RenderTarget::Image(_))) {
             let (w, h) = bench.size;
             let image = images.add(Image::new_target_texture(w, h, TextureFormat::Bgra8UnormSrgb, None));
+            bench.image = Some(image.clone());
             commands.entity(cam).insert(RenderTarget::Image(image.into()));
             if bench.ui {
                 commands.entity(cam).insert(bevy::ui::IsDefaultUiCamera);
@@ -542,6 +615,24 @@ fn drive(
     match bench.phase {
         Phase::Loading => {
             if ready.0 {
+                if matches!(bench.script, Some(ScriptKind::Actions | ScriptKind::Tools)) {
+                    let (nu, nv) = script::grid_blocks();
+                    let t = Instant::now();
+                    bench.site = script::find_site(&sim.world, centre, nu, nv);
+                    // Money for everything the tool acts build (a player
+                    // with a large grid in mind has it).
+                    if bench.site.is_some() && sim.world.economy.money < script::TOOL_MONEY {
+                        sim.world.economy.money = script::TOOL_MONEY;
+                    }
+                    match &bench.site {
+                        Some(s) => info!(
+                            "bench: tool site: grid {nu} x {nv} at {:?} (found in {:.0} ms)",
+                            s.a,
+                            t.elapsed().as_secs_f64() * 1e3
+                        ),
+                        None => warn!("bench: no free land for a {nu} x {nv} grid: the tool acts are skipped"),
+                    }
+                }
                 info!("bench: scene ready, warming up {} frames", bench.warmup);
                 bench.phase = Phase::Warmup;
                 bench.frame = 0;
@@ -565,6 +656,16 @@ fn drive(
             }
         }
         Phase::Measure => {
+            // `CITYSIM_BENCH_SHOTS="frame=path;..."`: save the image at
+            // those measured frames.
+            if let Some(path) = shot_at(bench.frame)
+                && let Some(image) = bench.image.clone()
+            {
+                info!("bench: frame {} saved to {path}", bench.frame);
+                commands
+                    .spawn(bevy::render::view::screenshot::Screenshot::image(image))
+                    .observe(bevy::render::view::screenshot::save_to_disk(path));
+            }
             if let Some(dt) = dt
                 && bench.frame > 0
             {
@@ -800,6 +901,18 @@ fn run_script(
     mut highlight: ResMut<WorldHighlight>,
     camera: Res<CameraOverride>,
     mut cmds: MessageWriter<SimCommand>,
+    mut tools: (
+        ResMut<ActiveTool>,
+        ResMut<ToolModes>,
+        ResMut<RoadChoice>,
+        ResMut<ScriptPointer>,
+    ),
+    cams: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
+    seen: (
+        Res<crate::shared::HoveredPoint>,
+        Res<crate::shared::CurveToolView>,
+        Res<crate::shared::ToolPreview>,
+    ),
 ) {
     let Some(kind) = bench.script else { return };
     if bench.phase != Phase::Measure {
@@ -853,8 +966,31 @@ fn run_script(
             });
             bench.tag(format!("quality {from:?} -> {to:?}"));
         }
-        ScriptKind::Actions => {
+        ScriptKind::Actions | ScriptKind::Tools => {
             let frame = bench.frame;
+            // The tool act in progress: pointer, camera, buttons.
+            let cam = cams.single().ok();
+            tool_frame(&mut bench, frame, cam, &mut tools.3);
+            // What the tool shows: as each tool act begins, and every 30
+            // frames during one.
+            if bench.tool_act.is_some() && frame >= bench.tool_log_at {
+                bench.tool_log_at = frame + 30;
+                let (hp, view, preview) = (&seen.0, &seen.1, &seen.2);
+                let text = format!(
+                    "tool state: pointer {:?} on ground {:?}, preview: {} pieces, {} nodes, {} refused, cost {}, \
+                     {} zone cells, error {:?}; roads {}",
+                    tools.3.0.map(|p| p.round()),
+                    hp.pos.map(|p| [p[0].round(), p[1].round()]),
+                    view.pieces.len(),
+                    view.nodes.len(),
+                    view.refused.len(),
+                    preview.cost,
+                    preview.zone_cells.len(),
+                    preview.error,
+                    sim.world.roads.segments.len()
+                );
+                bench.tag(text);
+            }
             // Animations in progress.
             if let Some((from, by, start)) = bench.hours {
                 let t = ((frame - start) as f32 / script::scaled(script::HOUR_FRAMES) as f32).min(1.0);
@@ -872,7 +1008,7 @@ fn run_script(
                     bench.pose = Some(script::zoom_pose(t, focus, &pose));
                 }
             }
-            let Some(&(when, name, act)) = script::ACTIONS.get(bench.next_act) else {
+            let Some(&(when, name, act)) = script::acts(kind).get(bench.next_act) else {
                 return;
             };
             if frame < script::scaled(when) {
@@ -881,6 +1017,25 @@ fn run_script(
             bench.next_act += 1;
             bench.acts.push((at, name.to_string()));
             bench.tag(format!("action: {name}"));
+            if matches!(act, Act::Tool(_) | Act::End) {
+                bench.tool_log_at = frame;
+            }
+            if false {
+                let (hp, view, preview) = (&seen.0, &seen.1, &seen.2);
+                bench.tag(format!(
+                    "tool state: pointer {:?} on ground {:?}, preview: {} pieces, {} nodes, {} refused, cost {}, \
+                     {} zone cells, error {:?}; roads {}",
+                    tools.3.0.map(|p| p.round()),
+                    hp.pos.map(|p| [p[0].round(), p[1].round()]),
+                    view.pieces.len(),
+                    view.nodes.len(),
+                    view.refused.len(),
+                    preview.cost,
+                    preview.zone_cells.len(),
+                    preview.error,
+                    sim.world.roads.segments.len()
+                ));
+            }
             let w = &sim.world;
             match act {
                 Act::BuildRoad => {
@@ -935,11 +1090,189 @@ fn run_script(
                         bench.tag("skipped: CITYSIM_SAVE_DIR is not set");
                     }
                 }
-                Act::End => {}
+                Act::Tool(t) => {
+                    if bench.site.is_none() {
+                        bench.tag("skipped: no site for the tool acts");
+                        return;
+                    }
+                    start_tool_act(&mut bench, t, frame, &mut tools.0, &mut tools.1, &mut tools.2);
+                    let cam = cams.single().ok();
+                    tool_frame(&mut bench, frame, cam, &mut tools.3);
+                }
+                Act::End => {
+                    bench.tool_act = None;
+                    tools.3.0 = None;
+                }
             }
         }
     }
 }
+
+/// A tool act begins: the tool and mode it needs, its camera.
+fn start_tool_act(
+    bench: &mut Bench,
+    act: ToolAct,
+    frame: u32,
+    tool: &mut ResMut<ActiveTool>,
+    modes: &mut ResMut<ToolModes>,
+    kind: &mut ResMut<RoadChoice>,
+) {
+    let Some(site) = bench.site.clone() else { return };
+    let city = bench.city.map_or(site.zone_at, |c| c.0);
+    let city_pose = CameraPose {
+        focus: Vec3::new(city.x, 0.0, city.y),
+        yaw: 0.35,
+        pitch: 0.95,
+        distance: 520.0,
+    };
+    let now = **modes;
+    let road = |r: RoadMode| ToolModes { road: r, ..now };
+    let zone = |z: ZoneMode| ToolModes { zone: z, ..now };
+    let wanted: Option<(ActiveTool, ToolModes, Option<CameraPose>)> = match act {
+        ToolAct::Setup => {
+            kind.set_if_neq(RoadChoice::Street);
+            Some((ActiveTool::Road, road(RoadMode::Grid), Some(site.pose())))
+        }
+        ToolAct::ChainClicks => Some((ActiveTool::Road, road(RoadMode::Continuous), Some(site.pose()))),
+        ToolAct::Fill => Some((
+            ActiveTool::Zone(Some(citysim_sim::Zone::Residential)),
+            zone(ZoneMode::Fill),
+            Some(city_pose),
+        )),
+        ToolAct::Marquee => Some((
+            ActiveTool::Zone(Some(citysim_sim::Zone::Residential)),
+            zone(ZoneMode::Marquee),
+            Some(city_pose),
+        )),
+        ToolAct::Bulldoze => Some((
+            ActiveTool::Bulldoze,
+            ToolModes {
+                bulldoze: BulldozeMode::Area,
+                ..now
+            },
+            Some(city_pose),
+        )),
+        _ => None,
+    };
+    if let Some((t, m, pose)) = wanted {
+        tool.set_if_neq(t);
+        modes.set_if_neq(m);
+        bench.tool_pose = pose;
+    }
+    match act {
+        ToolAct::Click => {
+            bench.keys.mouse_press.push(MouseButton::Left);
+        }
+        ToolAct::Release => {
+            bench.keys.mouse_release.push(MouseButton::Left);
+        }
+        ToolAct::Undo => {
+            bench.keys.press.extend([KeyCode::ControlLeft, KeyCode::KeyZ]);
+        }
+        ToolAct::Enter => bench.keys.press.push(KeyCode::Enter),
+        _ => {}
+    }
+    bench.tool_act = Some((act, frame));
+    bench.pointer_px = None;
+}
+
+/// One frame of the tool act in progress: where the camera looks, where the
+/// pointer is (as a window position, from where it should be on the
+/// ground), the clicks and drags.
+fn tool_frame(bench: &mut Bench, frame: u32, cam: Option<(&Camera, &GlobalTransform)>, pointer: &mut ScriptPointer) {
+    let (Some((act, start)), Some(site)) = (bench.tool_act, bench.site.clone()) else {
+        return;
+    };
+    let t = frame - start;
+    let mut pose = bench.tool_pose;
+    let px_of = |p: Vec2| cam.and_then(|(c, tf)| c.world_to_viewport(tf, Vec3::new(p.x, 0.0, p.y)).ok());
+    // Clicks `at` frames after the act's start: press, let go two later.
+    let click_at = |bench: &mut Bench, at: u32| {
+        if t == at {
+            bench.keys.mouse_press.push(MouseButton::Left);
+        }
+        if t == at + 2 {
+            bench.keys.mouse_release.push(MouseButton::Left);
+        }
+    };
+    let (nu, nv) = (site.nu as f32, site.nv as f32);
+    match act {
+        ToolAct::Setup => bench.pointer_at = Some(site.a - site.v * 30.0),
+        ToolAct::GridClicks => {
+            // Snapping held off (Alt): the grid exactly where it was found
+            // to fit, whatever the image size makes the snap radius.
+            bench.keys.press.push(KeyCode::AltLeft);
+            bench.pointer_at = Some(match t {
+                0..12 => site.a,
+                12..24 => site.at(nu, 0.0),
+                _ => site.at(nu, nv),
+            });
+            click_at(bench, 4);
+            click_at(bench, 16);
+        }
+        ToolAct::ChainClicks => {
+            let k = (t / 12) as usize;
+            let last = site.chain.len() - 1;
+            bench.pointer_at = Some(site.chain[k.min(last)]);
+            if k < last {
+                click_at(bench, k as u32 * 12 + 4);
+            }
+        }
+        ToolAct::Pan => {
+            // The pointer stays where it is on the screen; the ground under
+            // it moves with the camera.
+            if bench.pointer_px.is_none() {
+                bench.pointer_px = bench.pointer_at.and_then(px_of);
+            }
+            if let Some(base) = bench.tool_pose {
+                let a = t as f32 / 60.0 * std::f32::consts::TAU * 0.5;
+                let r = 30.0;
+                let mut p = base;
+                p.focus += Vec3::new(a.sin() * r, 0.0, (1.0 - a.cos()) * r);
+                p.distance *= 1.0 + 0.15 * (a * 0.7).sin();
+                p.yaw += 0.08 * (a * 0.5).sin();
+                pose = Some(p);
+            }
+        }
+        ToolAct::Wiggle | ToolAct::Fill => {
+            let c = if act == ToolAct::Fill {
+                site.zone_at
+            } else {
+                site.at(nu, nv)
+            };
+            let a = t as f32 / 40.0 * std::f32::consts::TAU;
+            let r = if act == ToolAct::Fill { 12.0 } else { GRID_WIGGLE_M };
+            bench.pointer_at = Some(c + Vec2::from_angle(a) * r);
+        }
+        ToolAct::Marquee | ToolAct::Bulldoze => {
+            let (a, b) = if act == ToolAct::Marquee {
+                (site.zone_at, site.zone_to)
+            } else {
+                site.district
+            };
+            if t == 4 {
+                bench.keys.mouse_press.push(MouseButton::Left);
+            }
+            let k = (t.saturating_sub(5) as f32 / 60.0).min(1.0);
+            let wobble = Vec2::from_angle(t as f32 * 0.2) * 3.0 * k;
+            bench.pointer_at = Some(a + (b - a) * k + wobble);
+        }
+        ToolAct::Click | ToolAct::Release | ToolAct::Undo | ToolAct::Enter => {
+            if act == ToolAct::Click && t == 2 {
+                bench.keys.mouse_release.push(MouseButton::Left);
+            }
+        }
+    }
+    bench.pose = pose;
+    pointer.0 = match bench.pointer_px {
+        Some(px) => Some(px),
+        None => bench.pointer_at.and_then(px_of),
+    };
+}
+
+/// How far the pointer circles round the grid's far corner (metres): far
+/// enough to change the grid by a block now and then.
+const GRID_WIGGLE_M: f32 = 26.0;
 
 /// Fill in the frame record of the frame `drive` just closed.
 #[allow(clippy::too_many_arguments)]
@@ -951,6 +1284,8 @@ fn record(
     counts: Res<super::perf::RenderShared>,
     pipelines: Res<Pipelines>,
     mut meshes: MessageReader<AssetEvent<Mesh>>,
+    tool_draw: Res<ToolDrawTime>,
+    cmd_time: Res<crate::shared::CommandTime>,
     mut mats: (
         MessageReader<AssetEvent<CityMaterial>>,
         MessageReader<AssetEvent<StandardMaterial>>,
@@ -972,6 +1307,7 @@ fn record(
             .count();
     let side = pipelines.0.lock().map(|p| *p).unwrap_or_default();
     let (created, compiling) = (side.created, side.compiling);
+    let tool_draw_ms = tool_draw.take_ms();
     let render_ms = counts.0.lock().map(|c| c.last_cpu_ms).unwrap_or_default();
     // What the simulation changed since the last frame.
     let w = &sim.world;
@@ -1009,6 +1345,8 @@ fn record(
         r.new_pipelines = new_pipelines;
         r.compiling = compiling;
         r.main_parts = main_marks.2;
+        r.tool_draw_ms = tool_draw_ms;
+        r.cmd_ms = cmd_time.0 as f64;
         r.render_parts = side.parts;
         r.gpu_wait_ms = side.gpu_wait_ms;
         r.tags.extend(tags);
@@ -1028,8 +1366,9 @@ use citysim_sim::World;
 use citysim_sim::junction::{JunctionControl, junction_nodes, junction_view};
 
 fn frames_csv(bench: &Bench) -> String {
-    let mut out =
-        String::from("frame,ms,main_ms,render_ms,sim_ms,meshes,materials,new_pipelines,compiling,gpu_wait_ms");
+    let mut out = String::from(
+        "frame,ms,main_ms,render_ms,sim_ms,meshes,materials,new_pipelines,compiling,gpu_wait_ms,tool_draw_ms,cmd_ms",
+    );
     for p in MAIN_PARTS {
         out.push_str(&format!(",main_{p}"));
     }
@@ -1045,7 +1384,7 @@ fn frames_csv(bench: &Bench) -> String {
             .map(|v| format!("{v:.3},"))
             .collect();
         out.push_str(&format!(
-            "{i},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.3},{parts}\"{}\"\n",
+            "{i},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.3},{:.3},{:.3},{parts}\"{}\"\n",
             r.ms,
             r.main_ms,
             r.render_ms,
@@ -1055,6 +1394,8 @@ fn frames_csv(bench: &Bench) -> String {
             r.new_pipelines,
             r.compiling,
             r.gpu_wait_ms,
+            r.tool_draw_ms,
+            r.cmd_ms,
             r.tags.join("; ").replace('"', "'")
         ));
     }
@@ -1096,12 +1437,14 @@ fn hitches(bench: &Bench) -> String {
         };
         format!(
             "{{ \"frame\": {i}, \"ms\": {:.2}, \"main_ms\": {:.2}, \"render_ms\": {:.2}, \"gpu_wait_ms\": {:.2}, \
+             \"tool_draw_ms\": {:.2}, \
              \"meshes\": {}, \"materials\": {}, \"new_pipelines\": {}, \"compiling\": {}, \"main_parts\": {{ {} }}, \
              \"render_parts\": {{ {} }}, \"tags\": [{}] }}",
             r.ms,
             r.main_ms,
             r.render_ms,
             r.gpu_wait_ms,
+            r.tool_draw_ms,
             r.meshes,
             r.materials,
             r.new_pipelines,
@@ -1127,7 +1470,7 @@ fn hitches(bench: &Bench) -> String {
         worst.join(",\n")
     );
     match bench.script {
-        Some(ScriptKind::Actions) => {
+        Some(ScriptKind::Actions | ScriptKind::Tools) => {
             let mut acts = Vec::new();
             for (k, (start, name)) in bench.acts.iter().enumerate() {
                 let end = bench.acts.get(k + 1).map_or(recs.len(), |a| a.0);
@@ -1142,14 +1485,38 @@ fn hitches(bench: &Bench) -> String {
                 // GPU's time hides it in the frame times).
                 let main_max = recs[*start..end].iter().map(|r| r.main_ms).fold(0.0, f64::max);
                 let render_max = recs[*start..end].iter().map(|r| r.render_ms).fold(0.0, f64::max);
+                // The tools' own work: the tool systems (`GameSet::Tools`),
+                // their commands applied (`shared::CommandTime`) and gfx drawing
+                // their feedback, per frame: average and worst.
+                let part = |name: &str| MAIN_PARTS.iter().position(|p| *p == name).expect("part");
+                let ti = part("tools");
+                let stat = |f: &dyn Fn(&FrameRec) -> f64| {
+                    let v: Vec<f64> = recs[*start..end].iter().map(f).collect();
+                    (v.iter().sum::<f64>() / n, v.iter().copied().fold(0.0, f64::max))
+                };
+                let tools = stat(&|r| r.main_parts[ti]);
+                let cmds = stat(&|r| r.cmd_ms);
+                let draw = stat(&|r| r.tool_draw_ms);
+                let all = stat(&|r| r.main_parts[ti] + r.cmd_ms + r.tool_draw_ms);
                 acts.push(format!(
                     "    {{ \"action\": {}, \"frames\": {}, \"avg_ms\": {avg:.2}, \"worst_ms\": {:.2}, \
                      \"worst_at\": {}, \"over_33ms\": {over33}, \"main_ms_max\": {main_max:.2}, \
-                     \"render_ms_max\": {render_max:.2}, \"worst\": {} }}",
+                     \"render_ms_max\": {render_max:.2}, \"tools_ms\": {{ \"avg\": {:.3}, \"max\": {:.3} }}, \
+                     \"sim_cmds_ms\": {{ \"avg\": {:.3}, \"max\": {:.3} }}, \
+                     \"tool_draw_ms\": {{ \"avg\": {:.3}, \"max\": {:.3} }}, \
+                     \"tool_total_ms\": {{ \"avg\": {:.3}, \"max\": {:.3} }}, \"worst\": {} }}",
                     json_str(name),
                     end - start,
                     recs[w].ms,
                     w - start,
+                    tools.0,
+                    tools.1,
+                    cmds.0,
+                    cmds.1,
+                    draw.0,
+                    draw.1,
+                    all.0,
+                    all.1,
                     rec_json(w)
                 ));
             }

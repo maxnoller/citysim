@@ -341,6 +341,34 @@ mod follow_tests {
     }
 
     fn follow(speed: usize, frames: usize, pause: std::ops::Range<usize>, foot: bool) -> (usize, f32, f32) {
+        let (c, m, mv, _) = follow_held(speed, frames, pause, 0..0, foot);
+        (c, m, mv)
+    }
+
+    /// Steps of the drawn body in the world: the largest while the
+    /// simulation was held (`SimClock::hold`), the first after the hold,
+    /// and the largest otherwise.
+    /// Frames a hold may take to settle (the glide onto the last sample).
+    const HOLD_SETTLE: usize = 8;
+
+    #[derive(Default, Clone, Copy)]
+    struct Steps {
+        /// Moved in all over the first `HOLD_SETTLE` frames of the hold.
+        settling: f32,
+        held: f32,
+        resumed: f32,
+        free: f32,
+    }
+
+    /// As `follow`, with the simulation held (`SimClock::hold`, a plan
+    /// being sent in parts) over the frames `hold`.
+    fn follow_held(
+        speed: usize,
+        frames: usize,
+        pause: std::ops::Range<usize>,
+        hold: std::ops::Range<usize>,
+        foot: bool,
+    ) -> (usize, f32, f32, Steps) {
         let mut app = app(town());
         app.world_mut().resource_mut::<SimClock>().speed = speed;
         let step = |app: &mut App, i: usize| {
@@ -352,27 +380,31 @@ mod follow_tests {
             step(&mut app, i);
         }
         let (mut checked, mut worst_mark, mut worst_move) = (0, 0.0f32, 0.0f32);
+        let mut steps = Steps::default();
         let mut i = 0;
         // Follow one after another as they arrive.
         while i < frames {
-            let (c, m, mv, used) = follow_one(&mut app, &step, i, frames, &pause, foot);
+            let (c, m, mv, used) = follow_one(&mut app, &step, i, frames, &pause, &hold, foot, &mut steps);
             checked += c;
             worst_mark = worst_mark.max(m);
             worst_move = worst_move.max(mv);
             i += used.max(1);
         }
-        (checked, worst_mark, worst_move)
+        (checked, worst_mark, worst_move, steps)
     }
 
     /// Follow one car or person from frame `start` until it arrives (or
     /// `frames`): (frames checked, worst mark, worst move, frames used).
+    #[allow(clippy::too_many_arguments)]
     fn follow_one(
         app: &mut App,
         step: &dyn Fn(&mut App, usize),
         start: usize,
         frames: usize,
         pause: &std::ops::Range<usize>,
+        hold: &std::ops::Range<usize>,
         foot: bool,
+        steps: &mut Steps,
     ) -> (usize, f32, f32, usize) {
         // A car that is moving and will keep going for a while, or the
         // person on foot with the longest way ahead.
@@ -406,6 +438,7 @@ mod follow_tests {
         };
         let (mut checked, mut worst_mark, mut worst_move) = (0, 0.0f32, 0.0f32);
         let mut last_view: Option<Vec3> = None;
+        let mut last_pos: Option<Vec2> = None;
         let mut i = start;
         while i < frames {
             i += 1;
@@ -427,6 +460,7 @@ mod follow_tests {
             world.resource_mut::<WorldHighlight>().selected = Some(target);
             *world.resource_mut::<CameraFollow>() = CameraFollow { focus: Some(focus), on };
             world.resource_mut::<SimClock>().paused = pause.contains(&i);
+            world.resource_mut::<SimClock>().hold = hold.contains(&i);
             step(app, i);
             let drawn = app.world().resource::<DrawnPoses>();
             let pos = match who {
@@ -435,8 +469,26 @@ mod follow_tests {
             };
             let Some(pos) = pos else {
                 last_view = None;
+                last_pos = None;
                 continue;
             };
+            let p2 = Vec2::from(pos);
+            if let Some(lp) = last_pos {
+                let d = p2.distance(lp);
+                // The drawn moment trails the sampled steps a little: the
+                // first frames of a hold glide onto the last one (as when
+                // paused); after that nothing moves.
+                if hold.contains(&i) && i >= hold.start + HOLD_SETTLE {
+                    steps.held = steps.held.max(d);
+                } else if hold.contains(&i) {
+                    steps.settling += d;
+                } else if i == hold.end && !hold.is_empty() {
+                    steps.resumed = steps.resumed.max(d);
+                } else if !hold.contains(&i) && !pause.contains(&i) {
+                    steps.free = steps.free.max(d);
+                }
+            }
+            last_pos = Some(p2);
             let body = Vec3::new(pos[0], 0.0, pos[1]);
             let (ring, ring_shown) = named(app, "Vehicle ring");
             let (dia, dia_shown) = named(app, "Vehicle marker");
@@ -479,6 +531,36 @@ mod follow_tests {
             assert!(checked > 60, "speed {speed}: only {checked} frames followed");
             assert!(mark < 1e-3, "speed {speed}: a mark is {mark} m off the figure");
             assert!(moved < 2e-3, "speed {speed}: the figure moved {moved} m in the view");
+        }
+    }
+
+    #[test]
+    fn a_plan_holding_the_sim_stops_cars_and_people_without_a_jump() {
+        // A plan sent in parts holds the simulation (`SimClock::hold`) for
+        // some frames: what is followed stands still, the marks stay on it,
+        // and when the hold ends it moves on by an ordinary frame's step.
+        for (speed, foot) in [(0, false), (3, false), (0, true)] {
+            let (checked, mark, moved, steps) = follow_held(speed, 400, 0..0, 200..260, foot);
+            println!(
+                "hold, speed {speed}, foot {foot}: {checked} frames, marks {mark:.5} m off, moved {moved:.5} m in view, \
+                 settling {:.3} m, then {:.5} m, on resuming {:.3} m, otherwise up to {:.3} m",
+                steps.settling, steps.held, steps.resumed, steps.free
+            );
+            assert!(
+                steps.settling <= steps.free * 1.5 + 1e-3,
+                "it went on {} m into the hold (frames move it up to {} m)",
+                steps.settling,
+                steps.free
+            );
+            assert!(mark < 1e-3, "a mark is {mark} m off");
+            assert!(moved < 2e-3, "the body moved {moved} m in the view");
+            assert!(steps.held < 1e-4, "it moved {} m while the sim was held", steps.held);
+            assert!(
+                steps.resumed <= steps.free * 1.5 + 1e-3,
+                "it jumped {} m when the hold ended (frames move it up to {} m)",
+                steps.resumed,
+                steps.free
+            );
         }
     }
 }

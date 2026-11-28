@@ -300,6 +300,7 @@ fn sync_junctions(
     mats: Res<WorldMaterials>,
     assets: Res<SignalAssets>,
     time: Res<Time<Real>>,
+    shared: Res<super::roads::SharedLayout>,
 ) {
     let world = &sim.world;
     let key = sim.key(world.versions.roads);
@@ -314,7 +315,7 @@ fn sync_junctions(
     let state = &mut *state;
     if roads_changed {
         state.roads_key = Some(key);
-        let layout = road_geom::layout(world);
+        let layout = super::roads::layout_of(&shared, &sim);
         state.layout = layout.nodes.into_iter().map(|n| (n.id, n)).collect();
     }
     let mut seen: Vec<NodeId> = Vec::new();

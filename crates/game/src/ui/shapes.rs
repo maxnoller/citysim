@@ -94,6 +94,9 @@ pub fn grid_frame(a: [f32; 2], b: [f32; 2], c: Option<[f32; 2]>, block_m: f32) -
     })
 }
 
+/// Blocks a grid's street across is built in at a time (one command each).
+pub const GRID_PIECE_BLOCKS: u32 = 4;
+
 /// A street grid: corner, unit side directions, blocks along each.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridFrame {
@@ -122,9 +125,24 @@ impl GridFrame {
             out.push(Curve::straight(s, add(s, w)));
         }
         if self.nv > 0 {
+            // The streets across, in pieces of at most `GRID_PIECE_BLOCKS`
+            // blocks from crossing to crossing (the same roads: each piece
+            // starts on the junction the one before ended at), so no single
+            // command crosses a whole grid's worth of streets.
             for i in 0..=self.nu {
                 let s = add(self.a, mul(self.u, i as f32 * self.block_m));
-                out.push(Curve::straight(s, add(s, d)));
+                let mut j = 0;
+                while j < self.nv {
+                    let k = (j + GRID_PIECE_BLOCKS).min(self.nv);
+                    let p0 = add(s, mul(self.v, j as f32 * self.block_m));
+                    let p1 = if k == self.nv {
+                        add(s, d)
+                    } else {
+                        add(s, mul(self.v, k as f32 * self.block_m))
+                    };
+                    out.push(Curve::straight(p0, p1));
+                    j = k;
+                }
             }
         }
         out
