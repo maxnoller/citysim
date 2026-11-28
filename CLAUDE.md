@@ -310,8 +310,8 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   cell with the fill tool, `people-lunch` (with `CITYSIM_DEMO_HOUR=12`) a driver on a lunch trip).
 - ui tools: plain modules know nothing of layout: `ui/fsnap.rs` (snapping: nodes, T onto roads, angles from the start
   road and 15° steps, whole-cell lengths, zoning lattices, parallel at a set distance, extensions, line meetings),
-  `ui/shapes.rs` (`Draft` chains of straight / curve / continuous pieces, `GridFrame`, `Stretch` of road between
-  junctions), `ui/plan.rs` (`Op`s checked in order on a scratch copy; road parts named by centre line and resolved
+  `ui/shapes.rs` (`Draft` chains of straight / curve / continuous pieces, `GridFrame` (its streets across are built in
+  pieces of `GRID_PIECE_BLOCKS` = 4 blocks, one command each), `Stretch` of road between junctions), `ui/plan.rs` (`Op`s checked in order on a scratch copy; road parts named by centre line and resolved
   when their turn comes; undo by serials / curves / zone cells; `plan::evaluate` is the reference, `plan::Prefixes` the same
   carrying on from the worlds after the operations a plan shares with the one before), `ui/planner.rs` (plans are checked
   on a worker thread: a frame waits at most `planner::WAIT`, 1 ms, then shows the last plan checked, `ToolPlan::stale`; a
@@ -398,7 +398,10 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
 - gfx roads: `road_geom::Frame` samples a segment's curve (two points when straight); everything along a road is a
   ribbon over it between the arm cuts of `junction::junction_shape`. `gfx/land.rs`: one index of drawn road edges per
   roads version; building lots, lot markers and zone cells are fitted clear of it in their own frame (`land::fit`).
-  The free-form road tool is drawn from `shared::CurveToolView` (filled by ui's road tool).
+  The free-form road tool is drawn from `shared::CurveToolView` (filled by ui's road tool): the plan in 128 m squares,
+  each re-meshed only when its pieces change (positions to the centimetre), the points / handles / snap as one small
+  mesh; a stale plan swaps to dimmed copies of the tool's own materials. Road chunks changed by an edit are re-meshed
+  within `QUALITY_REMESH_MS` a frame (a new world all at once), tree chunks row by row within it.
   Trees under the road being drawn are left out of their chunks while `CurveToolView` is active (re-meshed at most
   every 0.2 s). A selected vehicle (`WorldHighlight::selected`) gets white + accent ground rings and a floating
   diamond above it that grows with camera distance (unlit, readable at night); gfx's accent is the ui purple.

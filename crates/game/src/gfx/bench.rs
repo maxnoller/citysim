@@ -1199,6 +1199,9 @@ fn tool_frame(bench: &mut Bench, frame: u32, cam: Option<(&Camera, &GlobalTransf
     match act {
         ToolAct::Setup => bench.pointer_at = Some(site.a - site.v * 30.0),
         ToolAct::GridClicks => {
+            // Snapping held off (Alt): the grid exactly where it was found
+            // to fit, whatever the image size makes the snap radius.
+            bench.keys.press.push(KeyCode::AltLeft);
             bench.pointer_at = Some(match t {
                 0..12 => site.a,
                 12..24 => site.at(nu, 0.0),
