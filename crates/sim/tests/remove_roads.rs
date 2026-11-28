@@ -50,10 +50,7 @@ fn removing_parts_at_once_leaves_what_removing_them_one_by_one_does() {
     assert_eq!(preview.removed, out.removed);
     assert_eq!(out.removed.len(), parts.len());
     let mut single = w.clone();
-    loop {
-        let Some(&(segment, from_m, to_m)) = new_parts(&single, first).first() else {
-            break;
-        };
+    while let Some(&(segment, from_m, to_m)) = new_parts(&single, first).first() {
         single.apply(Command::RemoveRoad { segment, from_m, to_m }).unwrap();
     }
     let shape = |w: &World| {

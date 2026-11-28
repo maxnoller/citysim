@@ -245,20 +245,6 @@ impl Planner {
         }
         self.result(base_id, ops, after)
     }
-
-    /// Ask for `ops` on `base` and wait until it is checked (tests, and
-    /// where nothing can be shown meanwhile).
-    #[cfg(test)]
-    pub fn request_blocking(&mut self, base_id: u64, base: &Arc<World>, ops: &[Op]) -> &Done {
-        loop {
-            if self
-                .request(base_id, base, ops, false, Duration::from_millis(50))
-                .is_some()
-            {
-                return self.result(base_id, ops, false).expect("just checked");
-            }
-        }
-    }
 }
 
 /// Free `x` on another thread (copies of a large city take milliseconds to

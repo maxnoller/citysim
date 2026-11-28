@@ -130,27 +130,23 @@ fn setup(
     // The plan is drawn by chunks (`PlanChunks`: 0 the road, lit and
     // translucent, 1 its marks over everything nearby, 2 those through
     // whatever hides them); 3: the live marks (points, handles, snap).
-    for (i, m) in [(3, &mats.marks[0])] {
-        commands.spawn((
-            Name::new("Curve tool"),
-            ToolPart(i),
-            MeshMaterial3d(m.clone()),
-            Transform::default(),
-            Visibility::Hidden,
-            NotShadowCaster,
-        ));
-    }
+    commands.spawn((
+        Name::new("Curve tool"),
+        ToolPart(3),
+        MeshMaterial3d(mats.marks[0].clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
     // 4: the live marks again, faint, through whatever hides them.
-    for i in [4] {
-        commands.spawn((
-            Name::new("Curve tool (x-ray)"),
-            ToolPart(i),
-            MeshMaterial3d(mats.xray[0].clone()),
-            Transform::default(),
-            Visibility::Hidden,
-            NotShadowCaster,
-        ));
-    }
+    commands.spawn((
+        Name::new("Curve tool (x-ray)"),
+        ToolPart(4),
+        MeshMaterial3d(mats.xray[0].clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
     commands.insert_resource(mats);
 }
 
@@ -364,11 +360,7 @@ fn plan_by_chunk(view: &CurveToolView) -> HashMap<IVec2, CurveToolView> {
     if !view.active {
         return out;
     }
-    fn at<'a>(
-        out: &'a mut HashMap<IVec2, CurveToolView>,
-        kind: Option<RoadKind>,
-        p: [f32; 2],
-    ) -> &'a mut CurveToolView {
+    fn at(out: &mut HashMap<IVec2, CurveToolView>, kind: Option<RoadKind>, p: [f32; 2]) -> &mut CurveToolView {
         out.entry(road_geom::chunk_of(Vec2::from(p), PLAN_CHUNK_M))
             .or_insert_with(|| CurveToolView {
                 active: true,
