@@ -18,6 +18,22 @@
 //! to hour `b` over the path (day into night in one flight). Join the
 //! frames with e.g. `ffmpeg -framerate 30 -i dir/frame_%05d.png -c:v
 //! libx264 -pix_fmt yuv420p out.mp4`.
+//!
+//! Following (with `CITYSIM_FOLLOW=car|arrive|walker`, which makes the
+//! interface pick something and follow it): the first keyframe is the view
+//! until the follow starts (then the camera is the player's, zoomed to
+//! `CITYSIM_RECORD_FOLLOW_DIST`, 70 m), and the run records
+//! `CITYSIM_RECORD_SECONDS` (15) from there. Also:
+//! * `CITYSIM_RECORD_SPEED=1|3|6|12`: the simulation speed;
+//! * `CITYSIM_RECORD_DT="8,25"`: frame times (ms) to cycle through instead
+//!   of `1 / fps` (uneven frames, for measurements);
+//! * `CITYSIM_RECORD_PAUSE="a,b"`: paused from `a` to `b` seconds;
+//! * `CITYSIM_RECORD_SAVE=0`: no frames written (measurements only);
+//! * `CITYSIM_RECORD_UI=1`: the interface is drawn into the frames;
+//! * `CITYSIM_RECORD_LOG=file.csv`: per frame, the followed car's drawn
+//!   body, the sim's point for it, the ring, the diamond, the off-map
+//!   traveller's marker, the camera focus, and where they are on a 1920x1080
+//!   screen (`docs` of the columns in the header).
 
 use std::time::Duration;
 
@@ -27,7 +43,16 @@ use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::time::TimeUpdateStrategy;
 
-use crate::shared::{CameraOverride, CameraPose, GameSet, SceneReady, SimClock, WorldCamera};
+use std::io::Write as _;
+
+use bevy::diagnostic::FrameCount;
+
+use super::camera::CameraRig;
+use super::vehicles::VehicleEntities;
+use crate::shared::{
+    CameraFollow, CameraGoTo, CameraOverride, CameraPose, GameSet, SceneReady, SimClock, SimWorld, WorldCamera,
+    WorldHighlight, WorldTarget,
+};
 
 /// `CITYSIM_RECORD` is set: the app runs windowless (see `main.rs`).
 pub fn enabled() -> bool {
@@ -46,15 +71,30 @@ struct Recorder {
     keys: Vec<Key>,
     /// `CITYSIM_RECORD_HOURS`: drawn hour at the start and end.
     hours: Option<(f32, f32)>,
+    /// `CITYSIM_RECORD_FOLLOW` window, and who is followed.
+    walk_follow: Option<(f32, f32)>,
+    followed: Option<citysim_sim::CitizenId>,
+    last_focus: Option<Vec3>,
     image: Option<Handle<Image>>,
     /// Frames rendered since the scene was ready (warm-up first).
     frame: u32,
     saved: u32,
     done_at: Option<u32>,
-    /// `CITYSIM_RECORD_FOLLOW` window, and who is followed.
-    follow: Option<(f32, f32)>,
-    followed: Option<citysim_sim::CitizenId>,
-    last_focus: Option<Vec3>,
+    follow: Option<Follow>,
+    speed: usize,
+    dts: Vec<f32>,
+    pause: Option<(f32, f32)>,
+    save: bool,
+    ui: bool,
+    log: Option<std::fs::File>,
+}
+
+/// Following something (`CITYSIM_FOLLOW`).
+struct Follow {
+    distance: f32,
+    seconds: f32,
+    /// Frame (after warm-up) the follow started on.
+    started: Option<u32>,
 }
 
 const WARMUP: u32 = 90;
@@ -80,31 +120,73 @@ impl Plugin for RecordPlugin {
             .and_then(|s| s.parse().ok())
             .unwrap_or(30.0);
         let keys = parse_keys(&std::env::var("CITYSIM_RECORD_PATH").unwrap_or_default());
-        if keys.len() < 2 {
+        let pair = |k: &str| -> Option<(f32, f32)> {
+            let s = std::env::var(k).ok()?;
+            let (a, b) = s.split_once(',')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        };
+        let num = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<f32>().ok());
+        let list = |k: &str| -> Vec<f32> {
+            std::env::var(k)
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .collect()
+        };
+        let follow = std::env::var("CITYSIM_FOLLOW")
+            .is_ok_and(|v| !v.is_empty() && v != "0")
+            .then(|| Follow {
+                distance: num("CITYSIM_RECORD_FOLLOW_DIST").unwrap_or(70.0),
+                seconds: num("CITYSIM_RECORD_SECONDS").unwrap_or(15.0),
+                started: None,
+            });
+        if follow.is_none() && keys.len() < 2 {
             error!("CITYSIM_RECORD_PATH needs at least two keyframes \"t,x,z,yaw,pitch,distance;...\"");
         }
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(1.0 / fps)))
+        let speed = match num("CITYSIM_RECORD_SPEED").unwrap_or(1.0) as u32 {
+            3 => 1,
+            6 => 2,
+            12 => 3,
+            _ => 0,
+        };
+        let dts: Vec<f32> = list("CITYSIM_RECORD_DT").into_iter().map(|ms| ms / 1000.0).collect();
+        let pause = match list("CITYSIM_RECORD_PAUSE")[..] {
+            [a, b] => Some((a, b)),
+            _ => None,
+        };
+        let log = std::env::var("CITYSIM_RECORD_LOG")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| std::fs::File::create(p).ok())
+            .map(|mut f| {
+                let _ = writeln!(f, "{LOG_HEADER}");
+                f
+            });
+        let first_dt = dts.first().copied().unwrap_or(1.0 / fps);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(first_dt)))
             .insert_resource(Recorder {
                 dir,
                 size,
                 fps,
                 keys,
-                hours: std::env::var("CITYSIM_RECORD_HOURS").ok().and_then(|s| {
-                    let (a, b) = s.split_once(',')?;
-                    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
-                }),
+                hours: pair("CITYSIM_RECORD_HOURS"),
+                walk_follow: pair("CITYSIM_RECORD_FOLLOW"),
+                followed: None,
+                last_focus: None,
                 image: None,
                 frame: 0,
                 saved: 0,
                 done_at: None,
-                follow: std::env::var("CITYSIM_RECORD_FOLLOW").ok().and_then(|s| {
-                    let (a, b) = s.split_once(',')?;
-                    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
-                }),
-                followed: None,
-                last_focus: None,
+                follow,
+                speed,
+                dts,
+                pause,
+                save: std::env::var("CITYSIM_RECORD_SAVE").map_or(true, |v| v != "0"),
+                ui: std::env::var("CITYSIM_RECORD_UI").is_ok_and(|v| v == "1"),
+                log,
             })
-            .add_systems(Update, record.in_set(GameSet::Input));
+            .add_systems(Update, record.in_set(GameSet::Input))
+            .add_systems(Last, (log_frame, next_dt).chain());
     }
 }
 
@@ -165,32 +247,110 @@ fn record(
     ready: Res<SceneReady>,
     mut clock: ResMut<SimClock>,
     mut camera: ResMut<CameraOverride>,
-    sim: Res<crate::shared::SimWorld>,
-    people: Query<&super::people::PersonVisual>,
+    follow: Res<CameraFollow>,
+    mut goto: MessageWriter<CameraGoTo>,
     mut images: ResMut<Assets<Image>>,
     cams: Query<(Entity, Option<&RenderTarget>), With<WorldCamera>>,
     mut exit: MessageWriter<AppExit>,
-    mut hour: ResMut<super::daynight::PinnedHour>,
+    (sim, people, mut hour): (
+        Res<SimWorld>,
+        Query<&super::people::PersonVisual>,
+        ResMut<super::daynight::PinnedHour>,
+    ),
 ) {
-    clock.paused = false;
+    clock.speed = rec.speed;
     for (cam, target) in &cams {
         if !matches!(target, Some(RenderTarget::Image(_))) {
             let (w, h) = rec.size;
             let image = images.add(Image::new_target_texture(w, h, TextureFormat::Bgra8UnormSrgb, None));
             commands.entity(cam).insert(RenderTarget::Image(image.clone().into()));
+            if rec.ui {
+                commands.entity(cam).insert(bevy::ui::IsDefaultUiCamera);
+            }
             rec.image = Some(image);
         }
     }
-    let end = rec.keys.last().map_or(0.0, |k| k[0]);
-    let t = rec.frame.saturating_sub(WARMUP) as f32 / rec.fps;
+    let frame = rec.frame;
+    let fps = rec.fps;
+    let first = rec.keys.first().map(|k| pose_at(&rec.keys, k[0]));
+    // Following: the first keyframe until the follow starts, then the
+    // player's camera; the clock starts with the follow.
+    let (t, end) = match rec.follow.as_mut() {
+        Some(f) => {
+            if f.started.is_none() && follow.focus.is_some() && frame > WARMUP {
+                f.started = Some(frame);
+                goto.write(CameraGoTo {
+                    focus: follow.focus.unwrap_or_default(),
+                    distance: Some(f.distance),
+                });
+            }
+            let t = f.started.map_or(-1.0, |s| (frame - s) as f32 / fps);
+            camera.0 = if f.started.is_none() { first } else { None };
+            (t, f.seconds)
+        }
+        None => {
+            let t = frame.saturating_sub(WARMUP) as f32 / rec.fps;
+            let end = rec.keys.last().map_or(0.0, |k| k[0]);
+            let pose = keyed_pose(&mut rec, &mut clock, &sim, &people, t, frame);
+            camera.0 = Some(pose);
+            if let Some((a, b)) = rec.hours {
+                let k = (t / end.max(1e-3)).clamp(0.0, 1.0);
+                hour.0 = Some(a + (b - a) * k);
+            }
+            (t, end)
+        }
+    };
+    clock.paused = rec.pause.is_some_and(|(a, b)| t >= a && t < b);
+    if !ready.0 {
+        return;
+    }
+    rec.frame += 1;
+    if let Some(done) = rec.done_at {
+        // Let the last screenshots finish saving.
+        if rec.frame > done + 20 {
+            info!("record: {} frames in {}", rec.saved, rec.dir.display());
+            exit.write(AppExit::Success);
+        }
+        return;
+    }
+    if rec.frame <= WARMUP || t < 0.0 {
+        return;
+    }
+    if t > end {
+        rec.done_at = Some(rec.frame);
+        return;
+    }
+    if !rec.save {
+        return;
+    }
+    if let Some(image) = rec.image.clone() {
+        let path = rec.dir.join(format!("frame_{:05}.png", rec.saved));
+        rec.saved += 1;
+        commands.spawn(Screenshot::image(image)).observe(save_to_disk(path));
+        if rec.saved.is_multiple_of(150) {
+            info!("record: {} frames ({t:.1} s of {end:.1} s)", rec.saved);
+        }
+    }
+}
+
+/// The path's pose at `t`, the speed its keyframes set, and the focus on
+/// a person walking during `CITYSIM_RECORD_FOLLOW`.
+fn keyed_pose(
+    rec: &mut Recorder,
+    clock: &mut SimClock,
+    sim: &SimWorld,
+    people: &Query<&super::people::PersonVisual>,
+    t: f32,
+    frame: u32,
+) -> CameraPose {
     let mut pose = pose_at(&rec.keys, t);
     // The speed of the last keyframe passed that sets one.
     if let Some(k) = rec.keys.iter().rev().find(|k| k[0] <= t && k[6] >= 0.0) {
         clock.speed = (k[6] as usize).min(crate::shared::SPEEDS.len() - 1);
     }
-    if let Some((t0, t1)) = rec.follow
+    if let Some((t0, t1)) = rec.walk_follow
         && (t0..=t1).contains(&t)
-        && rec.frame > WARMUP
+        && frame > WARMUP
     {
         let w = &sim.world;
         if rec
@@ -233,38 +393,162 @@ fn record(
             pose.focus = f;
         }
     }
-    camera.0 = Some(pose);
-    if let Some((a, b)) = rec.hours {
-        let k = (t / end.max(1e-3)).clamp(0.0, 1.0);
-        hour.0 = Some(a + (b - a) * k);
+    pose
+}
+
+/// The next frame's time step (`CITYSIM_RECORD_DT` cycles).
+fn next_dt(rec: Res<Recorder>, frame: Res<FrameCount>, mut strategy: ResMut<TimeUpdateStrategy>) {
+    if rec.dts.len() > 1 {
+        let dt = rec.dts[(frame.0 as usize + 1) % rec.dts.len()];
+        *strategy = TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(dt));
     }
-    if !ready.0 {
-        return;
-    }
-    rec.frame += 1;
-    if let Some(done) = rec.done_at {
-        // Let the last screenshots finish saving.
-        if rec.frame > done + 20 {
-            info!("record: {} frames in {}", rec.saved, rec.dir.display());
-            exit.write(AppExit::Success);
+}
+
+const LOG_HEADER: &str = "frame,t,dt,paused,speed,vehicle,body_x,body_z,heading,sim_x,sim_z,ring_shown,ring_x,ring_z,\
+dia_shown,dia_x,dia_z,trav_shown,trav_x,trav_z,focus_x,focus_z,yaw,pitch,distance,follow_x,follow_z,\
+body_sx,body_sy,ring_sx,ring_sy,dia_sx,dia_sy,trav_sx,trav_sy,mark_sx,mark_sy";
+
+/// Where a ground point is on a 1920x1080 screen through `cam`.
+fn screen(cam: &GlobalTransform, fov: f32, p: Vec3) -> Vec2 {
+    let v = cam.affine().inverse().transform_point3(p);
+    let t = (fov * 0.5).tan();
+    let aspect = 1920.0 / 1080.0;
+    let x = (v.x / -v.z) / (t * aspect);
+    let y = (v.y / -v.z) / t;
+    Vec2::new((x + 1.0) * 0.5 * 1920.0, (1.0 - y) * 0.5 * 1080.0)
+}
+
+/// One line of `CITYSIM_RECORD_LOG` per frame once following.
+#[allow(clippy::too_many_arguments)]
+fn log_frame(
+    mut rec: ResMut<Recorder>,
+    frame: Res<FrameCount>,
+    time: Res<Time>,
+    sim: Res<SimWorld>,
+    clock: Res<SimClock>,
+    hl: Res<WorldHighlight>,
+    follow: Res<CameraFollow>,
+    entities: Res<VehicleEntities>,
+    cams: Query<(&GlobalTransform, &Projection, &CameraRig), With<WorldCamera>>,
+    named: Query<(&Name, &GlobalTransform, &InheritedVisibility)>,
+    tfs: Query<&GlobalTransform>,
+    people: Query<&super::people::PersonVisual>,
+) {
+    let started = rec.follow.as_ref().and_then(|f| f.started);
+    let fps = rec.fps;
+    let Some(log) = rec.log.as_mut() else { return };
+    let Some(start) = started else { return };
+    let Ok((cam, proj, rig)) = cams.single() else { return };
+    let fov = match proj {
+        Projection::Perspective(p) => p.fov,
+        _ => 0.7,
+    };
+    let w = &sim.world;
+    let vehicle = match &hl.selected {
+        Some(WorldTarget::Vehicle(v)) => Some(*v),
+        _ => None,
+    };
+    // A person on foot: their drawn figure, and the sim's point for them.
+    let walker = match &hl.selected {
+        Some(WorldTarget::Walker(c)) => citysim_sim::walk::walker_of(w, *c).map(|(leader, x)| {
+            let slot = if *c == leader {
+                0
+            } else {
+                x.party.iter().position(|p| p == c).map_or(0, |i| i as u8 + 1)
+            };
+            (*c, leader, slot, x.pos)
+        }),
+        _ => None,
+    };
+    let body = vehicle
+        .and_then(|v| entities.0.get(&v))
+        .and_then(|e| tfs.get(*e).ok())
+        .map(|t| (t.translation(), t.rotation().to_euler(EulerRot::YXZ).0))
+        .or_else(|| {
+            let (_, leader, slot, _) = walker?;
+            let v = people.iter().find(|v| v.leader == leader && v.slot == slot)?;
+            Some((v.drawn, 0.0))
+        });
+    let sim_pt = vehicle
+        .and_then(|v| w.vehicles.get(v))
+        .map(|v| citysim_sim::drive::vehicle_pose(w, v).0)
+        .or(walker.map(|x| x.3));
+    let find = |name: &str| {
+        named
+            .iter()
+            .find(|(n, ..)| n.as_str() == name)
+            .map(|(_, t, v)| (v.get(), t.translation().with_y(0.0)))
+    };
+    let ring = find("Vehicle ring");
+    let dia = find("Vehicle marker");
+    let trav = find("Route traveller rings");
+    let f = rig.current.focus;
+    let nan = Vec3::splat(f32::NAN);
+    let b = body.map_or(nan, |b| b.0.with_y(0.0));
+    let shown = |x: Option<(bool, Vec3)>| x.filter(|x| x.0).map_or(nan, |x| x.1);
+    let (r, d, tr) = (shown(ring), shown(dia), shown(trav));
+    let sc = |p: Vec3| {
+        if p.is_nan() {
+            Vec2::splat(f32::NAN)
+        } else {
+            screen(cam, fov, p)
         }
-        return;
-    }
-    if rec.frame <= WARMUP {
-        return;
-    }
-    if t > end {
-        rec.done_at = Some(rec.frame);
-        return;
-    }
-    if let Some(image) = rec.image.clone() {
-        let path = rec.dir.join(format!("frame_{:05}.png", rec.saved));
-        rec.saved += 1;
-        commands.spawn(Screenshot::image(image)).observe(save_to_disk(path));
-        if rec.saved.is_multiple_of(150) {
-            info!("record: {} frames ({t:.1} s of {end:.1} s)", rec.saved);
-        }
-    }
+    };
+    let (bs, rs, ds, ts) = (sc(b), sc(r), sc(d), sc(tr));
+    // Where the interface's leader line should end: the followed car's
+    // body (else the traveller's marker) 1.5 m up.
+    let mark = sc(if b.is_nan() { tr } else { b } + Vec3::Y * 1.5);
+    let fo = follow.focus.unwrap_or([f32::NAN; 2]);
+    let sp = sim_pt.unwrap_or([f32::NAN; 2]);
+    let _ = writeln!(
+        log,
+        "{},{:.5},{:.5},{},{},{},{:.4},{:.4},{:.5},{:.4},{:.4},{},{:.4},{:.4},{},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.5},{:.5},{:.4},{:.4},{:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+        frame.0,
+        rec_t(frame.0, start, fps),
+        time.delta_secs(),
+        clock.paused as u8,
+        clock.speed_steps(),
+        vehicle
+            .map(|v| format!("{v:?}"))
+            .or(walker.map(|x| format!("{:?}", x.0)))
+            .map_or(String::from("-"), |v| v.replace(',', ";")),
+        b.x,
+        b.z,
+        body.map_or(f32::NAN, |b| b.1),
+        sp[0],
+        sp[1],
+        ring.is_some_and(|x| x.0) as u8,
+        r.x,
+        r.z,
+        dia.is_some_and(|x| x.0) as u8,
+        d.x,
+        d.z,
+        trav.is_some_and(|x| x.0) as u8,
+        tr.x,
+        tr.z,
+        f.x,
+        f.z,
+        rig.current.yaw,
+        rig.current.pitch,
+        rig.current.distance,
+        fo[0],
+        fo[1],
+        bs.x,
+        bs.y,
+        rs.x,
+        rs.y,
+        ds.x,
+        ds.y,
+        ts.x,
+        ts.y,
+        mark.x,
+        mark.y,
+    );
+}
+
+/// Seconds since the follow started (by frames of the video).
+fn rec_t(frame: u32, start: u32, fps: f32) -> f32 {
+    (frame as f32 - start as f32) / fps
 }
 
 #[cfg(test)]

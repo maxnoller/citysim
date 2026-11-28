@@ -29,7 +29,10 @@ use super::widgets::{
     plate_node, plate_shadow, spawn_button, spawn_key,
 };
 use super::{CityPage, UiState};
-use crate::shared::{ActiveTool, CameraFollow, GameSet, SimCommand, SimWorld, WorldHighlight, WorldTarget};
+use crate::shared::{
+    ActiveTool, CameraFollow, DrawnPoses, FollowOn, GameSet, SimCommand, SimWorld, WorldCamera, WorldHighlight,
+    WorldTarget,
+};
 
 /// What the panel shows of people, places and cars: the last of `stack`
 /// (earlier entries are "back").
@@ -88,10 +91,12 @@ impl Plugin for PanelPlugin {
             .init_resource::<PanelArea>()
             .init_resource::<Folds>()
             .add_systems(Startup, (spawn_panel, spawn_leader))
-            .add_systems(
-                PostUpdate,
-                (panel_area, leader).chain().after(bevy::ui::UiSystems::Layout),
-            )
+            // The leader line is placed before the layout (so it shows this
+            // frame) with the camera of this frame; the panel's area is
+            // measured after it (one frame old for the line: it moves only
+            // while the panel slides).
+            .add_systems(PostUpdate, panel_area.after(bevy::ui::UiSystems::Layout))
+            .add_systems(PostUpdate, leader.before(bevy::ui::UiSystems::Layout))
             .add_systems(
                 Update,
                 (
@@ -502,6 +507,14 @@ fn people_input(
     }
 }
 
+/// The car on the map a person is in, if any.
+fn person_car(w: &citysim_sim::World, c: citysim_sim::CitizenId) -> Option<citysim_sim::VehicleId> {
+    citysim_sim::inspect::citizen(w, c)?
+        .trip?
+        .vehicle
+        .filter(|car| w.vehicles.contains_key(*car))
+}
+
 /// Keep the camera on whoever is followed, and highlight where they are.
 fn follow(
     sim: Res<SimWorld>,
@@ -535,18 +548,35 @@ fn follow(
             view.open(Target::Person(o));
         }
     }
-    let at = match view.current() {
-        // Under way off the map: where they should be by now.
-        Some(Target::Person(c)) => routes
-            .person(w, c)
-            .and_then(|t| t.at)
-            .or_else(|| people::person_position(w, c)),
-        Some(Target::Place(b)) => w.buildings.get(b).map(|b| b.center()),
-        Some(Target::Vehicle(v)) => w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0),
-        None => None,
+    let (at, on) = match view.current() {
+        Some(Target::Person(c)) => match person_car(w, c) {
+            // In a car on the map: the car.
+            Some(car) => (
+                w.vehicles.get(car).map(|v| citysim_sim::drive::vehicle_pose(w, v).0),
+                FollowOn::Vehicle(car),
+            ),
+            // On foot on the map: gfx follows the drawn figure.
+            None if citysim_sim::walk::walker_of(w, c).is_some() => {
+                (people::person_position(w, c), FollowOn::Walker(c))
+            }
+            // Under way off the map: where they should be by now (gfx
+            // follows the marker), else where they are.
+            None => match routes.person(w, c).and_then(|t| t.at) {
+                Some(at) => (Some(at), FollowOn::Traveller),
+                None => (people::person_position(w, c), FollowOn::Point),
+            },
+        },
+        Some(Target::Place(b)) => (w.buildings.get(b).map(|b| b.center()), FollowOn::Point),
+        Some(Target::Vehicle(v)) => (
+            w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0),
+            FollowOn::Vehicle(v),
+        ),
+        None => (None, FollowOn::Point),
     };
+    let focus = at.filter(|_| ui.following);
     cam.set_if_neq(CameraFollow {
-        focus: at.filter(|_| ui.following),
+        focus,
+        on: if focus.is_some() { on } else { FollowOn::Point },
     });
     // Where a person is shows in the world (their car or building).
     if let Some(Target::Person(c)) = view.current()
@@ -1780,6 +1810,11 @@ fn spawn_leader(mut commands: Commands) {
     ));
     for (which, size) in [(Leader::Dot, 7.0), (Leader::Tip, 10.0)] {
         commands.spawn((
+            Name::new(if which == Leader::Dot {
+                "Leader dot"
+            } else {
+                "Leader tip"
+            }),
             layout(Node {
                 position_type: PositionType::Absolute,
                 width: px(size),
@@ -1823,16 +1858,34 @@ fn leader(
     hl: Res<WorldHighlight>,
     sim: Res<SimWorld>,
     route: Res<crate::shared::RouteView>,
+    drawn: Res<DrawnPoses>,
     ui_scale: Res<UiScale>,
-    cameras: Query<(&Camera, &GlobalTransform), With<crate::shared::WorldCamera>>,
+    cameras: Query<(&Camera, &Transform), With<WorldCamera>>,
     mut parts: Query<(&Leader, &mut Node, &mut UiTransform, &mut Visibility)>,
+    mut held: Local<Option<Vec2>>,
 ) {
     let w = &sim.world;
+    // A car where it is drawn this frame (the sim's point is its front, up
+    // to a tick ahead), else where the sim has it.
+    let car = |v: citysim_sim::VehicleId| {
+        drawn
+            .vehicle(v)
+            .map(|d| d.pos)
+            .or_else(|| w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0))
+    };
     let at = match view.current() {
-        // Under way off the map: to the marker of where they should be.
-        Some(Target::Person(c)) => route.traveller.or_else(|| people::person_position(w, c)),
+        Some(Target::Person(c)) => match person_car(w, c) {
+            Some(v) => car(v),
+            // On foot: their figure as drawn; under way off the map: to the
+            // marker of where they should be.
+            None => drawn
+                .walker(c)
+                .or(drawn.traveller)
+                .or(route.traveller)
+                .or_else(|| people::person_position(w, c)),
+        },
         Some(Target::Place(b)) => w.buildings.get(b).map(|b| b.center()),
-        Some(Target::Vehicle(v)) => w.vehicles.get(v).map(|veh| citysim_sim::drive::vehicle_pose(w, veh).0),
+        Some(Target::Vehicle(v)) => car(v),
         None => match &hl.selected {
             Some(WorldTarget::Junction { pos, .. }) => Some(*pos),
             Some(WorldTarget::Road(s)) => s.points.get(s.points.len() / 2).copied(),
@@ -1843,7 +1896,19 @@ fn leader(
     let ends = (|| {
         let rect = area.0?;
         let (cam, tf) = cameras.single().ok()?;
-        let p = cam.world_to_viewport(tf, crate::shared::sim_to_world(at?, 1.5)).ok()? / scale;
+        // The camera has no parent: its transform of this frame (its global
+        // transform is propagated later in the frame).
+        let tf = GlobalTransform::from(*tf);
+        let p = cam.world_to_viewport(&tf, crate::shared::sim_to_world(at?, 1.5)).ok()?;
+        // On whole pixels, held while it moves less than one (a followed car
+        // stands still on screen give or take rounding noise: the dot must
+        // not flicker between two pixels).
+        let p = match *held {
+            Some(h) if (p - h).abs().max_element() < 0.75 => h,
+            _ => p.round(),
+        };
+        *held = Some(p);
+        let p = p / scale;
         if p.x > rect.min.x - 30.0 || p.x < 0.0 || p.y < 0.0 {
             return None;
         }
