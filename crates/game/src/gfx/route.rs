@@ -130,6 +130,7 @@ struct RouteShape {
     /// The traveller's estimate: (tick, pace) as published.
     traveller: Option<(u64, f32)>,
     vehicle: Option<citysim_sim::VehicleId>,
+    walker: Option<citysim_sim::CitizenId>,
     /// What the frame of reference belongs to (a new selection starts a
     /// new one).
     key: Option<ShapeKey>,
@@ -595,6 +596,8 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, shape: &RouteShape,
     let mut soft = MeshBuilder::new();
     let mut m = MeshBuilder::new();
     let y = heights::HIGHLIGHT + 0.06;
+    // On foot: a narrower line along the pavements and zebras.
+    let wk = if route.state == RouteState::Walking { 0.42 } else { 1.0 };
     let planned = !shape.trimmed;
     let (pts, cum) = (&shape.pts, &shape.along);
     if pts.len() >= 2 {
@@ -610,8 +613,8 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, shape: &RouteShape,
         let plain = |_: f32| [0.0, 0.0];
         // A car's line: the dark edge fades in from the cut (under the car),
         // the core starts a little ahead of it.
-        let edge_uv = |d: f32| [d, FADE_M * k];
-        let core_uv = |d: f32| [d - CORE_LEAD, 0.001];
+        let edge_uv = |d: f32| [d, FADE_M * k * wk];
+        let core_uv = |d: f32| [d - CORE_LEAD * wk, 0.001];
         if planned {
             let mut d = first;
             while d < total {
@@ -622,19 +625,29 @@ fn route_mesh(world: &citysim_sim::World, route: &RouteView, shape: &RouteShape,
             }
         } else {
             let span = (first, total);
-            ribbon(&mut soft, pts, cum, span, EDGE_W * k, y, edge, &whole, &edge_uv);
-            ribbon(&mut m, pts, cum, span, CORE_W * k, y + 0.01, core, &whole, &core_uv);
+            ribbon(&mut soft, pts, cum, span, EDGE_W * k * wk, y, edge, &whole, &edge_uv);
+            ribbon(
+                &mut m,
+                pts,
+                cum,
+                span,
+                CORE_W * k * wk,
+                y + 0.01,
+                core,
+                &whole,
+                &core_uv,
+            );
             // Chevrons at whole steps along the trip (they stay put when
             // the line is rebuilt), shown from a little ahead of the car on
             // (each eaten from behind as the cut reaches it).
             let white = lin(Color::WHITE);
-            let every = CHEVRON_EVERY * k;
-            let lead = (FADE_M + 4.0) * k;
+            let every = CHEVRON_EVERY * k * wk;
+            let lead = (FADE_M + 4.0) * k * wk;
             let mut d = (first / every).ceil() * every;
-            while d < total - 4.0 * k {
+            while d < total - 4.0 * k * wk {
                 let (p, dir) = at(pts, cum, d);
                 let from = m.pos.len();
-                chevron(&mut m, p, dir, y + 0.02, white, k);
+                chevron(&mut m, p, dir, y + 0.02, white, k * wk);
                 for i in from..m.pos.len() {
                     let q = Vec2::new(m.pos[i][0], m.pos[i][2]);
                     m.uv[i] = [d + (q - p).dot(dir) - lead, 0.001];
@@ -764,7 +777,7 @@ fn draw_route(
 /// a rebuilt line of the same selection starts where its first point lies
 /// on the old one.
 fn update_shape(shape: &mut RouteShape, route: &RouteView) {
-    let trimmed = route.state == RouteState::Driving || route.traveller.is_some();
+    let trimmed = matches!(route.state, RouteState::Driving | RouteState::Walking) || route.traveller.is_some();
     let key = (
         route.state,
         route.vehicle,
@@ -802,6 +815,7 @@ fn update_shape(shape: &mut RouteShape, route: &RouteView) {
         start,
         traveller: route.traveller.map(|_| (route.traveller_tick, route.traveller_pace)),
         vehicle: route.vehicle,
+        walker: route.walker,
         key: Some(key),
         traveller_at: shape.traveller_at,
     };
@@ -820,6 +834,11 @@ fn trim_route(shape: Res<RouteShape>, drawn: Res<DrawnPoses>, mut lines: Query<&
             let car = drawn.vehicle(shape.vehicle?)?;
             let (d, _) = shape.project(Vec2::from(car.pos), CUT_SEARCH_M + BACK_M)?;
             Some(d + car.half_length)
+        })
+        .or_else(|| {
+            // On foot: from the figure.
+            let p = drawn.walker(shape.walker?)?;
+            Some(shape.project(Vec2::from(p), CUT_SEARCH_M + BACK_M)?.0)
         })
         .unwrap_or(shape.start);
     let bits = cut.to_bits();

@@ -61,11 +61,50 @@ pub const HOUSE_WALLS: [Color; 6] = [
     c(0xB8CAD6), // dusty blue
     c(0xE7C4B5), // blush
 ];
-pub const HOUSE_ROOFS: [Color; 4] = [
+pub const HOUSE_ROOFS: [Color; 6] = [
     c(0xB5553C), // terracotta
     c(0x5C6670), // slate
     c(0x7A5540), // brown
     c(0x8E3B34), // dark red
+    c(0x474C54), // charcoal
+    c(0x9C6A48), // clay
+];
+/// Facing bricks: red, orange, brown, buff, grey-brown.
+pub const BRICKS: [Color; 5] = [c(0x9E5A48), c(0xAD7259), c(0x8A5E4E), c(0xC9A886), c(0x957D6F)];
+/// Front doors.
+pub const DOORS: [Color; 7] = [
+    c(0x5A4030), // stained wood
+    c(0x2F4F6F), // navy
+    c(0x7A2E2A), // oxblood
+    c(0x2E5E4A), // green
+    c(0xEDE7D8), // white
+    c(0x2A2D31), // black
+    c(0xC9973E), // mustard
+];
+/// Window shutters.
+pub const SHUTTERS: [Color; 5] = [c(0x4F6B4A), c(0x3E5F7A), c(0x7A3530), c(0x5C6670), c(0xE9E1CC)];
+/// Stone for sills, lintels, cornices and copings.
+pub const STONE: Color = c(0xD9D2C2);
+/// Dark metal: gutters, railings, window bars on modern blocks.
+pub const METAL_DARK: Color = c(0x3B4046);
+/// Profiled cladding on works and warehouses.
+pub const CLADDING: [Color; 7] = [
+    c(0xC9C4BA),
+    c(0x9DB0BC),
+    c(0xA9B9A4),
+    c(0xD8CBA6),
+    c(0xB8C0C6),
+    c(0xC2A58A),
+    c(0x7F96A8),
+];
+/// Shipping containers.
+pub const CONTAINERS: [Color; 6] = [
+    c(0xB8432F),
+    c(0x2F6FB5),
+    c(0x3F8A5A),
+    c(0xD9A441),
+    c(0x8A8F94),
+    c(0x7A3B5A),
 ];
 pub const WINDOW: Color = c(0x6F8FA6);
 pub const WINDOW_FRAME: Color = c(0xF7F1E5);
@@ -91,7 +130,6 @@ pub const ROOF_DETAIL: Color = c(0x8F959A);
 pub const PAVING: Color = c(0xC4BEB0);
 
 // ------------------------------------------------------------ industry
-pub const INDUSTRY_WALLS: Color = c(0xC9C4BA);
 pub const INDUSTRY_ROOF: Color = c(0x7D868C);
 pub const INDUSTRY_STRIPE: Color = c(0xD98F3E);
 pub const BRICK: Color = c(0x8E3B34);
@@ -117,7 +155,7 @@ pub const SUN: Color = c(0xFFF1DC);
 // ------------------------------------------------------------ vehicles
 /// Car paints: mostly whites, silvers, greys and black like a real car park,
 /// with a few colours.
-pub const CAR_BODIES: [Color; 10] = [
+pub const CAR_BODIES: [Color; 12] = [
     c(0xF2F1EC), // white
     c(0xBFC4C8), // silver
     c(0x5B6269), // grey
@@ -128,6 +166,8 @@ pub const CAR_BODIES: [Color; 10] = [
     c(0xD8C9A6), // beige
     c(0xE6A83E), // amber
     c(0x8E3B34), // maroon
+    c(0x23365A), // dark blue
+    c(0x7A5C44), // bronze
 ];
 pub const CAR_GLASS: Color = c(0x3E5566);
 /// Delivery trucks: (cab, cargo box, livery stripe).
@@ -151,3 +191,57 @@ pub const TOOL_BULLDOZE: Color = c(0xF08A3C);
 pub const TRAFFIC_FREE: Color = c(0x4CC66A);
 pub const TRAFFIC_BUSY: Color = c(0xF2C23D);
 pub const TRAFFIC_JAM: Color = c(0xE0453A);
+
+// ------------------------------------------------------------ people
+// A person's colours are chosen per person (`person_gen::person_tag`) from
+// these lists; the city shader reads them from the shared day buffer
+// (`city_material::DayParams::to_buffer`), in this order.
+pub const PERSON_SKIN: [Color; 6] = [
+    c(0xF1D3B8),
+    c(0xE3B48F),
+    c(0xC68E66),
+    c(0xA06C4A),
+    c(0x7A4E33),
+    c(0x5A3825),
+];
+pub const PERSON_HAIR: [Color; 8] = [
+    c(0x2A2420), // near black
+    c(0x4A3426), // dark brown
+    c(0x7A5434), // brown
+    c(0xB0895A), // dark blond
+    c(0xD9BD84), // blond
+    c(0x9B4A2C), // red
+    c(0xA9A6A0), // grey
+    c(0xE4E2DC), // white
+];
+pub const PERSON_TOP: [Color; 16] = [
+    c(0xC9483D), // red
+    c(0x2F6FB5), // blue
+    c(0x2E7D4F), // green
+    c(0xE0A23A), // mustard
+    c(0xF0EFEA), // white
+    c(0x3A3F47), // charcoal
+    c(0x7E5FA8), // purple
+    c(0xE07A8A), // pink
+    c(0x4FAAB4), // teal
+    c(0xB86A3C), // rust
+    c(0x8FA35C), // olive
+    c(0x1F2A44), // navy
+    c(0xCBC2A8), // beige
+    c(0xEBCB45), // yellow
+    c(0x6C3B4A), // plum
+    c(0x9BB7D4), // light blue
+];
+pub const PERSON_BOTTOM: [Color; 8] = [
+    c(0x2B3A55), // dark denim
+    c(0x4A6A90), // denim
+    c(0x2A2D31), // black
+    c(0x5B6269), // grey
+    c(0xC2B08A), // khaki
+    c(0x5A4632), // brown
+    c(0x6E7E5A), // olive
+    c(0x8E3B34), // maroon
+];
+pub const PERSON_SHOE: Color = c(0x2B2622);
+pub const PERSON_BELT: Color = c(0x3A2E25);
+pub const PERSON_BAG: Color = c(0x6B4A30);

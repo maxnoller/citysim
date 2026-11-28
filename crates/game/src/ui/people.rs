@@ -489,6 +489,9 @@ pub struct Sheet {
 /// draw (on foot, or a car beyond the cars shown), the place they are
 /// going: there is nothing to see on the way.
 pub fn person_position(world: &World, id: CitizenId) -> Option<[f32; 2]> {
+    if let Some((_, w)) = citysim_sim::walk::walker_of(world, id) {
+        return Some(w.pos);
+    }
     let v = inspect::citizen(world, id)?;
     if let Some(t) = v.trip {
         return match t.vehicle.and_then(|c| world.vehicles.get(c)) {
@@ -503,12 +506,16 @@ pub fn person_position(world: &World, id: CitizenId) -> Option<[f32; 2]> {
 /// shown.
 pub fn trip_unseen(world: &World, t: &inspect::TripView) -> bool {
     t.vehicle.is_none_or(|c| !world.vehicles.contains_key(c))
+        && !(t.mode == TravelMode::Walking && t.eta_tick.is_none())
 }
 
 /// Why a trip is not on the map, in words.
 fn unseen_words(t: &inspect::TripView) -> &'static str {
     match t.mode {
-        TravelMode::Walking => "On foot: the marker on the map shows where they should be by now",
+        TravelMode::Walking => {
+            "On foot where the map shows nobody (too many walking at once): the marker shows where they should be \
+             by now"
+        }
         TravelMode::NoCar => "Without a car they go by lift or bus: the marker shows where they should be by now",
         _ => {
             "Off screen: the map shows up to 125 cars per 1,000 residents, the rest drive in the same traffic. The \
@@ -1130,6 +1137,11 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
     let v = inspect::vehicle(world, id)?;
     let veh = world.vehicles.get(id)?;
     let truck = v.purpose == TripPurpose::Goods;
+    // What the vehicle is, by its trip (gfx draws the same: a moving van
+    // for a household moving, a lorry for goods to or from the highway, a
+    // delivery truck for goods inside the town).
+    let moving = matches!(v.purpose, TripPurpose::MoveIn | TripPurpose::MoveOut);
+    let long_haul = truck && (v.origin == Place::Entry || v.destination == Place::Entry);
     let driver_trip = v
         .driver
         .or(v.owner)
@@ -1142,15 +1154,36 @@ pub fn vehicle_sheet(world: &World, id: VehicleId) -> Option<Sheet> {
     }
     let mut s = Sheet {
         kind: SheetKind::Vehicle,
-        headline: if truck {
+        headline: if long_haul && v.destination == Place::Entry {
+            "Taking goods out of town".to_string()
+        } else if long_haul {
+            "Bringing goods into town".to_string()
+        } else if truck {
             "Delivering goods".to_string()
+        } else if moving {
+            format!(
+                "{} · {} aboard",
+                if v.purpose == TripPurpose::MoveIn {
+                    "Moving in"
+                } else {
+                    "Moving out"
+                },
+                v.occupants
+            )
         } else {
             format!("Going {} · {} aboard", reason_word(v.reason), v.occupants)
         },
         trip: driver_trip.map(|t| trip_bar(world, &t)),
         actions,
-        title: if truck {
+        title: if long_haul {
+            "Lorry".into()
+        } else if truck {
             "Delivery truck".into()
+        } else if moving {
+            match v.driver.or(v.owner) {
+                Some(d) => format!("{}'s moving van", name(world, d)),
+                None => "Moving van".into(),
+            }
         } else if let Some(d) = v.driver.or(v.owner) {
             format!("{}'s car", name(world, d))
         } else {

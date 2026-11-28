@@ -9,8 +9,11 @@
 //!   junction and stops and starts again at least once;
 //! * `arrive`: a car that arrives in the second half of that time and has
 //!   an owner (the view carries on with them);
-//! * `walker`: a person under way off the map for the whole time.
+//! * `walker`: a person under way off the map for the whole time;
+//! * `foot`: a person walking on the map (pavements, zebras) with the most
+//!   way still ahead, still walking at the end if anyone is.
 //!
+//! `CITYSIM_FOLLOW_GOODS=1` keeps `car` and `arrive` to goods vehicles.
 //! `CITYSIM_FOLLOW_LOG=file.csv` writes, per frame, where the leader line's
 //! dot is drawn (physical px of the view) for the follow measurements.
 
@@ -29,6 +32,7 @@ enum Kind {
     Car,
     Arrive,
     Walker,
+    Foot,
 }
 
 #[derive(Resource)]
@@ -54,6 +58,7 @@ impl Plugin for FollowDemoPlugin {
         let kind = match std::env::var("CITYSIM_FOLLOW").as_deref() {
             Ok("arrive") => Kind::Arrive,
             Ok("walker") => Kind::Walker,
+            Ok("foot") => Kind::Foot,
             _ => Kind::Car,
         };
         let num = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
@@ -186,8 +191,13 @@ fn pick(
             let seen = look_ahead(w, ticks);
             // Cars that fit; for `car`, if none stays the whole time (fast
             // speeds), the longest-lived one that turns and stops.
+            // `CITYSIM_FOLLOW_GOODS=1`: lorries and delivery trucks only.
+            let goods = std::env::var("CITYSIM_FOLLOW_GOODS").is_ok_and(|v| v == "1");
             let fits = |id: VehicleId, s: &Seen, whole: bool| {
                 let Some(v) = w.vehicles.get(id) else { return false };
+                if goods && w.traffic.trips.get(id).map(|t| t.purpose) != Some(citysim_sim::TripPurpose::Goods) {
+                    return false;
+                }
                 v.speed > 3.0
                     && match demo.kind {
                         Kind::Car => (!whole || s.gone_at.is_none()) && s.junctions >= 1 && s.restarts >= 1,
@@ -219,6 +229,33 @@ fn pick(
                 }
                 None => {
                     warn!("follow demo: no car fits");
+                    return;
+                }
+            }
+        }
+        Kind::Foot => {
+            // On foot the time ahead is about the way ahead at walking pace.
+            let secs = demo.seconds * clock.speed_steps() as f32;
+            let best = w
+                .walking
+                .walkers
+                .iter()
+                .filter(|(_, x)| x.done_m() > 2.0)
+                .min_by(|a, b| {
+                    // Long enough and nearest; else the longest way ahead.
+                    let score = |x: &citysim_sim::walk::Walker| {
+                        let short = x.left_m() < x.speed.max(0.5) * secs * 1.1;
+                        (short, if short { -x.left_m() } else { near(x.pos) })
+                    };
+                    score(a.1).partial_cmp(&score(b.1)).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            match best {
+                Some((id, x)) => {
+                    info!("follow demo: person {id:?} walking, {:.0} m to go", x.left_m());
+                    actions.write(UiAction::Person(*id));
+                }
+                None => {
+                    warn!("follow demo: nobody walking on the map");
                     return;
                 }
             }

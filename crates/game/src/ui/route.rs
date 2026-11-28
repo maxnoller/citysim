@@ -381,10 +381,30 @@ fn planned_trip_now(world: &World, state: RouteState, from: BuildingId, to: Buil
 /// trip they will make.
 pub fn person_trip(world: &World, id: CitizenId) -> Option<Trip> {
     let p = inspect::plan(world, id)?;
-    person_trip_of(world, &p)
+    person_trip_of(world, id, &p)
 }
 
-fn person_trip_of(world: &World, p: &inspect::DayPlan) -> Option<Trip> {
+/// A person walking on the map: the pavements and zebras still ahead.
+pub fn walker_trip(world: &World, id: CitizenId) -> Option<Trip> {
+    let (_, w) = citysim_sim::walk::walker_of(world, id)?;
+    Some(Trip {
+        state: RouteState::Walking,
+        points: w.ahead(),
+        origin: w.from.and_then(|b| building_end(world, b)),
+        destination: building_end(world, w.to),
+        vehicle: None,
+        at: None,
+        at_tick: 0,
+        pace: 0.0,
+    })
+}
+
+fn person_trip_of(world: &World, id: CitizenId, p: &inspect::DayPlan) -> Option<Trip> {
+    if p.trip.is_some()
+        && let Some(t) = walker_trip(world, id)
+    {
+        return Some(t);
+    }
     if let Some(t) = p.trip {
         if let Some(car) = t.vehicle.filter(|c| world.vehicles.contains_key(*c)) {
             return vehicle_trip(world, car);
@@ -439,8 +459,9 @@ impl TripCache {
             .trip
             .and_then(|t| t.vehicle)
             .filter(|c| world.vehicles.contains_key(*c));
-        if car.is_some() {
-            return person_trip_of(world, &p);
+        // In a car or on foot on the map: follows them (no route search).
+        if car.is_some() || (p.trip.is_some() && citysim_sim::walk::walker_of(world, id).is_some()) {
+            return person_trip_of(world, id, &p);
         }
         let key = TripKey {
             person: id,
@@ -451,7 +472,7 @@ impl TripCache {
         };
         let fresh = !matches!(&self.kept, Some((k, _)) if *k == key);
         if fresh {
-            self.kept = Some((key, person_trip_of(world, &p)));
+            self.kept = Some((key, person_trip_of(world, id, &p)));
         }
         let trip = self.kept.as_ref().and_then(|k| k.1.as_ref())?;
         // Under way off the map: from where they should be by now.
@@ -578,7 +599,7 @@ fn publish_route(
     };
     last.age += time.delta_secs();
     let fresh = last.target != Some(target) || sim.is_changed() && last.age > 10.0;
-    let every = if route.state == RouteState::Driving || route.traveller.is_some() {
+    let every = if matches!(route.state, RouteState::Driving | RouteState::Walking) || route.traveller.is_some() {
         CAR_EVERY_S
     } else {
         PLAN_EVERY_S
@@ -610,6 +631,10 @@ fn publish_route(
         traveller_tick: trip.at_tick,
         traveller_pace: trip.pace,
         vehicle: trip.vehicle.filter(|_| trip.state == RouteState::Driving),
+        walker: match target {
+            Target::Person(c) if trip.state == RouteState::Walking => Some(c),
+            _ => None,
+        },
     };
     // A moving car: publish again only once it is a few metres further on
     // or anything else changed (the samples ahead of it stay put).

@@ -1102,6 +1102,33 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
+            // Someone walking on the map, followed: the panel, the ring and
+            // marker on the figure, the way along the pavements and zebras.
+            name: "people-walker",
+            wait: 3.0,
+            setup: |w| {
+                reset(w);
+                let s = sim(w);
+                let who = s
+                    .walking
+                    .walkers
+                    .iter()
+                    .filter(|(_, x)| x.done_m() > 3.0)
+                    .max_by_key(|(_, x)| (x.route.marks.len().min(3), (x.left_m() * 10.0) as u32))
+                    .map(|(id, _)| *id);
+                if let Some(id) = who {
+                    let at = s.walking.walkers.get(&id).map(|x| x.pos).unwrap_or_default();
+                    w.write_message(UiAction::Person(id));
+                    w.write_message(UiAction::Follow);
+                    w.write_message(crate::shared::CameraGoTo {
+                        focus: at,
+                        distance: Some(42.0),
+                    });
+                }
+                w.resource_mut::<CameraOverride>().0 = None;
+            },
+        },
+        Step {
             // F6 into the selection panel.
             name: "panel-focus",
             wait: 1.5,

@@ -3,7 +3,10 @@
 
 mod bench;
 mod bench_script;
+mod building_com;
 mod building_gen;
+mod building_ind;
+mod building_res;
 mod buildings;
 mod camera;
 mod city_material;
@@ -16,10 +19,13 @@ mod loading;
 mod lot_props;
 mod lots;
 mod mesh_util;
+mod model_sheet;
 mod noise;
 mod overlay;
 mod palette;
+mod people;
 mod perf;
+mod person_gen;
 mod props;
 mod record;
 mod road_geom;
@@ -77,6 +83,8 @@ impl Plugin for GfxPlugin {
             route::RoutePlugin,
             yards::YardsPlugin,
             greens::GreensPlugin,
+            model_sheet::ModelSheetPlugin,
+            people::PeoplePlugin,
         ));
     }
 }
@@ -166,11 +174,11 @@ mod reload_tests {
         let (mut roads, mut zones) = (0, 0);
         // Hidden entities keep their last mesh (Mesh3d is never removed).
         for (name, mesh, _) in q.iter(w).filter(|(_, _, v)| v.is_none_or(|v| *v != Visibility::Hidden)) {
-            let n = meshes.get(&mesh.0).map_or(0, |m| m.count_vertices());
+            let n = || meshes.get(&mesh.0).map_or(0, |m| m.count_vertices());
             if name.as_str().starts_with("Roads") {
-                roads += n;
+                roads += n();
             } else if name.as_str() == "Zones" {
-                zones += n;
+                zones += n();
             }
         }
         let buildings = w
@@ -287,6 +295,7 @@ mod follow_tests {
             super::vehicles::VehiclesPlugin,
             super::camera::CameraPlugin,
             super::guides::GuidesPlugin,
+            super::people::PeoplePlugin,
         ));
         let lit = app
             .world_mut()
@@ -324,7 +333,14 @@ mod follow_tests {
     /// Follow a moving car for `frames` frames of alternating 8 and 25 ms
     /// at sim speed index `speed` (paused over `pause`): (frames checked,
     /// largest marker offset, largest frame-to-frame movement in view).
-    fn follow(speed: usize, frames: usize, pause: std::ops::Range<usize>) -> (usize, f32, f32) {
+    /// What is followed: a car, or a person on foot.
+    #[derive(Clone, Copy)]
+    enum Who {
+        Car(VehicleId),
+        Foot(citysim_sim::CitizenId),
+    }
+
+    fn follow(speed: usize, frames: usize, pause: std::ops::Range<usize>, foot: bool) -> (usize, f32, f32) {
         let mut app = app(town());
         app.world_mut().resource_mut::<SimClock>().speed = speed;
         let step = |app: &mut App, i: usize| {
@@ -335,8 +351,39 @@ mod follow_tests {
         for i in 0..30 {
             step(&mut app, i);
         }
-        // A car that is moving and will keep going for a while.
+        let (mut checked, mut worst_mark, mut worst_move) = (0, 0.0f32, 0.0f32);
+        let mut i = 0;
+        // Follow one after another as they arrive.
+        while i < frames {
+            let (c, m, mv, used) = follow_one(&mut app, &step, i, frames, &pause, foot);
+            checked += c;
+            worst_mark = worst_mark.max(m);
+            worst_move = worst_move.max(mv);
+            i += used.max(1);
+        }
+        (checked, worst_mark, worst_move)
+    }
+
+    /// Follow one car or person from frame `start` until it arrives (or
+    /// `frames`): (frames checked, worst mark, worst move, frames used).
+    fn follow_one(
+        app: &mut App,
+        step: &dyn Fn(&mut App, usize),
+        start: usize,
+        frames: usize,
+        pause: &std::ops::Range<usize>,
+        foot: bool,
+    ) -> (usize, f32, f32, usize) {
+        // A car that is moving and will keep going for a while, or the
+        // person on foot with the longest way ahead.
         let w = &app.world().resource::<SimWorld>().world;
+        let walker = w
+            .walking
+            .walkers
+            .iter()
+            .filter(|(_, x)| x.done_m() > 2.0)
+            .max_by(|a, b| a.1.left_m().total_cmp(&b.1.left_m()))
+            .map(|(c, _)| *c);
         let id: VehicleId = w
             .vehicles
             .iter()
@@ -352,34 +399,47 @@ mod follow_tests {
                     w.time.tick_of_day
                 )
             });
+        let who = if foot {
+            Who::Foot(walker.unwrap_or_else(|| panic!("nobody walking ({} walkers)", w.walking.walkers.len())))
+        } else {
+            Who::Car(id)
+        };
         let (mut checked, mut worst_mark, mut worst_move) = (0, 0.0f32, 0.0f32);
         let mut last_view: Option<Vec3> = None;
-        for i in 0..frames {
+        let mut i = start;
+        while i < frames {
+            i += 1;
+            let i = i - 1;
             // As ui does: pin it, follow it (the sim's point as the fallback).
             let world = app.world_mut();
-            let Some(focus) = world
-                .resource::<SimWorld>()
-                .world
-                .vehicles
-                .get(id)
-                .map(|v| citysim_sim::drive::vehicle_pose(&world.resource::<SimWorld>().world, v).0)
-            else {
-                break;
+            let sw = &world.resource::<SimWorld>().world;
+            let focus = match who {
+                Who::Car(id) => sw.vehicles.get(id).map(|v| citysim_sim::drive::vehicle_pose(sw, v).0),
+                Who::Foot(c) => citysim_sim::walk::walker_of(sw, c).map(|(_, x)| x.pos),
             };
-            world.resource_mut::<WorldHighlight>().selected = Some(WorldTarget::Vehicle(id));
-            *world.resource_mut::<CameraFollow>() = CameraFollow {
-                focus: Some(focus),
-                on: FollowOn::Vehicle(id),
+            let Some(focus) = focus else {
+                return (checked, worst_mark, worst_move, i - start);
             };
+            let (target, on) = match who {
+                Who::Car(id) => (WorldTarget::Vehicle(id), FollowOn::Vehicle(id)),
+                Who::Foot(c) => (WorldTarget::Walker(c), FollowOn::Walker(c)),
+            };
+            world.resource_mut::<WorldHighlight>().selected = Some(target);
+            *world.resource_mut::<CameraFollow>() = CameraFollow { focus: Some(focus), on };
             world.resource_mut::<SimClock>().paused = pause.contains(&i);
-            step(&mut app, i);
-            let Some(d) = app.world().resource::<DrawnPoses>().vehicle(id) else {
+            step(app, i);
+            let drawn = app.world().resource::<DrawnPoses>();
+            let pos = match who {
+                Who::Car(id) => drawn.vehicle(id).map(|d| d.pos),
+                Who::Foot(c) => drawn.walker(c),
+            };
+            let Some(pos) = pos else {
                 last_view = None;
                 continue;
             };
-            let body = Vec3::new(d.pos[0], 0.0, d.pos[1]);
-            let (ring, ring_shown) = named(&mut app, "Vehicle ring");
-            let (dia, dia_shown) = named(&mut app, "Vehicle marker");
+            let body = Vec3::new(pos[0], 0.0, pos[1]);
+            let (ring, ring_shown) = named(app, "Vehicle ring");
+            let (dia, dia_shown) = named(app, "Vehicle marker");
             assert!(ring_shown && dia_shown, "frame {i}: marks hidden");
             let mark = body
                 .with_y(0.0)
@@ -388,8 +448,8 @@ mod follow_tests {
             worst_mark = worst_mark.max(mark);
             // After the glide in (2 s of frames), the body holds still in
             // the camera's view.
-            let view = in_view(&mut app, body);
-            if i > 120
+            let view = in_view(app, body);
+            if i > start + 120
                 && let Some(last) = last_view
             {
                 worst_move = worst_move.max(view.distance(last));
@@ -397,17 +457,28 @@ mod follow_tests {
             }
             last_view = Some(view);
         }
-        (checked, worst_mark, worst_move)
+        (checked, worst_mark, worst_move, frames - start)
     }
 
     #[test]
     fn a_followed_car_holds_still_with_its_marks_on_it() {
         for (speed, pause) in [(0, 200..260), (3, 0..0)] {
-            let (checked, mark, moved) = follow(speed, 400, pause);
+            let (checked, mark, moved) = follow(speed, 400, pause, false);
             println!("speed {speed}: {checked} frames, marks {mark:.5} m off, body moved {moved:.5} m in view");
             assert!(checked > 100, "speed {speed}: only {checked} frames followed");
             assert!(mark < 1e-3, "speed {speed}: a mark is {mark} m off the body");
             assert!(moved < 2e-3, "speed {speed}: the body moved {moved} m in the view");
+        }
+    }
+
+    #[test]
+    fn a_followed_person_on_foot_holds_still_with_their_marks_on_them() {
+        for (speed, pause) in [(0, 200..260), (3, 0..0)] {
+            let (checked, mark, moved) = follow(speed, 400, pause, true);
+            println!("on foot, speed {speed}: {checked} frames, marks {mark:.5} m off, moved {moved:.5} m in view");
+            assert!(checked > 60, "speed {speed}: only {checked} frames followed");
+            assert!(mark < 1e-3, "speed {speed}: a mark is {mark} m off the figure");
+            assert!(moved < 2e-3, "speed {speed}: the figure moved {moved} m in the view");
         }
     }
 }

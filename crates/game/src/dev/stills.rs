@@ -9,9 +9,11 @@
 //!
 //! `CITYSIM_STILLS_LIST="name=view;name=view+overlay;..."` (default
 //! `wide=wide`) names the shots; each is saved as `dir/name.png`. A view is
-//! `wide`, `street`, `close` (the autoshot presets for the demo) or an
-//! exact pose `x,z,yaw,pitch,distance` (sim metres, radians, metres, as
-//! `CITYSIM_GFX_POSE`); `+zones` / `+traffic` shows that overlay. The time
+//! `wide`, `street`, `close` (the autoshot presets for the demo), a named
+//! view of the model sheet (`CITYSIM_DEMO=models`, `sheet::view`: `sheet`,
+//! `res`, `r1`, `cars`, ...) or an exact pose `x,z,yaw,pitch,distance` (sim
+//! metres, radians, metres, as `CITYSIM_GFX_POSE`); `+zones` / `+traffic`
+//! shows that overlay. `CITYSIM_STILLS_HUD=0` leaves the interface out. The time
 //! of day is the demo's (`CITYSIM_DEMO_HOUR`) or pinned with
 //! `CITYSIM_GFX_HOUR`. `CITYSIM_STILLS_SETTLE=s` seconds between moving the
 //! camera and the capture (default 0.75, and at least 20 frames: overlays
@@ -26,7 +28,7 @@ use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_dis
 use bevy::ui::IsDefaultUiCamera;
 
 use super::{DemoKind, ShotView};
-use crate::shared::{CameraOverride, CameraPose, GameSet, OverlayMode, SceneReady, SimCommand, WorldCamera};
+use crate::shared::{CameraOverride, CameraPose, GameSet, OverlayMode, SceneReady, SimCommand, SimWorld, WorldCamera};
 
 /// `CITYSIM_STILLS` is set: the app runs windowless (see `main.rs`).
 pub fn enabled() -> bool {
@@ -37,6 +39,13 @@ pub fn enabled() -> bool {
 enum View {
     Preset(ShotView),
     Pose([f32; 5]),
+    /// A named view of the model sheet (`sheet::view`).
+    Sheet(CameraPose),
+    /// Close behind a vehicle on a kind of trip (`trip:movein`,
+    /// `trip:moveout`, `trip:lorry`, `trip:delivery`), picked when the shot
+    /// is taken: a moving household nearest its new home, else the first;
+    /// `trip:walker` close to a person walking.
+    Trip(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +74,8 @@ fn parse_list(s: &str) -> Vec<Still> {
                 "wide" => View::Preset(ShotView::Wide),
                 "street" => View::Preset(ShotView::Street),
                 "close" => View::Preset(ShotView::Close),
+                name if super::sheet::view(name).is_some() => View::Sheet(super::sheet::view(name)?),
+                name if name.starts_with("trip:") => View::Trip(name[5..].to_string()),
                 pose => {
                     let v: Vec<f32> = pose.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                     if v.len() != 5 {
@@ -104,6 +115,8 @@ struct Stills {
     /// Shots handed to the screenshot system and not yet written.
     pending: u32,
     sent_sample: bool,
+    /// Draw the interface (`CITYSIM_STILLS_HUD=0`: the 3D scene alone).
+    hud: bool,
 }
 
 pub struct StillsPlugin {
@@ -138,6 +151,7 @@ impl Plugin for StillsPlugin {
             started: false,
             pending: 0,
             sent_sample: false,
+            hud: std::env::var("CITYSIM_STILLS_HUD").map_or(true, |v| v != "0"),
         })
         .add_systems(Update, run_stills.in_set(GameSet::Input));
     }
@@ -145,6 +159,62 @@ impl Plugin for StillsPlugin {
 
 #[derive(Component)]
 struct StillShot;
+
+/// A pose close to a vehicle on a `kind` of trip (see `View::Trip`).
+fn trip_pose(world: &citysim_sim::World, kind: &str) -> Option<CameraPose> {
+    use citysim_sim::{Place, TripPurpose};
+    let mut best: Option<(f32, [f32; 2], f32)> = None;
+    for (id, v) in world.vehicles.iter() {
+        let Some(t) = world.traffic.trips.get(id) else { continue };
+        let long = t.from == Place::Entry || t.to == Place::Entry;
+        let wanted = match kind {
+            "movein" => t.purpose == TripPurpose::MoveIn,
+            "moveout" => t.purpose == TripPurpose::MoveOut,
+            "lorry" => t.purpose == TripPurpose::Goods && long,
+            "delivery" => t.purpose == TripPurpose::Goods && !long,
+            _ => false,
+        };
+        if !wanted || v.speed < 0.5 && kind == "lorry" {
+            continue;
+        }
+        // Nearest its destination building (arriving), else anywhere off
+        // the highway stub.
+        let score = match t.to_building.and_then(|b| world.buildings.get(b)) {
+            Some(b) => {
+                let c = b.center();
+                ((v.pos[0] - c[0]).powi(2) + (v.pos[1] - c[1]).powi(2)).sqrt()
+            }
+            None => 1000.0 - v.pos[0].min(900.0),
+        };
+        if v.pos[0] < 110.0 || best.is_some_and(|b| b.0 <= score) {
+            continue;
+        }
+        best = Some((score, v.pos, v.heading));
+    }
+    if kind == "walker" {
+        // Someone on foot with a way still to go, looked at from close by.
+        let (_, w) = world
+            .walking
+            .walkers
+            .iter()
+            .filter(|(_, w)| w.left_m() > 40.0 && w.done_m() > 5.0)
+            .max_by(|a, b| a.1.left_m().total_cmp(&b.1.left_m()))?;
+        return Some(CameraPose {
+            focus: Vec3::new(w.pos[0], 0.0, w.pos[1]),
+            yaw: 0.8,
+            pitch: 0.45,
+            distance: 16.0,
+        });
+    }
+    let (_, p, h) = best?;
+    Some(CameraPose {
+        focus: Vec3::new(p[0], 0.0, p[1]),
+        // Looking along the vehicle from behind and to one side.
+        yaw: std::f32::consts::FRAC_PI_2 - h + 0.9,
+        pitch: 0.62,
+        distance: 30.0,
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 fn run_stills(
@@ -159,6 +229,7 @@ fn run_stills(
     in_flight: Query<(), With<StillShot>>,
     mut out: MessageWriter<SimCommand>,
     mut exit: MessageWriter<AppExit>,
+    sim: Res<SimWorld>,
 ) {
     if !st.sent_sample && st.demo.is_none() {
         st.sent_sample = true;
@@ -170,9 +241,10 @@ fn run_stills(
         if !matches!(target, Some(RenderTarget::Image(_))) {
             let (w, h) = st.size;
             let image = images.add(Image::new_target_texture(w, h, TextureFormat::Bgra8UnormSrgb, None));
-            commands
-                .entity(cam)
-                .insert((RenderTarget::Image(image.clone().into()), IsDefaultUiCamera));
+            commands.entity(cam).insert(RenderTarget::Image(image.clone().into()));
+            if st.hud {
+                commands.entity(cam).insert(IsDefaultUiCamera);
+            }
             st.image = Some(image);
         }
     }
@@ -191,6 +263,18 @@ fn run_stills(
             yaw,
             pitch,
             distance,
+        },
+        View::Sheet(pose) => pose,
+        View::Trip(kind) => match trip_pose(&sim.world, &kind) {
+            Some(p) => p,
+            None => {
+                if st.frames == 0 && st.since == 0.0 {
+                    warn!("stills: no vehicle on a {kind} trip yet");
+                }
+                camera
+                    .0
+                    .unwrap_or_else(|| super::autoshot::view_pose(ShotView::Street, st.demo))
+            }
         },
     };
     camera.0 = Some(pose);

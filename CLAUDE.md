@@ -65,21 +65,23 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   6, 12]` (a day is 16 min at 1x, 80 s at 12x), `SimCommand(Command)` message → applied in `GameSet::Sim`, result in
   `LastCommand`. `World::step` runs in `FixedUpdate` (`SimStep` set): the fixed rate is `TICKS_PER_SECOND` times
   `SimClock::fixed_per_tick()` (fast speeds split a tick's steps over up to `MAX_FIXED_HZ` = 120 updates a second, so
-  no frame carries all 12), `steps_per_tick()` steps each. gfx samples cars after every fixed update that moved the
-  sim and draws them at one continuous moment one update behind (`vehicles::DrawClock`: real-time pace whatever the
+  no frame carries all 12), `steps_per_tick()` steps each. gfx samples cars and people on foot after every fixed update
+  that moved the sim and draws them at one continuous moment one update behind (`vehicles::DrawClock`: real-time pace whatever the
   frame times, no chord errors at fast speeds, a pause glides to the newest sample and stops, no jump).
 - Frame order: `GameSet::{Input, Hover, Tools, Sim, Render}`.
 - `ActiveTool`, `OverlayMode`, `GraphicsQuality`, `PointerOverUi` (ui writes), `CameraInputBlocked` (ui: menu open or
   keyboard in a drawer), `HoveredCell` / `HoveredPoint` (shared computes from the `WorldCamera` ray).
 - `WorldCamera` marker (gfx's 3D camera), `CameraPose`, `CameraOverride` (when Some, gfx must show that pose; beats
-  `CameraFollow`), `CameraFollow { focus, on: FollowOn::{Point, Vehicle(id), Traveller} }` (ui writes each frame while
-  following; gfx keeps the focus on the thing as drawn this frame: the car's body, the off-map traveller's marker,
+  `CameraFollow`), `CameraFollow { focus, on: FollowOn::{Point, Vehicle(id), Traveller, Walker(citizen)} }` (ui writes
+  each frame while following; gfx keeps the focus on the thing as drawn this frame: the car's body, the off-map
+  traveller's marker, a person on foot's figure,
   `focus` = the sim's point only as fallback; it glides onto a new target (critically damped, from the camera's own
   speed: starting to follow, a car handing over to its owner) and is then locked to it, `camera::follow_drawn`, after
   `vehicles::DrawnSet::Traveller`), `CameraGoTo` message (move / zoom once).
-- `DrawnPoses { vehicles: Vec<(VehicleId, DrawnVehicle { pos, heading, half_length })>, traveller }` (gfx writes every
-  frame in `GameSet::Render`: the cars of `WorldHighlight::{selected, hovered}`, `CameraFollow::on`,
-  `RouteView::vehicle`, as drawn: body centre, not the sim's front point). Every mark on a car hangs on it: gfx's
+- `DrawnPoses { vehicles: Vec<(VehicleId, DrawnVehicle { pos, heading, half_length })>, traveller, walkers:
+  Vec<(CitizenId, [f32; 2])> }` (gfx writes every frame in `GameSet::Render`: the cars and people on foot of
+  `WorldHighlight::{selected, hovered}`, `CameraFollow::on`, `RouteView::{vehicle, walker}`, as drawn: body centre, not
+  the sim's front point; a figure where it stands; `half_length` of the vehicle's own model). Every mark on a car hangs on it: gfx's
   ring and diamond, ui's leader line (placed in `PostUpdate` before the UI layout, with the camera's `Transform` of the
   same frame, on whole pixels with hysteresis). Empty without gfx (ui falls back to `drive::vehicle_pose`).
 - Coordinates: `sim_to_world`, `world_to_sim`, `cell_center`, `world_to_cell` (zoning cells: `world.zoning.cell_corners`,
@@ -93,11 +95,13 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `BulldozeMode::{Road, Area}`), `SnapFeedback` (snapped point, `SnapTarget`, `Guide`s in sim metres, spacing),
   `CurveToolView` (the free-form road being drawn: pieces with `PieceChange`, refused curves, `error_at`, control
   points, handles, tightest bend, planned nodes; written only when it changes), `ToolPreview::{kind, area,
-  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, doomed buildings (the bulldozer's and those a
+  zone_cells, error, cost}`, `WorldHighlight` (hovered / pinned `WorldTarget` incl. `Vehicle`, `Walker(CitizenId)` (a person on foot: gfx rings
+  the drawn figure, `gfx/guides.rs` `walker_drawn`), doomed buildings (the bulldozer's and those a
   road being drawn takes), `doomed_roads`). (`PathPreview`, `ToolPreview::{line, rect, cells}`, `WorldHighlight::doomed_road_cells` and
   `shared::cell_corners` / `zone_cell_corners` are gone: nothing wrote or used them any more.)
-- `RouteView { state: RouteState::{None, Driving, Planned, Unseen}, points, origin, destination, traveller,
-  traveller_tick, traveller_pace, vehicle }` (ui writes while a
+- `RouteView { state: RouteState::{None, Driving, Planned, Unseen, Walking}, points, origin, destination, traveller,
+  traveller_tick, traveller_pace, vehicle, walker }` (`Walking`: a person on foot on the map, `points` along the
+  pavements and zebras ahead, gfx draws a narrower line; `walker`: who) (ui writes while a
   car or person is selected, only when it changes meaningfully: a new route, the car 2.5 m further on; gfx draws it in
   `gfx/route.rs`): `points` in sim metres along the lanes (lane offsets, left-turn pockets and junction turn paths included) from the car
   (or the trip's start when `Planned` / `Unseen`) to where it stops; `RouteEnd { pos, building }` at both ends (gfx
@@ -196,7 +200,13 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   `undo`, `shot`; `CPLAY_FRAME=0.9` on a software renderer).
 - Abandonment: a building cut off from the network is abandoned after one full in-game day continuously unreachable
   (`growth` `BuildingMeta::unreachable_since`); reconnecting resets it. Empty for `ABANDON_EMPTY_DAYS` midnights too.
-- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5; version 6 loads, its zoning
+- People on foot (`citysim_sim::walk`, contract section "r7-walk"): walking network derived from the roads (pavements,
+  junction and mid-block zebras, `walk::midblock_positions`), walkers in `world.walking.walkers` (`walker_of`, pose
+  `pos` / `heading` / `state`, `walked_m`), cars give way at zebras, people cross signals with the parallel green.
+  gfx draws them in `gfx/people.rs` (figures from `gfx/person_gen.rs`: 8 builds x 8 walk poses + standing, colours
+  per person by `MeshTag` and the palette lists in the day buffer, `city.wesl` kinds 10-13; sampled every fixed update
+  and drawn at the cars' drawn moment); ui hovers / follows them (`FollowOn::Walker`, `DrawnPoses::walkers`).
+- Saves: format version 7 (strips in extension block 4, per-day traffic losses in block 5, walkers in block 6; version 6 loads, its zoning
   is remade); versions 4 and 3 load (`save::v4`, `save::v3`, fixture
   `crates/sim/tests/data/round1_town.citysave`), version 5 is refused; `World::load` rejects structurally damaged
   saves. Round-1 saves keep their old second-row buildings until they are rebuilt.
@@ -262,18 +272,32 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   to the panel, as in a game (on only while it is full). Tail
   figures are only meaningful on a quiet machine (other builds double them).
 - `CITYSIM_RECORD=dir`: windowless video frames (`frame_00000.png`...) at `CITYSIM_RECORD_FPS` (30) with a fixed time
-  step, camera on a Catmull-Rom path `CITYSIM_RECORD_PATH="t,x,z,yaw,pitch,dist;..."`; join with ffmpeg. With
-  `CITYSIM_FOLLOW=car|arrive|walker` (ui's `follow_demo.rs`: looks `CITYSIM_FOLLOW_SECONDS` ahead on a copy of the
-  world and picks, near the view, a car that turns at a junction and stops and starts, one that arrives (hand-over to
-  its owner), or a person under way off the map, then follows it as a player would) the first keyframe is the view
+  step, camera on a Catmull-Rom path `CITYSIM_RECORD_PATH="t,x,z,yaw,pitch,dist;..."`; join with ffmpeg.
+  `CITYSIM_RECORD_HOURS=a,b` moves the drawn hour from a to b over the flight (about 0.3 s a 1080p frame in release
+  on a software renderer: record long flights in pieces of ~400 frames); a keyframe's seventh value sets the sim speed
+  (index into `SPEEDS`); `CITYSIM_RECORD_FOLLOW=t0,t1` puts the path's focus on a person walking. With
+  `CITYSIM_FOLLOW=car|arrive|walker|foot` (ui's `follow_demo.rs`: looks `CITYSIM_FOLLOW_SECONDS` ahead on a copy of
+  the world and picks, near the view, a car that turns at a junction and stops and starts, one that arrives (hand-over
+  to its owner), a person under way off the map, or a person walking on the map, then follows it as a player would) the first keyframe is the view
   until the follow starts, then the player's camera at `CITYSIM_RECORD_FOLLOW_DIST` (70 m) for `CITYSIM_RECORD_SECONDS`
   (15). Also `CITYSIM_RECORD_SPEED=1|3|6|12`, `CITYSIM_RECORD_DT="8,25"` (cycled frame times, ms),
   `CITYSIM_RECORD_PAUSE="a,b"` (s), `CITYSIM_RECORD_SAVE=0` (no frames), `CITYSIM_RECORD_UI=1` (the HUD in the frames),
   `CITYSIM_RECORD_LOG=f.csv` (per frame: drawn body, sim point, ring, diamond, traveller marker, camera focus and their
   1920x1080 screen positions), `CITYSIM_FOLLOW_LOG=f.csv` (the leader line's dot as laid out). **`scripts/follow-check.sh
-  [bin] [dir]`** runs nine follow runs (1x / 12x at 1/60 s, 1/144 s and 8 / 25 ms frames, a pause, a walker, a
-  hand-over; ≈10 min here) and prints marker-to-body px and the body's frame-to-frame movement on screen
+  [bin] [dir] [run...]`** runs twelve follow runs (1x / 12x at 1/60 s, 1/144 s and 8 / 25 ms frames, a pause, a walker
+  off the map, a hand-over, a person on foot at 1x / 12x; ≈14 min here) and prints marker-to-body px and the body's frame-to-frame movement on screen
   (`scripts/follow_stats.py`); the game-crate test `gfx::follow_tests` checks the same on a scripted clock.
+- **Model sheet: `CITYSIM_DEMO=models`** (`dev/sheet.rs` lays it out, `gfx/model_sheet.rs` draws it): every building
+  kind / level / lot in 8 seeds per level of detail, every vehicle (near / mid / far, half of them braking), trees,
+  props, sites, a signalled junction. Named still views (`CITYSIM_STILLS_LIST`): `sheet`, `res`, `com`, `ind`,
+  `r1 r1w r2 r2w r3 r3w c1 ... i2w` (one row), `cars`, `cars-close`, `trucks`, `green`, `props`, `sites`,
+  `junction`; `-mid` / `-far` show the other levels. `CITYSIM_STILLS_HUD=0` leaves the interface out; at most about
+  30 shots per run (the stills budget is 120 s). Stills also take `trip:movein|moveout|lorry|delivery|walker` (close
+  to a vehicle on such a trip, or a walker).
+- Bench extras: `CITYSIM_BENCH_POSE=x,z,yaw,pitch,dist` fixes the camera; the report adds `camera_triangles_k` (what
+  the world camera draws after culling and LOD; deterministic, unlike a software renderer's pipeline statistics),
+  `visible_triangles_k` (incl. shadow casters), `mesh_mb` / `mesh_triangles_k` (all geometry, GPU-only included).
+  Let tree / road chunks finish meshing before measuring (release build, `CITYSIM_BENCH_WARMUP=120`).
 - Running the game on the owner's desktop: never open a window there; use the windowless modes (stills, bench,
   record) or `xvfb-run -a -s "-screen 0 1920x1080x24" env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE ...` (renders on the
   GPU, presents at 12-16 fps). `CITYSIM_SHOT_SIZE=1920x1080` sets the autoshot window size.
@@ -338,6 +362,9 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   window or a drawer (it flips, else hides). The interface is designed at 1920x1080 (`UiScale` 1.0) and compacts below a logical
   width of 1660 (`UiState::compact`); the compact bar needs `theme::MIN_LAYOUT` (1380 px), larger interface sizes are
   held back to it, and the bar's figure columns only ever widen (proportional digits).
+- `CITYSIM_GFX_PEOPLE_SHOWCASE=x,z` (every figure build standing and walking at a spot), `CITYSIM_PEOPLE_TIMING=1`
+  (people sync CPU time every 5 s); `CITYSIM_RECORD_PATH` keyframes take an optional 7th value (sim speed index from
+  there), `CITYSIM_RECORD_FOLLOW=t0,t1` follows a walker's drawn figure.
 - gfx dev aids: `CITYSIM_GFX_POSE="x,z,yaw,pitch,dist"` (exact camera, beats `CameraOverride`), `CITYSIM_GFX_TOUR=1`
   (scripted camera flight for videos), `CITYSIM_GFX_STATS=1` (entity/mesh/material/triangle/tree counts every 5 s),
   `CITYSIM_GFX_QUALITY=low|medium|high` (starting `GraphicsQuality`), `CITYSIM_GFX_HOUR=h` (pin the drawn time of
@@ -350,13 +377,30 @@ Original 3D city-builder (roads, RCI zoning, agent traffic). Rust 2024 + Bevy 0.
   zone tool's preview cells are the cells' land (`zoning::cell_shape`, cut where two roads' rows meet);
   `gfx/route.rs` draws `RouteView` (accent ribbon with a dark edge and white chevrons, dashed when planned / unseen,
   rings at both ends, a glowing destination building and a pin), rebuilt only when `RouteView` changes, trimmed at the
-  drawn car each frame by `MeshTag`. Order in `GameSet::Render`: `vehicles::DrawnSet::{Vehicles, Traveller}` place
-  what moves and fill `DrawnPoses`; the ring, the diamond, the camera's follow and the route's cut run after it.
+  drawn car or figure each frame by `MeshTag`. Order in `GameSet::Render`: `vehicles::DrawnSet::{Vehicles, People,
+  Traveller}` place what moves and fill `DrawnPoses`; the ring, the diamond, the camera's follow and the route's cut run after it.
 - gfx shaders: `assets/gfx/shaders/city.wesl` (the shared `CityMaterial`: night glow by the vertex `uv.x` tag
   `mesh_util::Glow`, cloud shadows, ground detail), `sky.wesl` and `route.wesl` (the trip's line, trimmed by `MeshTag`). Day/night lives in `gfx/daynight.rs`.
 - gfx look: one palette (`gfx/palette.rs`), one shared vertex-coloured material for buildings/roads/trees/cars; models
-  are generated in code (`building_gen`, `vehicle_gen`, `props`) and cached; LOD via `VisibilityRange` (mesh origin
-  must be near the geometry: the cross-fade dither is measured from the entity origin).
+  are generated in code (`building_gen` + `building_res` / `building_com` / `building_ind`, `vehicle_gen`, `props`)
+  and cached; LOD via `VisibilityRange` (mesh origin must be near the geometry: the cross-fade dither is measured from
+  the entity origin).
+- gfx models in three levels of detail (`building_gen::Lod::{Near, Mid, Far}`; `MeshBuilder::fine` = near only,
+  `fine_only(f)`, `detail_only(f)` = not far; every level draws the same random numbers). A building is two child
+  entities: the detail part (`BuildingDetail`, the middle model; `buildings::swap_near` puts the near model in within
+  `near_distance(quality)` = 150 / 110 / 0 m on High / Medium / Low, generating it the first time a building of that
+  key comes close) and the far model, cross-faded at `LOD_DISTANCE` (430-470 m). Vehicles swap near / mid / far
+  meshes (90 / 60 / 0 m near by quality, far beyond 340 m). Building, site and vehicle meshes are GPU-only
+  (`MeshBuilder::build_gpu` + `mesh_util::add_gpu`; their bounds stay, their data does not: read triangle counts
+  with `mesh_util::mesh_triangles`). Surface patterns in `city.wesl` by vertex tag (`Glow::{Roof, Siding, Brick,
+  Cladding, Membrane}` = 20-24; 10-13 are the people's colour slots): `MeshBuilder::surface(kind, f)`.
+- gfx vehicles tell the trip (`vehicles::model_for`): a household's own car by its seed (`car_for`, compact
+  hatchbacks and estates first), a hired moving van for `MoveIn` / `MoveOut` (car length), a long-distance lorry
+  (`vehicle_gen::lorry_model`, 5.2 m) for goods to or from the highway, a delivery truck for goods in town; ui's
+  vehicle sheet names them the same way from the trip.
+- `buildings::BuildingDoors { version, doors }`: each finished building's front doors in sim metres, from the models
+  (`MeshBuilder::doors`, `Face::entrance`), for walkers to use one day (issue 51; the sim still uses the middle of
+  the lot's front edge).
 - gfx performance rule: never change a material asset that many meshes use (Bevy re-extracts and re-specialises every
   mesh using it: 30-60 ms frames). No frame rebuilds the whole city: a quality switch applies at once (the other
   levels' pipelines compile during loading on hidden warm-up cameras, `scene.rs`) and what depends on it (tree density,

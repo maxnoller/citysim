@@ -287,6 +287,9 @@ pub struct SegLayout {
     /// `(entry or stop line, stop line or entry)` metres from `a`, sorted:
     /// `[0]` for travel `a -> b` (at `b`), `[1]` for `b -> a` (at `a`).
     pub pockets: [Option<(f32, f32)>; 2],
+    /// Mid-block zebra crossings, metres from `a`
+    /// (`citysim_sim::walk::midblock_positions`).
+    pub zebras: Vec<f32>,
 }
 
 impl SegLayout {
@@ -305,6 +308,7 @@ impl SegLayout {
             box_b: false,
             avoid: Vec::new(),
             pockets: [None; 2],
+            zebras: Vec::new(),
         }
     }
 
@@ -427,6 +431,7 @@ pub fn layout(world: &World) -> RoadLayout {
             avoid: Vec::new(),
             pockets: [true, false]
                 .map(|fwd| citysim_sim::junction::turn_pocket(world, sid, fwd).map(|p| p.from_a(seg.length))),
+            zebras: citysim_sim::walk::midblock_positions(world, sid),
         });
     }
     // The highway continues off the map into the fog.
@@ -446,6 +451,7 @@ pub fn layout(world: &World) -> RoadLayout {
                 box_b: false,
                 avoid: Vec::new(),
                 pockets: [None; 2],
+                zebras: Vec::new(),
             });
         }
     }
@@ -829,6 +835,25 @@ pub fn mesh_segment_with(m: &mut MeshBuilder, s: &SegLayout, furniture: bool) {
     }
     let st = s.style;
     let h = st.h;
+    // Mid-block zebras: white bars across the carriageway, over the lane
+    // markings.
+    let half = citysim_sim::balance::ZEBRA_WIDTH_M * 0.5;
+    for &z in &s.zebras {
+        let (p, d) = f.pose(z);
+        let n = perp(d);
+        let white = lin(palette::MARKING);
+        let mut o = -h + 0.45;
+        while o + 0.5 <= h - 0.45 + 1e-3 {
+            let q = [
+                p + d * half + n * o,
+                p - d * half + n * o,
+                p - d * half + n * (o + 0.5),
+                p + d * half + n * (o + 0.5),
+            ];
+            m.quad_up(q.map(|v| lift(v, MARK_Y + 0.004)), white);
+            o += 1.0;
+        }
+    }
     let asphalt = lin(if st.highway {
         palette::ASPHALT_HIGHWAY
     } else {
@@ -1028,16 +1053,30 @@ pub fn road_detail(m: &mut MeshBuilder, s: &SegLayout, furniture: f32) {
                 }
                 let b = p + d * 1.3;
                 m.cylinder(lift(b, y), 0.22, 0.85, 6, iron, shade(iron, 1.3));
-            } else if roll < 0.65 {
-                // Fire hydrant.
-                let red = Color::srgb_u32(0xC8322B);
-                m.cylinder(lift(p, y), 0.13, 0.6, 6, red, shade(red, 1.1));
-                m.cylinder(lift(p, y + 0.6), 0.09, 0.12, 6, red, shade(red, 1.2));
-                m.box_yaw(lift(p, y + 0.38), Vec3::new(0.42, 0.08, 0.08), yaw, red, red);
-            } else if roll < 0.8 {
-                // Litter bin.
+            } else if roll < 0.52 {
+                // Cycle stands: three steel hoops along the kerb.
+                let steel = Color::srgb_u32(0x6E7378);
+                for k in [-0.8f32, 0.0, 0.8] {
+                    let q = p + d * k;
+                    m.box_yaw(lift(q, y), Vec3::new(0.04, 0.8, 0.65), yaw, steel, steel);
+                }
+            } else if roll < 0.62 {
+                // Advertising column: posters under a little dome.
                 let green = Color::srgb_u32(0x2F5D49);
-                m.cylinder(lift(p, y), 0.24, 0.9, 6, green, shade(green, 1.3));
+                let paper = [
+                    Color::srgb_u32(0xE9E1CC),
+                    Color::srgb_u32(0xE0564A),
+                    Color::srgb_u32(0x2F8FCB),
+                    Color::srgb_u32(0xF2B33D),
+                ];
+                let c = p - face * 0.2;
+                let k = (roll * 97.0) as usize;
+                m.cylinder(lift(c, y), 0.55, 2.3, 6, paper[k % 4], green);
+                m.cone(lift(c, y + 2.3), 0.62, 0.4, 6, green, 0.0);
+            } else if roll < 0.8 {
+                // Litter bin with a dark lid.
+                let green = Color::srgb_u32(0x2F5D49);
+                m.cylinder(lift(p, y), 0.24, 0.95, 6, green, shade(green, 0.7));
             } else {
                 // Bollards along the kerb.
                 let post = Color::srgb_u32(0x4A4E52);
@@ -1493,6 +1532,7 @@ mod tests {
                         WALK_Y,
                         MARK_Y,
                         MARK_Y + 0.002,
+                        MARK_Y + 0.004,
                         ROAD_Y + 0.13,
                         0.025,
                         ROAD_Y + 0.004,

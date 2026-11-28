@@ -140,6 +140,8 @@ enum SheetText {
     Headline,
     Subtitle,
     TripTitle,
+    /// The trip bar's icon: a car, or footprints on foot.
+    TripIcon,
     TripLeft,
     TripFrom,
     TripTo,
@@ -304,6 +306,10 @@ fn text_of(s: &Sheet, tag: SheetText) -> Option<(String, Option<Color>)> {
         SheetText::Headline => (s.headline.clone(), None),
         SheetText::Subtitle => (s.subtitle.clone(), None),
         SheetText::TripTitle => (s.trip.as_ref()?.title.to_uppercase(), None),
+        SheetText::TripIcon => {
+            let on_foot = s.trip.as_ref()?.title.starts_with("Walking");
+            ((if on_foot { icon::WALK } else { icon::CAR }).to_string(), None)
+        }
         SheetText::TripLeft => {
             let trip = s.trip.as_ref()?;
             (
@@ -401,6 +407,7 @@ fn target_of(t: &WorldTarget) -> Option<Target> {
     match t {
         WorldTarget::Building(b) => Some(Target::Place(*b)),
         WorldTarget::Vehicle(v) => Some(Target::Vehicle(*v)),
+        WorldTarget::Walker(c) => Some(Target::Person(*c)),
         _ => None,
     }
 }
@@ -544,6 +551,10 @@ fn follow(
                 w.vehicles.get(car).map(|v| citysim_sim::drive::vehicle_pose(w, v).0),
                 FollowOn::Vehicle(car),
             ),
+            // On foot on the map: gfx follows the drawn figure.
+            None if citysim_sim::walk::walker_of(w, c).is_some() => {
+                (people::person_position(w, c), FollowOn::Walker(c))
+            }
             // Under way off the map: where they should be by now (gfx
             // follows the marker), else where they are.
             None => match routes.person(w, c).and_then(|t| t.at) {
@@ -568,8 +579,11 @@ fn follow(
         && let Some(v) = citysim_sim::inspect::citizen(w, c)
     {
         let car = v.trip.and_then(|t| t.vehicle).filter(|c| w.vehicles.contains_key(*c));
+        let walking = citysim_sim::walk::walker_of(w, c).is_some();
         let sel = match (car, v.trip, v.inside) {
             (Some(car), _, _) => Some(WorldTarget::Vehicle(car)),
+            // On foot on the map: the figure.
+            (None, Some(_), _) if walking => Some(WorldTarget::Walker(c)),
             // On the way where the map draws nothing: the route's marker
             // shows where they should be (and the destination glows).
             (None, Some(_), _) => None,
@@ -1176,7 +1190,10 @@ fn trip_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, of: Of) {
             ..default()
         }))
         .with_children(|r| {
-            r.spawn(super::widgets::icon(fonts, icon::CAR, 16.0, t::TEXT));
+            r.spawn((
+                super::widgets::icon(fonts, icon::CAR, 16.0, t::TEXT),
+                SheetText::TripIcon,
+            ));
             r.spawn((
                 Text::new(""),
                 fonts.text(t::FONT_BODY, t::W_BOLD),
@@ -1855,9 +1872,11 @@ fn leader(
     let at = match view.current() {
         Some(Target::Person(c)) => match person_car(w, c) {
             Some(v) => car(v),
-            // Under way off the map: to the marker of where they should be.
+            // On foot: their figure as drawn; under way off the map: to the
+            // marker of where they should be.
             None => drawn
-                .traveller
+                .walker(c)
+                .or(drawn.traveller)
                 .or(route.traveller)
                 .or_else(|| people::person_position(w, c)),
         },

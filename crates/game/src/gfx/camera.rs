@@ -369,6 +369,7 @@ fn follow_drawn(
         let (p, drawn) = match follow.on {
             FollowOn::Vehicle(v) => drawn.vehicle(v).map_or((f, false), |d| (d.pos, true)),
             FollowOn::Traveller => drawn.traveller.map_or((f, false), |t| (t, true)),
+            FollowOn::Walker(c) => drawn.walker(c).map_or((f, false), |p| (p, true)),
             FollowOn::Point => (f, false),
         };
         let p = Vec3::new(

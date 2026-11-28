@@ -26,8 +26,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use citysim_sim::command::{NodeChange, PieceChange};
 use citysim_sim::{
-    BuildingId, Cell, CellRef, Command, CommandError, Curve, NodeId, Outcome, RoadKind, SegmentId, TICKS_PER_SECOND,
-    VehicleId, World, Zone,
+    BuildingId, Cell, CellRef, CitizenId, Command, CommandError, Curve, NodeId, Outcome, RoadKind, SegmentId,
+    TICKS_PER_SECOND, VehicleId, World, Zone,
 };
 
 // ---------------------------------------------------------------- ordering
@@ -466,6 +466,9 @@ pub enum WorldTarget {
     },
     /// A car or truck (follows it as it drives).
     Vehicle(VehicleId),
+    /// A person walking on the map (any of a walking party; gfx draws the
+    /// ring and marker on the drawn figure, `citysim_sim::walk::walker_of`).
+    Walker(citysim_sim::CitizenId),
 }
 
 /// What gfx should highlight in the world (issue 6): the hovered and the
@@ -496,9 +499,13 @@ pub enum RouteState {
     /// A trip that has not started yet (a person at home, at work...): the
     /// way they would drive now, from the building they are in.
     Planned,
-    /// Under way where the map draws nothing (on foot, a lift, a car beyond
-    /// the cars shown): the way a car would take, start to end.
+    /// Under way where the map draws nothing (a lift, a car beyond the
+    /// cars shown, a walk timed off the map): the way a car would take,
+    /// start to end.
     Unseen,
+    /// On foot on the map: `points` start at the person and follow the
+    /// pavements and zebras they will take (gfx draws a narrower line).
+    Walking,
 }
 
 /// One end of a [`RouteView`]: a ground point (sim metres) and the
@@ -536,6 +543,8 @@ pub struct RouteView {
     pub traveller_pace: f32,
     /// `Driving`: the car (gfx starts the line at its drawn body).
     pub vehicle: Option<VehicleId>,
+    /// `Walking`: the person on foot (gfx starts the line at their figure).
+    pub walker: Option<CitizenId>,
 }
 
 /// Player display settings that gfx honours (written by ui from the
@@ -612,6 +621,8 @@ pub enum FollowOn {
     /// The person under way off the map of [`RouteView::traveller`]: gfx
     /// follows its marker.
     Traveller,
+    /// A person walking on the map: gfx follows their drawn figure.
+    Walker(CitizenId),
 }
 
 /// A vehicle as gfx draws it this frame (sim metres): the centre of its
@@ -626,8 +637,9 @@ pub struct DrawnVehicle {
 }
 
 /// Where gfx draws what the interface points at, this frame: the vehicles
-/// of `WorldHighlight::{selected, hovered}`, `CameraFollow::on` and
-/// `RouteView::vehicle`, and the off-map traveller's marker. Written by gfx
+/// and people on foot of `WorldHighlight::{selected, hovered}`,
+/// `CameraFollow::on` and `RouteView::{vehicle, walker}`, and the off-map
+/// traveller's marker. Written by gfx
 /// in `GameSet::Render` (every frame, after it placed the cars); ui reads
 /// it later in the frame (`PostUpdate`: the panel's leader line) so its
 /// marks sit on the drawn body. Empty without gfx: use the sim's poses.
@@ -635,11 +647,18 @@ pub struct DrawnVehicle {
 pub struct DrawnPoses {
     pub vehicles: Vec<(VehicleId, DrawnVehicle)>,
     pub traveller: Option<[f32; 2]>,
+    /// People walking on the map (`WorldTarget::Walker`, `FollowOn::Walker`,
+    /// `RouteView::walker`): where their figure stands this frame.
+    pub walkers: Vec<(CitizenId, [f32; 2])>,
 }
 
 impl DrawnPoses {
     pub fn vehicle(&self, id: VehicleId) -> Option<DrawnVehicle> {
         self.vehicles.iter().find(|(v, _)| *v == id).map(|(_, d)| *d)
+    }
+
+    pub fn walker(&self, id: CitizenId) -> Option<[f32; 2]> {
+        self.walkers.iter().find(|(c, _)| *c == id).map(|(_, p)| *p)
     }
 }
 

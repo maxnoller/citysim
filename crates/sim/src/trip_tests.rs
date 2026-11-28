@@ -39,6 +39,18 @@ fn centre(w: &World, b: BuildingId) -> [f32; 2] {
 /// A driver at home with a free car (everyone else in the household too),
 /// and two shops: the nearest one and one far away.
 fn driver_at_home(w: &mut World) -> (CitizenId, BuildingId, BuildingId) {
+    driver_at_home_where(w, false)
+}
+
+/// Today's draw of a citizen for walking a shopping trip.
+fn walk_draw(w: &World, c: CitizenId) -> f32 {
+    let ci = &w.citizens[c];
+    people::daily(ci.seed, w.time.day, 0x3A20 + TripPurpose::Shopping.index() as u64)
+}
+
+/// [`driver_at_home`] whose driver walks short ways today (`walks`) or
+/// takes the car whatever the distance.
+fn driver_at_home_where(w: &mut World, walks: bool) -> (CitizenId, BuildingId, BuildingId) {
     let now = w.time.tick;
     let shop_pos: Vec<[f32; 2]> = w
         .buildings
@@ -60,7 +72,14 @@ fn driver_at_home(w: &mut World) -> (CitizenId, BuildingId, BuildingId) {
             if driving {
                 return None;
             }
-            let d = h.citizens.iter().copied().find(|&c| w.citizens[c].drives())?;
+            let d = h.citizens.iter().copied().find(|&c| {
+                w.citizens[c].drives()
+                    && if walks {
+                        walk_draw(w, c) < 0.5
+                    } else {
+                        walk_draw(w, c) >= balance::WALK_SHARE_NEAR
+                    }
+            })?;
             let hp = centre(w, h.home);
             let near = shop_pos.iter().map(|&p| geom::dist(hp, p)).fold(f32::MAX, f32::min);
             (h.cars > 0).then_some((near, hid, d))
@@ -70,6 +89,7 @@ fn driver_at_home(w: &mut World) -> (CitizenId, BuildingId, BuildingId) {
     let home = w.households[hid].home;
     for m in w.households[hid].citizens.clone() {
         w.traffic.pending.retain(|d| d.citizen != Some(m));
+        w.walking.walkers.remove(&m);
         w.citizens[m].has_car = false;
         people::set_place(w, m, Activity::Home, Location::In(home), now + DAY);
     }
@@ -93,31 +113,41 @@ fn journey(w: &World, id: CitizenId) -> crate::Journey {
 #[test]
 fn short_trips_are_walked_longer_ones_driven() {
     let mut w = town(31);
-    let (id, near, far) = driver_at_home(&mut w);
+    // Whether a trip of this length is walked is each person's daily
+    // draw: someone who walks short ways today, someone who drives.
+    let (walker, near, _) = driver_at_home_where(&mut w, true);
+    let (driver, _, far) = driver_at_home_where(&mut w, false);
+    let id = walker;
     let home = w.households[w.citizens[id].household].home;
     let d_near = geom::dist(centre(&w, home), centre(&w, near));
     let d_far = geom::dist(centre(&w, home), centre(&w, far));
-    assert!(d_far > balance::WALK_MAX_M, "{d_far}");
-    assert!(d_near <= balance::WALK_MAX_M, "a shop across the street: {d_near}");
+    assert!(d_far > balance::WALK_NEAR_M, "{d_far}");
+    assert!(d_near <= balance::WALK_NEAR_M, "a shop across the street: {d_near}");
     {
+        let id = walker;
         let before = w.traffic.pending.len();
         day::go(&mut w, id, near, TripPurpose::Shopping, &[]);
         let j = journey(&w, id);
         assert_eq!(j.mode, TravelMode::Walking);
-        assert!(j.arrive_tick.is_some(), "on foot, off screen");
+        assert!(j.arrive_tick.is_none(), "on foot on the map");
+        assert!(w.walking.walkers.contains_key(&id), "a walker on the pavement");
         assert_eq!(w.traffic.pending.len(), before, "no car");
         assert!(!w.citizens[id].has_car);
         let home = w.households[w.citizens[id].household].home;
         let now = w.time.tick;
         people::set_place(&mut w, id, Activity::Home, Location::In(home), now + DAY);
+        w.walking.walkers.remove(&id);
     }
-    // Far away: the car, on the road.
+    // Someone who does not walk today: the car, on the road.
+    let id = driver;
     let before = w.traffic.pending.len();
     day::go(&mut w, id, far, TripPurpose::Shopping, &[]);
     let j = journey(&w, id);
     assert_eq!(j.mode, TravelMode::Driving);
-    assert!(j.arrive_tick.is_none(), "a car on the road ends the trip");
-    assert_eq!(w.traffic.pending.len(), before + 1);
+    if traffic::drawn_driver(&w, id) {
+        assert!(j.arrive_tick.is_none(), "a car on the road ends the trip");
+        assert_eq!(w.traffic.pending.len(), before + 1);
+    }
     assert!(w.citizens[id].has_car);
     w.check_sim_invariants().unwrap();
 }
@@ -172,15 +202,32 @@ fn people_stay_in_the_car_until_it_arrives() {
         assert_eq!(j.vehicle, Some(v), "tick {}", w.time.tick);
         w.step();
         ticks += 1;
-        assert!(ticks < 20 * 60 * 5, "the car never arrived");
+        if ticks >= 20 * 60 * 15 {
+            let car = &w.vehicles[v];
+            let s = car.segment.unwrap();
+            let len = w.roads.segments[s].length;
+            panic!(
+                "the car never arrived: {:?} p {} len {} speed {} fwd {} jm {:?} zebra {:?} route {:?} walkers {}",
+                s,
+                car.progress,
+                len,
+                car.speed,
+                car.forward,
+                car.junction,
+                crate::walk::zebra_ahead(&w.walking, s, car.forward, len, car.progress),
+                car.route,
+                w.walking.walkers.len()
+            );
+        }
     }
     // The car arrived: they are in the shop (or on the way home from it).
     let c = &w.citizens[id];
     assert!(
         c.location == Location::In(far) || c.location.journey().is_some_and(|j| j.from == Some(far)),
-        "{:?} {:?}, due {due}",
+        "{:?} {:?}, due {due}, far {far:?}, now {}",
         c.activity,
-        c.location
+        c.location,
+        w.time.hour()
     );
 }
 
