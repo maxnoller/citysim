@@ -880,6 +880,9 @@ pub(crate) fn set(world: &mut World, n: NodeId, size: Option<RoundaboutSize>) {
         j.ring = size;
         j.ring_geom = crate::junction::RingCache::default();
     }
+    // Its roads are the same, but it must be built again (with or without
+    // the ring): the incremental sync keys on roads alone.
+    world.cache.junction_inputs.remove(n);
     world.versions.roads += 1;
     world.traffic.control_version += 1;
     // Rebuild the junctions now (zoning and the drawn roads follow them).

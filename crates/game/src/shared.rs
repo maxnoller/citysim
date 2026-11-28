@@ -97,6 +97,10 @@ pub struct SimClock {
     pub paused: bool,
     /// Index into [`SPEEDS`] (0 = 1x).
     pub speed: usize,
+    /// ui is sending a plan in parts over a few frames: no steps until it
+    /// has all been applied (so nothing changes between its parts; not
+    /// shown as a pause).
+    pub hold: bool,
 }
 
 impl SimClock {
@@ -117,7 +121,7 @@ impl SimClock {
 
     /// Sim steps per fixed update (0 while paused).
     pub fn steps_per_tick(&self) -> u32 {
-        if self.paused {
+        if self.paused || self.hold {
             0
         } else {
             self.speed_steps() / self.fixed_per_tick()
@@ -174,6 +178,28 @@ pub struct HoveredCell(pub Option<Cell>);
 pub struct HoveredPoint {
     pub pos: Option<[f32; 2]>,
     pub zone_cell: Option<CellRef>,
+}
+
+/// Real time `apply_commands` took this frame (ms, 0 when nothing was
+/// sent): ui sends a plan in parts by it, the benchmark records it.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct CommandTime(pub f32);
+
+/// Dev scripts without a window (`CITYSIM_BENCH`): the pointer's position
+/// in the world camera's viewport (logical px). Where there is no primary
+/// window, shared's hover and ui's tools take the pointer from here (the
+/// script presses the mouse buttons in `ButtonInput<MouseButton>`).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScriptPointer(pub Option<Vec2>);
+
+impl ScriptPointer {
+    /// The pointer: the window's cursor, else (no window) the script's.
+    pub fn position(&self, window: Option<&Window>) -> Option<Vec2> {
+        match window {
+            Some(w) => w.cursor_position(),
+            None => self.0,
+        }
+    }
 }
 
 /// True while the mouse is over a UI element (written by ui).
@@ -446,6 +472,10 @@ pub struct CurveToolView {
     pub guides: Vec<Guide>,
     /// Junctions it would make or use.
     pub nodes: Vec<([f32; 2], NodeChange)>,
+    /// What is shown (`pieces`, `refused`, `error_at`, `nodes`) is the last
+    /// plan checked; a newer one has been in the works for a moment (gfx
+    /// draws it dimmed). The points, handles and snap are always current.
+    pub stale: bool,
 }
 
 /// A stretch of road between two junctions (or dead ends).
@@ -778,6 +808,8 @@ impl Plugin for SharedPlugin {
         .init_resource::<HoveredCell>()
         .init_resource::<HoveredPoint>()
         .init_resource::<PointerOverUi>()
+        .init_resource::<ScriptPointer>()
+        .init_resource::<CommandTime>()
         .init_resource::<CameraInputBlocked>()
         .init_resource::<ToolPreview>()
         .init_resource::<OverlayMode>()
@@ -826,8 +858,12 @@ fn apply_commands(
     mut cmds: MessageReader<SimCommand>,
     mut last: ResMut<LastCommand>,
     time: Res<Time<Real>>,
+    mut took: ResMut<CommandTime>,
 ) {
+    let started = std::time::Instant::now();
+    let mut any = false;
     for SimCommand(cmd) in cmds.read() {
+        any = true;
         let res = sim.world.apply(cmd.clone());
         if let Err(e) = &res {
             debug!("command {cmd:?} rejected: {e}");
@@ -835,12 +871,19 @@ fn apply_commands(
         last.result = Some((cmd.clone(), res));
         last.at = time.elapsed_secs();
     }
+    let ms = if any {
+        started.elapsed().as_secs_f32() * 1e3
+    } else {
+        0.0
+    };
+    took.set_if_neq(CommandTime(ms));
 }
 
 fn compute_hover(
     window: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     over_ui: Res<PointerOverUi>,
+    script: Res<ScriptPointer>,
     sim: Res<SimWorld>,
     mut hovered: ResMut<HoveredCell>,
     mut point: ResMut<HoveredPoint>,
@@ -848,8 +891,7 @@ fn compute_hover(
     let mut cell = None;
     let mut ground = None;
     if !over_ui.0
-        && let Ok(window) = window.single()
-        && let Some(pos) = window.cursor_position()
+        && let Some(pos) = script.position(window.single().ok())
         && let Ok((camera, cam_tf)) = cameras.single()
         && let Ok(ray) = camera.viewport_to_world(cam_tf, pos)
         && let Some(hit) = ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))

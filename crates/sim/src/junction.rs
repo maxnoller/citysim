@@ -1095,6 +1095,60 @@ fn resolve(setting: JunctionSetting, arms: &[Arm], busy: bool) -> JunctionContro
     }
 }
 
+/// What [`build_state`] reads of the roads for node `n`: its position and
+/// each of its segments (id, ends, kind, centre line, length) in order. Two
+/// equal inputs build the same geometry, conflicts and signal plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct JunctionInputs {
+    pos: [f32; 2],
+    arms: Vec<(SegmentId, NodeId, NodeId, RoadKind, Curve, f32)>,
+}
+
+impl JunctionInputs {
+    pub(crate) fn of(roads: &RoadNetwork, n: NodeId) -> JunctionInputs {
+        let node = &roads.nodes[n];
+        JunctionInputs {
+            pos: node.pos,
+            arms: node
+                .segments
+                .iter()
+                .map(|&s| {
+                    let seg = &roads.segments[s];
+                    (s, seg.a, seg.b, seg.kind, seg.curve, seg.length)
+                })
+                .collect(),
+        }
+    }
+
+    /// Same as `self` for the roads as they are now (no allocation).
+    pub(crate) fn matches(&self, roads: &RoadNetwork, n: NodeId) -> bool {
+        let node = &roads.nodes[n];
+        node.pos == self.pos
+            && node.segments.len() == self.arms.len()
+            && node.segments.iter().zip(&self.arms).all(|(&s, a)| {
+                let seg = &roads.segments[s];
+                *a == (s, seg.a, seg.b, seg.kind, seg.curve, seg.length)
+            })
+    }
+}
+
+/// [`build_state`] for a junction whose inputs ([`JunctionInputs`]) are
+/// what `j` was built from: the geometry, conflicts and plan come out the
+/// same, so only what a rebuild resets is reset (queues, the control
+/// re-resolved). Leaves `j` equal to `build_state(roads, n, Some(&j))`.
+/// (Not for a roundabout: its geometry also depends on its neighbours, it
+/// is always built again.)
+pub(crate) fn rebuild_unchanged(j: &mut JunctionState) {
+    let deg = j.arms.len();
+    j.control = if deg >= 3 {
+        control_under(j, j.setting)
+    } else {
+        JunctionControl::Priority
+    };
+    j.queue.clear();
+    j.queue.resize(deg, 0);
+}
+
 /// Fresh state for node `n`, keeping the setting, busy flag, roundabout
 /// and (when the geometry did not change) the signal state of `old`.
 /// `states`: the other junctions (a roundabout checks it still fits

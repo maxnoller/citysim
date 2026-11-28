@@ -659,6 +659,7 @@ pub(crate) fn sync_junctions(world: &mut World) {
     world.traffic.junctions_version = world.versions.roads;
     let roads = &world.roads;
     let states = &mut world.traffic.junction_states;
+    let inputs = &mut world.cache.junction_inputs;
     // Roundabouts whose node went keep their land blocked until zoning
     // looks again.
     let mut gone: Vec<([f32; 2], f32)> = Vec::new();
@@ -671,7 +672,19 @@ pub(crate) fn sync_junctions(world: &mut World) {
         }
     }
     states.retain_keys(|n| roads.nodes.contains_key(n));
+    inputs.retain_keys(|n| roads.nodes.contains_key(n));
     for n in roads.nodes.keys() {
+        // Only junctions whose own roads changed are built again; the rest
+        // get what a rebuild would give them (`rebuild_unchanged`). A
+        // roundabout is always built again: whether it still fits depends
+        // on its neighbours too (its geometry is reused when unchanged).
+        if let Some(j) = states.get_mut(n)
+            && j.ring.is_none()
+            && inputs.get(n).is_some_and(|i| i.matches(roads, n))
+        {
+            junction::rebuild_unchanged(j);
+            continue;
+        }
         let old = states.remove(n);
         let fresh = junction::build_state(roads, states, n, old.as_ref());
         // A road edit left no room for the ring: an ordinary junction again.
@@ -681,6 +694,7 @@ pub(crate) fn sync_junctions(world: &mut World) {
             gone.push((roads.nodes[n].pos, size.dims().reserve_r()));
         }
         states.insert(n, fresh);
+        inputs.insert(n, junction::JunctionInputs::of(roads, n));
     }
     if !gone.is_empty() {
         world.traffic.control_version += 1;
@@ -1287,4 +1301,154 @@ pub fn overlapping_bodies(bodies: &[(VehicleId, [[f32; 2]; 4])], tol: f32) -> Ve
 /// saved; for benchmarks).
 pub fn debug_last_block_sync_ns(world: &World) -> u64 {
     world.cache.last_block_sync_ns
+}
+
+#[cfg(test)]
+mod junction_sync_tests {
+    use crate::scenarios::GridPlayer;
+    use crate::{World, Zone};
+
+    /// `sync_junctions` rebuilds only junctions whose roads changed; a
+    /// world that rebuilds every junction on every road change (the
+    /// remembered inputs dropped before each step) must stay identical
+    /// while a city grows by commands under traffic.
+    #[test]
+    fn incremental_junction_sync_equals_rebuilding_every_junction() {
+        let mut a = World::new(11);
+        let mut b = World::new(11);
+        let mut pa = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+        let mut pb = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+        let mut edits = 0;
+        while a.stats.population < 4_000 && a.time.day < 12 {
+            let v = a.versions.roads;
+            b.cache.junction_inputs = Default::default();
+            pa.act(&mut a);
+            pb.act(&mut b);
+            if a.versions.roads != v {
+                edits += 1;
+                assert_eq!(a.traffic.junction_states, b.traffic.junction_states, "after an edit");
+            }
+            a.step();
+            b.cache.junction_inputs = Default::default();
+            b.step();
+        }
+        assert!(edits > 15, "{edits} road edits");
+        assert_eq!(a.traffic.junction_states, b.traffic.junction_states);
+        assert!(a == b, "the worlds drifted apart");
+    }
+
+    /// The same with roundabouts: a streets city grows with rings at its
+    /// junctions, then a ring is taken away and set again, one of a ring's
+    /// arms is removed (`RemoveRoads`), and a street is built close enough
+    /// across another ring's arm to leave it no room.
+    #[test]
+    fn incremental_junction_sync_with_roundabouts() {
+        use crate::roundabout::RoundaboutSize as R;
+        use crate::{Command, Curve, RoadKind};
+        let mut a = World::new(12);
+        let mut b = World::new(12);
+        let mut pa = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+        let mut pb = GridPlayer::new(&[Zone::Residential, Zone::Commercial, Zone::Industrial]);
+        let same = |a: &World, b: &World, what: &str| {
+            assert_eq!(a.traffic.junction_states, b.traffic.junction_states, "{what}");
+            let ring_of =
+                |w: &World| -> Vec<_> { w.traffic.junction_states.iter().map(|(n, j)| (n, j.ring)).collect() };
+            assert_eq!(ring_of(a), ring_of(b), "{what}");
+        };
+        let mut edits = 0;
+        while a.stats.population < 2_500 && a.time.day < 8 {
+            let v = a.versions.roads;
+            b.cache.junction_inputs = Default::default();
+            pa.act(&mut a);
+            pb.act(&mut b);
+            if a.time.tick % crate::balance::TICKS_PER_HOUR as u64 == 1 {
+                crate::scenarios::add_roundabouts_of(&mut a, &[R::Medium], &[R::Small, R::Mini], 0);
+                b.cache.junction_inputs = Default::default();
+                crate::scenarios::add_roundabouts_of(&mut b, &[R::Medium], &[R::Small, R::Mini], 0);
+            }
+            if a.versions.roads != v {
+                edits += 1;
+                same(&a, &b, "after an edit");
+            }
+            a.step();
+            b.cache.junction_inputs = Default::default();
+            b.step();
+        }
+        let rings: Vec<crate::NodeId> = crate::junction::junction_nodes(&a)
+            .filter(|&n| crate::roundabout::roundabout(&a, n).is_some())
+            .collect();
+        assert!(rings.len() >= 3, "{} rings", rings.len());
+        let apply = |a: &mut World, b: &mut World, cmd: Command, what: &str| {
+            a.economy.money += 1_000_000;
+            b.economy.money += 1_000_000;
+            let ra = a.apply(cmd.clone()).is_ok();
+            b.cache.junction_inputs = Default::default();
+            let rb = b.apply(cmd).is_ok();
+            assert_eq!(ra, rb, "{what}");
+            same(a, b, what);
+            for _ in 0..200 {
+                a.step();
+                b.cache.junction_inputs = Default::default();
+                b.step();
+            }
+            same(a, b, what);
+        };
+        // A ring taken away and set again.
+        let n0 = rings[0];
+        let size = crate::roundabout::roundabout(&a, n0).unwrap();
+        apply(
+            &mut a,
+            &mut b,
+            Command::SetRoundabout { node: n0, size: None },
+            "ring removed",
+        );
+        assert!(crate::roundabout::roundabout(&a, n0).is_none());
+        apply(
+            &mut a,
+            &mut b,
+            Command::SetRoundabout {
+                node: n0,
+                size: Some(size),
+            },
+            "ring set again",
+        );
+        assert_eq!(crate::roundabout::roundabout(&a, n0), Some(size));
+        // One arm of another ring removed.
+        let n1 = rings[1];
+        let s = a.roads.nodes[n1].segments[0];
+        let len = a.roads.segments[s].length;
+        apply(
+            &mut a,
+            &mut b,
+            Command::RemoveRoads {
+                parts: vec![(s, 0.0, len)],
+            },
+            "an arm removed",
+        );
+        // A street across an arm of a third ring, just beyond its give-way
+        // line: no room left for the ring.
+        let n2 = rings[2];
+        let c = a.roads.nodes[n2].pos;
+        let s = a.roads.nodes[n2].segments[0];
+        let seg = &a.roads.segments[s];
+        let d = crate::junction::setback(&a, n2, s) + 6.0;
+        let p = seg.pose_dir(seg.a == n2, d, 0.0);
+        let r = crate::junction::right_of(p.dir);
+        let curve = Curve::straight(
+            [p.pos[0] + r[0] * 30.0, p.pos[1] + r[1] * 30.0],
+            [p.pos[0] - r[0] * 30.0, p.pos[1] - r[1] * 30.0],
+        );
+        let cmd = Command::Clearing(Box::new(Command::BuildCurve {
+            curve,
+            kind: RoadKind::Street,
+        }));
+        assert!(a.preview(&cmd).is_ok(), "the street across the arm at {c:?}");
+        apply(&mut a, &mut b, cmd, "a street close across an arm");
+        assert!(
+            crate::roundabout::roundabout(&a, n2).is_none(),
+            "the ring at {c:?} had to go"
+        );
+        assert!(edits > 10, "{edits} road edits");
+        assert!(a == b, "the worlds drifted apart");
+    }
 }

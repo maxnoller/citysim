@@ -50,6 +50,13 @@ pub enum Command {
     /// Remove the part of `segment` from `from_m` to `to_m` metres from its
     /// `a` node (`0..=length` for all of it). Never refused for money.
     RemoveRoad { segment: SegmentId, from_m: f32, to_m: f32 },
+    /// Remove several parts at once (`(segment, from_m, to_m)` each, as
+    /// `RemoveRoad`; at most one part per segment): one change of the
+    /// roads, so the zoning, junctions and indices follow once (undo of a
+    /// large road takes it away in a few of these instead of one command
+    /// per segment). Refused when a segment is missing or listed twice, or
+    /// is the highway. Never refused for money.
+    RemoveRoads { parts: Vec<(SegmentId, f32, f32)> },
     /// Shorthand: remove road pieces touching cells in the rectangle, and
     /// buildings overlapping it. The highway stub is not removable. Allowed
     /// without the money for it (the cost then pushes money negative), so a
@@ -603,6 +610,34 @@ pub(crate) fn plan(world: &World, cmd: &Command) -> Result<Plan, CommandError> {
                 cost: (cells_m(p.hi - p.lo).max(1) as i64) * balance::BULLDOZE_COST_PER_CELL,
                 parts: vec![p],
                 removed: vec![curve],
+                buildings: Vec::new(),
+                cells: Vec::new(),
+            })
+        }
+        Command::RemoveRoads { parts } => {
+            let mut ps = Vec::with_capacity(parts.len());
+            let mut removed = Vec::with_capacity(parts.len());
+            let mut cost = 0;
+            for (k, &(segment, from_m, to_m)) in parts.iter().enumerate() {
+                if parts[..k].iter().any(|p| p.0 == segment) {
+                    return Err(CommandError::NoSuchRoad);
+                }
+                let p = build::part(&world.roads, segment, from_m, to_m).ok_or(CommandError::NoSuchRoad)?;
+                let seg = &world.roads.segments[segment];
+                if seg.kind == RoadKind::Highway {
+                    return Err(CommandError::InvalidRoadKind(RoadKind::Highway));
+                }
+                removed.push(seg.curve.sub(p.lo, p.hi));
+                cost += (cells_m(p.hi - p.lo).max(1) as i64) * balance::BULLDOZE_COST_PER_CELL;
+                ps.push(p);
+            }
+            if ps.is_empty() {
+                return Err(CommandError::NoSuchRoad);
+            }
+            Ok(Plan::Remove {
+                cost,
+                parts: ps,
+                removed,
                 buildings: Vec::new(),
                 cells: Vec::new(),
             })

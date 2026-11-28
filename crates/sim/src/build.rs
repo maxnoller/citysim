@@ -178,6 +178,18 @@ pub(crate) fn buildings_near(world: &World, c: &Curve, reach: f32) -> Vec<(Build
     let pts = c.flatten(0.05);
     let mut out = Vec::new();
     for (id, b) in world.buildings.iter() {
+        // Far from the curve's box by more than the building's
+        // half-diagonal: its corners are too (no need to work them out).
+        let fp = &b.footprint;
+        let half = (fp.size[0].max(fp.size[1]) as f32) * crate::CELL_SIZE * 0.75 + 0.5;
+        let cn = fp.center;
+        if cn[0] - half > hi[0] + reach
+            || cn[0] + half < lo[0] - reach
+            || cn[1] - half > hi[1] + reach
+            || cn[1] + half < lo[1] - reach
+        {
+            continue;
+        }
         let poly = b.corners();
         let blo = poly
             .iter()

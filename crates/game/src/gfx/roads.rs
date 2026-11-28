@@ -80,12 +80,33 @@ pub struct RoadsPlugin;
 
 impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreStartup, init_pools).add_systems(
-            Update,
-            rebuild_roads
-                .in_set(GameSet::Render)
-                .after(super::buildings::BuildingsSync),
-        );
+        app.init_resource::<SharedLayout>()
+            .add_systems(PreStartup, init_pools)
+            .add_systems(Update, update_layout.after(GameSet::Sim).before(GameSet::Render))
+            .add_systems(
+                Update,
+                rebuild_roads
+                    .in_set(GameSet::Render)
+                    .after(super::buildings::BuildingsSync),
+            );
+    }
+}
+
+/// The road layout of the current roads (`road_geom::layout`: junction
+/// shapes and arm cuts of the whole network), worked out once per road edit
+/// for everything drawn along the roads (roads, junction furniture, the
+/// traffic overlay), before `GameSet::Render`.
+#[derive(Resource, Default)]
+pub struct SharedLayout {
+    pub key: Option<(u64, u64)>,
+    pub layout: std::sync::Arc<road_geom::RoadLayout>,
+}
+
+fn update_layout(sim: Res<SimWorld>, mut shared: ResMut<SharedLayout>) {
+    let key = sim.key(sim.world.versions.roads);
+    if shared.key != Some(key) {
+        shared.layout = std::sync::Arc::new(road_geom::layout(&sim.world));
+        shared.key = Some(key);
     }
 }
 
@@ -110,6 +131,7 @@ fn rebuild_roads(
     pools: Res<LampPools>,
     (requested, applied): (Res<GraphicsQuality>, Option<Res<QualityApplied>>),
     mouths: Res<DrivewayMouths>,
+    shared: Res<SharedLayout>,
 ) {
     let quality = drawn_quality(applied.as_deref(), *requested);
     let roads_key = sim.key(sim.world.versions.roads);
@@ -118,7 +140,7 @@ fn rebuild_roads(
         return;
     }
     // Only the quality changed (street furniture): a few chunks per frame.
-    let quality_only = state.key == Some(key);
+    let whole = state.chunks.is_empty() || state.key.is_none_or(|k| k.0.0 != roads_key.0);
     state.key = Some(key);
     state.quality = Some(quality);
     let furniture: f32 = match quality {
@@ -129,7 +151,7 @@ fn rebuild_roads(
     // The layout changes only with the roads; driveways only move what
     // the sidewalks keep clear.
     if state.layout.as_ref().is_none_or(|(k, _)| *k != roads_key) {
-        state.layout = Some((roads_key, road_geom::layout(&sim.world)));
+        state.layout = Some((roads_key, layout_of(&shared, &sim)));
     }
     // Borrowed out of the state while the chunks are updated.
     let (layout_key, mut layout) = state.layout.take().expect("layout");
@@ -186,7 +208,10 @@ fn rebuild_roads(
         if state.chunks.get(&c).is_some_and(|(h, _, _)| *h == hash) {
             continue;
         }
-        if quality_only && rebuilt > 0 && start.elapsed().as_secs_f64() * 1000.0 > QUALITY_REMESH_MS {
+        // A quality change or a road edit: a few chunks a frame (the rest
+        // next frame; a plan built in parts appears piece by piece anyway).
+        // A new world (no chunks yet, or another one loaded): all at once.
+        if !whole && rebuilt > 0 && start.elapsed().as_secs_f64() * 1000.0 > QUALITY_REMESH_MS {
             // The rest next frame.
             state.quality = None;
             break;
@@ -263,4 +288,13 @@ fn rebuild_roads(
     }
     debug!("roads: rebuilt {rebuilt} of {} chunks", state.chunks.len());
     state.layout = Some((layout_key, layout));
+}
+
+/// The shared layout if it is for the current roads, else made here.
+pub fn layout_of(shared: &SharedLayout, sim: &SimWorld) -> road_geom::RoadLayout {
+    if shared.key == Some(sim.key(sim.world.versions.roads)) {
+        (*shared.layout).clone()
+    } else {
+        road_geom::layout(&sim.world)
+    }
 }

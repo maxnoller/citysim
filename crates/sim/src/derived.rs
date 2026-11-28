@@ -33,9 +33,9 @@ pub(crate) struct Derived {
     /// built for.
     zoning_key: Option<(u64, RoadsKey)>,
     /// Cells of blocks whose road is connected to the entry: world-lattice
-    /// cells in a dense map, the others in a set.
+    /// cells in a dense map, the others in a sorted list.
     conn_world: Vec<bool>,
-    conn_cells: std::collections::BTreeSet<CellRef>,
+    conn_cells: Vec<CellRef>,
     /// Front-row cells of such blocks with the side the road is on.
     conn_fronts: Vec<(CellRef, u8)>,
     /// Cell -> segments passing through it (CSR layout over all map cells).
@@ -121,6 +121,9 @@ pub(crate) struct Derived {
     pub gave_up_reasons: [u32; 5],
     /// Debug: wall-clock time of the last zone-block regeneration, ns.
     pub last_block_sync_ns: u64,
+    /// What each junction's state was last built from
+    /// (`traffic::sync_junctions` rebuilds only those whose roads changed).
+    pub junction_inputs: crate::side::SideTable<NodeId, crate::junction::JunctionInputs>,
 }
 
 impl PartialEq for Derived {
@@ -287,7 +290,7 @@ impl Derived {
         self.conn_cells.clear();
         self.conn_world.clear();
         self.conn_world.resize((MAP_CELLS * MAP_CELLS) as usize, false);
-        let mut fronts = std::collections::BTreeSet::new();
+        let mut fronts: Vec<(CellRef, u8)> = Vec::new();
         for b in &zoning.blocks {
             let connected = self.node_connected_seg(b.segment);
             if !connected {
@@ -296,16 +299,19 @@ impl Derived {
             for c in b.cells() {
                 match cell_index(Cell::new(c.i, c.j)).filter(|_| c.lattice == crate::LatticeId::WORLD) {
                     Some(k) => self.conn_world[k] = true,
-                    None => {
-                        self.conn_cells.insert(c);
-                    }
+                    None => self.conn_cells.push(c),
                 }
                 if b.in_front_row(c) {
-                    fronts.insert((c, b.front as u8));
+                    fronts.push((c, b.front as u8));
                 }
             }
         }
-        self.conn_fronts = fronts.into_iter().collect();
+        // Sorted and without repeats, as sets (searched by halves).
+        self.conn_cells.sort_unstable();
+        self.conn_cells.dedup();
+        fronts.sort_unstable();
+        fronts.dedup();
+        self.conn_fronts = fronts;
     }
 
     fn node_connected_seg(&self, s: SegmentId) -> bool {
@@ -321,7 +327,7 @@ impl Derived {
     pub fn cell_connected(&self, c: CellRef) -> bool {
         match cell_index(Cell::new(c.i, c.j)).filter(|_| c.lattice == crate::LatticeId::WORLD) {
             Some(k) => self.conn_world.get(k).copied().unwrap_or(false),
-            None => self.conn_cells.contains(&c),
+            None => self.conn_cells.binary_search(&c).is_ok(),
         }
     }
 

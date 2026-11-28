@@ -32,6 +32,8 @@ use crate::shared::{CameraPose, GraphicsQuality, OverlayMode, WorldTarget};
 pub enum ScriptKind {
     Quality,
     Actions,
+    /// Only the tool acts of `actions` ([`TOOL_ACTIONS`]).
+    Tools,
 }
 
 impl ScriptKind {
@@ -39,9 +41,10 @@ impl ScriptKind {
         match std::env::var("CITYSIM_BENCH_SCRIPT").as_deref() {
             Ok("quality") => Some(ScriptKind::Quality),
             Ok("actions") => Some(ScriptKind::Actions),
+            Ok("tools") => Some(ScriptKind::Tools),
             Ok("" | "0") | Err(_) => None,
             Ok(other) => {
-                warn!("unknown CITYSIM_BENCH_SCRIPT={other:?} (quality or actions)");
+                warn!("unknown CITYSIM_BENCH_SCRIPT={other:?} (quality, actions or tools)");
                 None
             }
         }
@@ -106,6 +109,8 @@ pub enum Act {
     Save,
     Load,
     RemoveRoad,
+    /// A step of the tool acts.
+    Tool(ToolAct),
     End,
 }
 
@@ -140,6 +145,24 @@ pub const ACTIONS: [(u32, &str, Act); 22] = [
     (2360, "end", Act::End),
 ];
 
+/// The acts a script plays, in order: (frame, name, action). `actions`:
+/// [`ACTIONS`] up to its end, then the tool acts from there.
+pub fn acts(kind: ScriptKind) -> Vec<(u32, &'static str, Act)> {
+    let tools = TOOL_ACTIONS.iter().copied();
+    match kind {
+        ScriptKind::Quality => Vec::new(),
+        ScriptKind::Tools => tools.collect(),
+        ScriptKind::Actions => {
+            let base = ACTIONS[ACTIONS.len() - 1].0;
+            ACTIONS[..ACTIONS.len() - 1]
+                .iter()
+                .copied()
+                .chain(tools.map(|(f, n, a)| (base + f, n, a)))
+                .collect()
+        }
+    }
+}
+
 /// `CITYSIM_BENCH_SCRIPT_SCALE=f` (default 1): every frame count of the
 /// `actions` script times `f` (below 1 to try it on a slow software renderer).
 pub fn scaled(frames: u32) -> u32 {
@@ -150,9 +173,14 @@ pub fn scaled(frames: u32) -> u32 {
     ((frames as f32 * f).round() as u32).max(1)
 }
 
-/// Frames the `actions` script measures.
-pub fn actions_frames() -> u32 {
-    scaled(ACTIONS[ACTIONS.len() - 1].0)
+/// Frames the `actions` / `tools` script measures (`CITYSIM_BENCH_END=n`:
+/// at most `n`, to look at its first acts alone).
+pub fn actions_frames(kind: ScriptKind) -> u32 {
+    let all = scaled(acts(kind).last().map_or(0, |a| a.0));
+    std::env::var("CITYSIM_BENCH_END")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(all, |n: u32| n.min(all))
 }
 
 /// The street the script builds: start and end (sim metres).
@@ -269,4 +297,250 @@ pub fn zoom_pose(t: f32, focus: Vec2, start: &CameraPose) -> CameraPose {
         pitch: 0.45 + 0.6 * k,
         distance: (near.ln() + (far.ln() - near.ln()) * k).exp(),
     }
+}
+
+// ------------------------------------------------------------ tool acts
+
+/// The tool acts (`CITYSIM_BENCH_SCRIPT=tools`, and the end of `actions`):
+/// large pending actions of the real tools, driven like a player through
+/// the shared tool resources, the pointer (`ScriptPointer`) and the mouse
+/// buttons and keys: a street grid (`CITYSIM_BENCH_GRID=8x13` blocks of
+/// 40 m by default) drawn in the free land beside the city, pending while
+/// the camera pans and zooms (the pointer still, as when the player moves
+/// the camera with the keys) and while the pointer moves, then built and
+/// undone; a chain of a dozen curves, the same; the zone tool's fill and
+/// marquee over the city, applied and undone; the area bulldozer dragged
+/// over a district, applied and undone. Frames relative to the start of the
+/// tool acts.
+pub const TOOL_ACTIONS: [(u32, &str, Act); 20] = [
+    (0, "tools: camera over the free land", Act::Tool(ToolAct::Setup)),
+    (30, "grid: corner and width (clicks)", Act::Tool(ToolAct::GridClicks)),
+    (70, "grid pending: camera pans and zooms", Act::Tool(ToolAct::Pan)),
+    (370, "grid pending: pointer moves", Act::Tool(ToolAct::Wiggle)),
+    (490, "build the grid (click)", Act::Tool(ToolAct::Click)),
+    (640, "undo the grid (Ctrl+Z)", Act::Tool(ToolAct::Undo)),
+    (790, "chain of curves: placing points", Act::Tool(ToolAct::ChainClicks)),
+    (950, "chain pending: camera pans and zooms", Act::Tool(ToolAct::Pan)),
+    (1250, "build the chain (Enter)", Act::Tool(ToolAct::Enter)),
+    (1400, "undo the chain (Ctrl+Z)", Act::Tool(ToolAct::Undo)),
+    (1520, "zone fill pending: pointer moves", Act::Tool(ToolAct::Fill)),
+    (1640, "zone fill (click)", Act::Tool(ToolAct::Click)),
+    (1760, "undo the zoning (Ctrl+Z)", Act::Tool(ToolAct::Undo)),
+    (1880, "zone marquee: dragging", Act::Tool(ToolAct::Marquee)),
+    (2000, "zone marquee (release)", Act::Tool(ToolAct::Release)),
+    (2120, "undo the zoning (Ctrl+Z)", Act::Tool(ToolAct::Undo)),
+    (
+        2240,
+        "area bulldozer: dragging over a district",
+        Act::Tool(ToolAct::Bulldoze),
+    ),
+    (2360, "bulldoze the district (release)", Act::Tool(ToolAct::Release)),
+    (2480, "undo the demolition (Ctrl+Z)", Act::Tool(ToolAct::Undo)),
+    (2600, "end", Act::End),
+];
+
+/// One step of the tool acts (see [`TOOL_ACTIONS`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToolAct {
+    /// Camera over the site, the road tool in grid mode.
+    Setup,
+    /// Click the grid's corner, then its width; the pointer to its depth.
+    GridClicks,
+    /// The camera pans in a loop and zooms in and out, the pointer still.
+    Pan,
+    /// The camera still, the pointer circles round where it was.
+    Wiggle,
+    /// A click where the pointer is.
+    Click,
+    Undo,
+    /// The road tool in chain mode, a click on each point of a long chain;
+    /// the pointer on to the next.
+    ChainClicks,
+    Enter,
+    /// The zone tool's fill mode over the city, the pointer moving.
+    Fill,
+    /// The zone tool's marquee: press, drag over the city.
+    Marquee,
+    /// The area bulldozer: press, drag over a district.
+    Bulldoze,
+    /// Let go of the button.
+    Release,
+}
+
+/// `CITYSIM_BENCH_GRID=NUxNV`: the grid's blocks (default 8 x 13, the
+/// owner's grid).
+pub fn grid_blocks() -> (u32, u32) {
+    std::env::var("CITYSIM_BENCH_GRID")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once('x')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        })
+        .unwrap_or((8, 13))
+}
+
+/// Money the city is given before the tool acts (if it has less).
+pub const TOOL_MONEY: i64 = 5_000_000;
+
+/// Grid block, metres (the road tool's default block size).
+pub const GRID_BLOCK_M: f32 = 40.0;
+
+/// Where the tool acts work: the grid in free land beside the city (its
+/// corner, unit sides, blocks along each), the chain's points, and points
+/// in the city for zoning and the bulldozer.
+#[derive(Debug, Clone)]
+pub struct ToolSite {
+    pub a: Vec2,
+    pub u: Vec2,
+    pub v: Vec2,
+    pub nu: u32,
+    pub nv: u32,
+    pub chain: Vec<Vec2>,
+    /// A zoned spot near the centre (fill, marquee start) and the
+    /// marquee's other corner.
+    pub zone_at: Vec2,
+    pub zone_to: Vec2,
+    /// The district the bulldozer is dragged over (corners).
+    pub district: (Vec2, Vec2),
+}
+
+impl ToolSite {
+    pub fn at(&self, i: f32, j: f32) -> Vec2 {
+        self.a + self.u * i * GRID_BLOCK_M + self.v * j * GRID_BLOCK_M
+    }
+
+    pub fn centre(&self) -> Vec2 {
+        self.at(self.nu as f32 * 0.5, self.nv as f32 * 0.5)
+    }
+
+    /// A camera pose over the whole grid.
+    pub fn pose(&self) -> CameraPose {
+        let c = self.centre();
+        let extent = (self.nu.max(self.nv) as f32 * GRID_BLOCK_M).max(200.0);
+        CameraPose {
+            focus: Vec3::new(c.x, 0.0, c.y),
+            yaw: 0.35,
+            pitch: 0.95,
+            distance: extent * 2.1,
+        }
+    }
+
+    fn streets(&self) -> Vec<Curve> {
+        let mut out = Vec::new();
+        for j in 0..=self.nv {
+            let s = self.at(0.0, j as f32);
+            out.push(Curve::straight(s.into(), self.at(self.nu as f32, j as f32).into()));
+        }
+        for i in 0..=self.nu {
+            let s = self.at(i as f32, 0.0);
+            out.push(Curve::straight(s.into(), self.at(i as f32, self.nv as f32).into()));
+        }
+        out
+    }
+}
+
+/// A copy of the parts of `w` road commands use (as the road tool's
+/// scratch copy), to try commands on.
+fn scratch(w: &World) -> World {
+    let mut s = World::new(w.seed);
+    s.roads = w.roads.clone();
+    s.zoning = w.zoning.clone();
+    s.buildings = w.buildings.clone();
+    s.growth = w.growth.clone();
+    s.economy = w.economy.clone();
+    s.time = w.time.clone();
+    s.versions = w.versions.clone();
+    s.versions.roads += 1;
+    s.versions.grid += 1;
+    s.versions.buildings += 1;
+    s.economy.money = s.economy.money.max(100_000_000);
+    s
+}
+
+/// Find the tool acts' site: a grid of `nu` x `nv` blocks every street of
+/// which can be built, in the free land on one side of the city (tried
+/// east, north, south, west, a few cells further out each time).
+pub fn find_site(w: &World, centre: Vec2, nu: u32, nv: u32) -> Option<ToolSite> {
+    let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    for n in w.roads.nodes.values() {
+        lo = lo.min(Vec2::from(n.pos));
+        hi = hi.max(Vec2::from(n.pos));
+    }
+    let map = citysim_sim::MAP_SIZE_M;
+    let (wu, wv) = (nu as f32 * GRID_BLOCK_M, nv as f32 * GRID_BLOCK_M);
+    // (corner, u, v): the grid's first street runs along the city's edge.
+    let mid = centre;
+    let sides = [
+        (Vec2::new(hi.x, mid.y - wu * 0.5), Vec2::Y, Vec2::X),
+        (Vec2::new(mid.x - wu * 0.5, lo.y), Vec2::X, Vec2::NEG_Y),
+        (Vec2::new(mid.x - wu * 0.5, hi.y), Vec2::X, Vec2::Y),
+        (Vec2::new(lo.x, mid.y - wu * 0.5), Vec2::Y, Vec2::NEG_X),
+    ];
+    let snap = |p: Vec2| (p / citysim_sim::CELL_SIZE).round() * citysim_sim::CELL_SIZE;
+    for (a, u, v) in sides {
+        for step in [1.0f32, 2.0, 4.0, 8.0] {
+            let a = snap(a + v * step * citysim_sim::CELL_SIZE);
+            let far = a + u * wu + v * wv;
+            let inside = |p: Vec2| p.x > 16.0 && p.y > 16.0 && p.x < map - 16.0 && p.y < map - 16.0;
+            if !inside(a) || !inside(far) || !inside(a + u * wu) || !inside(a + v * wv) {
+                continue;
+            }
+            let mut site = ToolSite {
+                a,
+                u,
+                v,
+                nu,
+                nv,
+                chain: Vec::new(),
+                zone_at: centre,
+                zone_to: centre,
+                district: (centre, centre),
+            };
+            let mut s = scratch(w);
+            let ok = site.streets().into_iter().all(|curve| {
+                s.apply(Command::BuildCurve {
+                    curve,
+                    kind: RoadKind::Street,
+                })
+                .is_ok()
+            });
+            if !ok {
+                continue;
+            }
+            // The chain: a dozen pieces of 40 m winding gently across the
+            // same land (along its long side, turning up to 20 degrees).
+            let mut p = site.at(nu as f32 * 0.5, 0.5);
+            site.chain = vec![p];
+            for k in 0..12 {
+                let heading = 0.35 * (k as f32 * 0.8).sin();
+                let d = (site.v * heading.cos() + site.u * heading.sin()).normalize();
+                p += d * (nv as f32 - 1.0) * GRID_BLOCK_M / 12.0;
+                site.chain.push(p);
+            }
+            // Zoning and the bulldozer: in the city near its centre.
+            let usable = |p: [f32; 2]| {
+                w.zoning
+                    .cell_at(p)
+                    .filter(|&c| w.zoning.cell(c).is_some_and(|x| x.usable() && x.zone.is_none()))
+            };
+            let mut best: Option<(f32, Vec2)> = None;
+            for r in 0..40 {
+                for k in 0..16 {
+                    let p = centre + Vec2::from_angle(k as f32 * 0.39) * r as f32 * 8.0;
+                    if usable(p.into()).is_some() && best.is_none_or(|b| b.0 > p.distance(centre)) {
+                        best = Some((p.distance(centre), p));
+                    }
+                }
+                if best.is_some() {
+                    break;
+                }
+            }
+            let z = best.map_or(centre, |b| b.1);
+            site.zone_at = z;
+            site.zone_to = z + Vec2::new(90.0, 60.0);
+            site.district = (centre - Vec2::new(110.0, 80.0), centre + Vec2::new(110.0, 80.0));
+            return Some(site);
+        }
+    }
+    None
 }

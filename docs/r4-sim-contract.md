@@ -978,6 +978,13 @@ With people walking (r7-walk merged; 10 seeds, 15 days; commute over free flow /
 avenue city 1.90x / 0.43 %, with two-lane rings 2.13x / 0.52 %, with mini rings 1.89x / 0.42 %; streets city 3.43x /
 2.25 %, with small/mini rings 3.56x / 2.67 %, with mini rings everywhere 2.86x / 2.10 %.
 
+Incremental junction sync (plan-preview-fast): a junction whose own roads are unchanged (`JunctionInputs`) only has
+its control and queues reset; a ring junction is always built again (its paths and land depend on the arms' far ends
+and its neighbours), and `roundabout::set` drops the node's inputs, so setting or removing a ring rebuilds it.
+`RemoveRoads` taking an arm, and an edit that leaves a ring no room, go through the same `sync_junctions` as any road
+edit (the ring is dropped, its reserve's cars and land handed back). Checked in lockstep against rebuilding every
+junction: `traffic::junction_sync_tests::incremental_junction_sync_with_roundabouts`.
+
 ## 2026-11-27 (r7-walk: people walk)
 
 Citizens walk on the map: they leave a door, walk the pavements, wait at the kerb, cross on the zebras and go in at

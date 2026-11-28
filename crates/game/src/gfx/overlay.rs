@@ -180,6 +180,7 @@ fn draw_traffic(
     mut meshes: ResMut<Assets<Mesh>>,
     mut strips_q: Query<StripsQuery, (With<TrafficStrips>, Without<Veil>)>,
     mut veil: Query<&mut Visibility, (With<Veil>, Without<TrafficStrips>)>,
+    shared: Res<super::roads::SharedLayout>,
 ) {
     let on = *mode == OverlayMode::Traffic;
     let Ok((entity, mut vis)) = strips_q.single_mut() else {
@@ -197,7 +198,7 @@ fn draw_traffic(
     let key = sim.key(sim.world.versions.roads);
     let roads_changed = state.layout_key != Some(key);
     if roads_changed {
-        state.layout = road_geom::layout(&sim.world);
+        state.layout = super::roads::layout_of(&shared, &sim);
         state.layout_key = Some(key);
     }
     let now = time.elapsed_secs();
