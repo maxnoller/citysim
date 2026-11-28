@@ -12,8 +12,12 @@
 //!   rests at a window edge (only while the window has focus and no mouse
 //!   button is held).
 //! * While `CameraInputBlocked` (pause menu) all camera input is ignored.
-//! * `CameraFollow` keeps the focus on a moving point (panning ignored);
-//!   `CameraGoTo` moves the focus (and zoom) once.
+//! * `CameraFollow` keeps the focus on what is followed (panning ignored):
+//!   a car's body or the off-map traveller's marker as drawn this frame
+//!   (`follow_drawn`, after they are placed), else its point. It glides
+//!   onto a new target (an offset from it that dies away) and is then
+//!   locked to it exactly, so the followed thing holds still on screen
+//!   whatever the frame times. `CameraGoTo` moves the focus (and zoom) once.
 
 use bevy::camera::PerspectiveProjection;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
@@ -22,9 +26,10 @@ use bevy::window::PrimaryWindow;
 use citysim_sim::{MAP_SIZE_M, World};
 
 use super::scene::camera_look;
+use super::vehicles::DrawnSet;
 use crate::shared::{
-    CameraFollow, CameraGoTo, CameraInputBlocked, CameraOverride, CameraPose, DisplaySettings, GameSet, PointerOverUi,
-    WorldCamera, cell_center,
+    CameraFollow, CameraGoTo, CameraInputBlocked, CameraOverride, CameraPose, DisplaySettings, DrawnPoses, FollowOn,
+    GameSet, PointerOverUi, WorldCamera, cell_center,
 };
 
 pub const MIN_DISTANCE: f32 = 22.0;
@@ -141,7 +146,8 @@ impl Plugin for CameraPlugin {
         app.insert_resource(GfxPose(gfx_pose_from_env()))
             .insert_resource(GfxTour(tour, slow))
             .add_systems(Startup, spawn_camera)
-            .add_systems(Update, (camera_controls, apply_rig).chain().in_set(GameSet::Tools));
+            .add_systems(Update, (camera_controls, apply_rig).chain().in_set(GameSet::Tools))
+            .add_systems(Update, follow_drawn.in_set(GameSet::Render).after(DrawnSet::Traveller));
     }
 }
 
@@ -249,8 +255,9 @@ fn camera_controls(
                 rig.target.distance = d;
             }
         }
-        if let Some(f) = follow.focus {
-            rig.target.focus = Vec3::new(f[0], 0.0, f[1]);
+        // Following: `follow_drawn` moves the focus later in the frame.
+        let following = follow.focus.is_some();
+        if following {
             pan = Vec2::ZERO;
         }
         if input && pan != Vec2::ZERO {
@@ -294,7 +301,9 @@ fn camera_controls(
         let a = 1.0 - (-dt * 9.0).exp();
         let t = rig.target;
         let c = &mut rig.current;
-        c.focus = c.focus.lerp(t.focus, a);
+        if !following {
+            c.focus = c.focus.lerp(t.focus, a);
+        }
         // Zoom in log space so it feels even at all distances.
         c.distance = (c.distance.ln() + (t.distance.ln() - c.distance.ln()) * a).exp();
         c.pitch += (t.pitch - c.pitch) * a;
@@ -303,6 +312,118 @@ fn camera_controls(
         // Keep both yaws near each other so the angle never unwinds.
         rig.target.yaw = rig.current.yaw + (dyaw - dyaw * a);
     }
+}
+
+/// How fast the camera glides onto a new followed target (rad/s of a
+/// critically damped spring, about the camera's easing).
+const FOLLOW_GLIDE: f32 = 9.0;
+/// A followed point that moves further than this in a frame jumped (a new
+/// building): glide there.
+const FOLLOW_JUMP_M: f32 = 12.0;
+
+/// What the camera follows and how far it still is from it.
+#[derive(Default)]
+struct FollowState {
+    /// What was followed last frame, and whether it was drawn.
+    on: Option<(FollowOn, bool)>,
+    /// The followed point last frame.
+    last: Vec3,
+    /// The camera's focus minus the followed point, and how fast that
+    /// changes: a critically damped spring brings both to zero.
+    offset: Vec3,
+    offset_vel: Vec3,
+    /// The target's own speed is not known yet (its first frame).
+    target_unknown: bool,
+    /// The shown focus last frame and its velocity (following or not).
+    focus: Option<Vec3>,
+    focus_vel: Vec3,
+}
+
+/// One step of `dt` s of a critically damped spring of rate `w`:
+/// (offset, its velocity) -> the same `dt` later (exact for any `dt`).
+fn spring(e: Vec3, v: Vec3, w: f32, dt: f32) -> (Vec3, Vec3) {
+    let k = (-w * dt).exp();
+    let c = v + e * w;
+    ((e + c * dt) * k, (v - c * (w * dt)) * k)
+}
+
+/// Keep the camera on the followed thing as it is drawn this frame: the
+/// focus is the drawn point plus an offset that dies away (a glide onto a
+/// new target that starts at the camera's own speed: never a snap or a
+/// lurch), so once settled the followed body stays put on screen.
+#[allow(clippy::too_many_arguments)]
+fn follow_drawn(
+    time: Res<Time<Real>>,
+    follow: Res<CameraFollow>,
+    drawn: Res<DrawnPoses>,
+    overridden: Res<CameraOverride>,
+    gfx_pose: Res<GfxPose>,
+    tour: Res<GfxTour>,
+    mut rigs: Query<(&mut CameraRig, &mut Transform)>,
+    mut state: Local<FollowState>,
+) {
+    let dt = time.delta_secs().min(0.1);
+    let scripted = tour.0 || gfx_pose.0.is_some() || overridden.0.is_some();
+    // The point, and whether it is a drawn one (moving continuously).
+    let point = follow.focus.filter(|_| !scripted).map(|f| {
+        let (p, drawn) = match follow.on {
+            FollowOn::Vehicle(v) => drawn.vehicle(v).map_or((f, false), |d| (d.pos, true)),
+            FollowOn::Traveller => drawn.traveller.map_or((f, false), |t| (t, true)),
+            FollowOn::Walker(c) => drawn.walker(c).map_or((f, false), |p| (p, true)),
+            FollowOn::Point => (f, false),
+        };
+        let p = Vec3::new(
+            p[0].clamp(-FOCUS_MARGIN, MAP_SIZE_M + FOCUS_MARGIN),
+            0.0,
+            p[1].clamp(-FOCUS_MARGIN, MAP_SIZE_M + FOCUS_MARGIN),
+        );
+        (p, (follow.on, drawn))
+    });
+    let Ok((mut rig, mut tf)) = rigs.single_mut() else {
+        return;
+    };
+    if let Some((p, source)) = point {
+        // A new target (or the same one drawn / not drawn any more), or a
+        // point that jumped: glide from where the camera is, as fast as it
+        // moves.
+        let fresh = state.on != Some(source) || (!source.1 && p.distance(state.last) > FOLLOW_JUMP_M);
+        if fresh {
+            state.offset = rig.current.focus - p;
+            state.offset_vel = state.focus_vel;
+            state.target_unknown = true;
+        } else {
+            if state.target_unknown && dt > 1e-5 {
+                // Now the target's speed is known: the camera keeps its own.
+                let target_vel = (p - state.last) / dt;
+                state.offset_vel -= target_vel;
+                state.target_unknown = false;
+            }
+            let (e, v) = spring(state.offset, state.offset_vel, FOLLOW_GLIDE, dt);
+            state.offset = e;
+            state.offset_vel = v;
+        }
+        if state.offset.length() < 1e-4 && state.offset_vel.length() < 1e-3 {
+            state.offset = Vec3::ZERO;
+            state.offset_vel = Vec3::ZERO;
+        }
+        rig.target.focus = p;
+        rig.current.focus = p + state.offset;
+        let new = rig.current.transform();
+        if *tf != new {
+            *tf = new;
+        }
+        state.on = Some(source);
+        state.last = p;
+    } else {
+        state.on = None;
+    }
+    let focus = rig.current.focus;
+    if let Some(last) = state.focus
+        && dt > 1e-5
+    {
+        state.focus_vel = (focus - last) / dt;
+    }
+    state.focus = Some(focus);
 }
 
 fn apply_rig(mut q: Query<(&CameraRig, &mut Transform)>) {

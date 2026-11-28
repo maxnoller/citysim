@@ -19,8 +19,9 @@ use super::heights;
 use super::mesh_util::MeshBuilder;
 use super::palette::{self, lin, mix};
 use super::road_geom;
+use super::vehicles::DrawnSet;
 use crate::shared::{
-    ActiveTool, GameSet, GuideKind, RoadMode, SimWorld, SnapFeedback, SnapTarget, ToolModes, WorldCamera,
+    ActiveTool, DrawnPoses, GameSet, GuideKind, RoadMode, SimWorld, SnapFeedback, SnapTarget, ToolModes, WorldCamera,
     WorldHighlight, WorldTarget,
 };
 
@@ -59,10 +60,18 @@ pub struct GuidesPlugin;
 
 impl Plugin for GuidesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup).add_systems(
-            Update,
-            (draw_snap, pulse_marker, draw_highlight, vehicle_ring, vehicle_marker).in_set(GameSet::Render),
-        );
+        app.add_systems(Startup, setup)
+            .add_systems(
+                Update,
+                (draw_snap, pulse_marker, draw_highlight).in_set(GameSet::Render),
+            )
+            // On the cars as they are drawn this frame.
+            .add_systems(
+                Update,
+                (vehicle_ring, vehicle_marker)
+                    .in_set(GameSet::Render)
+                    .after(DrawnSet::Traveller),
+            );
     }
 }
 
@@ -415,11 +424,13 @@ fn walker_drawn(
         .map(|v| v.drawn)
 }
 
-/// The ring under a hovered or selected vehicle, at its exact lane pose,
-/// or under a person on foot (smaller, at the drawn figure).
+/// The ring under a hovered or selected vehicle, centred on its body as
+/// drawn this frame, or under a person on foot (smaller, at the drawn
+/// figure).
 fn vehicle_ring(
     hl: Res<WorldHighlight>,
     sim: Res<SimWorld>,
+    drawn: Res<DrawnPoses>,
     people: Query<&super::people::PersonVisual>,
     mut q: Query<(&mut Transform, &mut Visibility), With<VehicleRing>>,
 ) {
@@ -436,17 +447,17 @@ fn vehicle_ring(
         return;
     }
     t.scale = Vec3::ONE;
-    let id = [&hl.selected, &hl.hovered].into_iter().find_map(|x| match x {
-        Some(WorldTarget::Vehicle(v)) => Some(*v),
-        _ => None,
-    });
-    let pose = id
-        .and_then(|v| sim.world.vehicles.get(v))
-        .map(|v| citysim_sim::drive::vehicle_pose(&sim.world, v));
+    let pose = [&hl.selected, &hl.hovered]
+        .into_iter()
+        .find_map(|x| match x {
+            Some(WorldTarget::Vehicle(v)) => Some(*v),
+            _ => None,
+        })
+        .and_then(|v| drawn.vehicle(v));
     match pose {
-        Some((pos, dir)) => {
-            t.translation = Vec3::new(pos[0], heights::HIGHLIGHT + 0.05, pos[1]);
-            t.rotation = Quat::from_rotation_y(-dir[1].atan2(dir[0]));
+        Some(d) => {
+            t.translation = Vec3::new(d.pos[0], heights::HIGHLIGHT + 0.05, d.pos[1]);
+            t.rotation = Quat::from_rotation_y(-d.heading);
             vis.set_if_neq(Visibility::Inherited);
         }
         None => {
@@ -469,24 +480,21 @@ fn attach_copy(commands: &mut Commands, copy: Entity, parent: Entity) {
     });
 }
 
-/// The diamond above the selected (not merely hovered) vehicle: bobbing a
-/// little, spinning slowly, its height and size growing with the camera
-/// distance.
+/// The diamond above the selected (not merely hovered) vehicle, over its
+/// body as drawn this frame: bobbing a little, spinning slowly, its height
+/// and size growing with the camera distance.
 fn vehicle_marker(
     time: Res<Time<Real>>,
     hl: Res<WorldHighlight>,
     sim: Res<SimWorld>,
+    drawn: Res<DrawnPoses>,
     camera: Query<&GlobalTransform, With<WorldCamera>>,
     people: Query<&super::people::PersonVisual>,
     mut q: Query<(&mut Transform, &mut Visibility), With<VehicleMarker>>,
 ) {
     let Ok((mut t, mut vis)) = q.single_mut() else { return };
     let pose = match &hl.selected {
-        Some(WorldTarget::Vehicle(v)) => sim
-            .world
-            .vehicles
-            .get(*v)
-            .map(|veh| citysim_sim::drive::vehicle_pose(&sim.world, veh).0),
+        Some(WorldTarget::Vehicle(v)) => drawn.vehicle(*v).map(|d| d.pos),
         // Above a person on foot: lower, over their head.
         Some(WorldTarget::Walker(c)) => walker_drawn(&sim.world, &people, *c).map(|p| [p.x, p.z]),
         _ => None,
